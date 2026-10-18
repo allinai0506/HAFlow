@@ -7013,3 +7013,31 @@ python3 -m pytest -q tests/test_workflow_clone_reclaim.py tests/test_workflow_cl
 ```
 
 关键回归：`test_partial_delete_retry_keeps_original_archive_and_file`，覆盖成果、Git 元数据和身份文件部分删除后重试；`test_controller_auto_close_runs_real_cli_and_reclaims` 覆盖真实自动关闭链路。
+
+---
+
+## 166. 启动成功后的导航必须跟随返回对象的真实归属（2026-10-17）
+
+### 问题背景
+
+极简工作台在 Git 仓库子目录注册业务项目，再选择 Git 模板启动时，Factory 会将目录归一到 Git 根项目。页面虽取得新的 WORKFLOW_ID，却仍按提交前的业务项目加载需求列表，找不到新 ID 后退回旧需求，造成“启动成功”配旧画面的假成功。真实浏览器触发后，Node 回归复现 `business-child` 与预期 `git-parent` 不一致。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 输入路径与执行根目录不同 | 请求中的项目选择不是最终对象归属证明 | 启动后按返回的对象 ID 读取权威所属项目，再导航 |
+| 查不到新对象后选列表首项 | 合理的列表默认值可能掩盖动作失败 | 动作结果必须匹配返回 ID，不能以“最新”或第一项代替 |
+| 列表读取失败后覆盖为成功提示 | 后台启动成功与页面状态可读是两个事实 | 保留错误反馈，告知需求已登记并要求刷新核对 |
+
+### 操作规范
+
+1. URL 与两种工作台切换均携带真实 project_id/workflow_id。
+2. 保留原有 Git 根目录识别，不用 UI 的旧选择覆盖后端归属。
+3. 发生读回失败时不重发启动；通过既有需求列表和专业工作台核对。
+
+### 验证命令 / 守护测试
+
+`python3.13 -m pytest -q tests/test_simple_workbench.py`
+
+`test_started_workflow_uses_actual_owner_after_git_root_normalization` 覆盖归属变化和启动后读回失败两个分支；隔离浏览器已验证 Git 子目录启动后显示新工作流标题及其真实所属项目。

@@ -579,10 +579,12 @@ def read_pane(pid):
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return r.stdout
 
-def run_workflow(root,req,agent='auto',template='software-development-v1',title=''):
+def run_workflow(root,req,agent='auto',template='software-development-v1',title='',context=None):
     cmd=[str(HERDR_ROOT/'bin'/'herdr-factory'),'run','--project',root,'--agent',agent or 'auto','--template',template or 'software-development-v1']
     if title:
         cmd+=['--title',title]
+    for key, value in (context or {}).items():
+        cmd += ['--context', f'{key}={value}']
     cmd.append(req)
     r=run(cmd,600)
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
@@ -645,6 +647,7 @@ def templates_summary():
             'category': cat_id,
             'category_name': cat_name,
             'nodes_preview': nodes_preview,
+            'execution_mode': herdr_workflow.execution_mode(raw),
             'is_builtin': _is_builtin_path(info['path']),
         })
     return {'templates':out}
@@ -681,6 +684,8 @@ def template_detail(tid):
         'template': {'id': tid, **info, 'category': cat_id, 'category_name': cat_name},
         'nodes': nodes,
         'is_builtin': _is_builtin_path(info['path']),
+        'execution_mode': herdr_workflow.execution_mode(wf),
+        'context': wf.get('context') or {},
         'yaml': Path(info['path']).read_text(encoding='utf-8'),
     }
 
@@ -706,22 +711,27 @@ def save_template(name,content):
     path.write_text(text,encoding='utf-8')
     return {'name':name,'path':str(path),'node_count':len(nodes)}
 
-def _run_workflow_job(job_id,root,req,agent,template,title=''):
+def _run_workflow_job(job_id,root,req,agent,template,title='',context=None):
     try:
-        output=run_workflow(root,req,agent,template,title) if title else run_workflow(root,req,agent,template)
+        if context:
+            output=run_workflow(root,req,agent,template,title,context=context)
+        else:
+            output=run_workflow(root,req,agent,template,title) if title else run_workflow(root,req,agent,template)
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'succeeded','output':output,'finished_at':time.time()})
     except Exception as e:
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'failed','error':str(e),'finished_at':time.time()})
 
-def start_workflow_job(root,req,agent='auto',template='software-development-v1',title=''):
+def start_workflow_job(root,req,agent='auto',template='software-development-v1',title='',context=None):
     if not root or not req:
         raise RuntimeError('项目目录和自然语言需求不能为空')
+    if context is not None and (not isinstance(context,dict) or any(not isinstance(k,str) or not isinstance(v,str) for k,v in context.items())):
+        raise RuntimeError('context 必须是名称到路径的映射')
     job_id=uuid.uuid4().hex[:12]
     with RUN_JOBS_LOCK:
         RUN_JOBS[job_id]={'job_id':job_id,'status':'running','started_at':time.time()}
-    threading.Thread(target=_run_workflow_job,args=(job_id,root,req,agent,template,title),daemon=True).start()
+    threading.Thread(target=_run_workflow_job,args=(job_id,root,req,agent,template,title,context),daemon=True).start()
     return RUN_JOBS[job_id].copy()
 
 def workflow_job_status(job_id):
@@ -6931,7 +6941,7 @@ body {
   </aside>
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head brand-row">
-      <div class="brand">__PRODUCT_NAME__</div>
+      <div class="brand">__PRODUCT_NAME__</div><a class="btn" href="/simple" onclick="this.href=simpleWorkbenchUrl()">极简工作台</a>
       <span class="sidebar-title" id="sidebarTitle">空间工作台</span>
       <button type="button" class="btn-collapse-sidebar" id="btnCollapseSidebar" onclick="toggleSidebar()" title="折叠侧边栏 (⌘B)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
@@ -12583,9 +12593,20 @@ async function bindSlotPrompt(p){
 setInterval(()=>{if(!document.hidden)refreshAll()},600000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});
 (function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.dashMode=!!v.dashMode;state.dashWorkflowId=v.dashWorkflowId||null;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null;state.shellView=v.shellView||'workbench';})();
+function simpleWorkbenchUrl(){
+  const q=new URLSearchParams();
+  if(state.projectId)q.set('project_id',state.projectId);
+  if(state.workflowId&&!state.workflowId.startsWith('__'))q.set('workflow_id',state.workflowId);
+  return '/simple?'+q.toString();
+}
 async function initFromUrlOrState(){
   const p=new URLSearchParams(window.location.search);
   let qWf=p.get('workflow_id');
+  const qProject=p.get('project_id');
+  if(qProject&&!qWf){
+    state.workflowId=null;state.shellView='workbench';
+    try{await loadProject(qProject);}catch(e){toast(e.message,true);}
+  }
   const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops'),qView=p.get('view');
   if(!qWf&&qTask){
     try{
@@ -12781,7 +12802,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(404,error='Not Found')
         suffix=target.suffix.lower()
         ctype='text/html; charset=utf-8' if suffix in ('.html', '.htm') else 'application/javascript; charset=utf-8' if suffix=='.js' else 'text/css; charset=utf-8' if suffix=='.css' else 'application/octet-stream'
-        raw=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
+        raw=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-cache' if target.name.startswith('simple.') else 'public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
     def query(self):return urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
     def body(self):
         n=int(self.headers.get('Content-Length','0') or 0); raw=self.rfile.read(n) if n else b'{}'; return json.loads(raw.decode() or '{}')
@@ -12789,6 +12810,8 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path).path
         try:
             if p=='/':return self.send_html(HTML)
+            if p in {'/simple','/simple/'}:return self.send_html((CONSOLE_STATIC_DIR/'simple.html').read_text(encoding='utf-8').replace('__PRODUCT_NAME__',PRODUCT_NAME).replace('__PRODUCT_TAGLINE__',PRODUCT_TAGLINE))
+            if p=='/api/projects':return self.send_json(200,projects())
             if p.startswith('/static/'):return self.send_static(p[len('/static/'):])
             if p=='/dashboard':
                 self.send_response(302);self.send_header('Location','/?view=dashboard');self.end_headers();return
@@ -12918,12 +12941,19 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path).path
         try:
             b=self.body()
-            if p=='/api/run':return self.send_json(202,start_workflow_job(str(Path(b.get('project_root','')).expanduser().resolve()),str(b.get('requirement','')).strip(),str(b.get('agent') or 'auto'),str(b.get('template') or 'software-development-v1'),str(b.get('title') or '').strip()))
+            if p=='/api/run':
+                if not str(b.get('project_root') or '').strip():raise RuntimeError('项目目录不能为空')
+                return self.send_json(202,start_workflow_job(str(Path(b.get('project_root','')).expanduser().resolve()),str(b.get('requirement','')).strip(),str(b.get('agent') or 'auto'),str(b.get('template') or 'software-development-v1'),str(b.get('title') or '').strip(),context=b.get('context')))
             if p=='/api/project/create':
                 root=str(Path(b.get('project_root','')).expanduser().resolve())
                 name=str(b.get('project_name') or '').strip() or None
+                if not str(b.get('project_root') or '').strip():raise RuntimeError('项目目录不能为空')
                 tmpl=str(b.get('template') or 'software-development-v1').strip()
-                return self.send_json(200,herdr_projects.create_project(root,project_name=name,template_name=tmpl))
+                # Initialize the selected state store on this write path, never on GET.
+                from herdr.state_store import get_state_store
+                get_state_store(state_db_path())
+                project=herdr_projects.create_project(root,project_name=name,template_name=tmpl)
+                return self.send_json(200,project)
             if p=='/api/project/adopt':
                 wid=str(b.get('workspace_id','')).strip()
                 if not wid:raise RuntimeError('workspace_id 不能为空')

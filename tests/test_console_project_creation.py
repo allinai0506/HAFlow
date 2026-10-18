@@ -433,3 +433,41 @@ class TestConsoleProjectEndpointsAndUI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_r2_state_store_failure_prevents_project_registration(tmp_path, monkeypatch):
+    """Failing SQLite initialization must leave the real registry untouched."""
+    import contextlib
+    import importlib.util
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from console import herdr_factory_console as console
+    from herdr import state_store
+    spec = importlib.util.spec_from_file_location('r2_sandbox', Path(__file__).parent / 'support/simple_workbench_sandbox.py')
+    sandbox = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sandbox)
+    stack = contextlib.ExitStack()
+    def fail_store(*args):
+        raise RuntimeError('SQLite unavailable')
+    monkeypatch.setattr(state_store, 'get_state_store', fail_store)
+    sandbox.configure(tmp_path, stack)
+    registry = tmp_path / 'projects.json'
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), console.Handler)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+    try:
+        request = urllib.request.Request(f'http://127.0.0.1:{httpd.server_port}/api/project/create', data=json.dumps({'project_root':str(tmp_path),'template':'business-task-v1'}).encode(), headers={'Content-Type':'application/json'})
+        try:
+            urllib.request.urlopen(request)
+            assert False, 'must reject failed initialization'
+        except urllib.error.HTTPError as error:
+            assert 'SQLite unavailable' in error.read().decode()
+        assert not registry.exists()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        worker.join()
+        stack.close()
