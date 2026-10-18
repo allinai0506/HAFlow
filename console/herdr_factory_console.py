@@ -3288,6 +3288,7 @@ button { cursor: pointer; }
   cursor: pointer;
 }
 #flowInspectorBody .task {
+  flex-shrink: 0;
   grid-template-columns: 16px minmax(0, 1fr) auto 24px;
   gap: 8px;
   padding: 12px 0;

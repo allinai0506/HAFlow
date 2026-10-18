@@ -67,3 +67,5 @@ Qoder 历史逐条工具调用未被适配；无记录时不能恢复具体 shel
 用户明确问题集中于流程图和列表不一致。发现 `renderFlowGraph` 只检查 workflow ID；同 workflow 更新直接调用只处理 selected 的 `updateFlowSelection` 后返回，列表读取最新任务，画布却保留旧节点和连线。
 
 新增 RED→GREEN 测试复现 working/claude/1 快照更新到 completed/qodercli/2 后画布仍为 working；修复将 graph projection 纳入复用条件。投影未变仍复用，变化则按既有构建逻辑重建节点和连线，不引入第二套任务状态。真实 X6/Dagre 隔离浏览器点击更新验证了这些字段及下游 waiting→working 的同步。77 passed, 3 subtests passed；Ruff correctness/diff check 通过。尚不能把此缺陷等同于用户所有展示差异；正在等待用户明确画布卡片或侧栏任务页。
+
+真实用户页面另复现侧栏排版缺陷：`#flowInspectorBody` 为 flex 容器，任务行默认 flex-shrink:1，被压到 66.5px；内容 grid 第一行 61.6px、第二行 0px，执行者溢出到下一条任务。最小修复为侧栏任务行 flex-shrink:0。77 项专项及 3 项子测试、Ruff correctness、diff check 通过；部署后以真实 DOM 行边界核验。
