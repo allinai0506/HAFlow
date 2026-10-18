@@ -2719,3 +2719,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-18] Update | SPEC 七节点与真实浏览器验收
 - Updated [[dag-workflow-engine]]: 记录 SPEC 串并行结构、双技能审核和三套研发模板的本地服务/ego-browser E2E 契约，区分模板要求与程序化验证。
+
+## [2026-10-18] Updated | 极简工作台统一风格与信息层级
+- Updated [[simple-workbench]]: 共用 Console 设计变量、顶端上下文切换、默认成果摘要与记录折叠，以及原生弹窗的布局/焦点/错误提示契约。

@@ -195,7 +195,7 @@ class Element {
  append(o){this.children.push(o);}
  querySelector(){return new Element()}
  querySelectorAll(){return []}
- showModal(){} close(){} focus(){} scrollIntoView(){}
+ showModal(){} close(){} focus(){document.activeElement=this} scrollIntoView(){}
 }
 const document={getElementById(id){if(!elements.has(id))elements.set(id,new Element());return elements.get(id)},createElement(){return new Element()},querySelectorAll(){return []}};
 const Option=function(text,value){this.text=text;this.value=value};
@@ -287,20 +287,20 @@ def test_r2_limits_are_explicit():
     doc = (root / 'docs/walkthroughs/20261017-simple-workbench-v1.md').read_text()
     for text in (page, doc):
         assert '仅支持已存在目录' in text
-        assert '项目目标/简介采集与持久化尚未实现' in text
+    # This implementation limitation belongs in the technical record, not the UI.
+    assert '项目目标/简介采集与持久化尚未实现' in doc
     assert 'business-task-v1' not in page
     assert 'software-development-v1' not in page
 
 
-def test_r2_project_overview_reads_names_goals_and_recent_activity():
+def test_project_selection_reads_only_selected_project_without_duplicate_overview():
     _run_simple_js(r"""
-model.projects=[{project_id:'A',project_name:'项目甲',goal:'真实目标'},{project_id:'B',project_name:'项目乙'}];
-responses['/api/workflows?project_id=A']=[{workflow_id:'old',title:'旧需求',created_at:1000},{workflow_id:'new',title:'最新需求',created_at:2000}];
-responses['/api/workflows?project_id=B']=[];
-await loadProjectOverview();
-assert.equal($('projectList').children.length,2);
-assert.ok($('projectList').children[0].textContent.includes('项目甲 · 目标：真实目标 · 最近活动：最新需求'));
-assert.ok($('projectList').children[1].textContent.includes('项目乙 · 目标：未提供 · 最近活动：暂无需求活动'));
+responses['/api/projects']=[{project_id:'A',project_name:'项目甲'},{project_id:'B',project_name:'项目乙'}];
+responses['/api/workflows?project_id=A']=[];
+let otherRead=false;responses['/api/workflows?project_id=B']=()=>{otherRead=true;throw Error('不应读取其他项目')};
+await refreshProjects();
+assert.deepEqual($('project').children.map(x=>x.text),['项目甲','项目乙']);
+assert.equal(model.projectId,'A');assert.equal(otherRead,false);
 """)
 
 
@@ -330,3 +330,78 @@ responses['/api/templates']={templates:[{id:'custom-only',label:'自定义业务
 await $('newProject').onclick();
 assert.deepEqual($('projectType').children.map(x=>[x.value,x.text]),[['custom-only','业务目录 · 自定义业务']]);
 """)
+
+
+def test_result_summary_bounds_files_and_keeps_all_history_and_errors():
+    _run_simple_js(r"""
+const file=i=>({id:'f'+i,task_id:'t',name:'成果'+i+'.md',readable:true,actions:['view','download']});
+responses['/api/workflow/deliverables?workflow_id=w']={items:[{id:'commit',name:'提交记录',actions:[]},...Array.from({length:5},(_,i)=>file(i)),{id:'old',name:'旧成果',readable:false,reason:'任务已替代',actions:[]}],error:'部分工作区不可读',truncated:true,notice:'列表截断'};
+model.sequence=1;await loadResults('w',1);
+const children=$('resultList').children;
+assert.equal(children.filter(c=>c.className==='result').length,3);
+const history=children.find(c=>c.className==='resultHistory');assert.ok(history);
+assert.notEqual(history.open,true);
+assert.equal(history.children.filter(c=>c.className==='result').length,4);
+assert.ok(children.some(c=>c.textContent.includes('部分工作区不可读')));
+assert.ok(children.some(c=>c.textContent.includes('列表截断')));
+assert.equal($('resultCount').textContent,'5 项可用成果 · 7 项记录');
+""")
+
+
+def test_result_summary_does_not_promote_unreadable_or_stale_records():
+    _run_simple_js(r"""
+model.sequence=2;
+responses['/api/workflow/deliverables?workflow_id=w']={items:[{name:'不可读取',readable:false,actions:['view']},{name:'提交',actions:[]}]};
+await loadResults('w',2);
+assert.equal($('resultList').children.filter(c=>c.className==='result').length,0);
+assert.ok($('resultList').children.some(c=>c.className==='resultHistory'));
+const before=$('resultCount').textContent;await loadResults('w',1);assert.equal($('resultCount').textContent,before);
+""")
+
+
+def test_result_summary_includes_download_only_documents_and_safe_links():
+    _run_simple_js(r"""
+model.sequence=1;
+responses['/api/workflow/deliverables?workflow_id=w']={items:[{name:'报告.pdf',readable:true,actions:['download']},{name:'PR',actions:['open'],url:'https://example.com/pr/1'},{name:'无效链接',actions:['open'],url:'javascript:alert(1)'}]};
+await loadResults('w',1);
+assert.equal($('resultCount').textContent,'2 项可用成果 · 3 项记录');
+assert.equal($('resultList').children.filter(c=>c.className==='result').length,2);
+""")
+
+
+def test_template_search_no_match_keeps_keyboard_focus():
+    _run_simple_js(r"""
+model.projectId='A';$('template').value='';$('templateSearch').focus();
+await loadTemplate();
+assert.equal(document.activeElement,$('templateSearch'));
+assert.equal($('start').disabled,true);
+""")
+
+
+def test_escape_in_template_search_closes_dialog_without_clearing_draft():
+    _run_simple_js(r"""
+$('title').value='保留标题';$('requirement').value='保留需求';
+let closed=false,prevented=false;$('requirementDialog').close=()=>{closed=true};
+assert.equal(typeof $('templateSearch').onkeydown,'function');
+$('templateSearch').onkeydown({key:'Escape',preventDefault(){prevented=true}});
+assert.equal(closed,true);assert.equal(prevented,true);
+assert.equal($('title').value,'保留标题');assert.equal($('requirement').value,'保留需求');
+""")
+
+
+def test_switching_workflow_removes_previous_decision_before_new_response():
+    _run_simple_js(r"""
+model.projectId='A';$('workflow').value='new';$('decisions').textContent='旧需求的裁决';
+let finish;responses['/api/workflow?id=new&lightweight=1']=()=>new Promise(r=>{finish=r});
+const pending=loadWorkflow();await Promise.resolve();
+assert.ok(!$('decisions').textContent.includes('旧需求'));
+finish({workflow:{project_id:'wrong-project'}});await pending;
+assert.ok(!$('decisions').textContent.includes('旧需求'));
+$('workflow').value='';await loadWorkflow();assert.ok(!$('decisions').textContent.includes('正在读取'));
+""")
+
+
+def test_shared_console_palette_revalidates_after_release_changes(server):
+    with urllib.request.urlopen(server + '/static/console-tokens.css') as response:
+        assert response.headers['Cache-Control'] == 'no-cache'
+        assert response.headers['Content-Type'].startswith('text/css')

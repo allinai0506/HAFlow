@@ -14,3 +14,17 @@ Evidence:
 - `herdr/projects.py#create_project`
 - `workflow_templates/business-task-v1.yaml`
 - `tests/test_simple_workbench.py#test_real_http_create_start_decide_and_download`
+
+FACT：极简与空间工作台使用 `console/static/console-tokens.css` 同一套设计变量；空间工作台右上角切换入口复用 `simpleWorkbenchUrl`，极简页使用 `contextUrl` 保留项目/需求归属。项目仅用选择器呈现，不再逐个查询全项目最近活动。
+
+FACT：极简页默认展示当前需求/阶段、当前需求的待决表单和最多三项可查看、下载或打开的成果。完整需求、执行历史、项目全部待办及其余成果由原生 `details` 按需展开；记录数量和部分读取错误仍可见，不推断文件属于最终交付。展开详情期间暂停页面自动刷新，避免刷新收起正在阅读的记录。
+
+FACT：新建项目、需求及成果预览使用原生 `dialog`，头尾固定、正文滚动；创建/启动失败保留输入并显示可聚焦错误。模板搜索无匹配时不抢走输入焦点；搜索框显式处理 Esc，避免浏览器先清空搜索而不关闭弹窗。项目名称/需求标题获取初始焦点，其余焦点约束及关闭回到入口使用浏览器原生能力。
+
+Evidence:
+- `console/static/simple.js#loadResults`
+- `console/static/simple.js#formError`
+- `console/static/simple.html`
+- `tests/test_simple_workbench.py#test_result_summary_bounds_files_and_keeps_all_history_and_errors`
+- `tests/test_simple_workbench.py#test_template_search_no_match_keeps_keyboard_focus`
+- `tests/test_simple_workbench.py#test_escape_in_template_search_closes_dialog_without_clearing_draft`

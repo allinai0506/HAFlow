@@ -2274,65 +2274,7 @@ def tail_log(kind='controller',n=180):
         text='[日志尾部已截断，较早内容超出读取上限]'+('\n'+text if text else '')
     return text
 
-HTML_TEMPLATE=r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><style>:root {
-  /* Linear Clean Light Palette */
-  --bg-page: #f8f9fa;
-  --bg-sidebar: #fafafa;
-  --bg-surface: #ffffff;
-  --bg-subtle: #f4f5f7;
-  --bg-hover: #f0f1f3;
-  --bg-active: #eceef2;
-  --bg-elevated: #ffffff;
-
-  /* Typography */
-  --text-primary: #121316;
-  --text-secondary: #5f6368;
-  --text-tertiary: #8c919a;
-  --text-inverse: #ffffff;
-
-  /* Borders & Dividers */
-  --border-default: #e5e7eb;
-  --border-subtle: #f0f1f3;
-  --border-focus: #5e6ad2;
-
-  /* Primary Brand (Linear Blue-Violet / Royal Blue) */
-  --primary: #5e6ad2;
-  --primary-hover: #4f5bc4;
-  --primary-subtle: rgba(94, 106, 210, 0.08);
-
-  /* Status Colors */
-  --success: #16a34a;
-  --success-bg: #f0fdf4;
-  --warning: #d97706;
-  --warning-bg: #fffbeb;
-  --danger: #dc2626;
-  --danger-bg: #fef2f2;
-
-  /* Radius & Shadows */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 10px;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.09);
-
-  /* Compatibility Aliases */
-  --bg: var(--bg-page);
-  --panel: var(--bg-surface);
-  --panel-elevated: var(--bg-elevated);
-  --card: var(--bg-surface);
-  --card-hover: var(--bg-subtle);
-  --line: var(--border-default);
-  --line-focus: var(--border-focus);
-  --text: var(--text-primary);
-  --muted: var(--text-secondary);
-  --subtle: var(--text-tertiary);
-  --accent: var(--primary);
-  --accent-glow: rgba(94, 106, 210, 0.12);
-  --good: var(--success);
-  --warn: var(--warning);
-  --bad: var(--danger);
-}
+HTML_TEMPLATE=r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><link rel="stylesheet" href="/static/console-tokens.css"><style>
 
 * { box-sizing: border-box; }
 body {
@@ -6941,7 +6883,7 @@ body {
   </aside>
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head brand-row">
-      <div class="brand">__PRODUCT_NAME__</div><a class="btn" href="/simple" onclick="this.href=simpleWorkbenchUrl()">极简工作台</a>
+      <div class="brand">__PRODUCT_NAME__</div>
       <span class="sidebar-title" id="sidebarTitle">空间工作台</span>
       <button type="button" class="btn-collapse-sidebar" id="btnCollapseSidebar" onclick="toggleSidebar()" title="折叠侧边栏 (⌘B)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
@@ -7052,6 +6994,7 @@ body {
         <div class="tabs-scroll" id="workflowTabsList"></div>
       </div>
       <div class="actions">
+        <a id="simpleWorkbench" class="btn" href="/simple" onclick="this.href=simpleWorkbenchUrl()" title="切换到极简工作台，保留当前项目与需求">极简工作台 ↗</a>
         <button class="btn factory-action" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button>
         <div class="dropdown factory-action" id="moreDropdown">
           <button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button>
@@ -12802,7 +12745,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(404,error='Not Found')
         suffix=target.suffix.lower()
         ctype='text/html; charset=utf-8' if suffix in ('.html', '.htm') else 'application/javascript; charset=utf-8' if suffix=='.js' else 'text/css; charset=utf-8' if suffix=='.css' else 'application/octet-stream'
-        raw=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-cache' if target.name.startswith('simple.') else 'public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
+        raw=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-cache' if target.name.startswith('simple.') or target.name=='console-tokens.css' else 'public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
     def query(self):return urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
     def body(self):
         n=int(self.headers.get('Content-Length','0') or 0); raw=self.rfile.read(n) if n else b'{}'; return json.loads(raw.decode() or '{}')
