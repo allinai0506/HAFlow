@@ -10,6 +10,7 @@ Implements the 5-element paradigm (Goal, Metrics, Data, Markdown files, Cron):
 
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -45,7 +46,7 @@ def resolve_evaluation_timeout(target_dir: Path, explicit_timeout: Optional[floa
     if explicit_timeout is not None:
         try:
             val = float(explicit_timeout)
-            if val > 0:
+            if val > 0 and math.isfinite(val):
                 return val
         except (ValueError, TypeError):
             pass
@@ -54,7 +55,7 @@ def resolve_evaluation_timeout(target_dir: Path, explicit_timeout: Optional[floa
     if env_val:
         try:
             val = float(env_val.strip())
-            if val > 0:
+            if val > 0 and math.isfinite(val):
                 return val
         except (ValueError, TypeError):
             pass
@@ -67,24 +68,33 @@ def resolve_evaluation_timeout(target_dir: Path, explicit_timeout: Optional[floa
             m = re.search(r"<!--\s*HERDR_EVAL_TIMEOUT:\s*([0-9.]+)\s*-->", content, re.IGNORECASE)
             if m:
                 val = float(m.group(1))
-                if val > 0:
+                if val > 0 and math.isfinite(val):
                     return val
             m2 = re.search(r"-\s*\*\*评估超时\*\*:\s*`?([0-9.]+)`?", content)
             if m2:
                 val = float(m2.group(1))
-                if val > 0:
+                if val > 0 and math.isfinite(val):
                     return val
         except Exception:
             pass
 
-    # Adaptive scale based on test suite files
+    # Adaptive scale based on test suite files (Python, Jest, Vitest, etc.)
     try:
-        test_dirs = [target_dir / "tests", target_dir / "test"]
+        test_dirs = [target_dir / "tests", target_dir / "test", target_dir / "src"]
         test_files_count = 0
+        js_ts_suffixes = (
+            ".test.js", ".test.jsx", ".test.ts", ".test.tsx",
+            ".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx",
+        )
         for td in test_dirs:
             if td.is_dir():
-                for f in td.rglob("*.py"):
-                    if f.name.startswith("test_") or f.name.endswith("_test.py"):
+                for f in td.rglob("*"):
+                    if not f.is_file():
+                        continue
+                    fname = f.name.lower()
+                    if fname.endswith(".py") and (fname.startswith("test_") or fname.endswith("_test.py")):
+                        test_files_count += 1
+                    elif any(fname.endswith(sfx) for sfx in js_ts_suffixes):
                         test_files_count += 1
         if test_files_count > 50:
             adaptive = test_files_count * 4.0

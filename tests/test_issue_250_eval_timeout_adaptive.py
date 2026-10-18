@@ -95,3 +95,29 @@ class EvalTimeoutResolutionTest(unittest.TestCase):
             timeout = resolve_evaluation_timeout(self.target_dir)
             self.assertEqual(timeout, MAX_ADAPTIVE_EVALUATION_TIMEOUT)
             self.assertEqual(timeout, 1800.0)
+
+    def test_reject_non_finite_timeouts(self):
+        with patch.dict(os.environ, {}, clear=True):
+            # Explicit timeout inf/nan rejected
+            self.assertEqual(resolve_evaluation_timeout(self.target_dir, explicit_timeout=float("inf")), DEFAULT_EVALUATION_TIMEOUT)
+            self.assertEqual(resolve_evaluation_timeout(self.target_dir, explicit_timeout=float("-inf")), DEFAULT_EVALUATION_TIMEOUT)
+            self.assertEqual(resolve_evaluation_timeout(self.target_dir, explicit_timeout=float("nan")), DEFAULT_EVALUATION_TIMEOUT)
+
+        # Env var inf/nan rejected
+        for val in ["inf", "+inf", "-inf", "nan", "NaN"]:
+            with patch.dict(os.environ, {"HERDR_LOOP_EVAL_TIMEOUT": val}):
+                self.assertEqual(resolve_evaluation_timeout(self.target_dir), DEFAULT_EVALUATION_TIMEOUT)
+
+    def test_adaptive_scaling_for_javascript_typescript_suites(self):
+        tests_dir = self.target_dir / "tests"
+        tests_dir.mkdir(parents=True)
+        # Create 100 dummy JS/TS test files
+        for i in range(50):
+            (tests_dir / f"component_{i}.test.ts").write_text("// test\n", encoding="utf-8")
+        for i in range(50):
+            (tests_dir / f"service_{i}.spec.js").write_text("// test\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {}, clear=True):
+            timeout = resolve_evaluation_timeout(self.target_dir)
+            # 100 test files * 4.0s = 400.0s > default 300.0s
+            self.assertEqual(timeout, 400.0)
