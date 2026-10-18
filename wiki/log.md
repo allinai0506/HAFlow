@@ -2765,3 +2765,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Evidence: 3 个权限用例 RED(8b581c3)→GREEN(a7036d2)；黑盒实测 0600→0600/0640 保持/首建 0600；影响面 7 套件 97 passed。
 - 补充 `docs/lessons/lessons-learned.md` §169（原子写携模陷阱）与 §170（基线漂移与汇聚期四种编排停摆）；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust-r2.md`；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-01-wrapup.md`。
 - 本记录描述本地源码；PR 保持 OPEN，合并决策留人工。
+
+## [2026-10-18] Fix | issue #255 三轮：Codex 对新 head 的 3×P1（短写/截断脱敏/跨进程测试）
+- Fixed [[preflight-and-health]] §3.3：`os.write` 短写未检查即 `replace()`（ENOSPC 部分接受会发布截断 JSON）→ 按返回值循环写满；worker `stdout[-4096:]` 切点落入凭证行导致 `word=hunter2` 残段绕过逐行脱敏 → 超限切片后丢弃残缺首行。
+- 测试有效性：并发射锁回归从同解释器双线程改为 fork + Barrier 双进程，真正卡住跨进程 flock 边界；`test_agy_short_write_is_completed_before_replace`、`test_trust_tail_slice_does_not_split_credential_line` RED(1a03e39)→GREEN。
+- 事故披露：并发测试线程内各自 `patch(Path.home)` 竞态曾向真实 `~/.gemini/antigravity-cli/settings.json` 泄漏 2 条临时条目，已精确剔除（其余 79 条与 0600 逐位保持）。
+- Evidence：trust+worker 37 passed、影响面 7 套件 106 passed、compileall/diff-check 干净；教训补写于 §168/§169 与 r2 bug-report"第三轮"小节。PR #259 保持 OPEN 不合并。

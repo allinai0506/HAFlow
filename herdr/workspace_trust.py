@@ -153,7 +153,13 @@ def _agy_trust_write_locked(config: Path, canonical: str) -> bool:
         mode = 0o600
     fd, tmp_name = tempfile.mkstemp(dir=str(config.parent), prefix=".settings-", suffix=".tmp")
     try:
-        os.write(fd, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+        payload = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        # os.write may accept fewer bytes than requested (e.g. ENOSPC after a
+        # partial accept); a short write left unchecked would let os.replace
+        # publish truncated JSON and corrupt the user's settings.
+        written = 0
+        while written < len(payload):
+            written += os.write(fd, payload[written:])
         os.fchmod(fd, mode)
         os.replace(tmp_name, str(config))
     except BaseException:

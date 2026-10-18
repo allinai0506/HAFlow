@@ -923,7 +923,14 @@ def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=2
                 verdict = startup_readiness(agent_kind, started, runtime, transcript.stdout)
                 if verdict["status"] != "UNKNOWN":
                     if verdict["status"] == "TRUST_REQUIRED":
-                        verdict["terminal_text"] = transcript.stdout[-4096:]
+                        tail = transcript.stdout[-4096:]
+                        if len(transcript.stdout) > 4096:
+                            # The tail slice can start mid-line; a fragment like
+                            # "word=hunter2" evades per-line redaction, so drop
+                            # everything before the first complete line.
+                            nl = tail.find("\n")
+                            tail = tail[nl + 1:] if nl != -1 else ""
+                        verdict["terminal_text"] = tail
                     return verdict
         except (RuntimeError, ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
             verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "probe_failed"}

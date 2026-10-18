@@ -212,6 +212,21 @@ class TestStartAgent(unittest.TestCase):
         self.assertLessEqual(len(snippet), 400)
         self.assertIn("do you trust", snippet.lower())
 
+    def test_trust_tail_slice_does_not_split_credential_line(self):
+        """Codex PR #259 round-2 P1: the 4096-char tail slice can start inside
+        a credential assignment ("password=hunter2" → "word=hunter2"), and a
+        key-less fragment evades per-line redaction; the partial leading line
+        must be dropped before the evidence is built."""
+        filler = "-" * 100 + "\n"  # len 101; "password=" starts at index 101
+        prompt = "Do you trust the contents of this project?\n"
+        base = filler + "password=hunter2\n" + prompt
+        # make the [-4096:] cut land 4 chars into "password=" → "word=hunter2"
+        stdout = base + "p" * (4096 + len(filler) + 4 - len(base))
+        self.assertEqual(stdout[-4096:].splitlines()[0], "word=hunter2")
+        _, payload = self._assert_trust_blocked_failure_evidence("agy", stdout)
+        self.assertNotIn("hunter2", payload["trust_evidence"])
+        self.assertIn("do you trust", payload["trust_evidence"].lower())
+
     def test_non_trust_startup_failure_evidence_has_no_trust_snippet(self):
         """The trust evidence field is specific to TRUST_REQUIRED blocking;
         other startup failures must not fabricate one."""

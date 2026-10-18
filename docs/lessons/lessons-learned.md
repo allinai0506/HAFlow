@@ -7089,6 +7089,9 @@ agy（Antigravity CLI）在每个新目录首启弹出交互式信任对话框�
 2. 写入必须幂等合并并保留其余键/条目，临时文件 + `replace()` 原子替换。
 3. 修复类缺陷要用对照实验同时证明"复现失败"与"修复生效"（本次：未预埋目录出现对话框、
    预埋目录直接 READY）。
+4. 有界证据必须"先整行脱敏、再截断"，且尾部截断要丢弃残缺首行：`stdout[-4096:]` 可能
+   从凭证赋值中间切开，`word=hunter2` 这类丢掉 `password=` 前导键的残段会绕过中央
+   redactor 随证据外泄（Codex 二轮 P1；`test_trust_tail_slice_does_not_split_credential_line`）。
 
 ### 验证命令 / 守护测试
 
@@ -7126,6 +7129,13 @@ AGENTS.md §4.12 落盘安全边界。cleanroom_review 门禁在 temp HOME 用�
    落既有异常兜底（WARN + False），fail-closed 不放宽。
 2. 逐位保持原模式（`S_IMODE(st.st_mode)` 全权限位忠实保留），非硬编码 0600——
    0640 等既有模式同样保持。
+3. 序列化跨进程 read-modify-write：写入全程持 `flock(LOCK_EX|LOCK_NB)` 有界重试锁，
+   临时文件用 `mkstemp` 每次唯一（禁止共享固定 `.json.tmp`），否则并发启动互相覆盖丢条目。
+4. `os.write` 返回值是"已接受字节数"，可能短写（如 ENOSPC 收下前缀）：必须按返回值
+   循环写到 `written == len(payload)` 才 `fchmod`+`replace`，单次 `os.write` 忽略返回值
+   会把截断 JSON 原子替换到用户配置上（Codex 二轮 P1）。
+5. 锁/唯一临时文件的回归测试必须"两个独立进程 + barrier"卡进临界区交错；同解释器双线程
+   因不控制交错可在无锁实现下照样通过，证伪不了跨进程边界（Codex 二轮 P1）。
 
 ### 验证命令 / 守护测试
 
@@ -7135,6 +7145,10 @@ AGENTS.md §4.12 落盘安全边界。cleanroom_review 门禁在 temp HOME 用�
 `test_ensure_agy_workspace_trust_preserves_other_existing_mode`、
 `test_ensure_agy_workspace_trust_first_create_is_owner_only` 守护携模回归（RED
 于 8b581c3：`420 != 384` / `420 != 416`；GREEN 于 a7036d2）。
+
+`test_agy_short_write_is_completed_before_replace` 守护短写补全（RED 于 1a03e39
+单次 `os.write`：截断致 `json.loads` 失败；GREEN 于循环写）；
+`test_agy_concurrent_processes_keep_both_entries` 守护跨进程 flock 串行化（fork+barrier）。
 复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust-r2.md`。
 
 ## 170. 基线漂移与门禁汇聚期的四种编排停摆形态（2026-10-18）

@@ -12,6 +12,18 @@ sys.path.insert(0, str(HERDR_ROOT))
 from herdr import workspace_trust
 
 
+def _agy_add_entry_worker(home, path, barrier, result_q):
+    """Child-process body: real cross-process flock contention, released together
+    by the barrier so both enter the read-modify-write window simultaneously."""
+    try:
+        os.environ["HOME"] = home
+        barrier.wait(timeout=10)
+        ok = workspace_trust.ensure_agy_workspace_trust(path)
+        result_q.put(("ok" if ok else "fail", str(path)))
+    except BaseException as exc:  # noqa: BLE001
+        result_q.put(("error", repr(exc)))
+
+
 class TestWorkspaceTrust(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
@@ -332,9 +344,10 @@ class TestWorkspaceTrust(unittest.TestCase):
         self.assertEqual(conf.read_text(encoding="utf-8"), original)
 
     def test_agy_concurrent_launches_keep_both_entries(self):
-        """Two workflows launching agy concurrently must not drop entries:
-        read-modify-write is serialized across processes and tmp files are
-        per-write unique (no shared fixed .json.tmp)."""
+        """Two launches racing in one interpreter must not drop entries: the
+        read-modify-write is serialized and tmp files are per-write unique.
+        Cross-process serialization is covered separately by
+        test_agy_concurrent_processes_keep_both_entries."""
         import threading
 
         conf = self._agy_conf_path()
@@ -378,6 +391,78 @@ class TestWorkspaceTrust(unittest.TestCase):
         leftovers = [p.name for p in conf.parent.iterdir()
                      if p.name != "settings.json" and not p.name.endswith(".lock")]
         self.assertEqual(leftovers, [])
+
+    def test_agy_concurrent_processes_keep_both_entries(self):
+        """Two separate OS processes contending on the settings lock must both
+        keep their entries: threads in one interpreter cannot prove the
+        cross-process flock boundary that previously lost trust entries."""
+        import multiprocessing as mp
+
+        if "fork" not in mp.get_all_start_methods():
+            self.skipTest("fork start method unavailable")
+
+        conf = self._agy_conf_path()
+        conf.write_text(json.dumps({"model": "m", "trustedWorkspaces": []}), encoding="utf-8")
+        os.chmod(conf, 0o600)
+        proj_a = self.home / "proj_a"
+        proj_b = self.home / "proj_b"
+        proj_a.mkdir()
+        proj_b.mkdir()
+
+        ctx = mp.get_context("fork")
+        barrier = ctx.Barrier(2, timeout=15)
+        queue = ctx.Queue()
+        processes = [
+            ctx.Process(target=_agy_add_entry_worker,
+                        args=(str(self.home), str(p), barrier, queue))
+            for p in (proj_a, proj_b)
+        ]
+        old_mask = os.umask(0o022)
+        try:
+            for proc in processes:
+                proc.start()
+            for proc in processes:
+                proc.join(30)
+        finally:
+            os.umask(old_mask)
+
+        self.assertFalse([p.exitcode for p in processes if p.exitcode != 0])
+        results = [queue.get(timeout=5) for _ in processes]
+        self.assertEqual([status for status, _ in results], ["ok", "ok"])
+        data = json.loads(conf.read_text(encoding="utf-8"))
+        trusted = data["trustedWorkspaces"]
+        self.assertIn(workspace_trust._exact_case_path(os.path.realpath(str(proj_a))), trusted)
+        self.assertIn(workspace_trust._exact_case_path(os.path.realpath(str(proj_b))), trusted)
+        self.assertEqual(data.get("model"), "m")
+        self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
+
+    def test_agy_short_write_is_completed_before_replace(self):
+        """os.write may accept fewer bytes than requested (e.g. ENOSPC after a
+        partial accept); the write must loop until every byte lands, otherwise
+        replace() would publish truncated JSON over the user's settings."""
+        conf = self._agy_conf_path()
+        conf.write_text(json.dumps({"model": "m", "trustedWorkspaces": []}), encoding="utf-8")
+        os.chmod(conf, 0o600)
+        target_path = self.home / "proj_sw"
+        target_path.mkdir()
+
+        real_write = os.write
+        chunked = {"calls": 0}
+
+        def halving_write(fd, data):
+            chunked["calls"] += 1
+            n = max(1, len(data) // 2)
+            return real_write(fd, data[:n])
+
+        with patch("pathlib.Path.home", return_value=self.home), \
+             patch("os.write", side_effect=halving_write):
+            self.assertTrue(workspace_trust.ensure_agy_workspace_trust(target_path))
+
+        self.assertGreater(chunked["calls"], 1)
+        data = json.loads(conf.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("model"), "m")
+        self.assertIn(workspace_trust._exact_case_path(os.path.realpath(str(target_path))),
+                      data["trustedWorkspaces"])
 
 
 if __name__ == "__main__":
