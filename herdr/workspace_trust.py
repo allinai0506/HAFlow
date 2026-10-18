@@ -5,9 +5,40 @@ Pre-seeds permissions to avoid background modal/TTY authorization popups.
 
 import json
 import os
+import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+
+def _exact_case_path(path: str) -> str:
+    """Rebuild an absolute POSIX path with real directory-entry casing.
+
+    On case-insensitive filesystems Path.resolve()/os.path.realpath never
+    fixes casing, but agy matches trustedWorkspaces exactly. Existing
+    segments are re-found via os.scandir entry names; segments that do not
+    exist yet (planned clone leaves) are kept verbatim.
+    """
+    if not path or not path.startswith("/"):
+        return path
+    segments = path[1:].split("/")
+    out = ""
+    for i, seg in enumerate(segments):
+        try:
+            with os.scandir(out or "/") as it:
+                entries = {e.name: e.name.lower() for e in it}
+        except OSError:
+            entries = {}
+        if seg in entries:
+            out = out + "/" + seg
+            continue
+        folded = "/" + seg
+        match = next((n for n, low in entries.items() if low == folded[1:].lower()), None)
+        if match is None:
+            return out + "/" + "/".join(segments[i:])
+        out = out + "/" + match
+    return out
 
 
 def ensure_grok_workspace_trust(repo_path: Path | str) -> bool:
@@ -53,9 +84,99 @@ def ensure_claude_workspace_trust(repo_path: Path | str) -> bool:
         return False
 
 
+def ensure_agy_workspace_trust(repo_path: Path | str) -> bool:
+    """Register the case-canonical workspace path in antigravity-cli settings.json.
+
+    agy blocks every first start in a new directory with an interactive
+    "Do you trust the contents of this project?" dialog (issue #255).
+    trustedWorkspaces is matched path-and-case exactly, so entries are
+    written through _exact_case_path; other keys and entries are preserved.
+    """
+    try:
+        canonical = _exact_case_path(os.path.realpath(str(Path(repo_path).expanduser().absolute())))
+        config = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        import fcntl
+        # Different workflows launch concurrently and the controller only
+        # serializes within one workflow: serialize the whole read-modify-
+        # write across processes (PR #259 review P1).
+        with open(config.parent / (config.name + ".lock"), "a+") as lock:
+            deadline = time.monotonic() + _AGY_SETTINGS_LOCK_TIMEOUT
+            while True:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise ValueError("agy settings lock timeout; original file preserved")
+                    time.sleep(0.05)
+            try:
+                return _agy_trust_write_locked(config, canonical)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"[WORKSPACE TRUST WARN] agy trust failed for {repo_path}: {exc}", file=sys.stderr)
+        return False
+
+
+_AGY_SETTINGS_LOCK_TIMEOUT = 5.0
+
+
+def _agy_trust_write_locked(config: Path, canonical: str) -> bool:
+    try:
+        raw = config.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        data = {}
+    else:
+        # An unreadable or malformed existing file must fail closed: treating
+        # it as an empty config and overwriting would destroy unrelated user
+        # settings (model, permissions) despite the preservation contract
+        # (PR #259 review P1).
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("agy settings root is not an object; original file preserved")
+    trusted = data.get("trustedWorkspaces")
+    if trusted is None:
+        trusted = []
+        data["trustedWorkspaces"] = trusted
+    elif not isinstance(trusted, list):
+        raise ValueError("agy trustedWorkspaces is not a list; original file preserved")
+    if canonical in trusted:
+        return True
+    trusted.append(canonical)
+    # replace() carries the tmp file's mode, so a tmp created under
+    # umask 022 would widen the user's real 0600 settings.json to 0644 on
+    # the first agy dispatch (issue #255 review B-1).
+    try:
+        mode = stat.S_IMODE(config.stat().st_mode)
+    except FileNotFoundError:
+        mode = 0o600
+    fd, tmp_name = tempfile.mkstemp(dir=str(config.parent), prefix=".settings-", suffix=".tmp")
+    try:
+        payload = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        # os.write may accept fewer bytes than requested (e.g. ENOSPC after a
+        # partial accept); a short write left unchecked would let os.replace
+        # publish truncated JSON and corrupt the user's settings.
+        written = 0
+        while written < len(payload):
+            written += os.write(fd, payload[written:])
+        os.fchmod(fd, mode)
+        os.replace(tmp_name, str(config))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(fd)
+    return True
+
+
 _TRUST_HANDLERS = {
     "grok": ensure_grok_workspace_trust,
     "claude": ensure_claude_workspace_trust,
+    "agy": ensure_agy_workspace_trust,
 }
 
 

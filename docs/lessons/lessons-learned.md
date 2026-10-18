@@ -7063,3 +7063,120 @@ python3 -m pytest -q tests/test_workflow_clone_reclaim.py tests/test_workflow_cl
 `python3.13 -m pytest -q tests/test_console_execution_trace.py tests/test_deliverables.py`
 
 `test_canvas_node_and_list_row_open_the_same_task_detail` 原先失败于画布未打开详情；覆盖当前、历史与未派发节点。真实浏览器对 `haflow-issue-255-agy-trust-r2` 从画布和列表打开，概览、轨迹、产物、运行时四页签的完整显示文本逐项相同。
+
+## 168. 预检无头探针不能代替交互式启动的真实门（2026-10-18）
+
+### 问题背景
+
+agy（Antigravity CLI）在每个新目录首启弹出交互式信任对话框，worker 就绪门将其分类为
+`TRUST_REQUIRED` 并回滚派发；而 deep preflight 用 `agy --print` 无头探针，不触发该对话框，
+预检 READY 与真实启动失败长期矛盾。`_TRUST_HANDLERS` 只登记 grok/claude，
+`preseed_trust_target()` 对 agy 返回 None，launch 前置预埋对 agy 静默缺位——洁净室/门禁
+每个任务都是新克隆目录，agy 因此永久不可派发，只能靠人工把克隆路径写进 trustedWorkspaces。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 探针模式与真实启动形态不同 | 无头探针通过 ≠ 交互式启动可用；两者验证的是不同事实 | agent 能力矩阵须区分 probe/start 两条链，各自的判定来源分别断言 |
+| agent 接入未补 trust handler | 依赖"每个可派发 agent 都有预埋能力"的隐式约定，缺位即静默不可派发 | 新 agent 接入时同步覆盖 `_TRUST_HANDLERS`/preseed 回归测试 |
+| macOS resolve 不修正大小写 | agy 按精确路径+大小写匹配，错误 casing 写入等于没写 | 需要真实 casing 的路径用逐段 `os.scandir` canonical 化；未创建叶子用"已存在前缀 canonical + 剩余段原样" |
+| 回滚证据只剩 "blocked during startup" | 状态码不回答"为什么"，运维不可判读 | 信任阻塞失败必须携带有界、脱敏、可识别对话框的 pane 片段（HERDR_WORKER_FAILURE.trust_evidence） |
+
+### 操作规范
+
+1. 用户级信任配置只在 launch 前置阶段写入；worker 运行时保持只读（既有约定）。
+2. 写入必须幂等合并并保留其余键/条目，临时文件 + `replace()` 原子替换。
+3. 修复类缺陷要用对照实验同时证明"复现失败"与"修复生效"（本次：未预埋目录出现对话框、
+   预埋目录直接 READY）。
+4. 有界证据必须"先整行脱敏、再截断"，且尾部截断要丢弃残缺首行：`stdout[-4096:]` 可能
+   从凭证赋值中间切开，`word=hunter2` 这类丢掉 `password=` 前导键的残段会绕过中央
+   redactor 随证据外泄（Codex 二轮 P1；`test_trust_tail_slice_does_not_split_credential_line`）。
+
+### 验证命令 / 守护测试
+
+`python3 -m pytest -q tests/test_workspace_trust.py tests/test_herdr_worker.py tests/test_worker_startup_atomic_rollback.py`
+
+`test_agy_has_trust_handler_and_preseed_target`、`test_ensure_agy_workspace_trust_uses_real_disk_casing`、
+`test_agy_trust_dialog_failure_evidence_is_readable` 守护预埋覆盖、真实 casing 与证据可判读。
+
+## 169. 原子 replace() 携带临时文件模式，静默放宽目标权限（2026-10-18）
+
+### 问题背景
+
+issue #255 返工轮 B-1：`ensure_agy_workspace_trust()` 用 `tmp.write_text() +
+tmp.replace(config)` 原子覆写 `~/.gemini/antigravity-cli/settings.json`。POSIX
+rename/replace 携带临时文件自身的模式而非目标文件模式：真实文件 0600，tmp 在
+umask 022 下创建为 0644，首次 agy 派发即确定性地把 0600 放宽为 0644，违反
+AGENTS.md §4.12 落盘安全边界。cleanroom_review 门禁在 temp HOME 用真实函数
+复现 0600→0644 后阻断（候选 52f0369），修复提交 `a7036d2`。
+
+深层原因：原子写模板从 grok/claude handler 复制时只覆盖了"内容原子性"，
+未覆盖"权限保持"。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 只验内容不验模式 | 原子写验收必须包含权限维度：替换前后 `stat.S_IMODE` 逐位一致 | 写用户级敏感配置的 handler 一律"写前捕获原模式、replace 前 chmod tmp" |
+| 复制既有原子写模板 | 模板继承要连同其隐含前提一起核验（tmp 与目标同 umask 目录时模式由 umask 决定） | 跨 handler 复制写入路径时对照检查模式、所有权、符号链接语义 |
+| 首次创建无约定 | 目标不存在时不应继承 umask 宽松默认 | 用户私有配置（信任/token 类）首次创建固定 0o600 |
+| 同型隐患只修被点名处 | 范围纪律允许，但隐患必须显式登记 | grok/claude handler 同型 replace 携模隐患已记入 bug-report"已知限制"，待独立小任务 |
+
+### 操作规范
+
+1. 模式捕获必须在写入分支内、`FileNotFoundError` 分支取 0o600；捕获/设置失败
+   落既有异常兜底（WARN + False），fail-closed 不放宽。
+2. 逐位保持原模式（`S_IMODE(st.st_mode)` 全权限位忠实保留），非硬编码 0600——
+   0640 等既有模式同样保持。
+3. 序列化跨进程 read-modify-write：写入全程持 `flock(LOCK_EX|LOCK_NB)` 有界重试锁，
+   临时文件用 `mkstemp` 每次唯一（禁止共享固定 `.json.tmp`），否则并发启动互相覆盖丢条目。
+4. `os.write` 返回值是"已接受字节数"，可能短写（如 ENOSPC 收下前缀）：必须按返回值
+   循环写到 `written == len(payload)` 才 `fchmod`+`replace`，单次 `os.write` 忽略返回值
+   会把截断 JSON 原子替换到用户配置上（Codex 二轮 P1）。
+5. 锁/唯一临时文件的回归测试必须"两个独立进程 + barrier"卡进临界区交错；同解释器双线程
+   因不控制交错可在无锁实现下照样通过，证伪不了跨进程边界（Codex 二轮 P1）。
+
+### 验证命令 / 守护测试
+
+`python3 -m pytest -q tests/test_workspace_trust.py`
+
+`test_ensure_agy_workspace_trust_preserves_existing_0600_under_umask_022`、
+`test_ensure_agy_workspace_trust_preserves_other_existing_mode`、
+`test_ensure_agy_workspace_trust_first_create_is_owner_only` 守护携模回归（RED
+于 8b581c3：`420 != 384` / `420 != 416`；GREEN 于 a7036d2）。
+
+`test_agy_short_write_is_completed_before_replace` 守护短写补全（RED 于 1a03e39
+单次 `os.write`：截断致 `json.loads` 失败；GREEN 于循环写）；
+`test_agy_concurrent_processes_keep_both_entries` 守护跨进程 flock 串行化（fork+barrier）。
+复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust-r2.md`。
+
+## 170. 基线漂移与门禁汇聚期的四种编排停摆形态（2026-10-18）
+
+### 问题背景
+
+wf-haflow-1018-01（issue #255）从 craft 到 wrapup 期间 main 持续前进（PR #256/#257/#258
+先后合入），候选线三轮旋转、一次冻结漏发、一次静默停摆、一次授权纪元重构，各形态
+均实际发生并留有 notes.jsonl 证据（n-1792298194206、n-1792299892774、n-1792301076461）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 候选落后 main 被派发前守卫 [BASELINE STALE] 反复拒绝（本流 3 轮旋转） | 活跃主干上的长流程必须按"内容保持 rebase → freeze-candidate → 新 refs 发布 → 双门禁在新候选重验"旋转，旧轮次结论保留为不可变历史 | 旋转必须附内容保持证明（对非合并类交付文件 diff=0）；refs 同时发布 tasks+heads 保证新鲜 clone 可达 |
+| 修复轮 cleaned 后未自动 candidate_frozen，调度仍持旧候选拒派 r4 | candidate_published ≠ candidate_frozen；门禁派发读的是冻结候选 | fix/rework 轮次 cleaned 后必须显式 `freeze-candidate` 并核实 heads ref 可达且含当前 main，再派双门禁 |
+| BASELINE STALE fail-fast 残留的 failed 身份行使谱系"非全 superseded"，且 op resolved 判定把 failed 行误算作已登记 | 失败行既阻断新 op 铸造又伪 satisfied，表象为"卡住"且无告警——静默停摆是最难发现的停摆形态 | 诊断顺序：查 FAILED 行候选 SHA 是否等于当前冻结候选 → 查谱系 superseded 状态 → 查 op resolved 判定；已列入平台侧跟进 |
+| 人工纪元后启动/登记被 `require_authorization` 拒，旧 op 又 `deadline expired` | 替换派发的授权路径是 supersede（旧任务→superseded by 新任务）→ confirm_absent 铸新 epoch → 绑定新 op 启动，三步缺一不可 | 事件模板中的 `--onto` 分支可能随旋转陈旧，派发前核对当前 delivery-branch ref |
+
+### 操作规范
+
+1. 汇聚核验以"三点一致"为准：门禁任务 candidate_sha、gate-verdicts 文件、冻结记录
+   （candidate_frozen 事件 + integration ref），再加本工位 `git rev-parse HEAD`。
+2. 停摆排查先看调度侧（冻结候选、op/谱系状态）再看 worker 侧，避免把守卫
+   fail-fast 误判为环境故障。
+
+### 验证命令 / 守护测试
+
+编排类教训，证据为 `~/.herdr-controller/workflows/wf-haflow-1018-01/shared/notes.jsonl`
+决策留痕与 `gate-verdicts/`；后续纳入平台 reverification 路由专项（Selective
+Reverification：候选更新含文档双方追加不构成非影响策略，必须重验）。
