@@ -53,6 +53,7 @@
 | **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/herdr_factory_console.py` |
 | **使用或修改极简项目/需求/成果工作台** | [[simple-workbench]] | `console/static/simple.js`, `console/herdr_factory_console.py` |
 | **修改 Workflow 主区画布 / Inspector / 视图切换** | [[flow-workbench]] | `herdr/workflow_graph.py`, `console/herdr_factory_console.py`, `console/static/vendor/` |
+| **任务停在「已提交/集成中」，想知道代码合到哪、在等什么** | [[flow-workbench]] §10 | `herdr/delivery_pipeline.py`, `herdr/controller_actions.py`, `console/herdr_factory_console.py` |
 | **查看工作流交付成果（文件、提交、PR）** | [[flow-workbench]] | `herdr/deliverables.py`, `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **工位实时打断与插话纠偏 (Steering Mesh & AgentAdapter)** | [[task-lifecycle]] | `herdr/steering.py`, `herdr/agent_adapter.py`, `bin/herdr-task:steer/adapters` |
 | **Agent 终端等待输入与人工交互闭环 (Interaction Loop)** | [[task-lifecycle]] | `herdr/interaction_loop.py`, `console/herdr_factory_console.py` |

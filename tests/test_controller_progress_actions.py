@@ -295,3 +295,51 @@ def test_resolve_workflow_blockers_still_ignores_pipeline_tasks():
                                   "execution_mode": "context", "pane_id": ""}])
 def test_progress_actions_are_defensive_on_partial_records(bad):
     assert isinstance(generate_progress_actions(bad, {"workflow_id": "wf-001"}), list)
+
+
+# --------------------------------------------------------------------------
+# Issue #253: a task the scheduler is already integrating must not also offer a
+# human "并入目标分支" button — the two would race, and the console would be
+# showing an action whose owner is the daemon, not the operator.
+# --------------------------------------------------------------------------
+
+RUNNING = {"workflow_id": "wf-001", "status": "running"}
+
+
+@pytest.mark.parametrize("status,suffix", [("committed", ":integrate"),
+                                           ("completed", ":commit")])
+def test_scheduler_owned_task_offers_no_manual_git_step(status, suffix):
+    actions = generate_progress_actions(_task(status=status), RUNNING)
+    assert not any(a.action_id.endswith(suffix) for a in actions), _ids(actions)
+
+
+@pytest.mark.parametrize("wf_status", ["paused", "completed", "cleaned", "", None])
+def test_manual_git_step_stays_available_when_the_scheduler_is_not_driving(wf_status):
+    """Paused/finished workflows, and unknown status, keep the human route."""
+    workflow = {"workflow_id": "wf-001", "status": wf_status}
+    assert any(a.action_id.endswith(":integrate")
+               for a in generate_progress_actions(_task(status="committed"), workflow))
+
+
+def test_escalated_task_keeps_its_manual_routes():
+    """finalize_escalated means the daemon stopped; humans own recovery."""
+    task = _task(status="committed", finalize_escalated=True,
+                 finalize_escalate_reason="integrate_main_dirty")
+    actions = generate_progress_actions(task, RUNNING)
+    assert _by_id(actions, ":clear_escalation")
+
+
+def test_collect_workflow_actions_hides_the_step_the_scheduler_owns():
+    actions = collect_workflow_actions(
+        [_task("t-committed", status="committed", pane_id="")], RUNNING,
+    )
+    assert not any(a.action_id.endswith(":integrate") for a in actions), _ids(actions)
+
+
+def test_collect_workflow_actions_still_offers_settled_steps():
+    """Only the scheduler-driven steps disappear; the rest of the chain stays."""
+    tasks = [_task("t-integrated", status="integrated", pane_id=""),
+             _task("t-ready", status="cleanup_ready", pane_id="")]
+    ids = _ids(collect_workflow_actions(tasks, RUNNING))
+    assert "t-integrated:finalize" in ids
+    assert "t-ready:finalize" in ids

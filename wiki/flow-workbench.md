@@ -166,3 +166,30 @@ Evidence:
 - `tests/test_console_project_creation.py` — 冻结定义优先级（直接调用 + `workflow_detail` 级）、`workflow_template` 暴露
 - `tests/test_console_templates.py` — `TestTemplateLibraryBehavior`（空间隔离、仅用户点选记账、preferred 透传、保存模板记账、过期详情/填充丢弃、保存按发起空间记账、回落对齐、直开视图水合重绘）
 - `tests/test_console_workflow_latency.py` — 启动调度性能回归（`__templates__` 先调度模板库、overview 后台水合不阻塞启动）
+
+## 10. 交付管道可见性：commit → 集成 → 归档（issue #253）
+
+`FACT` 一个 `integration_mode=git` 的任务进入 `completed` / `committed` 后，控制器 registry watcher 会自己跑完整条交付链（`_check_finalize_retry` → `finalize_completed_task`：commit → integrate → `cleanup_ready` → `cleaned`）。这段窗口里任务不是终态，界面却曾把它渲染成终态语感的「已提交」，同时给出人工「并入目标分支」按钮——用户看不出系统在等什么，按钮还与守护进程争抢同一分支。
+
+`FACT` 现在由 `herdr/delivery_pipeline.py`（纯核心，无 I/O）给出唯一投影，工作台只渲染：
+
+| 字段 | 权威来源 |
+| :--- | :--- |
+| `stage` / `stage_label`（等待保存版本 / 等待集成 / 等待收尾 / 等待归档 / 已归档） | `task.status` 与既有的交付链顺序 |
+| `scheduler_owned` / `owner` / `owner_note` | 与守护进程同一守卫：运行中的 workflow + git 任务 + 非 context + 未 `finalize_escalated` + 状态仍在重试范围内（`completed` / `committed`）；未知状态一律不宣称接管 |
+| `gates` | 该节点**直接下游**且未 `pass` 的门禁节点（门禁定义复用 `workflow_progress` 的唯一定义，含默认 `test`/`review`/`wrapup` 回退）；有效的手工放行覆盖同样算已结算 |
+| `commit` / `integration_branch` / `candidate_sha` | Task Store 既有字段 |
+| `candidate_published_at` | `events.candidate_published`（`source=herdr-task`）按 task 取最新一条；缺失写「时间未记录」，不猜测 |
+
+`FACT` 渲染契约：徽章只在调度器接管时改为阶段标签（`等待集成` + 彩色在途样式），并在同排显示可见的等待原因「等待门禁: …」；未被接管的任务继续显示原有状态标签。调度控制的「继续推进」区块对这类任务不再产出任何人工动作，改列调度器归属说明。节点卡片（Inspector 运行标签）与任务抽屉各增一行交付管道：`commit=<sha> → integration_branch → 候选发布 <时间>`。
+
+`FACT` 只隐藏显示，不删除能力：`bin/herdr-task integrate` 等 CLI 兜底路径不变，`finalize_escalated` 的任务继续显示既有三条人工恢复动作。`task_git_step` 执行接口仍按 `GIT_PIPELINE_FORWARD` 表解析 argv，不依赖调用方传入命令。
+
+Evidence:
+- `herdr/delivery_pipeline.py` — `delivery_projection` / `scheduler_owns_next_step` / `pending_gate_nodes` / `stage_of`
+- `herdr/workflow_progress.py` — `gate_retry_node`（门禁定义的唯一公开入口）
+- `herdr/controller_actions.py` — `_git_pipeline_actions` 按归属跳过守护进程已接管的步骤
+- `console/herdr_factory_console.py` — `attach_delivery` / `candidate_publication_times` / `api_task_projection` / `taskBadge` / `deliveryWaitHtml` / `deliveryPipelineLine` / `renderSchedulerAttribution`
+- `tests/test_delivery_pipeline.py` — 纯投影与归属反例（paused/非 git/context/已升级/未知状态）
+- `tests/test_console_delivery_pipeline.py` — 服务端真实 SQLite + 事件账本读链、`workflow_detail` / `api_workflow_controller_actions`、Node 渲染断言
+- `tests/test_controller_progress_actions.py` — 调度器接管不产出人工 integrate，其余链路动作保留

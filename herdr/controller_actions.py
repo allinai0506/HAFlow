@@ -14,6 +14,8 @@ import shlex
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
 
+from .delivery_pipeline import scheduler_owns_next_step
+
 
 AGENT_CANDIDATE_POOL = ["codex", "claude", "opencode", "qodercli", "agy"]
 REPLACEMENT_SUFFIX_RE = re.compile(r"-r(\d+)$")
@@ -416,8 +418,15 @@ def _pipeline_effect(status, task_id):
     }[status]
 
 
-def _git_pipeline_actions(task, wid):
-    """The task's next step in the delivery pipeline, if it owes one."""
+def _git_pipeline_actions(task, wid, workflow=None):
+    """The task's next step in the delivery pipeline, if it owes one.
+
+    Steps the Controller's registry watcher already drives are deliberately not
+    offered: a manual button would race the daemon on the same branch, and the
+    console would present a daemon-owned step as an operator decision (#253).
+    The scheduler's guard mirrors ``services/herdr-controller.py``
+    ``_check_finalize_retry``, so both agree on who is holding the task.
+    """
     status = task.get("status") or ""
     tid = task.get("task_id") or ""
     if not tid:
@@ -425,10 +434,15 @@ def _git_pipeline_actions(task, wid):
 
     is_git = (task.get("integration_mode") or "none") == "git"
     is_context = task.get("execution_mode") == "context"
+    scheduler_owned = scheduler_owns_next_step(task, workflow)
 
     actions = []
     for match_status, name, steps, label, needs_git in GIT_PIPELINE_FORWARD:
         if status != match_status:
+            continue
+        if scheduler_owned:
+            # The whole commit -> integrate -> cleanup chain runs unattended
+            # for this status; the console shows its attribution instead.
             continue
         if needs_git and (not is_git or is_context):
             # commit / integrate exit 2 without a git clone (bin/herdr-task
@@ -656,7 +670,7 @@ def generate_progress_actions(task, workflow=None):
     actions: List[ControllerAction] = []
     if task.get("finalize_escalated"):
         actions.extend(_escalation_actions(task, wid))
-    actions.extend(_git_pipeline_actions(task, wid))
+    actions.extend(_git_pipeline_actions(task, wid, workflow))
     if not actions:
         actions.extend(_live_pane_actions(task, wid))
     return actions
