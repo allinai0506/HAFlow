@@ -69,3 +69,11 @@ Qoder 历史逐条工具调用未被适配；无记录时不能恢复具体 shel
 新增 RED→GREEN 测试复现 working/claude/1 快照更新到 completed/qodercli/2 后画布仍为 working；修复将 graph projection 纳入复用条件。投影未变仍复用，变化则按既有构建逻辑重建节点和连线，不引入第二套任务状态。真实 X6/Dagre 隔离浏览器点击更新验证了这些字段及下游 waiting→working 的同步。77 passed, 3 subtests passed；Ruff correctness/diff check 通过。尚不能把此缺陷等同于用户所有展示差异；正在等待用户明确画布卡片或侧栏任务页。
 
 真实用户页面另复现侧栏排版缺陷：`#flowInspectorBody` 为 flex 容器，任务行默认 flex-shrink:1，被压到 66.5px；内容 grid 第一行 61.6px、第二行 0px，执行者溢出到下一条任务。最小修复为侧栏任务行 flex-shrink:0。77 项专项及 3 项子测试、Ruff correctness、diff check 通过；部署后以真实 DOM 行边界核验。
+
+## 用户截图确认：两处单任务详情必须一致
+
+用户最终明确对比的是流程图节点详情与列表任务详情，不是任务行或刷新。Git 检索显示本轮 e7fb86e 只抽出了共享任务行；现存 `selectFlowNode` 始终走旧 Node Inspector，未调用统一任务详情。这是本轮实现误解，不能声称完整详情已统一。
+
+最小修复：有任务的画布节点调用既有 `openTaskDrawer`，与列表使用同一容器、同一 API 装配和四页签。默认最后一个未替代任务，无当前任务则最后一个历史任务；无任务节点保留定义概览。删除 HTML 层重复 click 监听，保留 X6 node:click，避免双请求。无新增详情状态、API、模型或存储。
+
+RED→GREEN：画布/列表入口同 task_id 测试原来失败于画布未调用任务详情；修复后 176 passed, 3 subtests passed，含图、详情、轨迹、产物及 frontend syntax 专项。Ruff correctness、compileall、diff check 均通过。待部署后真实双入口四页签对比。

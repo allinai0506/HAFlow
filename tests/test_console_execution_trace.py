@@ -596,3 +596,31 @@ assert.equal(builds,2);
 '''
     result = subprocess.run(['node','-e',script],capture_output=True,text=True,check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_canvas_node_and_list_row_open_the_same_task_detail():
+    script = '\n'.join(_extract(console.HTML_TEMPLATE,n) for n in ['selectFlowNode','flowTasksForNode','onTaskRowClick'])
+    script += r'''
+const assert=require('node:assert/strict');
+const state={workflow:{tasks:[
+ {task_id:'old',node:'craft',status:'superseded',superseded_by:'current'},
+ {task_id:'current',node:'craft',status:'cleaned'},
+ {task_id:'unrelated',node:'review',status:'working'}
+]}};
+let opened=[];
+function updateFlowSelection(){}
+function renderNodeInspector(){}
+function openTaskDrawer(id){opened.push(id)}
+const window={getSelection:()=>({toString:()=>''})};
+selectFlowNode('craft');
+assert.deepEqual(opened,['current']);
+onTaskRowClick({target:{closest:()=>null}},'current');
+assert.deepEqual(opened,['current','current']);
+state.workflow.tasks=[{task_id:'old',node:'craft',status:'superseded'}];
+selectFlowNode('craft');
+assert.equal(opened.at(-1),'old');
+selectFlowNode('not-dispatched');
+assert.equal(opened.length,3);
+'''
+    result=subprocess.run(['node','-e',script],capture_output=True,text=True,check=False)
+    assert result.returncode == 0, result.stderr

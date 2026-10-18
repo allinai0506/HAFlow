@@ -10737,7 +10737,6 @@ function ensureFlowCardShape(){
       const wrap=document.createElement('div');
       wrap.className='flow-node-card is-'+(n.status||'waiting')+(n.selected?' is-selected':'');
       wrap.innerHTML=flowCardInner(n);
-      wrap.addEventListener('click',function(){if(n.id)selectFlowNode(n.id);});
       return wrap;
     }
   });
@@ -10909,7 +10908,15 @@ function pickDefaultFlowNodeId(nodes){if(!nodes||!nodes.length)return null;const
 function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const ab=document.getElementById('flowAttnBar');const ctlP=document.getElementById('controllerTabView');const tplP=document.getElementById('templatesTabView');const arcP=document.getElementById('archiveTabView');const logP=document.getElementById('logsTabView');const shell=document.querySelector('.shell');if(shell)shell.dataset.workspace=mode||'flow';const isSys=(mode==='aux'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs');const bar=document.getElementById('canvasToolbar');if(bar)bar.style.display=isSys?'none':'flex';const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=isSys?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=(isSys||mode!=='list')?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=(mode==='flow')?'block':'none';if(ab&&isSys)ab.style.display='none';if(st)st.style.display='none';if(tl)tl.style.display=(mode==='flow'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs')?'none':'block';if(ctlP)ctlP.hidden=(mode!=='ctl');if(tplP)tplP.hidden=(mode!=='templates');if(arcP)arcP.hidden=(mode!=='archive');if(logP)logP.hidden=(mode!=='logs');if(typeof renderDeliverables==='function')renderDeliverables();}
 function switchWorkflowView(v){state.workflowView=(v==='list'?'list':'flow');const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView==='flow');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');setWorkspaceMode(state.workflowView);if(state.workflowView==='flow')requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});else renderTasks();}
 function switchFlowInspectorTab(t){state.flowInspectorTab=t;['Summary','Tasks','Context','Runtime'].forEach(k=>{const el=document.getElementById('flowTab'+k);if(el)el.classList.toggle('active',k.toLowerCase()===t);});renderNodeInspector();}
-function selectFlowNode(id){state.flowSelectedNodeId=id;updateFlowSelection();renderNodeInspector();}
+function selectFlowNode(id){
+  state.flowSelectedNodeId=id;
+  updateFlowSelection();
+  renderNodeInspector();
+  const tasks=flowTasksForNode(id).filter(t=>t.task_id);
+  const current=tasks.filter(t=>t.status!=='superseded'&&!t.superseded_by);
+  const task=current[current.length-1]||tasks[tasks.length-1];
+  if(task)openTaskDrawer(task.task_id);
+}
 function updateFlowSelection(){try{if(!state.flowGraph||!state.flowGraph.getCellById)return;const g=flowGraphData();(g.nodes||[]).forEach(n=>{try{const cell=state.flowGraph.getCellById(n.id);if(!cell||!cell.getData||!cell.setData)return;const sel=String(state.flowSelectedNodeId||'')===String(n.id);const data=cell.getData()||{};if(!!data.selected===sel)return;cell.setData(Object.assign({},data,{selected:sel}));}catch(err){}});}catch(e){}}
 function destroyFlowGraph(){try{if(state.flowGraph&&state.flowGraph.dispose)state.flowGraph.dispose();}catch(e){}state.flowGraph=null;state.flowGraphWfId=null;state.flowGraphProjectionKey=null;const c=document.getElementById('flowCanvas');if(c)c.innerHTML='';}
 function resizeFlowGraph(){try{const cv=document.getElementById('flowCanvas');const host=document.getElementById('flowCanvasWrap')||cv;if(!cv||!host||!state.flowGraph)return;const w=host.clientWidth||cv.clientWidth||800;const h=Math.max(280,cv.clientHeight||host.clientHeight||480);if(state.flowGraph.resize)state.flowGraph.resize(w,h);}catch(e){}}

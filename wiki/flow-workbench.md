@@ -178,3 +178,11 @@ Evidence: `console/herdr_factory_console.py::renderTaskRow/renderTasks/renderNod
 `FACT` 画布复用同时检查 workflow ID 与完整 graph projection 的序列化键。节点状态、执行者、任务计数或边发生变化时重建节点和连线；投影未变时只更新选中态，避免每次读取都重建。销毁画布同时清理投影键。
 
 Evidence: `renderFlowGraph/destroyFlowGraph`；`tests/test_console_execution_trace.py::test_flow_graph_refreshes_changed_projection_but_reuses_unchanged_graph`。隔离浏览器使用真实 X6/Dagre 验证同 workflow 的 working/claude/1 → completed/qodercli/2 变化，不修改生产任务状态。
+
+## 统一单任务详情入口
+
+`FACT` 点击已有任务的画布节点与点击列表任务，均调用 `openTaskDrawer(task_id)`。共用同一份任务/API 投影、详情抽屉和「概览 / 执行轨迹 / 产物 / 运行时」四页签，不再把节点模板概览当成该任务详情。节点存在多个执行记录时，默认选最后一条未替代任务；全部已替代时选最后一条历史任务。历史记录仍可通过节点任务列表选择，尚无任务的节点继续显示节点信息。
+
+`FACT` X6 的 `node:click` 是唯一画布点击装配；删除 HTML 包装层重复点击监听，防止一次点击重复加载详情。
+
+Evidence: `selectFlowNode/openTaskDrawer/onTaskRowClick`；`tests/test_console_execution_trace.py::test_canvas_node_and_list_row_open_the_same_task_detail`。
