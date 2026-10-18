@@ -15,7 +15,7 @@ Evidence:
 - `workflow_templates/business-task-v1.yaml`
 - `tests/test_simple_workbench.py#test_real_http_create_start_decide_and_download`
 
-FACT：极简与空间工作台共用 `console/static/console-tokens.css`，右上角双向切换保留项目和需求身份。桌面左侧列出项目，窄屏改用选择器，仅查询所选项目。
+FACT：极简与空间工作台共用 `console/static/console-tokens.css`，空间工作台左侧顶部、极简工作台右上角的双向切换保留项目和需求身份。桌面左侧列出项目，窄屏改用选择器，仅查询所选项目。
 
 FACT：页面围绕“新建项目 → 新建需求 → 获得成果”展开。首页呈现需求列表，进度和人工决定在原生弹窗中查看；成果按需打开，默认显示最多三项可用文件或链接，其余记录折叠。`/api/workflows` 直接投影 SQLite 既有 status 字段，缺失为 unknown。
 
