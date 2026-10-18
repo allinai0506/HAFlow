@@ -1995,6 +1995,7 @@ def api_workflows(pid=None):
         res.append({
             'workflow_id': wid,
             'project_id': w_proj,
+            'status': w.get('status') or 'unknown',
             'title': item.get('title') or '',
             'requirement_subject': item.get('requirement_subject') or '',
             'created_at': item.get('created_at') or 0,

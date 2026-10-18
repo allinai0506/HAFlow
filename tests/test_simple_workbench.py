@@ -108,6 +108,7 @@ def test_real_http_create_start_decide_and_download(tmp_path, monkeypatch):
         wid = re.search(r'^WORKFLOW_ID=(\S+)', status['output'], re.MULTILINE)[1]
         workflows = request('/api/workflows?project_id='+project['project_id'])
         assert workflows[0]['workflow_id'] == wid
+        assert workflows[0]['status'] == 'running'
         detail = request('/api/workflow?id='+wid+'&lightweight=1')
         assert detail['workflow']['status'] == 'running'
         assert detail['workflow']['startup_ready'] is True
@@ -216,8 +217,8 @@ def test_r2_template_summary_exposes_mode():
 
 def test_r2_project_template_roundtrip_and_search():
     _run_simple_js(r"""
-model.projects=[{project_id:'A',execution:{mode:'context'}},{project_id:'B'}];
-const templates=[{id:'contract',label:'合同审阅',description:'条款风险',category:'legal',execution_mode:'context'}, {id:'analysis',label:'分析',description:'经营复盘',category:'biz',execution_mode:'context'}, {id:'code',label:'开发',description:'代码审查',category:'eng',execution_mode:'git'}];
+model.projects=[{project_id:'A',execution:{mode:'context'}},{project_id:'B',execution:{mode:'git'}}];
+const templates=[{id:'contract',label:'合同审阅',description:'条款风险',category:'legal',execution_mode:'context'}, {id:'analysis',label:'分析',description:'经营复盘',category:'biz',execution_mode:'context'}, {id:'bid',label:'标书评审',description:'准备标书',category:'ops',execution_mode:'git'}];
 responses['/api/templates']={templates};
 for(const t of templates)responses['/api/template?id='+t.id]={template:t,nodes:[],context:{},execution_mode:t.execution_mode};
 for(const id of ['A','B'])responses['/api/workflows?project_id='+id]=[];
@@ -225,7 +226,7 @@ $('project').value='A';await selectProject();await openRequirement();
 $('category').value='legal';$('category').onchange();await loadTemplate();
 assert.equal($('template').value,'contract');
 $('project').value='B';await selectProject();await openRequirement();
-assert.equal($('category').value,'');assert.equal($('template').value,'code');
+assert.equal($('category').value,'');assert.equal($('template').value,'bid');
 $('project').value='A';await selectProject();await openRequirement();
 assert.equal($('template').value,'contract');assert.equal($('category').value,'legal');
 $('category').value='';$('templateSearch').value='经营';$('templateSearch').oninput();await loadTemplate();
@@ -405,3 +406,77 @@ def test_shared_console_palette_revalidates_after_release_changes(server):
     with urllib.request.urlopen(server + '/static/console-tokens.css') as response:
         assert response.headers['Cache-Control'] == 'no-cache'
         assert response.headers['Content-Type'].startswith('text/css')
+
+
+def test_non_code_templates_preserve_custom_categories_and_default_business_mode():
+    _run_simple_js(r"""
+model.projects=[{project_id:'A',execution:{mode:'context'}}];model.projectId='A';
+responses['/api/templates']={templates:[{id:'code',category:'eng',label:'代码',execution_mode:'git'},{id:'test',category:'sys',label:'测试',execution_mode:'context'},{id:'plain',category:'biz',label:'业务协作',execution_mode:'context'},{id:'legal',category:'legal',label:'合同审阅',execution_mode:'context'}]};
+responses['/api/template?id=plain']={template:{label:'业务协作'},nodes:[],context:{},execution_mode:'context'};
+await openRequirement();
+assert.deepEqual($('template').children.map(x=>x.value),['plain','legal']);
+assert.equal($('template').value,'plain');
+assert.ok($('category').children.some(x=>x.value==='legal'));
+""")
+
+
+def test_project_sidebar_selection_uses_current_project_without_cross_project_reads():
+    _run_simple_js(r"""
+responses['/api/projects']=[{project_id:'A',project_name:'客户调研'},{project_id:'B',project_name:'季度总结'}];
+responses['/api/workflows?project_id=A']=[];responses['/api/workflows?project_id=B']=[];
+await refreshProjects();
+assert.equal($('projectList').children.length,2);
+await $('projectList').children[1].onclick();
+assert.equal(model.projectId,'B');assert.equal($('workspaceName').textContent,'季度总结');
+assert.equal($('newRequirement').disabled,false);
+""")
+
+
+def test_requirement_submits_selected_template_and_real_context_with_optional_title():
+    _run_simple_js(r"""
+model.projects=[{project_id:'A',project_root:'/business'}];model.projectId='A';
+$('template').value='custom-business';$('requirement').value='整理访谈资料，生成调研报告';$('title').value='';
+$('contextInputs').querySelectorAll=()=>[{value:' /business/brief.md ',dataset:{context:'brief'}}];
+let submitted;api=async(url,body)=>{submitted={url,body};throw Error('controlled transport failure')};
+await $('requirementForm').onsubmit({preventDefault(){},target:$('requirementForm')});
+assert.equal(submitted.url,'/api/run');assert.equal(submitted.body.template,'custom-business');
+assert.equal(submitted.body.title,'整理访谈资料，生成调研报告');
+assert.deepEqual(submitted.body.context,{brief:'/business/brief.md'});assert.equal(submitted.body.project_root,'/business');
+assert.equal(model.job,null);assert.equal($('start').disabled,false);
+""")
+
+
+def test_simple_document_has_unique_ids_and_valid_dialog_descriptions():
+    from html.parser import HTMLParser
+    from pathlib import Path
+    class Document(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.ids = []
+            self.descriptions = []
+        def handle_starttag(self, tag, attributes):
+            attrs = dict(attributes)
+            if 'id' in attrs:
+                self.ids.append(attrs['id'])
+            if tag == 'dialog' and 'aria-describedby' in attrs:
+                self.descriptions.extend(attrs['aria-describedby'].split())
+    document = Document()
+    document.feed((Path(__file__).parents[1] / 'console/static/simple.html').read_text())
+    assert len(document.ids) == len(set(document.ids))
+    assert set(document.descriptions) <= set(document.ids)
+
+
+def test_progress_refreshes_while_open_without_replacing_a_decision_draft():
+    _run_simple_js(r"""
+document.hidden=false;document.querySelector=()=>null;
+document.activeElement={closest(){return null}};$('progressDialog').open=true;model.workflowId='w';
+let loads=0;loadWorkflow=async()=>{loads++};
+await refreshView();assert.equal(loads,1);
+document.querySelector=selector=>selector.includes('#myRequests')?{}:null;
+await refreshView();assert.equal(loads,2);
+document.querySelector=()=>null;
+document.querySelectorAll=()=>[{value:'尚未提交的决定'}];
+await refreshView();assert.equal(loads,2);
+document.querySelectorAll=()=>[];document.querySelector=()=>({});
+await refreshView();assert.equal(loads,2);
+""")

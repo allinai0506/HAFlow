@@ -25,3 +25,10 @@ Files: console/static/simple.{html,css,js}, tests/test_simple_workbench.py, wiki
 - [x] 最小实现：固定头尾、正文独立滚动、显式取消、字段说明和错误焦点；复用 dialog 原生键盘行为和草稿存储。
 - [x] GREEN：真实隔离服务创建项目/启动需求/决策/文件预览下载；桌面和窄屏弹窗、Tab/Esc/返回焦点、失败输入保留。
 - [x] 自审完整影响链，更新 Wiki 和验证记录，git diff --check；不部署或推送。
+
+## 批准原型 v3 后的实施（替代前述单列布局）
+- [x] RED：导航读取与切换、非代码模板过滤/默认、所选模板与必填资料真实提交。
+- [x] 精修原型的字重、间距、主次按钮和折叠提示；将获批三步骨架迁入simple静态页面，保留现有API及目录/资料输入。
+- [x] GREEN：真实HTTP/SQLite集成、相关专项、桌面/窄屏/键盘及现有 Git/context 模式回归。
+- [x] ai-slop-cleaner限定本次文件，删除无用状态/重复展示，重跑专项。
+- [x] google-code-review及code-review双轴独立审查，修复真实缺陷；记录未执行的生产与CI边界。

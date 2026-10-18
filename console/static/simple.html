@@ -1,37 +1,31 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>__PRODUCT_NAME__ · 极简工作台</title>
-<link rel="stylesheet" href="/static/console-tokens.css">
-<link rel="stylesheet" href="/static/simple.css?v=2">
-<script src="/static/simple.js?v=2" defer></script>
-</head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__ · 极简工作台</title><link rel="stylesheet" href="/static/console-tokens.css"><link rel="stylesheet" href="/static/simple.css?v=3"><script src="/static/simple.js?v=3" defer></script></head>
 <body>
-<header class="appHeader">
-<a class="brand" href="/simple" aria-label="HAFlow 极简工作台"><span class="brandMark">HF</span> __PRODUCT_NAME__</a>
-<nav class="workbenchSwitch" aria-label="切换工作台"><span aria-current="page">极简工作台</span><a id="professional" href="/">空间工作台 ↗</a></nav>
-</header>
+<header class="appHeader"><a class="brand" href="/simple" aria-label="HAFlow 极简工作台"><span class="brandMark">HF</span> __PRODUCT_NAME__<span class="edition">极简工作台</span></a><a id="professional" href="/" title="切换工作台，保留当前项目和需求">空间工作台 ↗</a></header>
+<div class="appLayout"><aside class="projectSidebar" aria-label="我的项目"><div class="sidebarHeading"><span>我的项目</span></div><div id="projectList"></div><p class="sidebarFoot">整理资料 · 撰写报告 · 准备方案</p></aside>
 <main>
-<div class="pageHead"><div><p class="eyebrow">我的工作</p><h1>极简工作台</h1><p class="subtle">跟进需求，处理待办，查看成果。</p></div><nav class="actions" aria-label="主要操作"><button id="newProject">新建项目</button><button id="showResults">获得成果</button><button id="newRequirement" class="primary">＋ 新建需求</button></nav></div>
-<div id="notice" role="alert" hidden></div>
-<section class="workspace selection" aria-label="选择项目与需求"><div class="filters"><label>当前项目<select id="project"><option value="">正在加载项目…</option></select></label><label>当前需求<select id="workflow"><option value="">先选择项目</option></select></label><button id="refresh" class="quiet">刷新状态</button></div>
-<p id="projectEmpty" class="empty" hidden>还没有项目。点击「新建项目」，关联一个已有目录。</p>
-<p id="requirementEmpty" class="empty" hidden>这个项目还没有需求。点击「新建需求」开始协作。</p></section>
-<section id="execution" class="workspace" aria-labelledby="requirementTitle" hidden><div class="sectionHead"><div><p class="eyebrow">当前需求</p><h2 id="requirementTitle"></h2></div><span id="status" class="badge"></span></div><ol id="stages" class="stages" aria-label="协作进度"></ol><details><summary>需求详情</summary><p id="workflowTemplate" class="subtle"></p><p id="requirementText"></p></details><details><summary>执行记录 <span id="taskCount" class="subtle"></span></summary><div id="tasks"></div></details></section>
-<section class="workspace attention" aria-labelledby="attentionTitle"><h2 id="attentionTitle">需要我处理</h2><section id="decisions" aria-label="当前需求的决定"></section><details><summary>项目全部待办 <span id="attentionCount" class="subtle"></span></summary><div id="attentionList"></div></details></section>
-<section id="results" class="workspace" tabindex="-1" aria-labelledby="resultsTitle"><div class="sectionHead"><h2 id="resultsTitle">交付成果</h2><span id="resultCount" class="subtle"></span></div><div id="resultList"><p class="empty">选择一个项目和需求后，在这里查看成果。</p></div></section>
+<div class="mobileProject"><label>我的项目<select id="project"><option value="">正在加载项目…</option></select></label></div>
+<div class="pageHead"><p class="eyebrow">人和 AI，一起把事情做完</p><h1 id="workspaceName">极简工作台</h1><p id="workspaceSubtitle" class="subtle">新建项目，说明需求，获得成果。</p></div>
+<nav class="steps" aria-label="新建项目，新建需求，获得成果">
+<section id="step1" class="step" data-active="true"><div class="stepHead"><span class="stepNumber">1</span><h2>新建项目</h2></div><p>给要做的事情起个名字。</p><div class="stepAction"><button id="newProject">＋ 新建项目</button><span id="projectHint"></span></div></section>
+<section id="step2" class="step"><div class="stepHead"><span class="stepNumber">2</span><h2>新建需求</h2></div><p>选择模板，说明需求，提供资料。</p><div class="stepAction"><button id="newRequirement" disabled>＋ 新建需求</button></div></section>
+<section id="step3" class="step"><div class="stepHead"><span class="stepNumber">3</span><h2>获得成果</h2></div><p>查看结果，下载完成的文件。</p><div class="stepAction"><button id="showResults" disabled>查看成果 →</button><span id="resultHint"></span></div></section>
+</nav>
+<div id="notice" role="status" hidden></div>
+<section id="myRequests" aria-labelledby="requestsTitle"><div class="sectionHead"><h2 id="requestsTitle">我的需求 <span id="workflowCount" class="subtle"></span></h2><button id="refresh" class="quiet">刷新状态</button></div><select id="workflow" hidden aria-label="当前需求"><option value="">先选择项目</option></select><div id="requestList"><p class="empty">正在读取需求…</p></div><p id="projectEmpty" class="empty" hidden>还没有项目。点击第 1 步「新建项目」，关联一个已有目录。</p><p id="requirementEmpty" class="empty" hidden>项目建好了。点击第 2 步「新建需求」，把一件事情交给 AI。</p><details id="attentionSection" class="workspace attention" hidden><summary>需要我处理 <span id="attentionCount" class="subtle"></span></summary><div id="attentionList"></div></details></section>
+<section id="results" class="workspace" tabindex="-1" aria-labelledby="resultsTitle" hidden><div class="sectionHead"><div><button id="backToRequests" class="back">← 返回我的需求</button><h2 id="resultsTitle">交付成果</h2><p id="resultSubject" class="subtle"></p></div><span id="resultCount" class="subtle"></span></div><div id="resultList"></div></section>
 <footer>共事 · __PRODUCT_TAGLINE__</footer>
-</main>
-<dialog id="projectDialog" aria-labelledby="projectDialogTitle" aria-describedby="projectHint"><form id="projectForm">
-<div class="dialogHead"><div><h2 id="projectDialogTitle">新建项目</h2><p id="projectHint" class="subtle">关联工作目录，开始协作。</p></div><button class="closeButton" type="button" data-close aria-label="关闭新建项目">×</button></div>
-<div class="dialogBody"><p class="fieldHint">以下信息均为必填。</p><label>项目名称<input id="projectName" autocomplete="off" required maxlength="120" placeholder="例如：季度经营分析" autofocus></label><label>工作目录<input id="projectRoot" placeholder="例如 /Users/me/业务资料" required aria-describedby="directoryHint"></label><p id="directoryHint" class="fieldHint">仅支持已存在目录；资料和成果仍保留在你的工作目录。</p><label>项目类型<select id="projectType" required><option value="">正在读取可用模板…</option></select></label></div>
+</main></div>
+<dialog id="progressDialog" aria-labelledby="progressTitle"><div class="dialogHead"><h2 id="progressTitle">需求进度</h2><button class="closeButton" type="button" data-close aria-label="关闭需求进度">×</button></div><div class="dialogBody"><section id="execution" hidden><div class="sectionHead"><h3 id="requirementTitle"></h3><span id="status" class="badge"></span></div><ol id="stages" class="stages" aria-label="协作进度"></ol><details><summary>需求详情</summary><p id="workflowTemplate" class="subtle"></p><p id="requirementText"></p></details><details><summary>执行记录 <span id="taskCount" class="subtle"></span></summary><div id="tasks"></div></details></section><section id="decisions" aria-label="需要你的决定"></section></div><div class="dialogFooter"><div class="dialogActions"><button type="button" data-close>关闭</button></div></div></dialog>
+<dialog id="projectDialog" aria-labelledby="projectDialogTitle" aria-describedby="projectDialogHint"><form id="projectForm">
+<div class="dialogHead"><div><h2 id="projectDialogTitle">新建项目</h2><p id="projectDialogHint" class="subtle">给事情起个名字，选择已有的资料目录。</p></div><button class="closeButton" type="button" data-close aria-label="关闭新建项目">×</button></div>
+<div class="dialogBody"><p class="fieldHint">项目名称和工作目录为必填。</p><label>项目叫什么？<input id="projectName" autocomplete="off" required maxlength="120" placeholder="例如：季度经营分析" autofocus></label><label>工作目录<input id="projectRoot" placeholder="例如 /Users/me/业务资料" required aria-describedby="directoryHint"></label><p id="directoryHint" class="fieldHint">仅支持已存在目录；资料和成果仍保留在你的工作目录。</p><details><summary>项目选项</summary><label>适用模板<select id="projectType" required><option value="">正在读取可用模板…</option></select></label></details></div>
 <div class="dialogFooter"><p class="formError" role="alert" tabindex="-1"></p><div class="dialogActions"><button type="button" data-close>取消</button><button class="primary" type="submit">创建或关联项目</button></div></div>
 </form></dialog>
 <dialog id="requirementDialog" aria-labelledby="requirementDialogTitle" aria-describedby="requirementProject"><form id="requirementForm">
 <div class="dialogHead"><div><h2 id="requirementDialogTitle">新建需求</h2><p id="requirementProject" class="subtle"></p></div><button class="closeButton" type="button" data-close aria-label="关闭新建需求">×</button></div>
-<div class="dialogBody"><fieldset><legend>需求内容</legend><label><span>需求标题 <small class="fieldHint">必填</small></span><input id="title" required maxlength="180" placeholder="为这次协作取一个简短名称" autofocus></label><label><span>你想完成什么？ <small class="fieldHint">必填</small></span><textarea id="requirement" rows="4" required placeholder="说明目标、已有资料和期望成果…"></textarea></label></fieldset><fieldset><legend>协作方式</legend><label>搜索模板<input id="templateSearch" type="search" placeholder="模板名称或业务场景"></label><div class="filters"><label>模板分类<select id="category"></select></label><label><span>协作模板 <small class="fieldHint">必填</small></span><select id="template" required></select></label></div><details class="templateDetails"><summary>模板说明与协作步骤</summary><div id="templateInfo" class="templateInfo" aria-live="polite"></div></details><div id="contextInputs"></div></fieldset></div>
-<div class="dialogFooter"><p class="formError" role="alert" tabindex="-1"></p><p id="jobStatus" role="status"></p><div class="dialogActions"><button type="button" data-close>取消</button><button id="start" class="primary" type="submit">开始协作</button></div></div>
+<div class="dialogBody"><p class="formIntro">选一个模板，用自己的话说清目标。</p><label>选择模板 <select id="template" required autofocus></select></label><p id="templateHint" class="fieldHint" aria-live="polite"></p><details><summary>查找其他模板</summary><label>搜索模板<input id="templateSearch" type="search" placeholder="输入模板名称或业务场景"></label><label>模板分类<select id="category"></select></label></details><details class="templateDetails"><summary>查看模板说明</summary><div id="templateInfo" class="templateInfo"></div></details><label class="goalLabel">你想完成什么？<textarea id="requirement" rows="4" required placeholder="例如：根据客户访谈资料，归纳主要问题，写一份调研报告。"></textarea></label><div id="contextInputs"></div><details><summary>给需求起个名字 <span class="fieldHint">选填</span></summary><label>需求标题<input id="title" maxlength="180" placeholder="不填写时，将使用需求描述的开头"></label></details></div>
+<div class="dialogFooter"><p class="formError" role="alert" tabindex="-1"></p><p id="jobStatus" role="status"></p><div class="dialogActions"><button type="button" data-close>取消</button><button id="start" class="primary" type="submit">交给 AI 处理 <span aria-hidden="true">→</span></button></div></div>
 </form></dialog>
 <dialog id="previewDialog" aria-labelledby="previewTitle"><div class="dialogHead"><h2 id="previewTitle" tabindex="-1">成果预览</h2><button class="closeButton" type="button" data-close aria-label="关闭成果预览" autofocus>×</button></div><div class="dialogBody"><pre id="preview"></pre></div><div class="dialogFooter"><div class="dialogActions"><button type="button" data-close>关闭</button></div></div></dialog>
 </body></html>

@@ -33,6 +33,58 @@ function options(select, entries, empty) {
   for(const [value,text] of entries) select.add(new Option(text,value));
 }
 function currentProject() { return model.projects.find(p=>p.project_id===model.projectId); }
+function businessTemplates(templates) {
+  return templates.filter(t=>!['eng','sys'].includes(t.category));
+}
+function updateSteps(step=model.projectId?2:1) {
+  for(let n=1;n<=3;n++) $('step'+n).dataset.active=String(n===step);
+  $('newRequirement').disabled=!currentProject();
+  $('showResults').disabled=!model.workflowId;
+}
+function renderProjects() {
+  $('projectList').replaceChildren();
+  for(const project of model.projects) {
+    const button=document.createElement('button');
+    button.className='projectItem'+(project.project_id===model.projectId?' selected':'');
+    button.textContent=project.project_name || project.project_id;
+    button.ariaCurrent=project.project_id===model.projectId?'page':null;
+    button.onclick=()=>{ $('project').value=project.project_id; notice(); return selectProject(); };
+    $('projectList').append(button);
+  }
+  if(!model.projects.length) $('projectList').textContent='从第 1 步创建你的第一个项目。';
+  $('workspaceName').textContent=currentProject()?.project_name || currentProject()?.project_id || '从一个项目开始';
+  $('workspaceSubtitle').textContent=model.projectId?'从新建需求开始，把资料变成你需要的成果。':'给事情起个名字，说清需求，拿到成果。';
+  $('projectHint').textContent=model.projectId?'已选择项目':'';
+  updateSteps();
+}
+function renderWorkflows(workflows) {
+  $('requestList').replaceChildren();
+  $('workflowCount').textContent=workflows.length?'共 '+workflows.length+' 项':'';
+  for(const workflow of workflows) {
+    const row=document.createElement('article'); row.className='requestRow';
+    const name=document.createElement('button'); name.className='requestName';
+    name.textContent=workflow.title || workflow.requirement_subject || workflow.workflow_id;
+    name.onclick=()=>openWorkflow(workflow.workflow_id);
+    const status=document.createElement('span'); status.className='requestStatus';status.textContent=label(workflow.status);status.dataset.status=workflow.status || 'unknown';
+    const button=document.createElement('button');button.className='requestAction';
+    const finished=['completed','delivered','cleaned'].includes(workflow.status);
+    button.textContent=finished?'查看成果':'查看进度';
+    button.onclick=()=>openWorkflow(workflow.workflow_id,finished);
+    row.append(name,status,button);$('requestList').append(row);
+  }
+  updateSteps();
+}
+function showResults() {
+  $('myRequests').hidden=true;$('results').hidden=false;
+  updateSteps(3);$('results').focus();
+}
+async function openWorkflow(wid,results=false) {
+  $('workflow').value=wid;
+  await loadWorkflow();
+  if(model.workflowId!==wid || $('execution').hidden) return;
+  if(results) showResults();
+  else $('progressDialog').showModal();
+}
 async function refreshProjects() {
   try {
     notice();
@@ -60,6 +112,9 @@ async function selectProject(clear=true) {
   $('templateInfo').textContent=''; $('contextInputs').replaceChildren();
   $('attentionList').textContent='请先选择一个项目。'; $('attentionCount').textContent=''; $('decisions').textContent='选择需求后，在这里处理待决事项。';
   if(clear) model.workflowId='';
+  $('progressDialog').close();$('results').hidden=true;$('myRequests').hidden=false;
+  $('requestList').replaceChildren();$('workflowCount').textContent='';$('resultHint').textContent='';
+  $('attentionSection').hidden=true;renderProjects();
   $('execution').hidden=true;
   $('resultList').innerHTML='<p class="empty">正在读取成果…</p>';
   $('resultCount').textContent='';
@@ -73,8 +128,9 @@ async function selectProject(clear=true) {
     options($('workflow'),workflows.map(w=>[w.workflow_id,w.title || w.requirement_subject || w.workflow_id]),'暂无需求');
     $('workflow').value=model.workflowId;
     $('requirementEmpty').hidden=!!workflows.length;
+    renderWorkflows(workflows);
     await Promise.all([loadWorkflow(),loadAttention(workflows,model.projectId)]);
-  } catch(e) { if(sequence===model.sequence) { options($('workflow'),[],'需求加载失败'); $('resultList').textContent='成果暂不可读取'; notice('需求加载失败：'+e.message); } }
+  } catch(e) { if(sequence===model.sequence) { options($('workflow'),[],'需求加载失败'); $('resultList').textContent='成果暂不可读取'; $('requestList').textContent='需求暂不可读取，请刷新重试。'; notice('需求加载失败：'+e.message); } }
 }
 async function loadWorkflow() {
   const wid=model.workflowId=$('workflow').value;
@@ -82,7 +138,7 @@ async function loadWorkflow() {
   $('decisions').textContent=wid?'正在读取当前需求的待决事项…':'选择需求后，在这里处理待决事项。';
   saveSelection();
   $('execution').hidden=true;
-  $('resultCount').textContent='';
+  $('resultCount').textContent='';$('resultHint').textContent='';updateSteps();
   if(!wid) { $('resultList').innerHTML='<p class="empty">暂无成果。新建需求后可在这里跟踪交付。</p>'; return; }
   $('resultList').innerHTML='<p class="empty">正在读取成果…</p>';
   try {
@@ -94,7 +150,8 @@ async function loadWorkflow() {
     $('execution').hidden=false;
     $('requirementTitle').textContent=d.workflow.title || d.workflow.requirement_subject || wid;
     $('requirementText').textContent=d.workflow.requirement || '';
-    $('workflowTemplate').textContent='工作流模板：'+(d.workflow.template || d.workflow.template_id || d.workflow.workflow_template || d.workflow.config?.workflow_template || '未提供');
+    $('resultSubject').textContent=$('requirementTitle').textContent;
+    $('workflowTemplate').textContent='协作模板：'+(d.workflow.template || d.workflow.template_id || d.workflow.workflow_template || d.workflow.config?.workflow_template || '未提供');
     $('status').textContent=label(d.workflow.status);
     $('status').dataset.status=d.workflow.status || 'unknown';
     $('taskCount').textContent=(d.tasks || []).length+' 项记录';
@@ -135,6 +192,7 @@ async function loadResults(wid,sequence) {
     const items=d.items || [];
     const usable=items.filter(item=>(item.readable && (item.actions || []).some(action=>action==='view' || action==='download')) || ((item.actions || []).includes('open') && /^https?:\/\//i.test(item.url || '')));
     const featured=new Set(usable.slice(0,3));
+    $('resultHint').textContent=usable.length?usable.length+' 项成果可查看':'';
     $('resultCount').textContent=usable.length+' 项可用成果 · '+items.length+' 项记录';
     const history=document.createElement('details'); history.className='resultHistory';
     const summary=document.createElement('summary'); summary.textContent='查看全部记录（其余 '+(items.length-featured.size)+' 项）'; history.append(summary);
@@ -176,6 +234,7 @@ async function loadResults(wid,sequence) {
 }
 async function loadAttention(workflows,projectId) {
   const sequence=(model.attentionSequence || 0)+1; model.attentionSequence=sequence;
+  $('attentionSection').hidden=true;
   $('attentionList').textContent='正在读取各需求的待处理事项…'; $('attentionCount').textContent='读取中';
   const items=[]; let failed=false;
   // Sequential requests keep this aggregation bounded without another state source.
@@ -189,11 +248,12 @@ async function loadAttention(workflows,projectId) {
   }
   if(projectId!==model.projectId || sequence!==model.attentionSequence) return;
   $('attentionList').replaceChildren();
+  $('attentionSection').hidden=!items.length&&!failed;
   $('attentionCount').textContent=items.length+' 项'+(failed?' · 部分读取失败':'');
   for(const {workflow,decision} of items) {
     const button=document.createElement('button'); button.className='attentionItem';
     button.textContent=(workflow.title || workflow.requirement_subject || workflow.workflow_id)+'：'+decision.question;
-    button.onclick=()=>{ $('workflow').value=workflow.workflow_id; return loadWorkflow(); };
+    button.onclick=()=>openWorkflow(workflow.workflow_id);
     $('attentionList').append(button);
   }
   if(!items.length) $('attentionList').textContent=failed?'部分需求待处理事项读取失败，请刷新重试':'当前项目暂无需要你处理的事项。';
@@ -205,7 +265,7 @@ function rememberTemplateSelection() {
 async function openRequirement() {
   if(!currentProject()) { notice('请先创建或选择一个项目。'); $('newProject').focus(); return; }
   const projectId=model.projectId, sequence=++model.templateSequence;
-  $('requirementDialog').showModal(); $('title').focus();
+  $('requirementDialog').showModal(); $('template').focus();
   $('requirementProject').textContent='所属项目：'+(currentProject().project_name || projectId);
   formError($('requirementForm'),'');
   if(model.job) { pollJob(); return; }
@@ -213,7 +273,7 @@ async function openRequirement() {
   try {
     const data=await api('/api/templates');
     if(projectId!==model.projectId || sequence!==model.templateSequence) return;
-    model.templates=data.templates || [];
+    model.templates=businessTemplates(data.templates || []);
     const categories=new Map(model.templates.map(t=>[t.category,t.category_name || t.category]));
     const saved=model.templateSelections.get(projectId);
     options($('category'),[['','全部分类'],...categories], '暂无分类');
@@ -221,7 +281,7 @@ async function openRequirement() {
     $('templateSearch').value=saved?.search || '';
     populateTemplates(saved?.template || '');
     if(!saved) {
-      const mode=currentProject()?.execution?.mode || 'git';
+      const mode=currentProject()?.execution?.mode || 'context';
       const preferred=model.templates.find(t=>t.execution_mode===mode);
       $('template').value=preferred?.id || '';
     }
@@ -238,13 +298,14 @@ async function loadTemplate() {
   const sequence=++model.templateSequence, projectId=model.projectId;
   rememberTemplateSelection();
   formError($('requirementForm'),'');
-  $('start').disabled=true; $('templateInfo').textContent='正在读取模板…'; $('contextInputs').replaceChildren();
+  $('start').disabled=true; $('templateHint').textContent='正在读取模板…'; $('templateInfo').textContent=''; $('contextInputs').replaceChildren();
   const tid=$('template').value;
-  if(!tid) { $('templateInfo').textContent='此分类没有可用模板。'; formError($('requirementForm'),'没有匹配模板，请调整分类或搜索条件。',false); return; }
+  if(!tid) { $('templateHint').textContent='此分类没有可用模板。'; $('templateInfo').textContent='此分类没有可用模板。'; formError($('requirementForm'),'没有匹配模板，请调整分类或搜索条件。',false); return; }
   try {
     const d=await api('/api/template?id='+encodeURIComponent(tid));
     if(sequence!==model.templateSequence || projectId!==model.projectId) return;
-    $('templateInfo').textContent=`${d.template.label || tid}\n${d.template.description || '模板未提供说明'}\n${d.nodes.map(n=>n.label).join(' → ')}\n执行方式：${d.execution_mode==='context'?'业务上下文，可使用普通目录':'Git 仓库，目录需已初始化 Git'}`;
+    $('templateHint').textContent=d.template.description || '选择模板后，说明你想完成的事情。';
+    $('templateInfo').textContent=`${d.nodes.map(n=>n.label).join(' → ')}\n执行方式：${d.execution_mode==='context'?'业务上下文，可使用普通目录':'Git 仓库，目录需已初始化 Git'}`;
     for(const kind of ['required','optional']) for(const ctx of d.context?.[kind] || []) {
       const wrapper=document.createElement('label'); wrapper.textContent=(ctx.label || ctx.id)+(kind==='required'?'（必填）':'（选填）');
       const input=document.createElement('input'); input.dataset.context=ctx.id; input.required=kind==='required'; input.placeholder='已有资料文件或目录的绝对路径'; wrapper.append(input); $('contextInputs').append(wrapper);
@@ -270,7 +331,7 @@ $('requirementForm').onsubmit=async event=>{
   $('start').disabled=true; formError(event.target,'');
   try {
     const context={}; for(const input of $('contextInputs').querySelectorAll('input')) if(input.value.trim()) context[input.dataset.context]=input.value.trim();
-    const job=await api('/api/run',{project_root:project.project_root,requirement:$('requirement').value.trim(),title:$('title').value.trim(),template:$('template').value,context,agent:'auto'});
+    const job=await api('/api/run',{project_root:project.project_root,requirement:$('requirement').value.trim(),title:$('title').value.trim() || $('requirement').value.trim().slice(0,80),template:$('template').value,context,agent:'auto'});
     model.job={id:job.job_id,projectId:project.project_id};
     try { sessionStorage.setItem('haflow.simple.job',JSON.stringify(model.job)); } catch { }
     pollJob();
@@ -306,14 +367,16 @@ $('newProject').onclick=async()=>{
   options($('projectType'),[],'正在读取模板…');
   try {
     const data=await api('/api/templates');
-    options($('projectType'),(data.templates || []).map(t=>[t.id,(t.execution_mode==='context'?'业务目录':'Git 仓库')+' · '+(t.label || t.id)]),'没有可用模板');
+    options($('projectType'),businessTemplates(data.templates || []).map(t=>[t.id,(t.execution_mode==='context'?'业务目录':'Git 仓库')+' · '+(t.label || t.id)]),'没有可用模板');
+    const preferred=businessTemplates(data.templates || []).find(t=>t.execution_mode==='context');
+    if(preferred) $('projectType').value=preferred.id;
     button.disabled=!$('projectType').value;
   } catch(e) { formError($('projectForm'),'项目模板读取失败：'+e.message); }
 };
 $('newRequirement').onclick=openRequirement;
-$('showResults').onclick=()=>{ $('results').scrollIntoView({behavior:'auto'}); $('results').focus(); };
+$('showResults').onclick=showResults;
+$('backToRequests').onclick=()=>{$('results').hidden=true;$('myRequests').hidden=false;updateSteps();};
 $('project').onchange=()=>{notice(); selectProject();};
-$('workflow').onchange=()=>{notice(); loadWorkflow();};
 $('category').onchange=()=>{populateTemplates();loadTemplate();};
 $('template').onchange=loadTemplate;
 $('templateSearch').oninput=()=>{populateTemplates();loadTemplate();};
@@ -321,6 +384,13 @@ $('templateSearch').oninput=()=>{populateTemplates();loadTemplate();};
 $('templateSearch').onkeydown=event=>{if(event.key==='Escape'){event.preventDefault();$('requirementDialog').close();}};
 $('refresh').onclick=refreshProjects;
 for(const button of document.querySelectorAll('[data-close]')) button.onclick=()=>button.closest('dialog').close();
-setInterval(()=>{ if(!document.hidden && !document.querySelector('dialog[open], details[open]') && !document.activeElement.closest('.decision') && model.workflowId) selectProject(false); },15000);
+function refreshView() {
+  if(document.hidden || !model.workflowId || document.querySelector('#projectDialog[open], #requirementDialog[open], #previewDialog[open]') || document.activeElement.closest('.decision')) return;
+  if([...document.querySelectorAll('.decision textarea')].some(input=>input.value.trim())) return;
+  if($('progressDialog').open) {
+    if(!document.querySelector('#progressDialog details[open]')) return loadWorkflow();
+  } else if($('results').hidden && !document.querySelector('#myRequests details[open]')) return selectProject(false);
+}
+setInterval(refreshView,15000);
 refreshProjects();
 if(model.job) pollJob();
