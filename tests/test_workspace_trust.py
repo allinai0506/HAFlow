@@ -221,6 +221,64 @@ class TestWorkspaceTrust(unittest.TestCase):
         canon2 = workspace_trust._exact_case_path(os.path.realpath(str(missing_leaf)))
         self.assertEqual(canon2, os.path.realpath(str(real_dir)) + os.sep + "deeper-LeAF")
 
+    # --- B-1 (cleanroom_review on 52f0369): replace() must not widen file mode ---
+
+    def test_ensure_agy_workspace_trust_preserves_existing_0600_under_umask_022(self):
+        """A real user settings.json is 0600; tmp+replace carries the tmp's
+        umask-derived 0644, so the first agy dispatch would silently widen it.
+        The write must keep the original mode."""
+        target_path = self.home / "agy_perm_project"
+        target_path.mkdir(parents=True)
+        conf = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+        conf.parent.mkdir(parents=True)
+        conf.write_text(json.dumps({"model": "keep-me"}), encoding="utf-8")
+        os.chmod(conf, 0o600)
+        self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
+
+        old_mask = os.umask(0o022)
+        try:
+            with patch("pathlib.Path.home", return_value=self.home):
+                self.assertTrue(workspace_trust.ensure_agy_workspace_trust(target_path))
+        finally:
+            os.umask(old_mask)
+
+        self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
+        data = json.loads(conf.read_text(encoding="utf-8"))
+        self.assertEqual(data["model"], "keep-me")
+        resolved = workspace_trust._exact_case_path(os.path.realpath(str(target_path)))
+        self.assertIn(resolved, data["trustedWorkspaces"])
+
+    def test_ensure_agy_workspace_trust_preserves_other_existing_mode(self):
+        """Mode preservation is the captured file mode, not a hardcoded 0600."""
+        target_path = self.home / "agy_perm_project640"
+        target_path.mkdir(parents=True)
+        conf = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+        conf.parent.mkdir(parents=True)
+        conf.write_text(json.dumps({}), encoding="utf-8")
+        os.chmod(conf, 0o640)
+
+        with patch("pathlib.Path.home", return_value=self.home):
+            self.assertTrue(workspace_trust.ensure_agy_workspace_trust(target_path))
+
+        self.assertEqual(conf.stat().st_mode & 0o777, 0o640)
+
+    def test_ensure_agy_workspace_trust_first_create_is_owner_only(self):
+        """First creation must not inherit the loose umask default (0644):
+        settings.json may contain user config, so it is created 0600."""
+        target_path = self.home / "agy_first_create"
+        target_path.mkdir(parents=True)
+        conf = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+        self.assertFalse(conf.exists())
+
+        old_mask = os.umask(0o022)
+        try:
+            with patch("pathlib.Path.home", return_value=self.home):
+                self.assertTrue(workspace_trust.ensure_agy_workspace_trust(target_path))
+        finally:
+            os.umask(old_mask)
+
+        self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

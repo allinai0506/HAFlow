@@ -89,3 +89,42 @@ tests/test_worker_push_guard.py tests/test_simple_workbench.py`：60 passed。
   herdr 上游检测行为不在本任务修改范围。
 - 自动应答路线（路线 A）未实施：路线 B 已被上述真实链路证据证明可靠，且符合
   worker 运行时只读约定，不再展开第二条路径。
+
+## B-1 返工修复（cleanroom_review 门禁对候选 52f0369 的唯一阻断项）
+
+**根因**：`ensure_agy_workspace_trust()` 沿用 grok/claude 的
+`tmp.write_text(...) + tmp.replace(config)` 原子写模式，但 `rename/replace` 携带
+**临时文件自身的模式**而非目标文件的模式。用户真实
+`~/.gemini/antigravity-cli/settings.json` 实测为 `0600`，而 tmp 文件在 umask 022
+下创建为 `0644`——首次 agy 派发即确定性地把 0600 放宽为 0644（评审在 temp HOME
+用真实函数复现 0600→0644 并对真实文件 stat 取证），违反 AGENTS.md §4.12
+落盘安全边界。grok/claude 两个既有 handler 存在同型隐患，但按范围纪律本次仅修
+agy（见"已知限制"）。
+
+**修复方式（方案 a：写前捕获、替换前 chmod）**：
+- 写入分支内先 `config.stat()` 捕获原文件模式（`stat.S_IMODE`），在
+  `tmp.replace(config)` 前 `os.chmod(tmp, mode)`，替换后权限与原文件逐位一致
+  （非硬编码 0600，0640 等既有模式同样保持）；
+- 目标文件不存在（首次创建）：`FileNotFoundError` 分支取 `0o600`——agy 配置属
+  用户私有配置，首次创建不应继承 umask 的 0644 宽松默认，与真实文件的 0600
+  约定一致；
+- 捕获/设置失败落在既有 `(OSError, ValueError, TypeError)` 兜底内，行为与原
+  写入失败一致（WARN + 返回 False），不改变语义。
+
+**验证与回归（TDD）**：
+- RED：新增 3 个用例先行失败并存档——
+  `test_ensure_agy_workspace_trust_preserves_existing_0600_under_umask_022`
+  （`AssertionError: 420 != 384`，即 0644 != 0600）、
+  `test_ensure_agy_workspace_trust_preserves_other_existing_mode`
+  （0640 被放宽为 0644：`420 != 416`）、
+  `test_ensure_agy_workspace_trust_first_create_is_owner_only`（0644 != 0600）；
+- GREEN：修复后 `tests/test_workspace_trust.py` 16 passed；
+- 独立复现证据：临时 HOME 直接调用真实函数，umask 022 下已存在 0600 → 操作后
+  `stat` 仍 0600 且内容合并正确；首次创建 → 0600；
+- 内环目标套件（7 个文件）：**97 passed**；`compileall` 通过；`ruff check` 对
+  改动文件与基线逐规则持平（无新增违规）。全程未启动真实 Agent、未触碰真实
+  `~/.gemini`。
+
+**已知限制**：`ensure_grok_workspace_trust` / `ensure_claude_workspace_trust` 的
+同型 replace 携模隐患未在本次修复（范围纪律：B-1 仅点名 agy 路径），应作为后续
+独立小任务处理。

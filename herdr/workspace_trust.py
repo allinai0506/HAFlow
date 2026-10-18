@@ -5,6 +5,7 @@ Pre-seeds permissions to avoid background modal/TTY authorization popups.
 
 import json
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -108,8 +109,16 @@ def ensure_agy_workspace_trust(repo_path: Path | str) -> bool:
         if canonical not in trusted:
             trusted.append(canonical)
             config.parent.mkdir(parents=True, exist_ok=True)
+            # replace() carries the tmp file's mode, so a tmp created under
+            # umask 022 would widen the user's real 0600 settings.json to
+            # 0644 on the first agy dispatch (issue #255 review B-1).
+            try:
+                mode = stat.S_IMODE(config.stat().st_mode)
+            except FileNotFoundError:
+                mode = 0o600
             tmp = config.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.chmod(tmp, mode)
             tmp.replace(config)
         return True
     except (OSError, ValueError, TypeError) as exc:
