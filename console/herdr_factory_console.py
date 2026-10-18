@@ -10803,6 +10803,7 @@ function deliverableCountsText(counts){
   counts=counts||{};
   const parts=['已产生 '+(Number(counts.present)||0)+' 项'];
   if(counts.workspace)parts.push('工作区文件 '+counts.workspace+' 项');
+  if(counts.historical)parts.push('历史产物 '+counts.historical+' 项');
   if(counts.missing)parts.push('未产生 '+counts.missing+' 项');
   if(counts.unconfirmed)parts.push('不可确认 '+counts.unconfirmed+' 项');
   if(counts.unavailable)parts.push('不可读取 '+counts.unavailable+' 项');

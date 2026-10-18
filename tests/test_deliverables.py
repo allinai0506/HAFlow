@@ -129,19 +129,30 @@ def test_same_file_identity_is_stable_and_deduped(tmp_path, monkeypatch):
     assert first["items"][0]["id"] == second["items"][0]["id"]
 
 
-def test_superseded_task_file_is_not_readable(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status,successor", [("superseded", None), ("completed", "task-next")])
+def test_superseded_task_file_is_readable_as_history(tmp_path, monkeypatch, status, successor):
     root, ws1 = _workspace(tmp_path, "task-old")
     monkeypatch.setenv("HERDR_CLONES_DIR", str(root))
-    (ws1 / "需求清单.md").write_text("旧稿\n", encoding="utf-8")
-    task = _task("task-old", ws1, "requirements", status="superseded")
+    content = "旧稿\n"
+    (ws1 / "需求清单.md").write_text(content, encoding="utf-8")
+    task = _task("task-old", ws1, "requirements", status=status, superseded_by=successor)
     packed = d.project_for_tasks("wf-biz", [task], NODES)
     item = next(row for row in packed["items"] if row["name"] == "需求清单.md")
-    assert item["status"] == "unavailable"
-    assert item["readable"] is False
-    with pytest.raises(d.DeliverableError) as caught:
+    assert item["status"] == "historical"
+    assert "历史" in item["status_label"]
+    assert item["readable"] is True
+    assert item["actions"] == ["view", "download"]
+    assert packed["counts"]["present"] == 0
+    assert packed["counts"]["historical"] == 1
+    assert d.read_deliverable("wf-biz", [task], NODES, "task-old", item["id"])["text"] == content
+    downloaded = d.read_deliverable("wf-biz", [task], NODES, "task-old", item["id"], download=True)
+    assert downloaded["body"] == content.encode()
+    assert "attachment" in downloaded["headers"]["Content-Disposition"]
+    with pytest.raises(d.DeliverableError):
+        d.read_deliverable("other-workflow", [task], NODES, "task-old", item["id"])
+    (ws1 / "需求清单.md").unlink()
+    with pytest.raises(d.DeliverableError):
         d.read_deliverable("wf-biz", [task], NODES, "task-old", item["id"])
-    assert caught.value.status == 409
-    assert "旧稿" not in caught.value.message
 
 
 def test_superseded_file_does_not_satisfy_the_node_expectation(tmp_path, monkeypatch):
@@ -156,8 +167,8 @@ def test_superseded_file_does_not_satisfy_the_node_expectation(tmp_path, monkeyp
 
     packed = d.project_for_tasks("wf-biz", [old_task, now_task], nodes)
     history = next(item for item in packed["items"] if item["task_id"] == "task-old")
-    assert history["status"] == "unavailable"
-    assert history["readable"] is False
+    assert history["status"] == "historical"
+    assert history["readable"] is True
     gaps = [item for item in packed["items"] if item["task_id"] == ""]
     assert [item["status"] for item in gaps] == ["missing"]
     assert gaps[0]["name"] == "requirements.md"
@@ -167,11 +178,11 @@ def test_superseded_file_does_not_satisfy_the_node_expectation(tmp_path, monkeyp
     (current / "requirements.md").write_text("新稿\n", encoding="utf-8")
     done = d.project_for_tasks("wf-biz", [old_task, now_task], nodes)
     assert any(item["task_id"] == "task-now" and item["status"] == "present" for item in done["items"])
-    assert any(item["task_id"] == "task-old" and item["status"] == "unavailable" for item in done["items"])
+    assert any(item["task_id"] == "task-old" and item["status"] == "historical" for item in done["items"])
     assert not any(item["status"] == "missing" for item in done["items"])
 
     alone = d.project_for_tasks("wf-biz", [old_task], nodes)
-    assert any(item["task_id"] == "task-old" and item["status"] == "unavailable" for item in alone["items"])
+    assert any(item["task_id"] == "task-old" and item["status"] == "historical" for item in alone["items"])
     unknown = [item for item in alone["items"] if item["task_id"] == ""]
     assert [item["status"] for item in unknown] == ["unconfirmed"]
     assert unknown[0]["status_label"] == "不可确认"
@@ -771,3 +782,43 @@ assert.ok(body.innerHTML.includes('还没有交付成果'));
 '''
     result = subprocess.run(['node', '-e', program], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_historical_file_preview_and_download_over_http(tmp_path, monkeypatch):
+    import json
+    import threading
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from console import herdr_factory_console as console
+
+    root, workspace = _workspace(tmp_path, 'old-task')
+    monkeypatch.setenv('HERDR_CLONES_DIR', str(root))
+    content = '# 历史报告\n\n可查阅、可下载。\n'
+    (workspace / '需求清单.md').write_text(content)
+    task = _task('old-task', workspace, 'requirements', status='superseded')
+    _seed_console_workflow(tmp_path, monkeypatch, [task], NODES)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), console.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f'http://127.0.0.1:{server.server_port}'
+    try:
+        with urllib.request.urlopen(base + '/api/workflow/deliverables?id=wf-biz') as response:
+            packed = json.load(response)['data']
+        row = next(r for r in packed['items'] if r['task_id'] == 'old-task')
+        assert row['status'] == 'historical' and row['actions'] == ['view', 'download']
+        query = urllib.parse.urlencode(dict(workflow_id='wf-biz', task_id='old-task', id=row['id']))
+        with urllib.request.urlopen(base + '/api/workflow/deliverable?' + query) as response:
+            assert json.load(response)['data']['text'] == content
+        with urllib.request.urlopen(base + '/api/workflow/deliverable?' + query + '&download=1') as response:
+            assert response.read() == content.encode()
+            assert 'attachment' in response.headers['Content-Disposition']
+        wrong = query.replace('task_id=old-task', 'task_id=other-task')
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(base + '/api/workflow/deliverable?' + wrong)
+        assert caught.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
