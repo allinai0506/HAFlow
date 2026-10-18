@@ -665,6 +665,9 @@ def template_detail(tid):
         gate_str = ''
         if isinstance(gate_info, dict):
             gate_str = gate_info.get('type') or gate_info.get('auto_criteria') or ('门禁校验' if gate_info else '')
+        # Controller resolve_gate_config applies these defaults without a YAML gate.
+        if not gate_str and n.get('id') in {'test', 'review', 'wrapup'}:
+            gate_str = '内置默认门禁（需验证结论）'
         nodes.append({
             'id': n.get('id'),
             'label': n.get('label') or n.get('id'),

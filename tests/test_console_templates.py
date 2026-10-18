@@ -64,6 +64,13 @@ class TestTemplateLibraryBackend(unittest.TestCase):
         strategy = next(n for n in detail["nodes"] if n["id"] == "strategy")
         self.assertEqual(sorted(strategy["depends_on"]), ["history_search", "scoring_extract"])
 
+    def test_template_detail_includes_implicit_verdict_gates(self):
+        detail = self.module.template_detail("software-development-v1")
+        nodes = {n["id"]: n for n in detail["nodes"]}
+        for key in ("test", "review", "wrapup"):
+            self.assertTrue(nodes[key]["gate"], key)
+        self.assertFalse(nodes["implementation"]["gate"])
+
     def test_template_detail_unknown_name_raises(self):
         with self.assertRaises(RuntimeError) as ctx:
             self.module.template_detail("no-such-template")
