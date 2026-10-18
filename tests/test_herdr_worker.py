@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import sys
 import importlib.machinery
 import importlib.util
@@ -135,6 +136,124 @@ class TestStartAgent(unittest.TestCase):
 
     def test_kimi_blocked_startup_does_not_write_workspace_trust(self):
         self._assert_trust_blocked_worker_preserves_config("kimi", ".kimi-code/workspace-trust/user-setting")
+
+    def _assert_trust_blocked_failure_evidence(self, agent_kind, dialog_text):
+        """issue #255 direction 3: trust-blocked startup failure evidence must
+        carry a bounded pane snippet identifying the dialog, not just a status."""
+        worker = load_worker()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            native = {"result": {"agent": {"agent": agent_kind, "name": "owned",
+                      "agent_session": "owned-session", "agent_status": "idle"}}}
+            transcript = subprocess.CompletedProcess([], 0, dialog_text, "")
+            argv = ["worker", "--task-id", "trust-evidence", "--source", td,
+                    "--agent", agent_kind, "--execution-mode", "context", "--pane-id", "owned-pane"]
+            stderr_buf = io.StringIO()
+            with patch.object(worker.Path, "home", return_value=home), \
+                 patch.object(worker, "CLONE_ROOT", home / "clones"), \
+                 patch.object(worker, "verify_request_preflight", return_value={"request_verified": True}), \
+                 patch.object(worker, "run_json", return_value=native), \
+                 patch.object(worker.subprocess, "run", return_value=transcript), \
+                 patch.object(worker.time, "sleep"), patch.object(sys, "argv", argv), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr_buf):
+                with self.assertRaises(RuntimeError) as ctx:
+                    worker.main()
+            exc_text = str(ctx.exception)
+            failure_line = next(
+                (line for line in stderr_buf.getvalue().splitlines()
+                 if line.startswith("HERDR_WORKER_FAILURE=")), None)
+            self.assertIsNotNone(failure_line)
+            payload = json.loads(failure_line.split("=", 1)[1])
+        return exc_text, payload
+
+    def test_agy_trust_dialog_failure_evidence_is_readable(self):
+        exc_text, payload = self._assert_trust_blocked_failure_evidence(
+            "agy",
+            "Do you trust the contents of this project?\n"
+            "> Yes, I trust this folder\n  No, exit\n",
+        )
+        self.assertEqual(payload["startup_status"], "TRUST_REQUIRED")
+        for target in (exc_text, payload.get("trust_evidence", "")):
+            self.assertIn("trust", target.lower())
+        snippet = payload["trust_evidence"]
+        self.assertIn("do you trust", snippet.lower())
+        self.assertIn("trust this folder", snippet.lower())
+        # Bounded evidence: bounded size, single-line, ANSI-free.
+        self.assertLessEqual(len(snippet), 400)
+        self.assertNotIn("\x1b", snippet)
+        self.assertNotIn("\n", snippet)
+
+    def test_trust_evidence_uses_central_redactor(self):
+        """Codex PR #259 P1: the ad-hoc regex missed password=/sk-…/quoted
+        access_token shapes; pane evidence must pass through the repository's
+        central redactor (herdr.supervisor.state.redact_text)."""
+        _, payload = self._assert_trust_blocked_failure_evidence(
+            "agy",
+            "Do you trust the contents of this project?\n"
+            "password=hunter2\n"
+            "export OPENAI_API_KEY=sk-abcd12345678\n"
+            '{"access_token": "xyzzy12345678"}\n',
+        )
+        snippet = payload["trust_evidence"]
+        for secret in ("hunter2", "sk-abcd12345678", "xyzzy12345678"):
+            self.assertNotIn(secret, snippet)
+        self.assertIn("trust", snippet.lower())
+
+    def test_trust_evidence_keeps_prompt_after_long_banner(self):
+        """Codex PR #259 P2: head truncation dropped the matched trust dialog
+        when earlier output filled the budget; evidence must contain the
+        matching prompt line."""
+        banner = "=" * 450
+        _, payload = self._assert_trust_blocked_failure_evidence(
+            "agy",
+            banner + "\nDo you trust the contents of this project?\n> Yes, I trust this folder\n",
+        )
+        snippet = payload["trust_evidence"]
+        self.assertLessEqual(len(snippet), 400)
+        self.assertIn("do you trust", snippet.lower())
+
+    def test_trust_tail_slice_does_not_split_credential_line(self):
+        """Codex PR #259 round-2 P1: the 4096-char tail slice can start inside
+        a credential assignment ("password=hunter2" → "word=hunter2"), and a
+        key-less fragment evades per-line redaction; the partial leading line
+        must be dropped before the evidence is built."""
+        filler = "-" * 100 + "\n"  # len 101; "password=" starts at index 101
+        prompt = "Do you trust the contents of this project?\n"
+        base = filler + "password=hunter2\n" + prompt
+        # make the [-4096:] cut land 4 chars into "password=" → "word=hunter2"
+        stdout = base + "p" * (4096 + len(filler) + 4 - len(base))
+        self.assertEqual(stdout[-4096:].splitlines()[0], "word=hunter2")
+        _, payload = self._assert_trust_blocked_failure_evidence("agy", stdout)
+        self.assertNotIn("hunter2", payload["trust_evidence"])
+        self.assertIn("do you trust", payload["trust_evidence"].lower())
+
+    def test_non_trust_startup_failure_evidence_has_no_trust_snippet(self):
+        """The trust evidence field is specific to TRUST_REQUIRED blocking;
+        other startup failures must not fabricate one."""
+        worker = load_worker()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            native = {"result": {"agent": {"agent": "grok", "name": "owned",
+                      "agent_session": "owned-session", "agent_status": "idle"}}}
+            transcript = subprocess.CompletedProcess([], 0, "Authentication required: please log in.", "")
+            argv = ["worker", "--task-id", "notrust", "--source", td,
+                    "--agent", "grok", "--execution-mode", "context", "--pane-id", "owned-pane"]
+            stderr_buf = io.StringIO()
+            with patch.object(worker.Path, "home", return_value=home), \
+                 patch.object(worker, "CLONE_ROOT", home / "clones"), \
+                 patch.object(worker, "verify_request_preflight", return_value={"request_verified": True}), \
+                 patch.object(worker, "run_json", return_value=native), \
+                 patch.object(worker.subprocess, "run", return_value=transcript), \
+                 patch.object(worker.time, "sleep"), patch.object(sys, "argv", argv), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr_buf):
+                with self.assertRaises(RuntimeError):
+                    worker.main()
+            failure_line = next(
+                (line for line in stderr_buf.getvalue().splitlines()
+                 if line.startswith("HERDR_WORKER_FAILURE=")), None)
+            self.assertIsNotNone(failure_line)
+            payload = json.loads(failure_line.split("=", 1)[1])
+        self.assertNotIn("trust_evidence", payload)
 
 
 

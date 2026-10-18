@@ -2754,9 +2754,27 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 ## [2026-10-18] docs | PR 交付状态与入口一致性教训
 - 更新任务修复记录为最终实现、部署候选、完整验证和已知边界；工程教训 §167 固化同对象、双入口、完整页签验收。
 
+## [2026-10-18] Fix | issue #255 agy 新目录信任预埋与失败证据
+- Fixed [[preflight-and-health]] §3.3 记录的信任预埋能力缺口：`herdr/workspace_trust.py` 新增 agy handler（realpath + `_exact_case_path` 逐段 scandir 真实大小写、幂等合并 `~/.gemini/antigravity-cli/settings.json` trustedWorkspaces、原子替换），注册 `_TRUST_HANDLERS` 后 `bin/herdr-task launch` 前置预埋自动覆盖 agy。
+- `services/herdr-worker.py` TRUST_REQUIRED 失败路径新增有界脱敏 pane 片段证据（异常消息与 HERDR_WORKER_FAILURE.trust_evidence）。
+- Evidence: `tests/test_workspace_trust.py`、`tests/test_herdr_worker.py`；真实链路对照实验（agy 1.4.2：未预埋目录复现对话框→TRUST_REQUIRED，预埋目录 `herdr agent start` 直达 READY）。
+- 补充 `docs/lessons/lessons-learned.md` §168：无头探针通过不等于交互式启动可用；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust.md`。
+
+## [2026-10-18] Fix | issue #255 B-1 信任写入保持原权限 + 双门禁汇聚收尾
+- Fixed [[preflight-and-health]] §3.3：`ensure_agy_workspace_trust` 原子 replace 携模放宽权限（0600→0644）修复——写前 `S_IMODE` 捕获、replace 前 chmod tmp、首建 0o600、fail-closed；候选 `a7036d2` 经 cleanroom_test-r5 / cleanroom_review-r5 双门禁 pass（三点一致：任务/verdict 文件/冻结记录 94417）。
+- Evidence: 3 个权限用例 RED(8b581c3)→GREEN(a7036d2)；黑盒实测 0600→0600/0640 保持/首建 0600；影响面 7 套件 97 passed。
+- 补充 `docs/lessons/lessons-learned.md` §169（原子写携模陷阱）与 §170（基线漂移与汇聚期四种编排停摆）；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust-r2.md`；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-01-wrapup.md`。
+- 本记录描述本地源码；PR 保持 OPEN，合并决策留人工。
+
+## [2026-10-18] Fix | issue #255 三轮：Codex 对新 head 的 3×P1（短写/截断脱敏/跨进程测试）
+- Fixed [[preflight-and-health]] §3.3：`os.write` 短写未检查即 `replace()`（ENOSPC 部分接受会发布截断 JSON）→ 按返回值循环写满；worker `stdout[-4096:]` 切点落入凭证行导致 `word=hunter2` 残段绕过逐行脱敏 → 超限切片后丢弃残缺首行。
+- 测试有效性：并发射锁回归从同解释器双线程改为 fork + Barrier 双进程，真正卡住跨进程 flock 边界；`test_agy_short_write_is_completed_before_replace`、`test_trust_tail_slice_does_not_split_credential_line` RED(1a03e39)→GREEN。
+- 事故披露：并发测试线程内各自 `patch(Path.home)` 竞态曾向真实 `~/.gemini/antigravity-cli/settings.json` 泄漏 2 条临时条目，已精确剔除（其余 79 条与 0600 逐位保持）。
+- Evidence：trust+worker 37 passed、影响面 7 套件 106 passed、compileall/diff-check 干净；教训补写于 §168/§169 与 r2 bug-report"第三轮"小节。PR #259 保持 OPEN 不合并。
+
 ## [2026-10-18] Update | 自动集成等待状态在专业工作台可见（issue #253）
 - Updated [[flow-workbench]] §10：新增 `herdr/delivery_pipeline.py` 纯投影（阶段 / 调度器归属 / 待过门禁 / commit→integration_branch→候选发布时间）；`committed` 且守护进程已接管的 git 任务徽章改为「等待集成 · 等待门禁: …」，调度控制不再产出人工「并入目标分支」动作，改列归属说明；节点卡片与任务抽屉新增交付管道行。
 - 门禁定义复用 `workflow_progress.gate_retry_node` 单一入口；等待原因只读既有事实（任务字段、门禁 `stage_verdict`、`candidate_published` 事件），未建第二事实源。
-- 追加 [[../docs/lessons/lessons-learned]] §168：守护进程已接管的进行中状态不得渲染成终态，也不得再暴露第二个人工入口。
+- 追加 [[../docs/lessons/lessons-learned]] §171：守护进程已接管的进行中状态不得渲染成终态，也不得再暴露第二个人工入口。
 - Evidence: `tests/test_delivery_pipeline.py`、`tests/test_console_delivery_pipeline.py`、`tests/test_controller_progress_actions.py`（新增回归）；console 专项 + 核心专项通过。PR: https://github.com/allinai0506/HAFlow/pull/264
 - 本记录描述本地隔离沙盒源码；分支已推送（PR #264），尚未合并、部署或重启 8765。
