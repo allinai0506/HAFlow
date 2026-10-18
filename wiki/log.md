@@ -2711,3 +2711,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Evidence: `tests/test_workflow_clone_reclaim.py`：四种旗标 × staged/untracked，暂停双向交错、晚到目录、归档写入失败重试和 dry-run 零副作用。
 
 - 发布保护追加：内部 Workflow 转移支持可选 `expected_status`，SQLite 写事务内先匹配观察状态再处理 force；阻止显式强制关闭覆盖预检期间的新暂停，并保留初始已暂停时的合法强制收口。证据：强制暂停交错与初始 paused 两项真实 SQLite / CLI 回归。
+
+## [2026-10-18] Update | SPEC 七节点与真实浏览器验收
+- Updated [[dag-workflow-engine]]: 记录 SPEC 串并行结构、双技能审核和三套研发模板的本地服务/ego-browser E2E 契约，区分模板要求与程序化验证。
