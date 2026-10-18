@@ -88,7 +88,7 @@ Inspector 默认选中同样必须确定性：blocked > failed > working > rewor
 
 Inspector 不新建第二套详情或解卡系统：
 
-- 任务行 → `openTaskDrawer(taskId)`（既有 Task Drawer，含概览/活动/产物/运行时）
+- 任务行 → `openTaskDrawer(taskId)`（既有 Task Drawer，含概览/执行轨迹/产物/运行时）
 - 阻塞节点 → `executeControllerAction(actionId)` + 既有 `/api/controller/execute-action`
 - 视图切换到「任务列表」→ 既有 `renderTasks()`，不重写任务列表
 
@@ -166,3 +166,9 @@ Evidence:
 - `tests/test_console_project_creation.py` — 冻结定义优先级（直接调用 + `workflow_detail` 级）、`workflow_template` 暴露
 - `tests/test_console_templates.py` — `TestTemplateLibraryBehavior`（空间隔离、仅用户点选记账、preferred 透传、保存模板记账、过期详情/填充丢弃、保存按发起空间记账、回落对齐、直开视图水合重绘）
 - `tests/test_console_workflow_latency.py` — 启动调度性能回归（`__templates__` 先调度模板库、overview 后台水合不阻塞启动）
+
+## 任务内容一致性
+
+`FACT` 列表与流程图 Inspector 的任务页共用 `renderTaskRow()`，显示相同任务名称、ID、执行者、状态与操作菜单；侧栏仅改变布局。`flowTasksForNode()` 只按节点筛选同一份 `workflow.tasks`，保留已替代任务供查看历史；节点状态聚合仍排除已替代任务。概览的当前任务区也复用同一任务行。
+
+Evidence: `console/herdr_factory_console.py::renderTaskRow/renderTasks/renderNodeInspector/flowTasksForNode`；`tests/test_console_execution_trace.py::test_flow_and_list_render_identical_task_content_and_history`。

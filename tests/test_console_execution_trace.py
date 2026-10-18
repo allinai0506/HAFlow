@@ -463,3 +463,68 @@ const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTr
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
     assert result.returncode == 0, result.stderr
+
+
+def test_flow_and_list_render_identical_task_content_and_history():
+    names = ['esc', 'renderTasks', 'renderTaskRow', 'flowTasksForNode', 'renderNodeInspector']
+    script = '\n'.join(_extract(console.HTML_TEMPLATE, n) for n in names if n != 'renderTaskRow' or 'function renderTaskRow(' in console.HTML_TEMPLATE)
+    script += r'''
+const assert=require('node:assert/strict');
+const elements={tasks:{},flowInspectorBody:{},flowInspTitle:{},flowInspMeta:{}};
+const document={getElementById:id=>elements[id]};
+const task={task_id:'test-auto',node:'test',agent:'qodercli',status:'superseded',superseded_by:'test-r2'};
+const state={workflow:{tasks:[task]},workflowId:'wf',flowSelectedNodeId:'test',flowInspectorTab:'tasks'};
+function updateAttentionHub(){}
+function taskDisplayName(){return '洁净室回归测试'}
+function badge(s){return '<b>'+s+'</b>'}
+function flowNodeById(){return {id:'test',label:'测试',node_type:'agent',status:'waiting'}}
+function cleanStageLabel(s){return s}
+function humanNodeStatus(s){return s}
+function flowNodeStatus(n,s){return s}
+renderTasks();
+renderNodeInspector();
+assert.equal(flowTasksForNode('test').length,1);
+assert.equal(elements.flowInspectorBody.innerHTML,elements.tasks.innerHTML);
+assert.ok(elements.tasks.innerHTML.includes('洁净室回归测试'));
+assert.ok(elements.tasks.innerHTML.includes('qodercli'));
+assert.ok(elements.tasks.innerHTML.includes('superseded'));
+assert.ok(elements.tasks.innerHTML.includes('成果会签'));
+'''
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_recorded_reports_are_visible_and_routine_status_is_collapsed():
+    names = ['esc', 'taskDrawerNumTs', 'traceClock', 'traceDotClass', 'traceDetailRows', 'renderExecutionTrace']
+    script = '\n'.join(_extract(console.HTML_TEMPLATE, n) for n in names)
+    script += r'''
+const assert=require('node:assert/strict');
+const html=renderExecutionTrace({status:'ready',availability:'recorded_actions',degradation:[{code:'native_unsupported'}],events:[
+  {kind:'task_completed',title:'任务完成',timestamp:20},
+  {kind:'progress_report',title:'阶段报告',timestamp:10,detail:'174项回归已执行',details:{observation_id:'obs-report',sha256:'abc'}}
+]});
+assert.ok(html.includes('174项回归已执行'));
+assert.ok(html.includes('产物回执'));
+assert.ok(html.includes('obs-report'));
+assert.ok(html.includes('暂无原生工具轨迹适配'));
+assert.ok(!html.includes('当前仅有任务状态记录'));
+assert.ok(html.indexOf('174项回归已执行') < html.indexOf('<details'));
+assert.ok(html.includes('<summary>任务状态记录（1）</summary>'));
+'''
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_task_menu_opens_the_clicked_view_instead_of_a_duplicate_task_id():
+    script = _extract(console.HTML_TEMPLATE, 'toggleTaskMenu')
+    script += r'''
+const assert=require('node:assert/strict');
+const clicked={classList:{contains:()=>false,add:s=>{clicked.open=s==='open'}}};
+const document={getElementById:()=>{throw Error('would select hidden list menu')}};
+function closeAllTaskMenus(){}
+function closeMoreMenu(){}
+toggleTaskMenu({stopPropagation(){},currentTarget:{closest:()=>clicked}},'same-task');
+assert.equal(clicked.open,true);
+'''
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr

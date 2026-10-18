@@ -296,7 +296,7 @@ def test_live_product_chain_reads_real_sessions_without_writing():
         assert page["run_id"] == task.get("run_id")
         blob = json.dumps(page)
         assert "base_instructions" not in blob
-        allowed = {"agent", "tool", "path", "command", "result", "exit_code", "timestamp", "source", "source_ref"}
+        allowed = {"agent", "tool", "path", "command", "result", "exit_code", "timestamp", "source", "source_ref", "observation_id", "sha256"}
         for event in page["events"]:
             assert event["task_id"] == task["task_id"]
             allowed_run = task.get("run_id") or run_id_for_task(task)
@@ -323,3 +323,45 @@ def test_live_product_chain_reads_real_sessions_without_writing():
         if page["events"]:
             assert page["events"][0]["title"] in rendered
     assert proved_native, "no ownership-proved native action was read"
+
+
+def test_ledger_reports_dispatch_artifacts_and_candidate_without_native_session(tmp_path, monkeypatch):
+    task = _task()
+    task.update(agent='qodercli', goal='核验候选版本的启动信任与回滚', node='cleanroom_test')
+    path = tmp_path / 'state.db'
+    _db(path, [task])
+    payloads = [
+        ('initial_dispatched', {'prompt': 'PRIVATE_PROMPT', 'identity_path': '/private/credential'}),
+        ('task_artifact_checkpoint', {'step': 2, 'summary': '已执行174项回归；password=SECRET123',
+            'next_step': '核验回滚', 'observation_id': 'obs-report', 'sha256': 'a' * 64,
+            'size_bytes': 1173, 'content': 'PRIVATE_CONTENT'}),
+        ('candidate_published', {'candidate_sha': 'b' * 40}),
+        ('tool_execution', {'status': 'timeout', 'exit_code': None, 'side_effects': 'unknown',
+            'observation_id': 'obs-tool', 'sha256': 'c' * 64}),
+    ]
+    conn = sqlite3.connect(path)
+    conn.execute('UPDATE tasks SET goal=? WHERE task_id=?', (task['goal'], 'task-a'))
+    for i, (kind, payload) in enumerate(payloads, 30):
+        conn.execute('INSERT INTO events (task_id,event_type,payload_json,timestamp,source,run_id) VALUES (?,?,?,?,?,?)',
+            ('task-a', kind, json.dumps(payload), i, 'checkpoint', 'run-a'))
+    conn.execute('INSERT INTO events (task_id,event_type,payload_json,timestamp,run_id) VALUES (?,?,?,?,?)',
+        ('task-a', 'task_artifact_checkpoint', '{"summary":"WRONG_RUN"}', 50, 'other-run'))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(console, 'state_db_path', lambda: path)
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = console.api_task_trajectory('task-a')
+    encoded = json.dumps(result, ensure_ascii=False)
+    assert '核验候选版本的启动信任与回滚' in encoded
+    assert '已执行174项回归' in encoded
+    assert '核验回滚' in encoded
+    assert 'obs-report' in encoded and 'a' * 64 in encoded
+    assert 'b' * 40 in encoded
+    assert 'timeout' in encoded and 'unknown' in encoded
+    for secret in ('PRIVATE_PROMPT', 'PRIVATE_CONTENT', '/private/credential', 'SECRET123', 'WRONG_RUN'):
+        assert secret not in encoded
+    report = next(e for e in result['events'] if e['kind'] == 'progress_report')
+    assert report['status'] == 'neutral'  # Agent report is not an acceptance verdict.
+    assert result['availability'] == 'recorded_actions'
+    assert any(n['code'] == 'native_unsupported' for n in result['degradation'])
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before

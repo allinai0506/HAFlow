@@ -35,3 +35,11 @@ Claude 先按已记录的会话文件名直接打开。找不到时才逐个查�
 ## 页面
 
 打开工作流，点开任务，再点「执行轨迹」。这一页才请求轨迹。时间正序。失败事件用红色，通过用绿色，编辑用蓝色，读取用空心灰点。点一条事件展开脱敏后的工具、相对路径、命令名、退出码、来源和证据标识。
+
+## 已保存的执行报告与产物回执
+
+`FACT` 轨迹读取同一 Task / Run 的 `task_artifact_checkpoint`、`candidate_published` / `candidate_frozen` 和 `tool_execution`。阶段报告展示执行摘要、下一步、Observation ID 和 SHA-256；摘要复用现有脱敏能力。报告里的“测试通过”是执行者陈述，不转换为验收通过。派发事件展示任务目标与执行者，不返回完整提示词或完成凭据。
+
+`FACT` 无原生工具适配（包括 Qoder）时明确提示缺口，已有报告仍可展示；`recorded_actions` 与原生 `agent_actions` 分开。存在具体操作或报告时，无详情的生命周期记录折叠保留。轨迹页的“本任务产出”复用产物页及其可读性、归属与失败语义。
+
+Evidence: `herdr/execution_trace.py::project_stored_event/trace_availability`；`herdr/native_session_trace.py::load_native_actions`；`console/herdr_factory_console.py::renderExecutionTrace/renderTaskDrawer`；`tests/test_execution_trace_api.py::test_ledger_reports_dispatch_artifacts_and_candidate_without_native_session`。

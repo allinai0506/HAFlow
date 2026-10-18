@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .native_session_trace import _norm_path, load_native_actions
 from .state_db import get_readonly_db_connection
+from .supervisor.state import redact_text
 from .trajectory import run_id_for_task
 
 
@@ -26,6 +27,8 @@ _PROJECTABLE_EVENT_TYPES = (
     "agent_started", "task_started", "task_completed", "initial_dispatched",
     "task_status_changed", "task_transition",
     "verification_completed", "tests_completed", "blocked_marker_observed",
+    "task_artifact_checkpoint", "candidate_published", "candidate_frozen",
+    "tool_execution",
 )
 AGENT_ACTION_KINDS = frozenset({
     "file_read", "file_edit", "tool_call", "test_failed", "test_passed", "retry",
@@ -41,7 +44,7 @@ _PUBLIC_FIELDS = (
 )
 _DETAIL_FIELDS = (
     "agent", "tool", "path", "command", "result", "exit_code", "timestamp",
-    "source", "source_ref",
+    "source", "source_ref", "observation_id", "sha256",
 )
 
 
@@ -210,6 +213,14 @@ def assemble_trace(
     }
 
 
+def _report_text(value: Any) -> str:
+    return _clip(redact_text(value)) if isinstance(value, str) else ""
+
+
+def _evidence_sha(value: Any) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value) else None
+
+
 def _transition_correlation(task_id, status, timestamp):
     if timestamp is None or not status:
         return None
@@ -312,7 +323,40 @@ def project_stored_event(row: Dict[str, Any], task: Dict[str, Any]) -> Optional[
     elif event_type == "task_completed":
         base.update(kind="task_completed", title="任务完成", status="info")
     elif event_type == "initial_dispatched":
-        base.update(kind="task_dispatched", title="任务已派发", status="info")
+        target = task.get("goal") or task.get("stage_label") or task.get("node") or task.get("stage")
+        parts = [f"执行者：{agent}" if agent else "", f"目标：{target}" if target else ""]
+        base.update(kind="task_dispatched", title="任务已派发", status="info",
+                    detail=_report_text(" · ".join(p for p in parts if p)))
+    elif event_type == "task_artifact_checkpoint":
+        summary = _report_text(payload.get("summary"))
+        next_step = _report_text(payload.get("next_step"))
+        step = payload.get("step")
+        title = f"执行者报告 · 第 {step} 步" if isinstance(step, int) else "执行者报告"
+        detail = " · ".join(p for p in [summary, f"下一步：{next_step}" if next_step else ""] if p)
+        base.update(kind="progress_report", title=title, detail=detail)
+        base["details"] = _details(
+            agent=agent, result=summary, observation_id=_safe_token(payload.get("observation_id")),
+            sha256=_evidence_sha(payload.get("sha256")),
+            source=origin, source_ref=source_ref, timestamp=timestamp,
+        )
+    elif event_type in {"candidate_published", "candidate_frozen"}:
+        sha = payload.get("candidate_sha")
+        if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+            return None
+        base.update(kind="candidate", title="候选版本已发布" if event_type == "candidate_published" else "候选版本已冻结",
+                    detail=f"Commit · {sha}")
+    elif event_type == "tool_execution":
+        result = _report_text(payload.get("status"))
+        effects = _report_text(payload.get("side_effects"))
+        exit_code = payload.get("exit_code")
+        exit_code = exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None
+        base.update(kind="tool_receipt", title="工具执行回执",
+                    detail=f"状态：{result or 'unknown'} · 退出码：{exit_code if exit_code is not None else 'unknown'} · 副作用：{effects or 'unknown'}")
+        base["details"] = _details(
+            agent=agent, result=result, exit_code=exit_code,
+            observation_id=_safe_token(payload.get("observation_id")), sha256=_evidence_sha(payload.get("sha256")),
+            source=origin, source_ref=source_ref, timestamp=timestamp,
+        )
     elif event_type in {"task_status_changed", "task_transition"}:
         to_status = (
             metadata.get("to_status")
@@ -455,6 +499,8 @@ def trace_availability(events: Sequence[Dict[str, Any]]) -> str:
     kinds = {event.get("kind") for event in events}
     if kinds & AGENT_ACTION_KINDS:
         return "agent_actions"
+    if kinds & {"progress_report", "candidate", "tool_receipt"}:
+        return "recorded_actions"
     if events:
         return "task_events"
     return "none"
