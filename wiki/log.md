@@ -2771,3 +2771,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 测试有效性：并发射锁回归从同解释器双线程改为 fork + Barrier 双进程，真正卡住跨进程 flock 边界；`test_agy_short_write_is_completed_before_replace`、`test_trust_tail_slice_does_not_split_credential_line` RED(1a03e39)→GREEN。
 - 事故披露：并发测试线程内各自 `patch(Path.home)` 竞态曾向真实 `~/.gemini/antigravity-cli/settings.json` 泄漏 2 条临时条目，已精确剔除（其余 79 条与 0600 逐位保持）。
 - Evidence：trust+worker 37 passed、影响面 7 套件 106 passed、compileall/diff-check 干净；教训补写于 §168/§169 与 r2 bug-report"第三轮"小节。PR #259 保持 OPEN 不合并。
+
+## [2026-10-18] fix | 旁路索引排除与沙盒残壳自动回收（Issue #254）
+- Updated [[task-lifecycle]] §5.2.1：`herdr/clone_archive.py` 排除 `.codegraph/`、`*.sock` 等外部索引进程产物，归档后旁路追加不阻断源内容校验；定义外部工具残壳判定白名单，对已归档且仅剩残壳的目录放行 inode 漂移并由收尾流程安全删除，解除收尾死锁。
+- `services/herdr-worker.py` 在克隆初始化时清理父仓库带入的 `.codegraph`，并在上下文中声明禁止外部索引进程挂载至沙盒。
+- 沉淀教训 `docs/lessons/lessons-learned.md` §171。
+- Evidence: `tests/test_workflow_clone_reclaim.py`（46 passed，新增 9 项旁路追加、残壳回收、外来文件检测与 Codex P1/P2 闭环回归），`bin/herdr-task close-workflow wf-haflow-1017-01 --dry-run` 实跑通过。
