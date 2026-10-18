@@ -668,6 +668,9 @@ def template_detail(tid):
         gate_str = ''
         if isinstance(gate_info, dict):
             gate_str = gate_info.get('type') or gate_info.get('auto_criteria') or ('门禁校验' if gate_info else '')
+        # Controller resolve_gate_config applies these defaults without a YAML gate.
+        if not gate_str and n.get('id') in {'test', 'review', 'wrapup'}:
+            gate_str = '内置默认门禁（需验证结论）'
         nodes.append({
             'id': n.get('id'),
             'label': n.get('label') or n.get('id'),
@@ -6417,46 +6420,43 @@ body {
 .tpl-legend-dot.start { background: var(--success); }
 .tpl-legend-dot.middle { background: var(--primary); }
 .tpl-legend-dot.gate { background: var(--warning); }
+/* Keep graph geometry aligned with the HTML card dimensions. */
 .tpl-node-card {
-  width: 216px;
-  height: 118px;
-  background: #ffffff;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 8px 12px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  box-shadow: var(--shadow-sm);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  font-family: var(--font-sans);
-  box-sizing: border-box;
+  width: 280px; height: 188px; box-sizing: border-box;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  border-radius: var(--radius-md); padding: 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  box-shadow: var(--shadow-sm); cursor: pointer; font-family: var(--font-sans);
 }
-.tpl-node-card:hover {
-  border-color: var(--primary);
-  box-shadow: 0 4px 12px var(--primary-glow);
-  transform: translateY(-1px);
-}
-.tpl-node-card.selected {
-  border-color: var(--primary);
-  background: rgba(94, 106, 210, 0.04);
-  box-shadow: 0 0 0 2px var(--primary);
-}
+.tpl-node-card:hover, .tpl-node-card.selected { border-color: var(--primary); }
+.tpl-node-card.selected { box-shadow: 0 0 0 2px var(--primary); }
+.tpl-node-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tpl-node-kind { flex-shrink: 0; white-space: nowrap; font-size: 11px; color: var(--primary); background: var(--primary-subtle); padding: 2px 8px; border-radius: 4px; }
+.tpl-node-agents { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-secondary); }
+.tpl-node-title { font-size: 14px; font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-node-purpose { font-size: 12px; color: var(--text-secondary); line-height: 20px; min-height: 60px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.tpl-node-footer { margin-top: auto; display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border-subtle); padding-top: 8px; font-size: 11px; line-height: 16px; color: var(--text-tertiary); }
+.tpl-node-footer strong { color: var(--primary); font-weight: 500; }
 .tpl-node-drawer {
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-default);
-  box-shadow: var(--shadow-md);
-  padding: 16px 20px;
-  display: none;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 260px;
-  overflow-y: auto;
-  z-index: 15;
+  width: min(800px, calc(100vw - 48px)); max-height: calc(100dvh - 64px);
+  padding: 0; margin: auto; color: var(--text-primary); background: var(--bg-surface);
+  border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg); overflow: hidden;
 }
-.tpl-node-drawer.open {
-  display: flex;
+.tpl-node-drawer::backdrop { background: rgba(18, 19, 22, .4); }
+.tpl-node-drawer[open] { display: flex; flex-direction: column; }
+.tpl-node-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px; border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; }
+.tpl-node-drawer-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; font-size: 16px; font-weight: 600; }
+#tplDrawerTitle { overflow-wrap: anywhere; }
+.tpl-node-details { overflow: auto; min-height: 0; padding: 24px 24px 32px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; overscroll-behavior: contain; }
+.tpl-node-field { min-width: 0; }
+.tpl-node-field.wide { grid-column: 1 / -1; }
+.tpl-node-field label { display: block; margin-bottom: 8px; font-size: 12px; color: var(--text-secondary); }
+.tpl-node-field > div { font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 600px) {
+  .tpl-node-drawer { width: calc(100vw - 32px); max-height: calc(100dvh - 32px); }
+  .tpl-node-drawer-head { padding: 16px; }
+  .tpl-node-details { grid-template-columns: minmax(0, 1fr); padding: 20px 16px 32px; }
 }
 .tpl-modal-overlay {
   position: fixed;
@@ -7737,34 +7737,21 @@ function ensureTplLayoutDOM(tplEl){
             <button type="button" class="tool-btn" onclick="fitTplGraph()" title="自适应居中" style="width:36px">居中</button>
           </div>
         </div>
-        <div class="tpl-node-drawer" id="tplNodeDrawer">
-          <div style="display:flex;align-items:center;justify-content:space-between">
-            <div style="font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:8px">
-              <span style="font-size:14px;color:var(--primary)">📌</span>
+        <dialog class="tpl-node-drawer" id="tplNodeDrawer" aria-labelledby="tplDrawerTitle">
+          <div class="tpl-node-drawer-head">
+            <div class="tpl-node-drawer-heading">
               <span id="tplDrawerTitle">工序详情</span>
               <span class="tpl-badge cat-eng" id="tplDrawerType">agent 节点</span>
             </div>
-            <button type="button" class="tool-btn" onclick="closeTplNodeDrawer()">✕</button>
+            <button type="button" class="tool-btn" aria-label="关闭节点属性" onclick="closeTplNodeDrawer()">✕</button>
           </div>
-          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;background:var(--bg-subtle);border:1px solid var(--border-subtle);border-radius:var(--radius-md);padding:12px">
-            <div>
-              <label style="font-size:11px;color:var(--text-tertiary);font-weight:500;display:block;margin-bottom:3px">工序职责使命 (Purpose)</label>
-              <div id="tplDrawerPurpose" style="font-size:12px;font-weight:500;line-height:1.4">-</div>
-            </div>
-            <div>
-              <label style="font-size:11px;color:var(--text-tertiary);font-weight:500;display:block;margin-bottom:3px">负责智能体 (Preferred Agents)</label>
-              <div id="tplDrawerAgents" style="font-size:11px;font-family:var(--font-mono);color:var(--primary);line-height:1.4">-</div>
-            </div>
-            <div>
-              <label style="font-size:11px;color:var(--text-tertiary);font-weight:500;display:block;margin-bottom:3px">前置依赖工序 (Depends On)</label>
-              <div id="tplDrawerDeps" style="font-size:12px;font-weight:500;line-height:1.4">-</div>
-            </div>
-            <div>
-              <label style="font-size:11px;color:var(--text-tertiary);font-weight:500;display:block;margin-bottom:3px">准出门禁 / 验收要求</label>
-              <div id="tplDrawerGate" style="font-size:12px;font-weight:500;line-height:1.4">-</div>
-            </div>
+          <div class="tpl-node-details">
+            <div class="tpl-node-field wide"><label>工序职责</label><div id="tplDrawerPurpose">-</div></div>
+            <div class="tpl-node-field"><label>负责智能体</label><div id="tplDrawerAgents">-</div></div>
+            <div class="tpl-node-field"><label>前置依赖</label><div id="tplDrawerDeps">-</div></div>
+            <div class="tpl-node-field wide"><label>准出门禁 / 验收要求</label><div id="tplDrawerGate">-</div></div>
           </div>
-        </div>
+        </dialog>
       </main>
     </div>
   `;
@@ -7863,7 +7850,7 @@ async function selectTemplateInLibrary(id,remember){ // remember=1 仅用户点�
   if(descEl)descEl.textContent=t.description||'';
   if(editBtnEl)editBtnEl.textContent=t.is_builtin?'查看 YAML / 向导':'可视化配置 / YAML';
   renderTplCards();
-  closeTplNodeDrawer();
+  if(state.currentTemplateDetail?.template?.id!==id)closeTplNodeDrawer();
 
   // 过期响应丢弃:切空间/连续点选后,迟到的 /api/template 继续帧不得覆盖最新选择
   const sequence=state.templateDetailSequence=(state.templateDetailSequence||0)+1;
@@ -7882,28 +7869,26 @@ async function selectTemplateInLibrary(id,remember){ // remember=1 仅用户点�
   }
 }
 
+function tplNodeCardHTML(d){
+  const agents=(d.agents||[]).join('、')||'Auto';
+  const purpose=d.purpose||'暂无说明';
+  return `<div class="tpl-node-top"><span class="tpl-node-kind">${(d.depends_on||[]).length?'工序环节':'起始工序'}</span><span class="tpl-node-agents" title="${esc(agents)}">${esc(agents)}</span></div>
+    <div class="tpl-node-title" title="${esc(d.label||d.id)}">${esc(d.label||d.id)}</div>
+    <div class="tpl-node-purpose" title="${esc(purpose)}">${esc(purpose)}</div>
+    <div class="tpl-node-footer"><span>${d.gate?'门禁校验':'自动流转'}</span><strong>查看完整属性 →</strong></div>`;
+}
+
 function ensureTplCardShape(){
   if(window._tplShapeRegistered)return true;
   if(!window.X6||!X6.Shape||!X6.Shape.HTML||!X6.Shape.HTML.register)return false;
   try{
     X6.Shape.HTML.register({
-      shape:'tpl-flow-card',width:216,height:118,effect:['data'],
+      shape:'tpl-flow-card',width:280,height:188,effect:['data'],
       html(cell){
         const d=(cell&&cell.getData)?(cell.getData()||{}):{};
         const div=document.createElement('div');
         div.className='tpl-node-card'+(d.selected?' selected':'');
-        div.innerHTML=`
-          <div style="display:flex;align-items:center;justify-content:space-between">
-            <span style="font-size:10px;font-weight:600;color:var(--primary);background:var(--primary-subtle);border:1px solid rgba(94,106,210,0.2);padding:2px 4px;border-radius:4px">${d.isStart?'起始工序':'工序环节'}</span>
-            <span style="font-size:10.5px;color:var(--text-secondary);font-weight:500">${esc((d.agents||[]).join('、')||'Auto')}</span>
-          </div>
-          <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin:3px 0 2px">${esc(d.label||d.id)}</div>
-          <div style="font-size:11px;color:var(--text-secondary);line-height:1.35;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${esc(d.purpose||'暂无说明')}</div>
-          <div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;color:var(--text-tertiary);border-top:1px solid var(--border-subtle);padding-top:4px">
-            <span>${d.gate?'🔒 门禁校验':'✓ 自动流转'}</span>
-            <span style="color:var(--primary);font-weight:600">点击查看属性</span>
-          </div>
-        `;
+        div.innerHTML=tplNodeCardHTML(d);
         div.onclick=()=>openTemplateNodeDrawer(d);
         return div;
       }
@@ -7933,7 +7918,7 @@ function renderTplDAG(nodes){
     const g=new window.dagre.graphlib.Graph();
     g.setGraph({rankdir:'LR',ranksep:56,nodesep:32,marginx:36,marginy:36});
     g.setDefaultEdgeLabel(()=>({}));
-    const nodeW=216,nodeH=118;
+    const nodeW=280,nodeH=188;
     nodes.forEach(n=>g.setNode(n.id,{width:nodeW,height:nodeH}));
     const edges=[];
     nodes.forEach(n=>{
@@ -7990,24 +7975,16 @@ function renderTplDAG(nodes){
 
 function renderTplFallbackSVG(container,nodes){
   if(!container)return;
-  container.innerHTML=`
-    <div style="padding:32px;display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:center;height:100%;overflow:auto">
-      ${nodes.map((n,i)=>`
-        <div class="tpl-node-card" onclick='openTemplateNodeDrawer(${JSON.stringify(n)})'>
-          <div style="display:flex;align-items:center;justify-content:space-between">
-            <span style="font-size:10px;font-weight:600;color:var(--primary);background:var(--primary-subtle);padding:2px 4px;border-radius:4px">第 ${i+1} 步</span>
-            <span style="font-size:10.5px;color:var(--text-secondary)">${esc((n.agents||[]).join('、')||'Auto')}</span>
-          </div>
-          <div style="font-size:13px;font-weight:600;color:var(--text-primary)">${esc(n.label||n.id)}</div>
-          <div style="font-size:11px;color:var(--text-secondary);line-height:1.35">${esc(n.purpose||'暂无说明')}</div>
-          <div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;color:var(--text-tertiary);border-top:1px solid var(--border-subtle);padding-top:4px">
-            <span>${(n.depends_on||[]).length?'依赖: '+esc(n.depends_on.join(',')):'起始环节'}</span>
-            <span style="color:var(--primary)">点击详情</span>
-          </div>
-        </div>
-        ${i<nodes.length-1?'<div style="font-size:18px;color:var(--primary)">➔</div>':''}
-      `).join('')}
-    </div>`;
+  const list=document.createElement('div');
+  list.style.cssText='padding:32px;display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:center;height:100%;overflow:auto;box-sizing:border-box';
+  nodes.forEach(n=>{
+    const card=document.createElement('div');
+    card.className='tpl-node-card';
+    card.innerHTML=tplNodeCardHTML(n);
+    card.onclick=()=>openTemplateNodeDrawer(n);
+    list.appendChild(card);
+  });
+  container.replaceChildren(list);
 }
 
 function fitTplGraph(){
@@ -8024,17 +8001,18 @@ function zoomTplGraph(delta){
 function openTemplateNodeDrawer(node){
   const drawer=document.getElementById('tplNodeDrawer');
   if(!drawer)return;
-  drawer.classList.add('open');
+  if(!drawer.open)drawer.showModal();
+  document.getElementById('tplDrawerType').textContent=(node.node_type||'agent')+' 节点';
   document.getElementById('tplDrawerTitle').textContent=(node.label||node.id)+` (${node.id})`;
   document.getElementById('tplDrawerPurpose').textContent=node.purpose||'该阶段主要负责交付目标任务推进。';
   document.getElementById('tplDrawerAgents').textContent=(node.agents&&node.agents.length)?node.agents.join('、'):'auto (根据任务类型智能路由)';
   document.getElementById('tplDrawerDeps').textContent=(node.depends_on&&node.depends_on.length)?node.depends_on.join('、')+'（前置工序完备后自动触发）':'起始工序（无需前置依赖，工作流启动即就绪）';
-  document.getElementById('tplDrawerGate').textContent=node.gate||'默认标准门禁检查（自动化测试及基线验证）';
+  document.getElementById('tplDrawerGate').textContent=node.gate||'自动流转（未单独配置节点门禁）';
 }
 
 function closeTplNodeDrawer(){
   const drawer=document.getElementById('tplNodeDrawer');
-  if(drawer)drawer.classList.remove('open');
+  if(drawer&&drawer.open)drawer.close();
 }
 
 function launchWithCurrentTemplate(){

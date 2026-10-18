@@ -64,6 +64,13 @@ class TestTemplateLibraryBackend(unittest.TestCase):
         strategy = next(n for n in detail["nodes"] if n["id"] == "strategy")
         self.assertEqual(sorted(strategy["depends_on"]), ["history_search", "scoring_extract"])
 
+    def test_template_detail_includes_implicit_verdict_gates(self):
+        detail = self.module.template_detail("software-development-v1")
+        nodes = {n["id"]: n for n in detail["nodes"]}
+        for key in ("test", "review", "wrapup"):
+            self.assertTrue(nodes[key]["gate"], key)
+        self.assertFalse(nodes["implementation"]["gate"])
+
     def test_template_detail_unknown_name_raises(self):
         with self.assertRaises(RuntimeError) as ctx:
             self.module.template_detail("no-such-template")
@@ -299,6 +306,27 @@ class TestTemplateLibraryBehavior(unittest.TestCase):
              + script.split('// SOURCE')[1]],
             text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_refreshing_same_template_preserves_node_details(self):
+        source = self.html
+        block = source[source.index('async function selectTemplateInLibrary('):
+                       source.index('function tplNodeCardHTML(')]
+        self.run_js(block, r'''
+const state={templates:[],currentTemplateDetail:{template:{id:'alpha'}}};
+const document={getElementById:()=>null};
+let closed=0;
+function renderTplCards(){}
+function closeTplNodeDrawer(){closed++}
+function renderTplDAG(){}
+async function api(url){return {template:{id:url.split('=')[1]},nodes:[]}}
+// SOURCE
+(async()=>{
+ await selectTemplateInLibrary('alpha');
+ assert.equal(closed,0,'刷新同一模板不得打断属性阅读');
+ await selectTemplateInLibrary('beta');
+ assert.equal(closed,1,'切换模板必须关闭旧节点属性');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
 
     def test_template_selection_is_scoped_per_space(self):
         source = self.html

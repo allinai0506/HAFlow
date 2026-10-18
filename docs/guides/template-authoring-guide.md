@@ -170,3 +170,11 @@ HAFlow 内置了两套核心软件开发工作流模板，面向不同复杂度�
    ```bash
    herdr-factory run "试跑测试任务" --template my-template
    ```
+
+### 3.6 SPEC 规格开发与真实浏览器验收
+
+`spec-development-v1` 为七节点 Git 模板：规格与澄清 → 方案与任务 → 实现与自查收敛 → 独立测试 / 独立审核并行 → 验收汇聚 → 六步收尾。规格节点内执行 specify、按需 clarify 及对抗检查；方案节点内执行 plan、tasks、analyze。审核节点依次要求 `ai-slop-cleaner --review` 和 `google-code-review`，只读验证同一冻结候选；修复交回实现节点，不在审核中移动候选。
+
+三套研发模板（`code-craft-v1`、`software-development-v1`、`spec-development-v1`）的测试节点均要求启动冻结候选的本地服务，通过 `ego-browser` 技能执行真实业务 E2E，记录启动/版本、步骤、实际结果、浏览器及状态回读证据。未执行、跳过、失败或证据缺失不得输出 pass。测试使用隔离端口、临时数据和测试账号。
+
+上述要求是模板的执行/验收契约，不是新增的 Controller E2E 回执校验器。用户目录同名模板优先于内置模板；更新源码后需核对实际加载路径。已有 Workflow 使用冻结定义，新模板不会追溯覆盖历史运行。

@@ -1,0 +1,312 @@
+name: spec-development-v1
+label: SPEC规格开发
+version: '1.1'
+description: 七节点 SPEC 研发：规格与澄清→方案与任务→实现自查→独立测试/双技能审核并行→验收汇聚→六步收尾。
+execution:
+  mode: git
+selective_replan:
+  version: selective-replan-v1
+  mode: explicit_task_targets
+  retry_node: implementation
+nodes:
+- id: specify
+  label: 1. 规格与澄清
+  node_type: agent
+  depends_on: []
+  parallel: false
+  max_tasks_per_node: 4
+  purpose: 单一节点串行完成 /speckit-specify、按需 /speckit-clarify 与规格对抗检查。
+  default_task_type: docs
+  default_integration_mode: git
+  agent_policy:
+    preferred:
+    - codex
+    - claude
+    - opencode
+    max_concurrency: 1
+    parallel: false
+    allow_soft_degrade: true
+  required_outputs:
+  - spec.md（当前 feature 目录）
+  - 澄清记录或跳过原因
+  - 规格对抗检查与问题处置表
+  rules:
+  - 启动前读取目标项目 AGENTS.md 和适用规则；只在平台分配的隔离 Task 工作区执行，不自行更换分支或启动另一套工作流。
+  - 从本次需求及前序交付确认唯一 feature 目录，将其路径和当前版本写入交付记录；不得硬编码示例 specs/007-display-fields-hierarchy/，不得混用不同 feature 的产物。
+  - 检查本节点所需 slash command/skill 是否实际可用；优先使用项目已安装命令，点号与连字符形式仅在确认映射后使用。缺失则报告阻塞及缺失项，不伪造执行或自动安装。
+  - 交付记录包含 feature 目录、输入版本、命令或技能、输出路径、验证证据、未解决问题；后续节点必须读取已集成的前序产物，不假设不同 Task 共享未提交文件。
+  - 创建 Task 默认使用 --agent auto；不调用收费模型探针，不越权推送、合并、部署或重启服务。
+  - 派发实现、测试或评审任务时显式传入与影响面匹配的 --test-cmd / --lint-cmd；不依赖评估器默认全量。专项验证不能替代必要的 CI 全量，exit 124 或缺少回执均不得标记 PASS。
+  - 等待人工、CI 或外部审核时按平台支持的协议周期性 checkpoint，记录等待原因与恢复入口；无法维持等待时交回主控，不无限占用工位或盲目重派。
+  - 派发失败先核对 state.db 中 Task/Run、候选、派发记录及现场身份；补派按平台 supersedes/recovery 协议保留不可变历史。未知结果不得重复发送，不手改 verdict 或绕过门禁。
+  - 先检查项目原则文件及已确认的原则；缺失时执行 /speckit.constitution 建立原则，已有原则则复用，不无故重写。
+  - 将需求整理为范围、非目标、用户场景、验收标准、约束和失败边界，执行 /speckit-specify（已验证的别名可为 /speckit.specify）。
+  - 保存 spec.md，明确本次 feature 目录及待澄清问题；遇到无法确定的关键业务选择向用户提问，不猜测。
+  - 读取上一节点的 spec.md 和问题清单；存在影响范围、验收或技术选择的歧义时执行 /speckit-clarify。
+  - 需要用户回答的问题必须等待答复；确认结果写回同一 spec.md。
+  - 无待澄清问题时本节点仍交付明确的跳过原因和检查记录；仅跳过 clarify 命令，不跳过节点交付。
+  - 在同一节点、同一工位依次起草→反例/边界对抗检查→按需澄清→修订，不另开 clarify 节点或嵌套工作流。
+  - 对抗检查必须覆盖隐式假设、空/错误输入、无操作假成功、权限与失败边界；逐项记录问题、反例、处置与验收标准。该自查不宣称独立代码评审。
+- id: plan
+  label: 2. 方案与任务
+  node_type: agent
+  depends_on:
+  - specify
+  parallel: false
+  max_tasks_per_node: 4
+  purpose: 单一节点串行执行 /speckit-plan → /speckit-tasks → /speckit-analyze。
+  default_task_type: docs
+  default_integration_mode: git
+  agent_policy:
+    preferred:
+    - codex
+    - claude
+    - opencode
+    max_concurrency: 1
+    parallel: false
+    allow_soft_degrade: true
+  required_outputs:
+  - plan.md
+  - tasks.md
+  - spec/plan/tasks 一致性报告
+  - 测试/评审范围、信任边界与退出标准
+  rules:
+  - 启动前读取目标项目 AGENTS.md 和适用规则；只在平台分配的隔离 Task 工作区执行，不自行更换分支或启动另一套工作流。
+  - 从本次需求及前序交付确认唯一 feature 目录，将其路径和当前版本写入交付记录；不得硬编码示例 specs/007-display-fields-hierarchy/，不得混用不同 feature 的产物。
+  - 检查本节点所需 slash command/skill 是否实际可用；优先使用项目已安装命令，点号与连字符形式仅在确认映射后使用。缺失则报告阻塞及缺失项，不伪造执行或自动安装。
+  - 交付记录包含 feature 目录、输入版本、命令或技能、输出路径、验证证据、未解决问题；后续节点必须读取已集成的前序产物，不假设不同 Task 共享未提交文件。
+  - 创建 Task 默认使用 --agent auto；不调用收费模型探针，不越权推送、合并、部署或重启服务。
+  - 派发实现、测试或评审任务时显式传入与影响面匹配的 --test-cmd / --lint-cmd；不依赖评估器默认全量。专项验证不能替代必要的 CI 全量，exit 124 或缺少回执均不得标记 PASS。
+  - 等待人工、CI 或外部审核时按平台支持的协议周期性 checkpoint，记录等待原因与恢复入口；无法维持等待时交回主控，不无限占用工位或盲目重派。
+  - 派发失败先核对 state.db 中 Task/Run、候选、派发记录及现场身份；补派按平台 supersedes/recovery 协议保留不可变历史。未知结果不得重复发送，不手改 verdict 或绕过门禁。
+  - 在规格关键问题已解决后执行 /speckit-plan；沿目标项目真实代码调用链确认兼容性、数据权威来源和改动边界。
+  - 方案写入当前 feature 的 plan.md，列出模块、接口、数据变化、关键不变量、测试策略与迁移/恢复要求；仅在相关时生成辅助设计文件。
+  - 执行 /speckit-tasks 生成可执行 tasks.md，明确依赖、文件范围、验收方法及测试任务。
+  - 对本次 feature 目录执行 /speckit-analyze，检查 spec.md、plan.md、tasks.md 的覆盖、矛盾与缺失；不得固定使用示例目录。
+  - 先记录 analyze 发现，再在授权范围修正规格/方案/任务并重跑；关键业务歧义回到用户确认，存在未解决阻塞不得进入实现。
+  - 方案中明确威胁模型、范围外事项、验收与轮次预算；平台缺失的新授权/锁/原子性原语转设计/backlog，不在业务任务中制造半套原语。
+  - 默认单工位实现；第一版不自动拆多实现任务。仅在另行确认接口稳定、文件/迁移/生成产物互不冲突、独立验收与统一集成人后，才调整并发策略。
+- id: implementation
+  label: 3. 实现与自查收敛
+  node_type: agent
+  depends_on:
+  - plan
+  parallel: false
+  max_tasks_per_node: 4
+  purpose: /speckit-implement → /speckit-converge → 专项自测，在单工位内完成实现与补漏。
+  default_task_type: feat
+  default_integration_mode: git
+  agent_policy:
+    preferred:
+    - codex
+    - claude
+    - opencode
+    max_concurrency: 1
+    parallel: false
+    allow_soft_degrade: true
+  required_outputs:
+  - 实现代码与修改清单
+  - 完成状态准确的 tasks.md
+  - converge 自查及 analyze 结果
+  - RED→GREEN 与专项/调用链证据
+  - verify-baseline 及冻结候选交付记录
+  rules:
+  - 启动前读取目标项目 AGENTS.md 和适用规则；只在平台分配的隔离 Task 工作区执行，不自行更换分支或启动另一套工作流。
+  - 从本次需求及前序交付确认唯一 feature 目录，将其路径和当前版本写入交付记录；不得硬编码示例 specs/007-display-fields-hierarchy/，不得混用不同 feature 的产物。
+  - 检查本节点所需 slash command/skill 是否实际可用；优先使用项目已安装命令，点号与连字符形式仅在确认映射后使用。缺失则报告阻塞及缺失项，不伪造执行或自动安装。
+  - 交付记录包含 feature 目录、输入版本、命令或技能、输出路径、验证证据、未解决问题；后续节点必须读取已集成的前序产物，不假设不同 Task 共享未提交文件。
+  - 创建 Task 默认使用 --agent auto；不调用收费模型探针，不越权推送、合并、部署或重启服务。
+  - 派发实现、测试或评审任务时显式传入与影响面匹配的 --test-cmd / --lint-cmd；不依赖评估器默认全量。专项验证不能替代必要的 CI 全量，exit 124 或缺少回执均不得标记 PASS。
+  - 等待人工、CI 或外部审核时按平台支持的协议周期性 checkpoint，记录等待原因与恢复入口；无法维持等待时交回主控，不无限占用工位或盲目重派。
+  - 派发失败先核对 state.db 中 Task/Run、候选、派发记录及现场身份；补派按平台 supersedes/recovery 协议保留不可变历史。未知结果不得重复发送，不手改 verdict 或绕过门禁。
+  - 执行 /speckit-implement；按 tasks.md 顺序推进，遵守目标项目测试驱动要求并保留 RED→GREEN 证据。
+  - 每项完成须有实际代码/产物及验收证据再勾选；测试使用临时数据和受控依赖，不操作生产状态或启动真实业务 Agent。
+  - 运行受影响测试、调用方及至少一条真实入口到持久化再读取的适用链路；记录命令、退出码、版本与未验证项，执行平台 verify-baseline。
+  - 执行 /speckit-converge，对照 spec/plan/tasks 将遗漏补入任务清单并完成，随后重跑 /speckit-analyze 与受影响验证。
+  - 自查不替代独立 test/review。修复门禁反馈后由主控发布新的冻结候选，不自行改写其他 Task 的历史身份或验收结论。
+  - 范围内必要清理遵循先锁定行为、写清理计划、删除优先、逐项验证；不顺手扩大重构范围。
+- id: test
+  label: 4. 独立测试
+  node_type: agent
+  depends_on:
+  - implementation
+  parallel: false
+  max_tasks_per_node: 4
+  purpose: 与 review 并行，对同一冻结候选执行专项回归、真实调用链和失败边界验收。
+  default_task_type: test
+  default_integration_mode: none
+  agent_policy:
+    preferred:
+    - codex
+    - claude
+    - opencode
+    max_concurrency: 1
+    parallel: false
+    allow_soft_degrade: true
+  required_outputs:
+  - 冻结候选与实际装载记录
+  - 测试范围、执行日志与退出码
+  - 需求验收覆盖和边界结果
+  - 缺陷清单与机器门禁结论
+  - 本地服务启动与候选版本核验记录（命令、工作目录、URL、隔离环境）
+  - ego-browser 真实 E2E 报告（步骤、预期/实际结果、业务主路径及失败边界）
+  - E2E 截图/浏览器记录与状态回读证据（绑定候选 SHA 和 Task/Run）
+  rules:
+  - 真实 E2E 为本测试节点必过门禁：必须在隔离测试环境启动当前冻结候选版本的本地服务，执行真实端到端测试；不得用单元测试、静态检查、截图、页面可打开或 HTTP 200 替代。
+  - 浏览器 E2E 必须使用 ego-browser 技能：先读取目标环境技能并运行 ego-browser skill，遵循当前版本指南操作真实本地应用；不得用静态 mock/demo 页面、测试替身或伪造成功页面替代被验收业务链。
+  - 按项目文档启动所需前后端及依赖，使用隔离端口、临时数据库和测试账号；服务实际加载版本必须对应冻结 candidate_sha。记录启动命令、工作目录、端口/URL、版本核验及就绪证据；不得复用身份不明的旧服务或重启生产服务。
+  - 从 spec/需求与本次影响面选择关键用户旅程，使用 ego-browser 实际输入、点击、提交并检查结果，覆盖至少一条完整业务主路径及相关失败/边界路径；跨持久化功能须验证写入后的读取/刷新/重新打开，必要时核对 API/数据库，不能只看成功提示。
+  - 保存可回放步骤、预期/实际结果、截图或浏览器记录及后端状态回读证据，并绑定 workflow/task/run 与 candidate_sha；报告不得含凭据或未脱敏敏感数据。测试结束仅清理由本任务启动且身份明确的服务及临时资源。
+  - '只有真实本地服务 E2E 全部必要场景通过且其他必需验收也通过，才允许 HERDR_GATE_VERDICT: pass。未运行、跳过、失败、技能缺失、环境未就绪或证据不足均须 HERDR_GATE_VERDICT: blocked，说明原因并交主控恢复/裁决；不得标为不适用后放行，也不得以 unknown 当 PASS。'
+  - 启动前读取目标项目 AGENTS.md 和适用规则；只在平台分配的隔离 Task 工作区执行，不自行更换分支或启动另一套工作流。
+  - 从本次需求及前序交付确认唯一 feature 目录，将其路径和当前版本写入交付记录；不得硬编码示例 specs/007-display-fields-hierarchy/，不得混用不同 feature 的产物。
+  - 检查本节点所需 slash command/skill 是否实际可用；优先使用项目已安装命令，点号与连字符形式仅在确认映射后使用。缺失则报告阻塞及缺失项，不伪造执行或自动安装。
+  - 交付记录包含 feature 目录、输入版本、命令或技能、输出路径、验证证据、未解决问题；后续节点必须读取已集成的前序产物，不假设不同 Task 共享未提交文件。
+  - 创建 Task 默认使用 --agent auto；不调用收费模型探针，不越权推送、合并、部署或重启服务。
+  - 派发实现、测试或评审任务时显式传入与影响面匹配的 --test-cmd / --lint-cmd；不依赖评估器默认全量。专项验证不能替代必要的 CI 全量，exit 124 或缺少回执均不得标记 PASS。
+  - 等待人工、CI 或外部审核时按平台支持的协议周期性 checkpoint，记录等待原因与恢复入口；无法维持等待时交回主控，不无限占用工位或盲目重派。
+  - 派发失败先核对 state.db 中 Task/Run、候选、派发记录及现场身份；补派按平台 supersedes/recovery 协议保留不可变历史。未知结果不得重复发送，不手改 verdict 或绕过门禁。
+  - 只读验收已集成冻结 candidate_sha；开工先核验实际 HEAD、候选身份及 verify-baseline，Git 对象存在不等于候选已装载。不匹配交主控修复，不自行切分支或替换候选。
+  - 必须使用独立于实现任务的 Task/Run 和隔离会话；优先不同 Agent，资源不足先排队。复用实现 Agent 只能走平台显式审计豁免，不能将作者自审冒充独立验收。
+  - 不得直接修改业务代码、规格或 tasks.md；发现输出位置、触发条件、后果、复现/验证方法、分类与严重度，交主控统一归并并回流 implementation。
+  - '记录候选 SHA、执行范围、输入版本、命令及退出码。仅无阻塞且必要证据齐全时输出 HERDR_GATE_VERDICT: pass，否则输出 HERDR_GATE_VERDICT: blocked；缺证据保持 unknown，不伪造
+    PASS。'
+  - 区分业务/代码缺陷与平台、环境、等待问题；基础设施 unknown 交主控恢复，不机械要求实现者改代码。
+  - 测试范围取自 plan，覆盖受影响模块、调用方及适用的真实 CLI/Controller→核心→持久化→读取链；不替换被验收能力。
+  - 本地不机械重复 CI 全量；CI 不可用按目标项目规则补证。纯文档按实际影响验收；超时、网络/代理或 runner 故障先分诊。
+- id: review
+  label: 5. 独立审核
+  node_type: agent
+  depends_on:
+  - implementation
+  parallel: false
+  max_tasks_per_node: 4
+  purpose: 与 test 并行，强制依次使用 ai-slop-cleaner --review 和 google-code-review。
+  default_task_type: test
+  default_integration_mode: none
+  agent_policy:
+    preferred:
+    - codex
+    - claude
+    - opencode
+    max_concurrency: 1
+    parallel: false
+    allow_soft_degrade: true
+  required_outputs:
+  - ai-slop-cleaner --review 报告
+  - google-code-review 报告（LGTM / Comments / Request Change）
+  - 发现分类、严重度及处置建议
+  - 覆盖的完整 diff 与调用链
+  - 机器门禁结论与候选 SHA
+  rules:
+  - 启动前读取目标项目 AGENTS.md 和适用规则；只在平台分配的隔离 Task 工作区执行，不自行更换分支或启动另一套工作流。
+  - 从本次需求及前序交付确认唯一 feature 目录，将其路径和当前版本写入交付记录；不得硬编码示例 specs/007-display-fields-hierarchy/，不得混用不同 feature 的产物。
+  - 检查本节点所需 slash command/skill 是否实际可用；优先使用项目已安装命令，点号与连字符形式仅在确认映射后使用。缺失则报告阻塞及缺失项，不伪造执行或自动安装。
+  - 交付记录包含 feature 目录、输入版本、命令或技能、输出路径、验证证据、未解决问题；后续节点必须读取已集成的前序产物，不假设不同 Task 共享未提交文件。
+  - 创建 Task 默认使用 --agent auto；不调用收费模型探针，不越权推送、合并、部署或重启服务。
+  - 派发实现、测试或评审任务时显式传入与影响面匹配的 --test-cmd / --lint-cmd；不依赖评估器默认全量。专项验证不能替代必要的 CI 全量，exit 124 或缺少回执均不得标记 PASS。
+  - 等待人工、CI 或外部审核时按平台支持的协议周期性 checkpoint，记录等待原因与恢复入口；无法维持等待时交回主控，不无限占用工位或盲目重派。
+  - 派发失败先核对 state.db 中 Task/Run、候选、派发记录及现场身份；补派按平台 supersedes/recovery 协议保留不可变历史。未知结果不得重复发送，不手改 verdict 或绕过门禁。
+  - 只读验收已集成冻结 candidate_sha；开工先核验实际 HEAD、候选身份及 verify-baseline，Git 对象存在不等于候选已装载。不匹配交主控修复，不自行切分支或替换候选。
+  - 必须使用独立于实现任务的 Task/Run 和隔离会话；优先不同 Agent，资源不足先排队。复用实现 Agent 只能走平台显式审计豁免，不能将作者自审冒充独立验收。
+  - 不得直接修改业务代码、规格或 tasks.md；发现输出位置、触发条件、后果、复现/验证方法、分类与严重度，交主控统一归并并回流 implementation。
+  - '记录候选 SHA、执行范围、输入版本、命令及退出码。仅无阻塞且必要证据齐全时输出 HERDR_GATE_VERDICT: pass，否则输出 HERDR_GATE_VERDICT: blocked；缺证据保持 unknown，不伪造
+    PASS。'
+  - 区分业务/代码缺陷与平台、环境、等待问题；基础设施 unknown 交主控恢复，不机械要求实现者改代码。
+  - 两项技能均为必做，不得二选一或仅用普通自审替代：先读取并执行 ai-slop-cleaner 的 --review 模式，再读取并执行 google-code-review。目标环境缺任一技能则阻塞并说明，不静默跳过或自动安装。
+  - ai-slop-cleaner --review 仅检查本次变更及必要调用上下文，审查清理计划/验证策略、死代码、重复逻辑、无意义抽象、边界违规和行为保护证据；无清理必要时明确记录，无须为了使用技能制造代码改动。
+  - google-code-review 必须审查设计、复杂度、功能正确性，并按影响面覆盖并发、安全、测试、命名、注释、规范、文档和变更说明；先读全 diff 与关联调用链，不只检查新增 helper。
+  - 发现分为 A 真缺陷、B 设计边界、C 平台结构缺口、D 复核发现；Nit/Optional 不冒充阻塞，不以零发现或个人偏好为退出标准。
+  - 两项技能报告必须绑定同一冻结 SHA。google-code-review 的 LGTM/Comments/Request Change 是人类审查结论，另按阻塞情况输出平台 pass/blocked；必要修复由独立
+    writer 完成并重新验收。
+- id: acceptance
+  label: 6. 验收汇聚
+  node_type: agent
+  depends_on:
+  - test
+  - review
+  parallel: false
+  max_tasks_per_node: 4
+  purpose: 汇聚同候选测试和两项强制审核报告，统一问题处置与受控返工，不直接改代码。
+  default_task_type: docs
+  default_integration_mode: none
+  agent_policy:
+    preferred:
+    - codex
+    - claude
+    - opencode
+    max_concurrency: 1
+    parallel: false
+    allow_soft_degrade: true
+  required_outputs:
+  - 需求—任务—实现—证据对应表
+  - 同 SHA 双门禁及两项技能报告核验
+  - 问题去重/分类/处置与剩余风险
+  - 放行或返工/等待的明确结论
+  rules:
+  - 启动前读取目标项目 AGENTS.md 和适用规则；只在平台分配的隔离 Task 工作区执行，不自行更换分支或启动另一套工作流。
+  - 从本次需求及前序交付确认唯一 feature 目录，将其路径和当前版本写入交付记录；不得硬编码示例 specs/007-display-fields-hierarchy/，不得混用不同 feature 的产物。
+  - 检查本节点所需 slash command/skill 是否实际可用；优先使用项目已安装命令，点号与连字符形式仅在确认映射后使用。缺失则报告阻塞及缺失项，不伪造执行或自动安装。
+  - 交付记录包含 feature 目录、输入版本、命令或技能、输出路径、验证证据、未解决问题；后续节点必须读取已集成的前序产物，不假设不同 Task 共享未提交文件。
+  - 创建 Task 默认使用 --agent auto；不调用收费模型探针，不越权推送、合并、部署或重启服务。
+  - 派发实现、测试或评审任务时显式传入与影响面匹配的 --test-cmd / --lint-cmd；不依赖评估器默认全量。专项验证不能替代必要的 CI 全量，exit 124 或缺少回执均不得标记 PASS。
+  - 等待人工、CI 或外部审核时按平台支持的协议周期性 checkpoint，记录等待原因与恢复入口；无法维持等待时交回主控，不无限占用工位或盲目重派。
+  - 派发失败先核对 state.db 中 Task/Run、候选、派发记录及现场身份；补派按平台 supersedes/recovery 协议保留不可变历史。未知结果不得重复发送，不手改 verdict 或绕过门禁。
+  - 必须读取当前有效 test/review 任务、Run、候选及业务验收证据；两条分支均 PASS 且对应当前冻结候选，审核两项技能均完成，才允许收尾。不得仅凭节点 completed 或通用评分放行。
+  - 只读核验 spec/plan/tasks 和实际实现的对应关系；漏项由主控回流 implementation 更新任务与实现，不在汇聚工位改代码或创造第三份权威清单。
+  - 对发现统一去重、分类并记录处置。真缺陷必须修复；范围外需求或新平台原语交所有者决定 backlog/缩范围，不自行免除既有验收。
+  - 连续两轮复核性发现即触发所有者停表裁决；连续三轮未收敛或预算耗尽升级人工。轮次由主控依据真实历史累计，不能靠新建 Task 清零。
+  - 返工通过平台恢复/选择性返工协议执行，不在 depends_on 中造环；新候选的受影响门禁必须重跑，未受影响证据仅在平台显式复用契约满足时复用，默认重跑。
+  - 测试与审核可并行收集证据；修复前由单一主控形成批次，等待当前批次结算或明确取消旧候选，避免一边验旧版本一边移动候选。
+  artifact_mode: shared_artifacts
+  gate:
+    retry_node: implementation
+- id: wrapup
+  label: 7. 六步收尾
+  node_type: agent
+  depends_on:
+  - acceptance
+  parallel: false
+  max_tasks_per_node: 4
+  purpose: 使用 six-step-finish 核验验收证据、沉淀知识并建立交付 PR。
+  default_task_type: docs
+  default_integration_mode: none
+  agent_policy:
+    preferred:
+    - codex
+    - claude
+    - opencode
+    max_concurrency: 1
+    parallel: false
+    allow_soft_degrade: true
+    exclude_stage_agents:
+    - implementation
+  required_outputs:
+  - 六步收尾逐步状态表
+  - PR URL / base / 当前 head
+  - CI 与外部审核完成及 findings 闭环证据
+  - 知识/Wiki 更新及候选再验证记录
+  - 待授权动作、遗留项与资源归档状态
+  - 机器门禁结论
+  rules:
+  - 启动前读取目标项目 AGENTS.md 和适用规则；只在平台分配的隔离 Task 工作区执行，不自行更换分支或启动另一套工作流。
+  - 从本次需求及前序交付确认唯一 feature 目录，将其路径和当前版本写入交付记录；不得硬编码示例 specs/007-display-fields-hierarchy/，不得混用不同 feature 的产物。
+  - 检查本节点所需 slash command/skill 是否实际可用；优先使用项目已安装命令，点号与连字符形式仅在确认映射后使用。缺失则报告阻塞及缺失项，不伪造执行或自动安装。
+  - 交付记录包含 feature 目录、输入版本、命令或技能、输出路径、验证证据、未解决问题；后续节点必须读取已集成的前序产物，不假设不同 Task 共享未提交文件。
+  - 创建 Task 默认使用 --agent auto；不调用收费模型探针，不越权推送、合并、部署或重启服务。
+  - 派发实现、测试或评审任务时显式传入与影响面匹配的 --test-cmd / --lint-cmd；不依赖评估器默认全量。专项验证不能替代必要的 CI 全量，exit 124 或缺少回执均不得标记 PASS。
+  - 等待人工、CI 或外部审核时按平台支持的协议周期性 checkpoint，记录等待原因与恢复入口；无法维持等待时交回主控，不无限占用工位或盲目重派。
+  - 派发失败先核对 state.db 中 Task/Run、候选、派发记录及现场身份；补派按平台 supersedes/recovery 协议保留不可变历史。未知结果不得重复发送，不手改 verdict 或绕过门禁。
+  - 必须使用目标项目适用 six-step-finish 或优先级更高的项目收尾脚本，逐步记录步骤/执行者/命令/结果/证据。
+  - 只在 acceptance 放行、同 SHA test/review 及两项强制技能报告齐全时进入收尾；核对当前候选和业务验收，不用旧 head 的证据放行新版本。
+  - 按项目要求完成知识沉淀、Wiki 检查并提交；新增提交会改变候选，必须由主控重新冻结并完成必要门禁或平台认可的选择性复用，再发布交付。
+  - 首选 herdr-task create-pr 创建交付 PR，记录 URL、base、head。平台因缺候选或门禁拒绝时应补齐证明，禁止换 forge 入口绕过门禁。真正的平台入口不可用按目标项目授权流程处理并记录原因。
+  - 建 PR 后完成审核闭环：等待必要 CI 与外部审核实际完成，核验当前 head 的检查和 findings 逐项处置；仅有早先绿色 CI 不等于异步审核完成。未决阻塞不得宣称交付完成。
+  - CI/外部审核故障或等待交主控恢复；正确性/安全性问题回 implementation 形成新候选并重走受影响验收。连续两轮复核发现停表、三轮未收敛升级人工。
+  - 六步状态表固定包含 PR URL / CI 状态 / 审核 findings 状态（未决数量及处置）；合并未授权时明确待确认，不自动合并，不使用 --force/--yes 或改写分支历史。
+  - 合并确认、锚点同步、分支清理按授权与落地事实记录完成/待确认/不适用。不得自行删除 Task clone/pane/阶段 tab；平台关闭回收应先验证完整归档，再核验物理结果。
+  - '必要条件满足输出 HERDR_GATE_VERDICT: pass；缺证据或有阻塞输出 blocked 并说明。明确工作流交付、PR 合并、部署和业务 UAT 的实际状态。'
+  artifact_mode: shared_artifacts
+  gate:
+    retry_node: implementation
+  review_closure_required: true

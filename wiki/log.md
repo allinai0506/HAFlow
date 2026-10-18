@@ -2716,3 +2716,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Added [[simple-workbench]]：记录 /simple 与专业工作台共用 API、URL 身份、Context 业务目录和真实成果读取边界。
 - Evidence: `tests/test_simple_workbench.py`、`console/static/simple.js`、`console/herdr_factory_console.py#Handler`。
 - 补充 `docs/lessons/lessons-learned.md` §166：输入项目可能经 Git 根目录归一化，启动后按返回工作流读回真实归属，不允许旧需求默认值掩盖错误。
+
+## [2026-10-18] Update | SPEC 七节点与真实浏览器验收
+- Updated [[dag-workflow-engine]]: 记录 SPEC 串并行结构、双技能审核和三套研发模板的本地服务/ego-browser E2E 契约，区分模板要求与程序化验证。
