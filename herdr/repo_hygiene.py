@@ -141,13 +141,24 @@ def main_repo_from_env(default: str = "") -> str:
     return os.environ.get("HERDR_MAIN_REPO", default)
 
 
+def is_bypass_untracked(path: str) -> bool:
+    """True for untracked bypass artifacts (e.g. .codegraph, .DS_Store, *.sock) produced by indexers/IDEs."""
+    from herdr.clone_archive import is_bypass_rel_path
+    return is_bypass_rel_path(path)
+
+
 def teardown_output_diagnosis(porcelain: str, *, task_id: str) -> dict:
     """Reuse hygiene path semantics, including non-infrastructure untracked output."""
     paths = parse_porcelain_paths(porcelain)
     for line in str(porcelain or '').splitlines():
         if line.startswith('?? '):
             path = _decode_git_path(line[3:])
-            if path and not is_internal_untracked(path) and path not in paths:
+            if (
+                path
+                and not is_internal_untracked(path)
+                and not is_bypass_untracked(path)
+                and path not in paths
+            ):
                 paths.append(path)
     return {'reason': 'unpreserved_worktree_output' if paths else '',
             'blocked_files': paths[:MAX_LISTED_FILES], 'blocked_total': len(paths),
