@@ -246,6 +246,7 @@ def make_scene(root: Path) -> SimpleNamespace:
         "task_id": "wrapup-task", "workflow_id": "wf-closure",
         "status": "agent_done", "stage": "wrapup", "node": "wrapup",
         "agent": "qodercli", "clone_path": str(clone),
+        "source_repo": str(clone),
     })
     store.save_task({
         "task_id": "legacy-wrapup", "workflow_id": "wf-legacy",
@@ -827,3 +828,173 @@ def test_stop_line_does_not_pass_with_only_one_completed_round(scene):
     assert refused.returncode == 2
     assert "no completed Codex review found" in (refused.stdout + refused.stderr)
 
+
+def test_rogue_remote_in_clone_is_rejected_as_delivery_identity(scene):
+    """Rogue remote added by worker in clone must not become a delivery identity (issue #227)."""
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "evil",
+         "https://github.com/attacker/repo.git"],
+        check=True, capture_output=True, text=True,
+    )
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+
+def test_source_repo_is_authoritative_over_clone_remotes(scene, tmp_path):
+    """source_repo remotes are authoritative; clone remotes cannot expand them (issue #227)."""
+    source = tmp_path / "source_repo"
+    source.mkdir()
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "remote", "add", "origin",
+         "https://github.com/owner/repo.git"],
+        check=True,
+    )
+
+    task = scene.store.get_task("wrapup-task")
+    task["source_repo"] = str(source)
+    scene.store.save_task(task)
+
+    # Worker injects rogue remotes into task clone
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "evil",
+         "https://github.com/attacker/repo.git"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "upstream",
+         "https://github.com/attacker/repo.git"],
+        check=True,
+    )
+
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+    # The legitimate owner/repo PR remains accepted
+    ok = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/owner/repo/pull/1",
+    )
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_fork_source_repo_accepts_upstream_and_ignores_clone_evil(scene, tmp_path):
+    """Fork in source_repo accepts upstream target PR and ignores clone evil (issue #227)."""
+    source = tmp_path / "fork_source_repo"
+    source.mkdir()
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "remote", "add", "origin",
+         "git@github.com:forkuser/repo.git"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "remote", "add", "upstream",
+         "https://github.com/owner/repo.git"],
+        check=True,
+    )
+
+    task = scene.store.get_task("wrapup-task")
+    task["source_repo"] = str(source)
+    scene.store.save_task(task)
+
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "add", "evil",
+         "https://github.com/attacker/repo.git"],
+        check=True,
+    )
+
+    ok = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/owner/repo/pull/1",
+    )
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+
+def test_worker_clone_origin_cannot_forge_delivery_identity_when_source_repo_missing(scene):
+    """When source_repo is absent, worker setting origin in clone must fail closed (Codex P1 on PR #265)."""
+    task = scene.store.get_task("wrapup-task")
+    task["source_repo"] = None
+    scene.store.save_task(task)
+
+    # Worker runs git remote set-url origin attacker in its clone
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "set-url", "origin",
+         "https://github.com/attacker/repo.git"],
+        check=True,
+    )
+
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+
+def test_worker_clone_origin_cannot_forge_delivery_identity_when_source_repo_non_github(scene, tmp_path):
+    """When source_repo has no GitHub remote, clone remotes cannot forge identity (Codex P1 on PR #265)."""
+    source = tmp_path / "nongithub_source"
+    source.mkdir()
+    subprocess.run(["git", "-C", str(source), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "remote", "add", "origin",
+         "https://gitlab.example.com/team/repo.git"],
+        check=True,
+    )
+
+    task = scene.store.get_task("wrapup-task")
+    task["source_repo"] = str(source)
+    scene.store.save_task(task)
+
+    # Worker in clone sets origin to attacker GitHub repo
+    subprocess.run(
+        ["git", "-C", str(scene.clone), "remote", "set-url", "origin",
+         "https://github.com/attacker/repo.git"],
+        check=True,
+    )
+
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+
+def test_immutable_launch_delivery_identities_respected(scene):
+    """Immutable delivery_identities captured at launch take precedence when source_repo is absent."""
+    task = scene.store.get_task("wrapup-task")
+    task["source_repo"] = None
+    task["delivery_identities"] = ["launch-owner/repo"]
+    scene.store.save_task(task)
+
+    # Attacker PR is rejected
+    refused = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/attacker/repo/pull/1",
+    )
+    assert refused.returncode == 2
+    assert "delivery identity" in (refused.stdout + refused.stderr)
+
+    # Launch delivery identity PR is accepted
+    ok = record_valid(
+        scene.store, scene.head,
+        pr_url="https://github.com/launch-owner/repo/pull/1",
+    )
+    assert ok.returncode == 0, ok.stdout + ok.stderr

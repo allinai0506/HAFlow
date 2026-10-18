@@ -4150,6 +4150,14 @@ def _launch_task(args):
             now=now,
         )
 
+    launch_delivery_identities = []
+    if source_repo:
+        try:
+            from herdr.review_closure import _path_delivery_identities
+            launch_delivery_identities = _path_delivery_identities(source_repo)
+        except Exception:
+            launch_delivery_identities = []
+
     task = {
         "task_id": args.task_id,
         "workflow_id": args.workflow_id,
@@ -4157,6 +4165,7 @@ def _launch_task(args):
         "project_id": project.get("project_id"),
         "project_name": project.get("project_name"),
         "source_repo": source_repo,
+        "delivery_identities": launch_delivery_identities,
         "base_branch": base_branch,
         "coordinator_pane_id": project.get("coordinator_pane_id"),
         "workflow_config": project.get("workflow_file"),
