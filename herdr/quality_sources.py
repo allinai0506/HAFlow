@@ -14,9 +14,11 @@ from .execution_trace import (
     MAX_LIMIT,
     STORED_LIMIT,
     _PROJECTABLE_EVENT_TYPES,
+    _corrupt_payload_note,
     _tests_row_has_verdict,
     _verification_verdicts,
     assemble_trace,
+    decode_stored_payload,
     merge_trace_events,
     project_stored_event,
     read_stored_events,
@@ -48,8 +50,9 @@ def load_quality_inputs(task_id: str, run_id: str, *, db_path, roots, budget_s: 
     owning = persisted == run_id if persisted else run_id == run_id_for_task(task)
     signals, human_note = _human_rows(task_id, run_id, db_path)
     if not owning:
-        events, truncated = _events_for_run(task, run_id, db_path)
+        events, truncated, corrupt_notes = _events_for_run(task, run_id, db_path)
         notes = [{"code": "historical_run_trace_limited", "message": "只读取该运行已归属的账本事件。"}]
+        notes.extend(corrupt_notes)
         if truncated:
             notes.append({"code": "native_truncated", "message": "执行轨迹已截断，仅显示已读取的部分。"})
         if human_note:
@@ -112,13 +115,12 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
     finally:
         conn.close()
     decoded = []
+    corrupt_ids = []
     for row in rows:
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except json.JSONDecodeError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload, corrupt = decode_stored_payload(row["payload_json"])
+        if corrupt:
+            corrupt_ids.append(row["id"])
+            continue
         decoded.append({
             "id": row["id"],
             "task_id": row["task_id"],
@@ -130,6 +132,9 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
             "sequence": row["sequence"],
             "payload": payload,
         })
+    notes = []
+    if corrupt_ids:
+        notes.append(_corrupt_payload_note(corrupt_ids))
     view = dict(task)
     view["run_id"] = run_id
     verdicts = _verification_verdicts(decoded)
@@ -140,7 +145,7 @@ def _events_for_run(task: Dict[str, Any], run_id: str, db_path):
         event = project_stored_event(row, view)
         if event is not None:
             projected.append(event)
-    return merge_trace_events(projected), len(decoded) >= STORED_LIMIT
+    return merge_trace_events(projected), len(rows) >= STORED_LIMIT, notes
 
 
 def _human_rows(task_id: str, run_id: str, db_path):

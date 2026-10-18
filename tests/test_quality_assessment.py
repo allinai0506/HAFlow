@@ -950,6 +950,147 @@ class QualityReadTest(unittest.TestCase):
         self.assertNotIn("quality_assessment", outcome)
         self.assertNotIn("quality_assessment", experience)
 
+    def _insert_ledger_event(self, task_id, run_id, *, event_type="verification_completed",
+                             payload_json="{oops", timestamp=70, sequence=1):
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, ?, ?, ?, 'trajectory', ?, ?)",
+                (task_id, event_type, payload_json, timestamp, run_id, sequence),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_corrupt_stored_ledger_payload_is_unknown(self):
+        task_id, run_id = "task-corrupt", "run-corrupt"
+        self._insert_task(task_id, run_id)
+        self._insert_ledger_event(task_id, run_id)
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["correctness"], "success")
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertEqual(report["rework_count"], 0)
+        self.assertEqual(report["blocked_count"], 0)
+
+    def test_corrupt_stored_ledger_payload_is_unknown_for_historical_run(self):
+        task_id = "task-histcorrupt"
+        owning_run = "run-histcorrupt-own"
+        historical_run = "run-histcorrupt-old"
+        self._insert_task(task_id, owning_run)
+        self._insert_ledger_event(task_id, historical_run, timestamp=71)
+        report = assess_task_run(task_id, historical_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertIn("historical_run_trace_limited", report["problem_codes"])
+        self.assertEqual(report["test_anomalies"], [])
+
+    def test_corrupt_ledger_payload_is_recorded_for_every_projectable_type(self):
+        from herdr.execution_trace import _PROJECTABLE_EVENT_TYPES
+
+        task_id, run_id = "task-corrupt-all", "run-corrupt-all"
+        self._insert_task(task_id, run_id)
+        for index, event_type in enumerate(_PROJECTABLE_EVENT_TYPES):
+            self._insert_ledger_event(
+                task_id, run_id, event_type=event_type,
+                timestamp=80 + index, sequence=index + 1,
+            )
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt-all")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertEqual(report["test_anomalies"], [])
+
+    def test_non_object_json_ledger_payload_counts_as_corrupt(self):
+        task_id, run_id = "task-corrupt-forms", "run-corrupt-forms"
+        self._insert_task(task_id, run_id)
+        for index, payload_json in enumerate(("[1,2]", '"str"', "null")):
+            self._insert_ledger_event(
+                task_id, run_id, payload_json=payload_json,
+                timestamp=100 + index, sequence=index + 1,
+            )
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt-forms")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+
+    def test_blank_ledger_payload_is_not_corrupt(self):
+        task_id, run_id = "task-blank-payload", "run-blank-payload"
+        self._insert_task(task_id, run_id)
+        self._insert_ledger_event(task_id, run_id, payload_json=None, timestamp=110, sequence=1)
+        self._insert_ledger_event(task_id, run_id, payload_json="", timestamp=111, sequence=2)
+        self._insert_ledger_event(task_id, run_id, payload_json="{}", timestamp=112, sequence=3)
+        self._insert_outcome(task_id, run_id, eval_id="eval-blank-payload")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertNotIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertEqual(report["trace_completeness"], "complete")
+        self.assertEqual(report["process_quality"], "acceptable")
+
+    def test_valid_object_missing_keys_is_not_corrupt(self):
+        task_id, run_id = "task-schema-gaps", "run-schema-gaps"
+        self._insert_task(task_id, run_id)
+        self._insert_ledger_event(
+            task_id, run_id, payload_json=json.dumps({"verification": {}}),
+            timestamp=120, sequence=1,
+        )
+        self._insert_ledger_event(
+            task_id, run_id, payload_json=json.dumps({"evidence_id": "ev-loose"}),
+            timestamp=121, sequence=2,
+        )
+        self._insert_outcome(task_id, run_id, eval_id="eval-schema-gaps")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertNotIn("stored_payload_corrupt", report["problem_codes"])
+
+    def test_corrupt_payload_keeps_the_real_anomaly_signal(self):
+        task_id, run_id = "task-corrupt-anomaly", "run-corrupt-anomaly"
+        self._insert_task(task_id, run_id)
+        self._insert_scoped_verification(
+            task_id, run_id, passed=False, evidence="ev-a6", timestamp=130,
+        )
+        self._insert_ledger_event(
+            task_id, run_id, event_type="task_artifact_checkpoint",
+            timestamp=131, sequence=2,
+        )
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt-anomaly")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["correctness"], "success")
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["rework_count"], 0)
+        self.assertEqual(report["blocked_count"], 0)
+
+    def test_clean_ledger_run_stays_acceptable(self):
+        task_id, run_id = "task-clean-ctrl", "run-clean-ctrl"
+        self._insert_task(task_id, run_id)
+        self._insert_scoped_verification(
+            task_id, run_id, passed=True, evidence="ev-clean", timestamp=140,
+        )
+        self._insert_outcome(task_id, run_id, eval_id="eval-clean-ctrl")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["trace_completeness"], "complete")
+        self.assertEqual(report["process_quality"], "acceptable")
+        self.assertNotIn("stored_payload_corrupt", report["problem_codes"])
+
+    def test_corrupt_payload_assessment_does_not_change_the_database(self):
+        task_id, run_id = "task-corrupt-readonly", "run-corrupt-readonly"
+        self._insert_task(task_id, run_id)
+        self._insert_ledger_event(task_id, run_id, timestamp=150)
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt-readonly")
+        before = hashlib.sha256(self.db.read_bytes()).hexdigest()
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before)
+        self.assertNotIn("assessment_unavailable", report["problem_codes"])
+
 
 class ReadonlyOutcomeTest(unittest.TestCase):
     def test_readonly_reader_does_not_create_a_database(self):

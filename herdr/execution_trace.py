@@ -22,6 +22,7 @@ from .trajectory import run_id_for_task
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 100
 STORED_LIMIT = 2000
+_CORRUPT_SAMPLE_CAP = 8
 _MISSING = object()
 _PROJECTABLE_EVENT_TYPES = (
     "agent_started", "task_started", "task_completed", "initial_dispatched",
@@ -506,6 +507,36 @@ def trace_availability(events: Sequence[Dict[str, Any]]) -> str:
     return "none"
 
 
+def decode_stored_payload(payload_json: Any) -> Tuple[Dict[str, Any], bool]:
+    """Decode one ledger ``payload_json`` into ``(payload, corrupt)``.
+
+    NULL, empty, and valid object documents are not corrupt: legacy empty
+    payloads stay ``(obj, False)``. Invalid JSON or valid non-object JSON is
+    corrupt and yields no payload.
+    """
+    if payload_json is None or payload_json == "":
+        return {}, False
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return {}, True
+    if not isinstance(payload, dict):
+        return {}, True
+    return payload, False
+
+
+def _corrupt_payload_note(corrupt_ids: Sequence[Any]) -> Dict[str, Any]:
+    """One bounded aggregate note; sample row ids only, never payload text."""
+    return {
+        "code": "stored_payload_corrupt",
+        "message": "部分账本事件载荷已损坏，已跳过无法解析的内容。",
+        "details": {
+            "corrupt_count": len(corrupt_ids),
+            "sample_ids": [str(value) for value in corrupt_ids[:_CORRUPT_SAMPLE_CAP]],
+        },
+    }
+
+
 def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     try:
         conn = get_readonly_db_connection(db_path)
@@ -547,13 +578,12 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
     finally:
         conn.close()
     events = []
+    corrupt_ids = []
     for row in rows:
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except json.JSONDecodeError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload, corrupt = decode_stored_payload(row["payload_json"])
+        if corrupt:
+            corrupt_ids.append(row["id"])
+            continue
         events.append({
             "id": row["id"],
             "task_id": row["task_id"],
@@ -566,7 +596,9 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
             "payload": payload,
         })
     notes = []
-    if len(events) >= STORED_LIMIT:
+    if corrupt_ids:
+        notes.append(_corrupt_payload_note(corrupt_ids))
+    if len(rows) >= STORED_LIMIT:
         notes.append({"code": "native_truncated", "message": "执行轨迹已截断，仅显示已读取的部分。"})
     return events, notes
 

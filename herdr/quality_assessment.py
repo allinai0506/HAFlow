@@ -24,6 +24,7 @@ _UNKNOWN_NOTES = frozenset({
     "native_unavailable",
     "native_unverified",
     "native_corrupt",
+    "stored_payload_corrupt",
     "historical_run_trace_limited",
     "human_signals_truncated",
 })
