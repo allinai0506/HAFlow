@@ -77,6 +77,21 @@ def task_gate_hard_timeout_seconds(base_timeout=None):
     return max(base * 2.0, DEFAULT_GATE_TASK_HARD_TIMEOUT_SECONDS)
 
 
+DEFAULT_GATE_HANDOFF_GRACE_SECONDS = 300.0
+
+
+def task_gate_handoff_grace_seconds():
+    raw = os.environ.get("HERDR_GATE_HANDOFF_GRACE_SECONDS")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val > 0:
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_GATE_HANDOFF_GRACE_SECONDS
+
+
 def _gate_verdict_file_candidates(task):
     candidates = []
     task_id = task.get("task_id")
@@ -100,9 +115,10 @@ def _task_has_valid_gate_verdict(task):
         try:
             if not os.path.exists(path):
                 continue
+            st = os.stat(path)
             if rework_started:
                 try:
-                    if os.stat(path).st_mtime < (rework_started - 1.0):
+                    if st.st_mtime < (rework_started - 1.0):
                         continue
                 except OSError:
                     continue
@@ -112,10 +128,10 @@ def _task_has_valid_gate_verdict(task):
                 verdict = str(payload.get("verdict") or "").strip().lower()
                 if verdict in ("pass", "blocked"):
                     note = str(payload.get("note") or "").strip()
-                    return True, verdict, note
+                    return True, verdict, note, st.st_mtime
         except Exception:
             continue
-    return False, None, None
+    return False, None, None, None
 
 
 def _is_gate_task(task):
@@ -843,15 +859,26 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
 
         # Issue #250 & Codex review: Check gate identity before suppressing watchdog or extending timeout
         if _is_gate_task(task):
-            has_verdict, verdict_val, verdict_note = _task_has_valid_gate_verdict(task)
+            res = _task_has_valid_gate_verdict(task)
+            has_verdict, verdict_val, verdict_note = res[0], res[1], res[2]
+            verdict_mtime = res[3] if len(res) > 3 else None
             if has_verdict:
-                print(
-                    f"[SENTINEL TIMEOUT SUPPRESSED] task={tid} status={status} idle={int(idle_seconds)}s — "
-                    f"gate verdict '{verdict_val}' already written, suppressing watchdog failure",
-                    flush=True,
-                )
-                timeouts.pop(tid, None)
-                continue
+                grace = task_gate_handoff_grace_seconds()
+                verdict_age = (now - verdict_mtime) if verdict_mtime is not None else 0
+                if verdict_mtime is None or verdict_age < 0 or verdict_age < grace:
+                    print(
+                        f"[SENTINEL TIMEOUT SUPPRESSED] task={tid} status={status} idle={int(idle_seconds)}s — "
+                        f"gate verdict '{verdict_val}' written recently ({int(verdict_age)}s ago, grace={int(grace)}s), suppressing watchdog failure",
+                        flush=True,
+                    )
+                    timeouts.pop(tid, None)
+                    continue
+                else:
+                    print(
+                        f"[SENTINEL TIMEOUT HANDOFF EXPIRED] task={tid} status={status} idle={int(idle_seconds)}s — "
+                        f"gate verdict '{verdict_val}' written {int(verdict_age)}s ago exceeded handoff grace ({int(grace)}s), allowing watchdog failure for recovery",
+                        flush=True,
+                    )
 
             gate_timeout = task_gate_hard_timeout_seconds(hard_timeout)
             if idle_seconds < gate_timeout:

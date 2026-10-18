@@ -3140,12 +3140,18 @@ def process_gate_verdict_reconciliations():
             if not _gate_verdict_is_fresh(task):
                 continue
             pane_id = task.get("pane_id")
+            runtime_settled = True
             if pane_id:
                 try:
                     runtime = get_agent_runtime_status(pane_id)
-                    if runtime not in ("idle", "done"):
-                        continue
+                    runtime_settled = (runtime in ("idle", "done"))
                 except Exception:
+                    runtime_settled = False
+            if not runtime_settled:
+                # Issue #250 & Codex review: If runtime is not settled, allow adoption after bounded handoff grace
+                verdict_mtime = _gate_verdict_file_mtime(task)
+                grace = float(os.environ.get("HERDR_GATE_HANDOFF_GRACE_SECONDS", "300"))
+                if not verdict_mtime or (time.time() - verdict_mtime) < grace:
                     continue
             if gate_verdict_ready(task):
                 if _set_observed_status(task, "agent_done", "gate_verdict_recovery"):
@@ -8214,6 +8220,23 @@ def _gate_verdict_is_fresh(task):
     return False
 
 
+def _gate_verdict_file_mtime(task):
+    """PR #250 & Codex review: Return mtime of first fresh, valid candidate verdict file, or None."""
+    for path in _gate_verdict_file_candidates(task):
+        try:
+            if not os.path.exists(path):
+                continue
+            if not _gate_verdict_file_is_fresh(path, task):
+                continue
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict) and _normalize_gate_verdict(payload.get("verdict")):
+                return os.stat(path).st_mtime
+        except Exception:
+            continue
+    return None
+
+
 def _verdict_from_file(task):
     for path in _gate_verdict_file_candidates(task):
         try:
@@ -10112,7 +10135,8 @@ def get_agent_runtime_status(pane_id):
                 "get",
                 pane_id
             ],
-            text=True
+            text=True,
+            timeout=10,
         )
 
         data = json.loads(output)

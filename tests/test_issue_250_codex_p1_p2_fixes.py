@@ -566,6 +566,99 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         updated_3 = store.get_task(task_id_3)
         self.assertEqual(updated_3.get("stage_verdict_affected_task_ids"), ["impl-a", "impl-b"])
 
+    def test_p1_sentinel_watchdog_suppression_expires_after_handoff_grace(self):
+        """P1: Sentinel must not suppress watchdog indefinitely if agent remains working; after handoff grace it must fail task."""
+        sentinel = _load_sentinel()
+        task_id = "wf-p1-handoff-expired"
+        verdict_path = self.verdicts_dir / f"{task_id}.json"
+        verdict_path.write_text(
+            json.dumps({"verdict": "blocked", "note": "hung agent blocker"}),
+            encoding="utf-8",
+        )
+
+        now = 10000.0
+        # Verdict file was written 600s ago (exceeding default 300s handoff grace)
+        os.utime(str(verdict_path), (now - 600.0, now - 600.0))
+
+        # Task has exceeded gate hard timeout (7200s): updated 8000s ago
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p1-sentinel",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "updated_at": now - 8000.0,
+            "version": 2,
+        }
+
+        state = {"stalls": {}, "timeouts": {}}
+        mock_store = MagicMock()
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "update_statuses", return_value=True) as mock_update_statuses:
+            changed = sentinel.check_task_stalls([task], state, now=now)
+
+            # Because verdict age (600s) > grace (300s) and idle (8000s) > gate_timeout (7200s),
+            # suppression must expire and watchdog must fail the task!
+            mock_update_statuses.assert_called_once_with(
+                {task_id: ("failed", "hard_timeout_watchdog")},
+                expected={task_id: "working"},
+                versions={task_id: 2},
+            )
+            self.assertTrue(changed)
+            self.assertIn(task_id, state["timeouts"])
+
+    def test_p1_controller_reconciles_working_gate_task_when_agent_hung_after_grace(self):
+        """P1: When agent hangs in working but verdict is durable past handoff grace, controller reconciles to agent_done."""
+        controller = _load_controller()
+        task_id = "wf-p1-controller-hung"
+        verdict_path = self.verdicts_dir / f"{task_id}.json"
+        verdict_path.write_text(
+            json.dumps({"verdict": "pass", "note": "durable pass verdict"}),
+            encoding="utf-8",
+        )
+
+        now = time.time()
+        # Verdict was written 400s ago (> 300s grace)
+        os.utime(str(verdict_path), (now - 400.0, now - 400.0))
+
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "pane_id": "p1",
+            "status": "working",
+            "rework_started_at": now - 500.0,
+            "version": 1,
+        }
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(controller, "load_tasks", return_value=[task]), \
+             patch.object(controller, "node_is_gate", return_value=True), \
+             patch.object(controller, "get_agent_runtime_status", return_value="working"), \
+             patch.object(controller, "gate_verdict_ready", return_value=True), \
+             patch.object(controller, "_set_observed_status", return_value=True) as mock_set_status, \
+             patch.object(controller, "emit_done_if_allowed") as mock_emit:
+            processed = controller.process_gate_verdict_reconciliations()
+            self.assertEqual(processed, 1)
+            mock_set_status.assert_called_once_with(task, "agent_done", "gate_verdict_recovery")
+
+    def test_p2_controller_get_agent_runtime_status_has_timeout(self):
+        """P2: get_agent_runtime_status must bound subprocess call with timeout=10."""
+        controller = _load_controller()
+        with patch("subprocess.check_output") as mock_sub:
+            mock_sub.return_value = json.dumps({"result": {"agent": {"agent_status": "idle"}}})
+            status = controller.get_agent_runtime_status("pane-123")
+            self.assertEqual(status, "idle")
+            mock_sub.assert_called_once_with(
+                ["herdr", "agent", "get", "pane-123"],
+                text=True,
+                timeout=10,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

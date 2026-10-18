@@ -8,18 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
-## [2026-10-19] fix | 门禁完成证据 CAS 版本刷新与归因列表全量校验 (PR #266 Codex Review)
+## [2026-10-19] fix | 门禁完成证据 CAS 版本刷新、有界 watchdog 抑制与探针超时加固 (PR #266 Codex Review)
 
 - 背景：
-  1. GitHub Codex 自动化评审指出 PR #266 存在 2 项缺陷：
+  1. GitHub Codex 自动化评审指出 PR #266 存在 4 项缺陷：
      - [P1] `bin/herdr-task:set_status` 在写入 completion evidence（`_capture_verified_candidate`）更新元数据后，SQLite 中的任务版本号自增，但后续 CAS 状态流转仍使用更新前的旧版本号，导致针对真实 Git clone 的强制流转总是被判定为并发冲突而拒绝；
-     - [P2] `bin/herdr-task:adopt_verdict_cli` 在解析裁决文件中的 `affected_task_ids` 时，仅静默丢弃非字符串元素，残留部分归因，与 Controller 拒绝全量列表的契约不一致，可能导致选择性返工遗漏故障。
+     - [P2] `bin/herdr-task:adopt_verdict_cli` 在解析裁决文件中的 `affected_task_ids` 时，仅静默丢弃非字符串元素，残留部分归因，与 Controller 拒绝全量列表的契约不一致，可能导致选择性返工遗漏故障；
+     - [P1] `services/herdr-sentinel.py` 在门禁生成结论后无条件无限期抑制 watchdog 超时，而 Controller 仅在 agent 为 `idle`/`done` 时对账，若 agent 产出结论后挂死在 `working`，任务将永久卡死；
+     - [P2] `services/herdr-controller.py:get_agent_runtime_status` 调用 `herdr agent get` 缺失超时参数，当 pane 异常阻塞时会同步冻结 Controller 主对账循环。
 - 变更：
   1. **元数据写入后 CAS 版本同步**：在 `_capture_verified_candidate` 中完成元数据更新后同步刷新内存 task 对象的 `version`，并在 `set_status` 的 CAS 流转前从 Store 权威拉取最新版本号作为 `expected_version`；
-  2. **归因列表严格校验与 Fail-Closed**：在 `adopt_verdict_cli` 中与 Controller 保持一致，若 `affected_task_ids` 含有非字符串、空项或不是列表，立即打出告警并全量清空归因（降级为全量返工），防止残缺归因被持久化。
+  2. **归因列表严格校验与 Fail-Closed**：在 `adopt_verdict_cli` 中与 Controller 保持一致，若 `affected_task_ids` 含有非字符串、空项或不是列表，立即打出告警并全量清空归因（降级为全量返工），防止残缺归因被持久化；
+  3. **Watchdog 抑制有界化与超期对账**：Sentinel 引入 `task_gate_handoff_grace_seconds`（默认 300s），仅在结论产出窗口内抑制 watchdog，超期后放行 watchdog 置 failed 以触发恢复；Controller 在 agent 未能在窗口内 settle 时直接采纳持久化裁决流转 `agent_done`；
+  4. **Runtime 状态探针增加 10s 有界超时**：`get_agent_runtime_status` 为 `check_output` 加上 `timeout=10`，异常时返回 None 并安全降级。
 - 证据：
-  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 P1 与 P2 回归测试；
-  2. 全量 24 项 Issue #250 测试与 215 项相关门禁测试全部通过。
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增全部 4 项缺陷的回归测试；
+  2. 全量 27 项 Issue #250 测试与 215 项相关门禁测试全部通过。
 
 ## [2026-10-18] fix | 门禁裁决隔离强化：拒绝陈旧裁决、CAS 绑定受控采纳与工位身份校验 (PR #266)
 
