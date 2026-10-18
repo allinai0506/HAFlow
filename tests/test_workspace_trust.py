@@ -111,6 +111,116 @@ class TestWorkspaceTrust(unittest.TestCase):
         self.assertIsNone(workspace_trust.preseed_trust_target("", "grok"))
         self.assertIsNone(workspace_trust.preseed_trust_target(None, "grok"))
 
+    # --- issue #255: agy (Antigravity CLI) trust pre-seeding ---
+
+    def test_agy_has_trust_handler_and_preseed_target(self):
+        """agy must be covered by launch pre-seed; otherwise every fresh clone
+        blocks on the interactive trust dialog (issue #255)."""
+        self.assertIn("agy", workspace_trust._TRUST_HANDLERS)
+        self.assertEqual(
+            workspace_trust.preseed_trust_target("/tmp/clones/t1", "agy"),
+            "/tmp/clones/t1",
+        )
+
+    def test_ensure_agy_workspace_trust_creates_and_updates(self):
+        """agy handler must add the canonical path to trustedWorkspaces and be idempotent."""
+        target_path = self.home / "agy_project"
+        target_path.mkdir(parents=True)
+
+        with patch("pathlib.Path.home", return_value=self.home):
+            self.assertTrue(workspace_trust.ensure_agy_workspace_trust(target_path))
+            conf = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+            self.assertTrue(conf.exists())
+            data = json.loads(conf.read_text(encoding="utf-8"))
+            resolved = workspace_trust._exact_case_path(os.path.realpath(str(target_path)))
+            self.assertIn(resolved, data["trustedWorkspaces"])
+
+            # Second call must be idempotent (no duplicate entries).
+            self.assertTrue(workspace_trust.ensure_agy_workspace_trust(target_path))
+            data2 = json.loads(conf.read_text(encoding="utf-8"))
+            self.assertEqual(data2["trustedWorkspaces"].count(resolved), 1)
+
+    def test_ensure_agy_workspace_trust_preserves_other_config_and_entries(self):
+        """Write must merge: keep existing trustedWorkspaces and all other top-level keys."""
+        target_path = self.home / "agy_project2"
+        target_path.mkdir(parents=True)
+        conf = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+        conf.parent.mkdir(parents=True)
+        existing = {
+            "allowNonWorkspaceAccess": True,
+            "model": "some-model",
+            "permissions": {"allow": ["foo"]},
+            "trustedWorkspaces": ["/Users/user/existing-project"],
+        }
+        conf.write_text(json.dumps(existing), encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=self.home):
+            self.assertTrue(workspace_trust.ensure_agy_workspace_trust(target_path))
+            data = json.loads(conf.read_text(encoding="utf-8"))
+
+        resolved = workspace_trust._exact_case_path(os.path.realpath(str(target_path)))
+        self.assertEqual(data["allowNonWorkspaceAccess"], True)
+        self.assertEqual(data["model"], "some-model")
+        self.assertEqual(data["permissions"], {"allow": ["foo"]})
+        self.assertIn("/Users/user/existing-project", data["trustedWorkspaces"])
+        self.assertIn(resolved, data["trustedWorkspaces"])
+
+    def test_ensure_agy_workspace_trust_uses_real_disk_casing(self):
+        """agy matches trusted paths exactly, case-sensitive; wrong-cased input
+        must be canonicalized to the real directory-entry casing."""
+        real_dir = self.home / "RealRepo"
+        real_dir.mkdir()
+        wrong_cased = real_dir.parent / (real_dir.name.lower())
+        self.assertNotEqual(str(real_dir), str(wrong_cased))
+        # Only meaningful on case-insensitive filesystems; otherwise skip.
+        if not wrong_cased.exists():
+            self.skipTest("filesystem is case-sensitive")
+
+        with patch("pathlib.Path.home", return_value=self.home):
+            self.assertTrue(workspace_trust.ensure_agy_workspace_trust(wrong_cased))
+            conf = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+            data = json.loads(conf.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(data["trustedWorkspaces"]), 1)
+        self.assertEqual(
+            data["trustedWorkspaces"][0],
+            os.path.realpath(str(real_dir)),
+        )
+
+    def test_agy_trust_canonicalizes_existing_prefix_for_not_yet_created_clone(self):
+        """Launch preseeds planned clone paths that do not exist yet: existing
+        prefix segments must be canonicalized, missing leaf segments kept."""
+        parent = self.home / "MyClones"
+        parent.mkdir()
+        planned = parent / "lowercase-clone"
+
+        with patch("pathlib.Path.home", return_value=self.home):
+            self.assertTrue(workspace_trust.ensure_agy_workspace_trust(planned))
+            conf = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+            data = json.loads(conf.read_text(encoding="utf-8"))
+
+        expected = os.path.join(
+            workspace_trust._exact_case_path(os.path.realpath(str(parent))),
+            "lowercase-clone",
+        )
+        self.assertEqual(data["trustedWorkspaces"], [expected])
+
+    def test_exact_case_path_preserves_unknown_leaf_case(self):
+        """Pure helper: wrong-cased existing segments are fixed from disk
+        entries; a missing leaf is kept verbatim."""
+        real_dir = self.home / "TrueName"
+        real_dir.mkdir()
+        wrong = real_dir.parent / "truename"
+        if not wrong.exists():
+            self.skipTest("filesystem is case-sensitive")
+
+        canon = workspace_trust._exact_case_path(os.path.realpath(str(wrong)))
+        self.assertEqual(canon, os.path.realpath(str(real_dir)))
+
+        missing_leaf = wrong / "deeper-LeAF"
+        canon2 = workspace_trust._exact_case_path(os.path.realpath(str(missing_leaf)))
+        self.assertEqual(canon2, os.path.realpath(str(real_dir)) + os.sep + "deeper-LeAF")
+
 
 if __name__ == "__main__":
     unittest.main()

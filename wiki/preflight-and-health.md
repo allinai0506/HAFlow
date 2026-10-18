@@ -86,8 +86,19 @@ Evidence:
 3. **`TIMEOUT` 与 `LOCAL_ERROR` 不触发 `--auto-disable`**；`PROVIDER_ERROR` 与 `TOKEN_EXHAUSTED` / `AUTH_REQUIRED` 一样计入建议禁用候选。控制台「执行者自检」弹窗展示每路探针原始输出尾部供人工复核。
 4. **`pi` 已接入真实探针**（`pi --print --no-session`，无副作用）：`UNKNOWN` 仅保留给尚无确认安全非交互模式的执行者。
 
-### 3.3 Claude 工作区信任自动铺路
-针对 Claude Code 常见的 `"do you trust this folder"` 阻塞对话框，系统在任务启动前（`services/herdr-worker.py#ensure_claude_workspace_trust`）自动向 `~/.claude.json` 注入 `hasTrustDialogAccepted = True`，从根源消除交互式卡死。
+### 3.3 工作区信任自动铺路（preseed）
+CLI Agent 在从未信任过的目录首启会弹交互式信任对话框（如 Claude `do you trust this folder`、agy `Do you trust the contents of this project?`）。`bin/herdr-task launch` 在启动 worker 前经 `herdr/workspace_trust.py#preseed_trust_target` + `ensure_workspace_trust` 按 agent 预埋：grok → `~/.grok/trusted_folders.toml`，claude → `~/.claude.json` `trustedDirectories`，agy → `~/.gemini/antigravity-cli/settings.json` `trustedWorkspaces`。
+
+`FACT` 无 trust handler 的 agent（如 codex）preseed 返回 None 并跳过；agy 条目按"精确路径+大小写"匹配，写入前经 `os.path.realpath` 与 `_exact_case_path`（逐段 `os.scandir` 重建真实 casing；未创建的计划克隆叶子按"已存在前缀 canonical + 剩余段原样"）canonical 化；写入为幂等合并，保留既有条目与其余顶层键，临时文件原子替换。Worker 运行时对用户信任配置只读；`agy --print` 无头探针不触发对话框，预检 READY 不能证明交互式启动免信任（issue #255）。
+
+`FACT` 信任阻塞的启动失败证据携带有界、脱敏的 pane 文字片段（异常消息与 `HERDR_WORKER_FAILURE.trust_evidence`），足以识别 trust 对话框，不再仅剩状态码。
+
+Evidence:
+- `herdr/workspace_trust.py#_TRUST_HANDLERS` / `#preseed_trust_target` / `#_exact_case_path`
+- `herdr/workspace_trust.py#ensure_agy_workspace_trust`
+- `services/herdr-worker.py#_trust_blocked_evidence`
+- `tests/test_workspace_trust.py` / `tests/test_herdr_worker.py`
+- `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust.md`
 
 Evidence:
 - `herdr/deep_preflight.py:TOKEN_PATTERNS`
@@ -96,7 +107,7 @@ Evidence:
 - `herdr/deep_preflight.py:LOCAL_PATTERNS`
 - `herdr/deep_preflight.py:SMOKE_TIMEOUTS` / `smoke_probe`
 - `herdr/deep_preflight.py:choose_smoke_command` (pi `--print --no-session`)
-- `services/herdr-worker.py#ensure_claude_workspace_trust`
+- `herdr/workspace_trust.py#ensure_claude_workspace_trust`
 - `RULES.md:探针无副作用安全`
 
 ## 可执行证据与运行版本边界

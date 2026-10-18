@@ -2731,3 +2731,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-18] Updated | 工作台模式并排切换
 - Updated [[simple-workbench]]: 左上同排“极简工作台 / 流程工作台”，当前模式高亮，保留项目及需求上下文；原空间工作台更名为流程工作台。
+
+## [2026-10-18] Fix | issue #255 agy 新目录信任预埋与失败证据
+- Fixed [[preflight-and-health]] §3.3 记录的信任预埋能力缺口：`herdr/workspace_trust.py` 新增 agy handler（realpath + `_exact_case_path` 逐段 scandir 真实大小写、幂等合并 `~/.gemini/antigravity-cli/settings.json` trustedWorkspaces、原子替换），注册 `_TRUST_HANDLERS` 后 `bin/herdr-task launch` 前置预埋自动覆盖 agy。
+- `services/herdr-worker.py` TRUST_REQUIRED 失败路径新增有界脱敏 pane 片段证据（异常消息与 HERDR_WORKER_FAILURE.trust_evidence）。
+- Evidence: `tests/test_workspace_trust.py`、`tests/test_herdr_worker.py`；真实链路对照实验（agy 1.4.2：未预埋目录复现对话框→TRUST_REQUIRED，预埋目录 `herdr agent start` 直达 READY）。
+- 补充 `docs/lessons/lessons-learned.md` §167：无头探针通过不等于交互式启动可用；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust.md`。

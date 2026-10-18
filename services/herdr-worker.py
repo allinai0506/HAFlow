@@ -847,6 +847,22 @@ def verify_request_preflight(agent_kind, cwd):
     return row
 
 
+def _trust_blocked_evidence(text):
+    """Bounded, ANSI-stripped pane snippet that identifies a trust dialog."""
+    if not text:
+        return ""
+    from herdr.agent_adapter import _strip_ansi
+    lines = []
+    for raw in _strip_ansi(str(text)).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        line = re.sub(r"(?i)(api[_ -]?key|token|secret|authorization|bearer)\s*[:=]?\s*\S+", r"\1=[REDACTED]", line)
+        lines.append(line)
+    snippet = " | ".join(lines)
+    return snippet[:400]
+
+
 def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=20):
     """Bounded native identity -> owned transcript -> identity recheck gate."""
     from herdr.agent_adapter import startup_readiness
@@ -860,6 +876,7 @@ def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=2
             runtime = run_json(["herdr", "agent", "get", pane_id], timeout=min(3, remaining))["result"]["agent"]
             verdict = startup_readiness(agent_kind, started, runtime, None)
             if verdict["reason"] != "transcript_unavailable":
+                verdict["terminal_text"] = ""
                 return verdict
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -877,6 +894,8 @@ def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=2
                 runtime = run_json(["herdr", "agent", "get", pane_id], timeout=min(3, remaining))["result"]["agent"]
                 verdict = startup_readiness(agent_kind, started, runtime, transcript.stdout)
                 if verdict["status"] != "UNKNOWN":
+                    if verdict["status"] == "TRUST_REQUIRED":
+                        verdict["terminal_text"] = transcript.stdout[:4096]
                     return verdict
         except (RuntimeError, ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
             verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "probe_failed"}
@@ -885,6 +904,18 @@ def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=2
             if remaining > 0:
                 time.sleep(min(.5, remaining))
     return verdict
+
+
+def _read_pane_text(pid, limit=4096):
+    """Bounded visible-pane text for startup failure evidence (best effort)."""
+    try:
+        cp = subprocess.run(
+            ["herdr", "pane", "read", pid, "--source", "visible", "--lines", "64"],
+            text=True, capture_output=True, timeout=3, check=False,
+        )
+        return cp.stdout[:limit] if cp.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return ""
 
 def main():
     parser = argparse.ArgumentParser()
@@ -1145,6 +1176,14 @@ def main():
 
         readiness = wait_startup_ready(args.agent, pane_id, agent)
         if not readiness.get("interactive_ready"):
+            if readiness.get("status") == "TRUST_REQUIRED":
+                text = readiness.get("terminal_text") or _read_pane_text(pane_id)
+                snippet = _trust_blocked_evidence(text)
+                readiness["trust_evidence"] = snippet
+                raise RuntimeError(
+                    f"Worker startup TRUST_REQUIRED: {readiness.get('reason', 'unknown')} "
+                    f"| trust evidence: {snippet!r}"
+                )
             raise RuntimeError(f"Worker startup {readiness.get('status', 'UNKNOWN')}: {readiness.get('reason', 'unknown')}")
 
         agent_started = True
@@ -1216,6 +1255,8 @@ def main():
             "startup_status": (readiness or {}).get("status", "UNKNOWN"),
             "failure_type": type(exc).__name__,
         }
+        if (readiness or {}).get("trust_evidence"):
+            failure["trust_evidence"] = readiness["trust_evidence"]
         pane_rolled_back = False
         if not agent_start_attempted and pane_id and rollback_unstarted_pane(clone, pane_id, pane_source, launch_identity):
             pane_rolled_back = True

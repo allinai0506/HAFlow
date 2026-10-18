@@ -7041,3 +7041,38 @@ python3 -m pytest -q tests/test_workflow_clone_reclaim.py tests/test_workflow_cl
 `python3.13 -m pytest -q tests/test_simple_workbench.py`
 
 `test_started_workflow_uses_actual_owner_after_git_root_normalization` 覆盖归属变化和启动后读回失败两个分支；隔离浏览器已验证 Git 子目录启动后显示新工作流标题及其真实所属项目。
+
+---
+
+## 167. 预检无头探针不能代替交互式启动的真实门（2026-10-18）
+
+### 问题背景
+
+agy（Antigravity CLI）在每个新目录首启弹出交互式信任对话框，worker 就绪门将其分类为
+`TRUST_REQUIRED` 并回滚派发；而 deep preflight 用 `agy --print` 无头探针，不触发该对话框，
+预检 READY 与真实启动失败长期矛盾。`_TRUST_HANDLERS` 只登记 grok/claude，
+`preseed_trust_target()` 对 agy 返回 None，launch 前置预埋对 agy 静默缺位——洁净室/门禁
+每个任务都是新克隆目录，agy 因此永久不可派发，只能靠人工把克隆路径写进 trustedWorkspaces。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 探针模式与真实启动形态不同 | 无头探针通过 ≠ 交互式启动可用；两者验证的是不同事实 | agent 能力矩阵须区分 probe/start 两条链，各自的判定来源分别断言 |
+| agent 接入未补 trust handler | 依赖"每个可派发 agent 都有预埋能力"的隐式约定，缺位即静默不可派发 | 新 agent 接入时同步覆盖 `_TRUST_HANDLERS`/preseed 回归测试 |
+| macOS resolve 不修正大小写 | agy 按精确路径+大小写匹配，错误 casing 写入等于没写 | 需要真实 casing 的路径用逐段 `os.scandir` canonical 化；未创建叶子用"已存在前缀 canonical + 剩余段原样" |
+| 回滚证据只剩 "blocked during startup" | 状态码不回答"为什么"，运维不可判读 | 信任阻塞失败必须携带有界、脱敏、可识别对话框的 pane 片段（HERDR_WORKER_FAILURE.trust_evidence） |
+
+### 操作规范
+
+1. 用户级信任配置只在 launch 前置阶段写入；worker 运行时保持只读（既有约定）。
+2. 写入必须幂等合并并保留其余键/条目，临时文件 + `replace()` 原子替换。
+3. 修复类缺陷要用对照实验同时证明"复现失败"与"修复生效"（本次：未预埋目录出现对话框、
+   预埋目录直接 READY）。
+
+### 验证命令 / 守护测试
+
+`python3 -m pytest -q tests/test_workspace_trust.py tests/test_herdr_worker.py tests/test_worker_startup_atomic_rollback.py`
+
+`test_agy_has_trust_handler_and_preseed_target`、`test_ensure_agy_workspace_trust_uses_real_disk_casing`、
+`test_agy_trust_dialog_failure_evidence_is_readable` 守护预埋覆盖、真实 casing 与证据可判读。

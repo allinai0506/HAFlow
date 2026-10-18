@@ -10,6 +10,35 @@ import time
 from pathlib import Path
 
 
+def _exact_case_path(path: str) -> str:
+    """Rebuild an absolute POSIX path with real directory-entry casing.
+
+    On case-insensitive filesystems Path.resolve()/os.path.realpath never
+    fixes casing, but agy matches trustedWorkspaces exactly. Existing
+    segments are re-found via os.scandir entry names; segments that do not
+    exist yet (planned clone leaves) are kept verbatim.
+    """
+    if not path or not path.startswith("/"):
+        return path
+    segments = path[1:].split("/")
+    out = ""
+    for i, seg in enumerate(segments):
+        try:
+            with os.scandir(out or "/") as it:
+                entries = {e.name: e.name.lower() for e in it}
+        except OSError:
+            entries = {}
+        if seg in entries:
+            out = out + "/" + seg
+            continue
+        folded = "/" + seg
+        match = next((n for n, low in entries.items() if low == folded[1:].lower()), None)
+        if match is None:
+            return out + "/" + "/".join(segments[i:])
+        out = out + "/" + match
+    return out
+
+
 def ensure_grok_workspace_trust(repo_path: Path | str) -> bool:
     """Register workspace path in ~/.grok/trusted_folders.toml."""
     try:
@@ -53,9 +82,45 @@ def ensure_claude_workspace_trust(repo_path: Path | str) -> bool:
         return False
 
 
+def ensure_agy_workspace_trust(repo_path: Path | str) -> bool:
+    """Register the case-canonical workspace path in antigravity-cli settings.json.
+
+    agy blocks every first start in a new directory with an interactive
+    "Do you trust the contents of this project?" dialog (issue #255).
+    trustedWorkspaces is matched path-and-case exactly, so entries are
+    written through _exact_case_path; other keys and entries are preserved.
+    """
+    try:
+        canonical = _exact_case_path(os.path.realpath(str(Path(repo_path).expanduser().absolute())))
+        config = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+        data = {}
+        if config.exists():
+            try:
+                data = json.loads(config.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        trusted = data.get("trustedWorkspaces")
+        if not isinstance(trusted, list):
+            trusted = []
+            data["trustedWorkspaces"] = trusted
+        if canonical not in trusted:
+            trusted.append(canonical)
+            config.parent.mkdir(parents=True, exist_ok=True)
+            tmp = config.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            tmp.replace(config)
+        return True
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"[WORKSPACE TRUST WARN] agy trust failed for {repo_path}: {exc}", file=sys.stderr)
+        return False
+
+
 _TRUST_HANDLERS = {
     "grok": ensure_grok_workspace_trust,
     "claude": ensure_claude_workspace_trust,
+    "agy": ensure_agy_workspace_trust,
 }
 
 
