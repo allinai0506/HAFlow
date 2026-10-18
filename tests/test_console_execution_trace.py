@@ -34,6 +34,24 @@ def _extract(html, name):
     raise AssertionError(name)
 
 
+#: The delivery-pipeline display helpers the shared task row / drawer render
+#: through (`herdr/delivery_pipeline` → `taskBadge`/`deliveryWaitHtml`).  The
+#: node harnesses below must carry the real sources: stubbing them would let a
+#: broken badge pass, and the harness must not fall behind the render chain.
+DELIVERY_DISPLAY_HELPERS = (
+    "deliveryOf", "deliveryGates", "deliveryReason", "deliveryOverridesStatus",
+    "taskStatusLabel", "taskStatusClass", "taskBadge", "deliveryWaitHtml",
+    "deliveryClock", "deliveryPipelineLine", "cleanStageLabel",
+    "taskDrawerNumTs", "humanStatus",
+)
+
+
+def _delivery_script(html, skip=()):
+    return '\n'.join(
+        _extract(html, name) for name in DELIVERY_DISPLAY_HELPERS if name not in skip
+    )
+
+
 def test_trace_tab_keeps_the_other_tabs_and_has_no_sample_data():
     html = console.HTML_TEMPLATE
     assert ">执行轨迹</button>" in html
@@ -468,6 +486,11 @@ const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTr
 def test_flow_and_list_render_identical_task_content_and_history():
     names = ['esc', 'renderTasks', 'renderTaskRow', 'flowTasksForNode', 'renderNodeInspector']
     script = '\n'.join(_extract(console.HTML_TEMPLATE, n) for n in names if n != 'renderTaskRow' or 'function renderTaskRow(' in console.HTML_TEMPLATE)
+    # cleanStageLabel / humanStatus are stubbed below, so only the helpers this
+    # harness does not define are carried in.
+    script += "\n" + _delivery_script(
+        console.HTML_TEMPLATE, skip=("cleanStageLabel",),
+    )
     script += r'''
 const assert=require('node:assert/strict');
 const elements={tasks:{},flowInspectorBody:{},flowInspTitle:{},flowInspMeta:{}};
@@ -532,6 +555,9 @@ assert.equal(clicked.open,true);
 
 def test_trace_drawer_prioritizes_execution_over_repeated_attributes_and_artifacts():
     script = _extract(console.HTML_TEMPLATE, 'renderTaskDrawer')
+    script += "\n" + _delivery_script(
+        console.HTML_TEMPLATE, skip=("humanStatus",),
+    )
     script += r'''
 const assert=require('node:assert/strict');
 const elements={};

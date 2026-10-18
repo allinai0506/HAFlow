@@ -60,6 +60,19 @@ def _gate(nodes, node_id):
     return _DEFAULT_GATES.get(node_id)
 
 
+def gate_retry_node(config, node_id):
+    """Public gate accessor: the node a gate retries ('' when not a gate).
+
+    The single definition of "which node ids are gates" lives here: an explicit
+    ``gate`` contract on the node, or the ``_DEFAULT_GATES`` fallback.  Callers
+    that must not restate that rule (e.g. the delivery-pipeline projection)
+    ask this function instead.
+    """
+    nodes = {node.get('id'): node for node in (config or {}).get('nodes') or []
+             if isinstance(node, dict) and node.get('id')}
+    return _gate(nodes, node_id) or ''
+
+
 def _identity_reason(workflow, facts, candidate):
     current = workflow.get('candidate_sha')
     if not candidate or not current:

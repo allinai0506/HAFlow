@@ -7214,3 +7214,37 @@ bin/herdr-task close-workflow wf-haflow-1017-01 --dry-run
 ```
 
 涵盖归档后旁路追加、残壳复活安全回收、损坏归档拦截及现存 7 任务工作流实跑通过。
+
+---
+
+## 172. 守护进程已接管的进行中状态不能渲染成终态，也不能再留人工入口（2026-10-18）
+
+### 问题背景
+
+wf-haflow-1017-01 实跑复盘：craft 任务写完代码进入 `committed` 后，控制器 registry watcher 会自己跑完整条交付链（`_check_finalize_retry` → `finalize_completed_task`：commit → integrate → `cleanup_ready` → `cleaned`）。这段“机器正在干活”的窗口里，专业工作台把任务徽章渲染成终态语感的「已提交」，调度控制同时给出人工「并入目标分支」按钮。用户（产品目标人群是不懂 Agent/Git 的普通企业用户）无法回答“代码现在合到哪了、还要多久、卡在哪”；按钮还与守护进程争抢同一分支。同源问题是 #250（洁净室门禁现场对操作者不可见）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 状态机取值直接当产品语义显示 | 内部状态码不是面向用户的进度 | 徽章由投影层给出阶段与等待原因，不直接渲染原始状态字符串 |
+| 同一交付步骤有两个驱动者 | 自动化接管的步骤再暴露人工入口会制造竞争与责任不清 | 谁驱动谁显示：守护进程接管时只显示归属与等待原因，人工入口只在自动化停止（如 `finalize_escalated`）时出现 |
+| 前端自行推导“在等什么” | 二次推导会与调度器分叉，且容易变成第二事实源 | 等待原因来自纯核心投影，只读既有事实（任务字段、DAG 门禁 `stage_verdict`、`candidate_published` 事件） |
+| 归属判定“看起来应该”自动 | 缺事实时宣称归属会误导操作者 | 归属守卫必须与守护进程同一条件（运行中工作流 + git + 非 context + 未升级 + 状态仍在重试范围内）；未知一律不宣称接管 |
+| 该显示原因的地方只写工具提示 | 悬停提示不构成可见信息 | 关键等待原因在列表与节点卡片上可见，不藏在 `title` 里 |
+| 把“隐藏按钮”当成“拒绝执行” | 显示层与能力层是两件事 | 只改显示与动作生成，保留 CLI 兜底路径，并显式记录未做服务端拒绝 |
+
+### 操作规范
+
+1. 面向用户的进度一律走投影函数（`herdr/delivery_pipeline.py`），并在测试中同时覆盖“接管”与“未接管”两侧反例。
+2. 门禁/节点语义只保留一处定义；需要复用就加公开访问器（`workflow_progress.gate_retry_node`），不在新模块里重写判定。
+3. 缺事实时写“未记录”，不得用“最新一条”“第一项”或空值代替。
+4. 事件时间等 I/O 事实由装配外壳读取后传入纯核心，核心模块不做 I/O。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 -m pytest -q tests/test_delivery_pipeline.py tests/test_controller_progress_actions.py tests/test_console_delivery_pipeline.py
+```
+
+关键回归：`test_scheduler_owned_task_offers_no_manual_git_step`（接管时无人工动作）、`test_manual_git_step_stays_available_when_the_scheduler_is_not_driving`（paused/完成/未知状态保留人工入口）、`test_gate_wait_disappears_once_both_gates_passed`（门禁 pass 后不再显示等待）、`test_human_owned_task_keeps_its_existing_label`（未接管不改徽章）、`test_controller_actions_no_longer_offer_a_manual_integrate`（真实 SQLite + 事件账本的读链）。

@@ -28,6 +28,7 @@ from herdr import projection as herdr_projection
 from herdr import deliverables as herdr_deliverables
 from herdr import archive as herdr_archive
 from herdr import controller_actions as herdr_controller_actions
+from herdr import delivery_pipeline as herdr_delivery_pipeline
 from herdr import dashboard as herdr_dashboard
 from herdr.reason_labels import human_reason
 from herdr import workflow_docs as herdr_workflow_docs
@@ -541,6 +542,43 @@ def _referenced_task_inventory(wid,p,ts,w):
             conn.close()
     return definition,inventory
 
+def candidate_publication_times(wid):
+    """Latest ``candidate_published`` event time per task (one bounded query).
+
+    Read-only and fail-soft: a delivery badge is a display projection, so a
+    missing or unreadable ledger must not take the whole workbench down.
+    """
+    wid=str(wid or '').strip()
+    if not wid:return {}
+    from herdr.state_db import get_readonly_db_connection
+    try:
+        conn=get_readonly_db_connection(state_db_path())
+        try:
+            rows=conn.execute(
+                "SELECT task_id,MAX(timestamp) AS published_at FROM events "
+                "WHERE workflow_id=? AND event_type='candidate_published' "
+                "AND source='herdr-task' GROUP BY task_id",(wid,)).fetchall()
+        finally:conn.close()
+    except (sqlite3.Error,OSError):
+        return {}
+    return {str(r['task_id']):r['published_at'] for r in rows if r['task_id'] and r['published_at'] is not None}
+
+def attach_delivery(tasks,workflow,definition=None):
+    """Attach one delivery-pipeline projection per task (issue #253).
+
+    The projection itself is pure core (`herdr.delivery_pipeline`); this shell
+    only supplies the two I/O facts it cannot read: the pinned node definition
+    and the candidate publication event.
+    """
+    tasks=list(tasks or [])
+    if not any(herdr_delivery_pipeline.stage_of(t.get('status')) for t in tasks):
+        return tasks
+    published=candidate_publication_times((workflow or {}).get('workflow_id'))
+    return [{**t,'delivery':herdr_delivery_pipeline.delivery_projection(
+                t,workflow,tasks,config=definition,
+                published_at=published.get(str(t.get('task_id') or '')))}
+            for t in tasks]
+
 def workflow_detail(wid, *, lightweight=False):
     if lightweight:
         from herdr.recovery_store import read_snapshot
@@ -553,6 +591,7 @@ def workflow_detail(wid, *, lightweight=False):
         ts=tasks_for_workflow(wid)
     ts=enrich_workflow_tasks(wid,p,ts)
     definition,inventory=_referenced_task_inventory(wid,p,ts,w)
+    ts=attach_delivery(ts,w,definition=definition)
     ss=[]
     for k,l in workflow_stages(wid,p,w,definition=definition):
         x=stage_summary(ts,k,workflow=w); x['label']=l; ss.append(x)
@@ -1973,6 +2012,20 @@ def api_task_projection(tid):
             proj['deliverables'] = herdr_deliverables.project_for_tasks(
                 wid, own, _workflow_nodes(wid,workflow), include_expectations=False,
             )
+            # Delivery pipeline row (#253): read from the same frozen definition
+            # and sibling tasks the graph uses, so the drawer cannot disagree
+            # with the flow view about where the task is.  Isolated from the
+            # artifacts read: a projection failure is not an artifacts failure.
+            task = next((t for t in workflow_tasks if t.get('task_id') == tid), None)
+            if task:
+                try:
+                    published=candidate_publication_times(wid).get(str(tid))
+                    proj['delivery']=herdr_delivery_pipeline.delivery_projection(
+                        task,workflow,workflow_tasks,
+                        config=workflow.get('config') if isinstance(workflow.get('config'),dict) else None,
+                        published_at=published)
+                except (KeyError,TypeError,ValueError):
+                    pass
         else:
             proj['deliverables'] = herdr_deliverables.pack([])
     except Exception:
@@ -3373,6 +3426,15 @@ button { cursor: pointer; }
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 8px;
+}
+.task-wait {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .task-menu {
   position: relative;
@@ -7524,6 +7586,63 @@ function cleanStageLabel(s){
   return String(s??'').replace(/^\d+\s*(?=[\u4e00-\u9fff])/, '')
 }
 
+// Delivery pipeline (issue #253). A committed git task the scheduler still
+// owns is NOT terminal: the badge has to name the stage it is waiting at, and
+// the reason, instead of the terminal-sounding raw status label「已提交」.
+// Every field below comes from `herdr.delivery_pipeline` — never re-derived
+// here, so the console cannot disagree with the scheduler about ownership.
+// Tasks the scheduler does not own keep their existing status label.
+function deliveryOf(t){return (t&&t.delivery)||null;}
+function deliveryGates(t){
+  const d=deliveryOf(t);if(!d)return [];
+  return (d.gates||[]).map(g=>cleanStageLabel(g.label||g.id)).filter(Boolean);
+}
+function deliveryReason(t){
+  const d=deliveryOf(t);if(!d)return '';
+  const gates=deliveryGates(t);
+  if(gates.length)return '等待门禁: '+gates.join('、');
+  return d.wait_kind==='owner'?String(d.owner_note||''):'';
+}
+function deliveryOverridesStatus(t){
+  const d=deliveryOf(t);
+  return Boolean(d&&d.scheduler_owned&&d.stage_label);
+}
+function taskStatusLabel(t){
+  const d=deliveryOf(t);
+  return deliveryOverridesStatus(t)?d.stage_label:humanStatus((t||{}).status);
+}
+function taskStatusClass(t){
+  if(deliveryOverridesStatus(t))return 'working';
+  return ((t||{}).status)||'waiting';
+}
+function taskBadge(t){
+  const reason=deliveryOverridesStatus(t)?deliveryReason(t):'';
+  return `<span class="badge ${esc(taskStatusClass(t))}"${reason?` title="${esc(reason)}"`:''}>${esc(taskStatusLabel(t))}</span>`;
+}
+function deliveryWaitHtml(t){
+  if(!deliveryOverridesStatus(t))return '';
+  const reason=deliveryReason(t);
+  return reason?`<span class="task-wait" title="${esc(reason)}">${esc(reason)}</span>`:'';
+}
+function deliveryClock(ts){
+  const n=taskDrawerNumTs(ts);if(n===null)return '';
+  const d=new Date(n>1e12?n:n*1000);if(isNaN(d.getTime()))return '';
+  const p=v=>String(v).padStart(2,'0');
+  return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
+}
+// commit → integration branch → candidate publication, all existing facts.
+// Only git tasks belong here; the commit segment is what makes the row a
+// delivery statement rather than noise on a non-git or uncommitted task.
+function deliveryPipelineLine(t){
+  const d=deliveryOf(t);if(!d||d.integration_mode!=='git')return '';
+  const parts=[];
+  if(d.commit_short)parts.push('commit='+d.commit_short);
+  if(d.integration_branch)parts.push(d.integration_branch);
+  if(!parts.length)return '';
+  parts.push('候选发布 '+(d.candidate_published_at?deliveryClock(d.candidate_published_at):'时间未记录'));
+  return parts.join(' → ');
+}
+
 function relationText(s){
   return s.relation==='current_factory'?'当前工厂':
          s.relation==='historical'?'历史空间':'独立终端'
@@ -10157,7 +10276,7 @@ function renderTaskRow(t){
       <span class="task-name">${esc(taskDisplayName(t))}</span>
     </div>
     <span class="task-agent"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><circle cx="12" cy="8" r="4"/><path d="M6 20v-2a6 6 0 0 1 12 0v2"/></svg>${esc(t.agent||'未分配')}</span>
-    <div class="task-status">${badge(t.status)}</div>
+    <div class="task-status">${deliveryWaitHtml(t)}${taskBadge(t)}</div>
     <div class="task-menu">
       <button class="task-menu-btn" title="更多操作" onclick="toggleTaskMenu(event)">···</button>
       <div class="task-dropdown-menu" onclick="event.stopPropagation()">
@@ -11079,7 +11198,7 @@ function renderFlowGraph(){
 }
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
 function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId));}
-function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='未选择';body.innerHTML='<div class="empty insp-empty"><strong>还没有选中节点</strong><span>在流程图里点一个阶段，这里会显示任务、上下文和运行情况。</span></div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(renderTaskRow).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>分支</dt><dd>${esc(t.candidate_sha||t.integration_branch||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-act-group"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:4px 8px;font-size:12px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
+function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='未选择';body.innerHTML='<div class="empty insp-empty"><strong>还没有选中节点</strong><span>在流程图里点一个阶段，这里会显示任务、上下文和运行情况。</span></div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(renderTaskRow).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${taskBadge(t)}${deliveryWaitHtml(t)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>交付管道</dt><dd>${esc(deliveryPipelineLine(t)||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-act-group"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:4px 8px;font-size:12px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
 let _resizeFlowDebounce=null;
 window.addEventListener('resize',()=>{
   clearTimeout(_resizeFlowDebounce);
@@ -11739,7 +11858,7 @@ function renderTaskDrawer(){
   document.getElementById('taskDrawerTitle').textContent=title;
   document.getElementById('taskDrawerId').textContent=task.task_id||'';
   const parts=[];
-  if(task.status)parts.push(humanStatus(task.status));
+  if(task.status)parts.push(taskStatusLabel(task));
   if(task.agent)parts.push(task.agent);
   if(dur!==null)parts.push(formatElapsed(dur));
   document.getElementById('taskDrawerMeta').textContent=parts.join(' · ');
@@ -11753,10 +11872,14 @@ function renderTaskDrawer(){
   const attrRows=[];
   if(task.agent)attrRows.push(['执行者',task.agent]);
   if(stage)attrRows.push(['阶段',stage]);
-  if(task.status)attrRows.push(['状态',humanStatus(task.status)]);
+  if(task.status)attrRows.push(['状态',taskStatusLabel(task)]);
   if(rtShort)attrRows.push(['运行现场',rtShort]);
   if(ds)attrRows.push([ds.label,fmtClock(ds.ts)]);
   if(dur!==null)attrRows.push(['耗时',formatElapsed(dur)]);
+  const pipelineLine=deliveryPipelineLine(task);
+  if(pipelineLine)attrRows.push(['交付管道',pipelineLine]);
+  const waitReason=deliveryReason(task);
+  if(waitReason)attrRows.push(['当前等待',waitReason]);
   const tab=state.taskDrawerTab==='activity'?'trace':state.taskDrawerTab;
   const tabs=['overview','trace','artifacts','runtime'];
   const labels={overview:'tdTabOverview',trace:'tdTabActivity',artifacts:'tdTabArtifacts',runtime:'tdTabRuntime'};
@@ -11777,6 +11900,8 @@ function resolveTaskDetail(tid,td,proj,tdError,projError,rowTask){
   const fetched=(td&&td.task)||{};
   const task=Object.assign({},rowTask||{},fetched);
   if(!Object.keys(task).length&&proj)Object.assign(task,{task_id:proj.task_id,workflow_id:proj.workflow_id,node:proj.node,agent:proj.agent,status:proj.status,goal:proj.goal});
+  // The drawer's own projection is authoritative when the row snapshot is stale.
+  if(proj&&proj.delivery)task.delivery=proj.delivery;
   return {status:'ok',task,proj:proj||{},live:((td&&td.runtime)||{})};
 }
 async function openTaskDrawer(tid){
@@ -11980,9 +12105,23 @@ const CTL_CAT_META={fix:['修复','working'],rework:['换人重派','rework'],by
 function catMeta(c){return CTL_CAT_META[c]||[c||'操作','waiting'];}
 // Pipeline actions must render even when there are zero blockers: a healthy task
 // that still owes `integrate` is exactly the case that used to render nothing.
+// Tasks the scheduler already owns have no action at all — they are shown as an
+// attribution instead, so nobody hunts for a button that would race the daemon (#253).
+function renderSchedulerAttribution(){
+  const ts=((state.workflow&&state.workflow.tasks)||[]).filter(deliveryOverridesStatus);
+  if(!ts.length)return {count:0,html:''};
+  const html=ts.map(t=>{
+    const note=String((deliveryOf(t)||{}).owner_note||'');
+    const reason=deliveryReason(t);
+    const detail=reason&&reason!==note?` · ${esc(reason)}`:'';
+    return `<div class="ctl-blocker" style="margin-bottom:8px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">${esc(taskDisplayName(t)||t.task_id)}</div><div class="ctl-blocker-id">${esc(t.task_id||'')}</div></div><div style="display:flex;gap:8px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(t.task_id||'')}')">查看任务详情</button></div></div><div class="ctl-effect">${esc(note)}${detail}</div></div>`;
+  }).join('');
+  return {count:ts.length,html};
+}
 function renderPipelineActions(acts){
   const pipelineActs=acts.filter(a=>a.group==='pipeline');
-  if(!pipelineActs.length)return '';
+  const attributed=renderSchedulerAttribution();
+  if(!pipelineActs.length&&!attributed.count)return '';
   const resumeAct=pipelineActs.find(a=>a.action_id.endsWith(':resume_workflow'));
   const taskActs=pipelineActs.filter(a=>a!==resumeAct);
   const byTask={};
@@ -11992,7 +12131,8 @@ function renderPipelineActions(acts){
     return `<div class="ctl-blocker" style="margin-bottom:8px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">${esc(taskDisplayName({task_id:k})||k)}</div><div class="ctl-blocker-id">${esc(k)}</div></div><div style="display:flex;gap:8px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(k)}')">查看任务详情</button></div></div></div><div class="ctl-actions">${items.map((a,i)=>controllerActionCard(a,k,i+1)).join('')}</div>`;
   }).join('');
   const resumeHtml=resumeAct?`<div class="ctl-actions" style="margin-bottom:12px">${controllerActionCard(resumeAct,'',1)}</div>`:'';
-  return `<section><div class="ctl-section-title">继续推进 <span class="ctl-count">${pipelineActs.length}</span></div><div class="ctl-sub">这些任务本身没有报错，只是还差一步就能收尾（保存版本 / 并入目标分支 / 归档），或者工位需要人推一把。点按钮即可。</div>${resumeHtml}${groups}</section>`;
+  const count=pipelineActs.length+attributed.count;
+  return `<section><div class="ctl-section-title">继续推进 <span class="ctl-count">${count}</span></div><div class="ctl-sub">这些任务本身没有报错，只是还差一步就能收尾（保存版本 / 并入目标分支 / 归档），或者工位需要人推一把。点按钮即可。由调度器接管的任务不需要你操作，只列出当前等待原因。</div>${resumeHtml}${groups}${attributed.html}</section>`;
 }
 // Open decision asks must be impossible to miss: they block whole waves and
 // previously only existed as free text inside the coordinator's terminal.
