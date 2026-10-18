@@ -3119,6 +3119,36 @@ def process_blocked_observations():
     return processed
 
 
+def process_gate_verdict_reconciliations():
+    """PR #250: Reconcile gate tasks that have written a valid verdict.
+
+    Covers two failure modes:
+    1. A working gate task where gate_verdict_ready is True is transitioned to agent_done.
+    2. A gate task failed by watchdog where a valid gate verdict file exists is auto-adopted.
+    """
+    processed = 0
+    for task in load_tasks():
+        status = task.get("status")
+        workflow_id = task.get("workflow_id")
+        node_id = task.get("node") or task.get("stage")
+        if not workflow_id or not node_id or not node_is_gate(workflow_id, node_id):
+            continue
+
+        task_id = task.get("task_id")
+        if status in {"working", "dispatched"}:
+            if gate_verdict_ready(task):
+                if _set_observed_status(task, "agent_done", "gate_verdict_recovery"):
+                    emit_done_if_allowed(get_task(task_id))
+                    processed += 1
+        elif status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog":
+            verdict, _, _ = read_gate_verdict(task)
+            if verdict in ("pass", "blocked"):
+                if try_auto_verdict(task_id):
+                    processed += 1
+    return processed
+
+
+
 # ============================================================
 # Stage policies
 # ============================================================
@@ -8282,8 +8312,15 @@ def try_auto_verdict(task_id):
         return False
 
     task = get_task(task_id)
-    if not task or task.get("status") != "agent_done":
+    if not task:
         return False
+
+    status = task.get("status")
+    if status != "agent_done":
+        # Issue #250: Allow adopting gate verdict if task was placed in failed
+        # (e.g. by watchdog) but produced a valid machine-readable gate verdict.
+        if not (status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog"):
+            return False
 
     workflow_id = task.get("workflow_id")
     node_id = task.get("node") or task.get("stage")
@@ -9965,8 +10002,6 @@ def handle_event(task_id, agent_status):
             maybe_ack_on_working(task_id)
 
     elif agent_status in {"idle", "done"}:
-        if task.get("completion_protocol") == "receipt-v1":
-            return
         if current_status in {"dispatched", "working", "rework"}:
             has_done_marker, screen = _completion_marker_snapshot(task)
             if agent_status == "idle" and not has_done_marker:
@@ -9988,6 +10023,8 @@ def handle_event(task_id, agent_status):
                     if _set_observed_status(task, "agent_done", "rework_recovery"):
                         emit_done_if_allowed(get_task(task_id), report_text=screen)
                     return
+            if task.get("completion_protocol") == "receipt-v1":
+                return
             # Both idle and done are settled runtime states; the durable
             # marker, sampling, elapsed-time and CAS gates still arbitrate.
             _record_completion_sample(
@@ -10454,6 +10491,7 @@ def registry_watcher():
             process_structured_completions(now=now)
             process_all_completion_observations(now=now)
             process_blocked_observations()
+            process_gate_verdict_reconciliations()
             tasks = load_tasks()
             task_ids_now = set()
             _wf_closed_cache = {}

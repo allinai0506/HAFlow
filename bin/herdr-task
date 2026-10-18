@@ -2459,7 +2459,14 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
         print(f"{task_id}: already {new_status}")
         return
 
-    if new_status not in TRANSITIONS.get(old_status, set()):
+    allowed_transitions = set(TRANSITIONS.get(old_status, set()))
+    force_transition = False
+    if old_status == "failed" and new_status == "completed" and verdict:
+        # Issue #250: Allow adopting gate verdict from failed state
+        allowed_transitions.add("completed")
+        force_transition = True
+
+    if new_status not in allowed_transitions:
         print(
             f"Illegal transition: "
             f"{task_id}: {old_status} -> {new_status}"
@@ -2491,6 +2498,7 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
             reason="cli_set_status",
             source="herdr-task",
             metadata=metadata,
+            force=force_transition,
             store=store,
         )
     except Exception as exc:
@@ -5144,6 +5152,85 @@ def bypass_gate_cli(task_id, reason, operator="human", note=None, as_json=False)
         sys.exit(1)
 
 
+def adopt_verdict_cli(task_id, verdict=None, note=None, operator="human", as_json=False):
+    """Adopt gate verdict from gate-verdict file into task (productizing manual arbitration)."""
+    data = load_tasks()
+    task = find_task(data, task_id)
+    if not task:
+        print(f"Task not found: {task_id}", file=sys.stderr)
+        sys.exit(1)
+
+    affected_ids = []
+    # If verdict is not explicitly given, read from gate-verdict file
+    if not verdict:
+        candidates = []
+        try:
+            from herdr.direct_dispatch import gate_verdict_path
+            candidates.append(gate_verdict_path(task_id))
+        except Exception:
+            override = os.environ.get("HERDR_GATE_VERDICT_DIR")
+            vdir = Path(override).expanduser() if override else (Path.home() / ".herdr-controller" / "gate-verdicts")
+            candidates.append(str(vdir / f"{task_id}.json"))
+
+        clone_path = task.get("clone_path")
+        if clone_path:
+            candidates.append(os.path.join(clone_path, ".herdr/gate-verdict.json"))
+
+        for path in candidates:
+            try:
+                if not os.path.exists(path):
+                    continue
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict):
+                    raw_v = str(payload.get("verdict") or "").strip().lower()
+                    if raw_v in ("pass", "blocked"):
+                        verdict = raw_v
+                        note = note or str(payload.get("note") or "").strip()
+                        raw_aff = payload.get("affected_task_ids")
+                        if isinstance(raw_aff, list):
+                            for aff in raw_aff:
+                                if isinstance(aff, str) and aff.strip():
+                                    affected_ids.append(aff.strip())
+                        break
+            except Exception:
+                continue
+
+    if not verdict or verdict not in ("pass", "blocked"):
+        print(f"No valid gate verdict found for task {task_id}", file=sys.stderr)
+        sys.exit(2)
+
+    if verdict == "blocked" and not (note or "").strip():
+        note = f"gate verdict blocked (adopted by {operator})"
+
+    old_status = task.get("status")
+    set_status(
+        task_id,
+        "completed",
+        verdict=verdict,
+        note=note,
+        affected_task_ids=affected_ids if affected_ids else None,
+        skip_operator=operator,
+    )
+
+    result = {
+        "task_id": task_id,
+        "status": "completed",
+        "previous_status": old_status,
+        "verdict": verdict,
+        "note": note,
+        "affected_task_ids": affected_ids,
+        "operator": operator,
+    }
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"[GATE VERDICT ADOPTED] task={task_id} status={old_status} -> completed "
+            f"verdict={verdict} note=\"{note}\""
+        )
+        print("HERDR_GATE_ADOPT_RESULT=" + json.dumps(result, ensure_ascii=False))
+    return 0
 
 
 def _with_git_operation_lock(*, include_source_repo=False):
@@ -9063,6 +9150,16 @@ def main():
              "independent of the task worker; requires HERDR_OPERATOR=1)",
     )
 
+    adopt_verdict_cmd = sub.add_parser(
+        "adopt-verdict",
+        help="从门禁结论文件采纳裁决并完成门禁任务（支持从 failed 状态恢复）",
+    )
+    adopt_verdict_cmd.add_argument("task_id")
+    adopt_verdict_cmd.add_argument("--verdict", choices=["pass", "blocked"], default=None, help="Explicit verdict override")
+    adopt_verdict_cmd.add_argument("--note", default=None, help="Explicit note override")
+    adopt_verdict_cmd.add_argument("--operator", default="human", help="Audited operator identity")
+    adopt_verdict_cmd.add_argument("--json", action="store_true", help="Output result as JSON")
+
     closure_cmd = sub.add_parser(
         "record-review-closure",
         help="记录 wrapup 审核闭环回执（PR URL / CI / findings；完成转换会 fail-closed 校验）",
@@ -9759,6 +9856,15 @@ def main():
                    affected_task_ids=args.affected_task_ids,
                    skip_review_closure=args.skip_review_closure,
                    skip_operator=args.operator)
+
+    elif args.command == "adopt-verdict":
+        adopt_verdict_cli(
+            args.task_id,
+            verdict=args.verdict,
+            note=args.note,
+            operator=args.operator,
+            as_json=getattr(args, "json", False),
+        )
 
     elif args.command == "record-review-closure":
         record_review_closure(args.task_id, pr_url=args.pr_url,

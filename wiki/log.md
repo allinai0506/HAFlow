@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-18] fix | 洁净室门禁评测自适应超时与 watchdog 结论自动采纳 (issue #250)
+
+- 背景：
+  1. 在 `wf-haflow-1017-01` 工作流中，洁净室外环门禁工位（`cleanroom_test` / `cleanroom_review`）虽已产出合法门禁结论文件（`~/.herdr-controller/gate-verdicts/wf-haflow-1017-01-cleanroom_{test,review}-auto.json`，`verdict: "blocked"`），但被 Sentinel 的 `hard_timeout_watchdog` 提前置为 `failed`；
+  2. `bin/herdr-loop` 评测单次写死 300s 超时，而当前仓库 pytest 全量套件耗时 ~753s，导致 3 次迭代全部超时（耗时 900s 徒劳重试），叠加测试运行与浏览器人工复现，工位耗时超过 Sentinel 3600s 上限；
+  3. Sentinel 超时检测未感知任务是否已落盘合法门禁结论；
+  4. Controller 在 `completion_protocol == "receipt-v1"` 时过早 return 阻断了 `gate_verdict_ready` 恢复，且 `try_auto_verdict` 不允许从 `failed` 状态采纳已落盘结论；
+  5. 缺乏产品化的手动仲裁采纳命令（`bin/herdr-task set` 拦截 `failed -> completed` 非法状态流转）。
+- 变更：
+  1. **评分器评测自适应超时与可配预算**：在 `herdr/evaluator.py` 增加 `resolve_evaluation_timeout`，支持 `--timeout` 参数、环境变量 `HERDR_LOOP_EVAL_TIMEOUT` / `HERDR_EVAL_TIMEOUT`、`GOAL.md` 契约及按测试文件数自适应计算（单文件 4.0s，最大上限 1800s，默认 300s）；`bin/herdr-loop` 接入；
+  2. **Sentinel 门禁感知与超时抑制**：在 `services/herdr-sentinel.py` 中增加门禁结论文件检测（`_task_has_valid_gate_verdict`），已产出有效结论的门禁任务超时被抑制并打印日志；门禁工位超时预算扩展至 7200s（`task_gate_hard_timeout_seconds`）；
+  3. **Controller Receipt-v1 门禁恢复与 Watchdog 失败自动采纳**：在 `services/herdr-controller.py` 中将 `receipt-v1` 阻断移至 `gate_verdict_ready` 与 `rework_recovery` 之后；在 `try_auto_verdict` 中支持采纳 `hard_timeout_watchdog` 失败但存在合法结论的门禁任务；后台巡检增加已完成门禁对账；
+  4. **CLI 产品化门禁采纳命令**：在 `bin/herdr-task` 增加 `adopt-verdict <task_id>` 子命令，并在指定 `--verdict` 时通过 `force_transition=True` 允许由 `failed` 受控流转至 `completed`。
+- 证据：
+  1. `tests/test_issue_250_eval_timeout_adaptive.py`（8 测试通过）；
+  2. `tests/test_issue_250_sentinel_gate_verdict_watchdog.py`（2 测试通过）；
+  3. `tests/test_issue_250_controller_gate_verdict_recovery_receipt_v1.py`（2 测试通过）；
+  4. `tests/test_issue_250_adopt_verdict_cli.py`（2 测试通过）；
+  5. `tests/test_issue_250_cleanroom_gate_e2e.py`（1 测试通过）；
+  6. 门禁与全量相关测试 97 项用例全部 PASS。
+
 ## [2026-10-17] fix | 治理 PR 审核数小时死循环与 CI Runner 欠费秒挂
 
 - 背景：

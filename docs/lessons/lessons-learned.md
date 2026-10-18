@@ -7286,3 +7286,50 @@ bin/herdr-task freeze-candidate <workflow_id> --candidate-sha <sha> ...
 ```
 
 证据：共享区 notes n-1792319495852-d33d（TaskB 补派承诺）、n-1792325777357-ff5d（candidate_mismatch 伪影）、n-1792331586268-4ad5（opt-out 审计 + rebase 旋转 + 重冻结）、n-1792333606916-d835（--abandon 解死端）、n-1792330151841-f810（D3 裁决）；回归测试 `tests/test_quality_assessment.py`（含 `test_historical_receipt_does_not_leak_across_runs`），候选 `ce5875b` 上 103 passed + 13 subtests。
+
+---
+
+## 174. 洁净室门禁评测自适应超时与 watchdog 结论受控采纳（2026-10-18）
+
+### 问题背景
+
+wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanroom_test` 与 `cleanroom_review`）虽已成功生成合法门禁裁决文件（`wf-haflow-1017-01-cleanroom_test-auto.json`，结论为 `verdict: "blocked"`），但被后台巡检 Sentinel 的 `hard_timeout_watchdog` 强行置为 `failed`。
+根因分析：
+1. `bin/herdr-loop` 自检评测预算写死 `timeout=300s`，而仓库全量测试套件耗时高达 ~753s，单次评测超时（exit 124）触发 3 次反复重试，空耗 900s 预算，最终总耗时突破 Sentinel 的 3600s 硬超时；
+2. Sentinel 在判定超时失效时盲目执行失败转移，未感知任务工作目录或中央落盘路径是否已有有效门禁裁决；
+3. 控制器调度链路在 `completion_protocol == "receipt-v1"` 时提前退出，阻断了 `gate_verdict_ready` 对 idle 门禁工位的自动恢复，且 `try_auto_verdict` 坚决拒绝从 `failed` 状态采纳已落盘的有效裁决；
+4. CLI 状态转移网关缺乏强制覆盖路径，运维总指挥无法通过正规命令手工收编有效门禁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 评测超时写死固定常数（300s） | 大型测试套件执行时长远超单一固定预算，固定阈值会导致持续重试雪崩 | 超时预算分层决策：支持 CLI 参数、环境变量、目标契约（GOAL.md）与按测试集规模自适应缩放（单文件 4s 弹性上浮至 1800s） |
+| 巡检哨兵无视已落盘的物理证据 | 物理结论优先于超时猜测；已有合法输出的任务被超时强杀违背了事实优先原则 | 哨兵杀死任务前必须检查合法门禁落盘候选；存在合法结论时抑制超时并放行控制器采纳，门禁超时预算单独放宽（7200s） |
+| 通讯协议检查粗暴阻断业务生命周期 | 对 receipt-v1 屏幕记号采样的隔离不应顺手剥离门禁完成事件（gate_verdict_ready） | 协议边界防御应放置在专有逻辑（如屏幕记号采样）之前，不可阻断公共的结论感知与故障恢复流程 |
+| 终态锁死导致合法结论沦为孤岛 | 状态机 fail-closed 虽好，但当 watchdog 误杀发生后，程序应具备针对已验证证据的自愈通道 | 允许 Controller 与 CLI 在核验合法 `verdict` 文件真实存在时，受控突破 `failed -> completed` 状态转移壁垒；严格限制仅对 `failure_reason == "hard_timeout_watchdog"` 的门禁工位生效 |
+| 重启/返工任务吸附陈旧裁决 | 未校验文件 mtime 与执行纪元（`rework_started_at`），历史裁决文件会导致重启中的任务在执行前被瞬间误置 `agent_done` | 裁决读取严格要求时效晚于当前纪元启动时间；返工（`cmd_rework`）前主动清理磁盘旧裁决；对账巡检仅在工位运行时确认为 `idle`/`done` 时介入 |
+| 强制流转裸奔并发竞争 | `force=True` 若未绑定当前观察到的版本号与状态快照，并发重试/流转会被强制完成直接抹掉 | 强制状态转移必须传递 `expected_status` 与 `expected_version` 执行 CAS 校验，发生并发写入时原子拒绝 |
+| 哨兵超时抑制被非门禁工位冒用 | 先查文件再判工位身份，会导致带残留同名文件的普通实现任务永久逃逸超时守护 | 哨兵必须先判定 `_is_gate_task` 门禁身份，严禁普通实现工位跳过 watchdog 守护 |
+| 人工仲裁无标准 CLI 命令入口 | 应急运维依赖直接修改底层数据库容易破坏版本和审计一致性 | 产品化提供 `herdr-task adopt-verdict` 命令，完成证据核验、事件落盘、SQLite 更新与状态广播全链条 |
+
+### 操作规范
+
+1. **评测预算管理**：所有执行评测必须经由 `herdr/evaluator.py::resolve_evaluation_timeout` 统一计算超时，不允许在调用方硬编码数字。
+2. **哨兵超时前置检查**：哨兵在标记 `hard_timeout_watchdog` 前，必须先核查目标是否为门禁工位（`_is_gate_task`）；确为门禁工位时遍历工作目录及 `~/.herdr-controller/gate-verdicts/` 核验结论文件；若存在有效结论，只警告并抑制失败流转。
+3. **门禁工位超时宽限**：门禁工位涉及编译、全量回归与大模型综合审计，基础超时默认翻倍（7200s）。
+4. **受控仲裁通道**：当门禁被异常置为 failed 但证据确凿时，使用 `herdr-task adopt-verdict <task_id> [--verdict blocked/pass]` 采纳，禁止直接 update 数据库；状态网关对非 watchdog 失败或非门禁任务强制拒绝。
+5. **执行纪元隔离**：裁决落盘与采纳必须校验 `mtime >= rework_started_at - 1.0`，返工启动时主动 unlink 历史裁决残留。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_issue_250_eval_timeout_adaptive.py \
+          tests/test_issue_250_sentinel_gate_verdict_watchdog.py \
+          tests/test_issue_250_controller_gate_verdict_recovery_receipt_v1.py \
+          tests/test_issue_250_adopt_verdict_cli.py \
+          tests/test_issue_250_cleanroom_gate_e2e.py \
+          tests/test_issue_250_codex_p1_p2_fixes.py
+```
+
+关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与时效拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog。

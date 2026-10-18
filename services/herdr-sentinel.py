@@ -61,6 +61,65 @@ def task_hard_timeout_seconds():
         return DEFAULT_TASK_HARD_TIMEOUT_SECONDS
 
 
+DEFAULT_GATE_TASK_HARD_TIMEOUT_SECONDS = 7200.0
+
+
+def task_gate_hard_timeout_seconds(base_timeout=None):
+    base = base_timeout or task_hard_timeout_seconds()
+    raw = os.environ.get("HERDR_GATE_TASK_HARD_TIMEOUT")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val > 0:
+                return val
+        except (ValueError, TypeError):
+            pass
+    return max(base * 2.0, DEFAULT_GATE_TASK_HARD_TIMEOUT_SECONDS)
+
+
+def _gate_verdict_file_candidates(task):
+    candidates = []
+    task_id = task.get("task_id")
+    if task_id:
+        try:
+            from herdr.direct_dispatch import gate_verdict_path
+            candidates.append(gate_verdict_path(task_id))
+        except Exception:
+            override = os.environ.get("HERDR_GATE_VERDICT_DIR")
+            vdir = Path(override).expanduser() if override else (Path.home() / ".herdr-controller" / "gate-verdicts")
+            candidates.append(str(vdir / f"{task_id}.json"))
+    clone_path = task.get("clone_path")
+    if clone_path:
+        candidates.append(os.path.join(clone_path, ".herdr/gate-verdict.json"))
+    return candidates
+
+
+def _task_has_valid_gate_verdict(task):
+    for path in _gate_verdict_file_candidates(task):
+        try:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict):
+                verdict = str(payload.get("verdict") or "").strip().lower()
+                if verdict in ("pass", "blocked"):
+                    note = str(payload.get("note") or "").strip()
+                    return True, verdict, note
+        except Exception:
+            continue
+    return False, None, None
+
+
+def _is_gate_task(task):
+    node = str(task.get("node") or task.get("stage") or "").lower()
+    if any(k in node for k in ("cleanroom", "gate")):
+        return True
+    if node in ("test", "review", "wrapup"):
+        return True
+    return bool(task.get("gate"))
+
+
 def run(cmd, timeout=10):
     return subprocess.run(
         cmd,
@@ -774,6 +833,24 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
         if idle_seconds < hard_timeout:
             timeouts.pop(tid, None)
             continue
+
+        # Issue #250: If a valid gate-verdict file already exists, suppress watchdog failure
+        has_verdict, verdict_val, verdict_note = _task_has_valid_gate_verdict(task)
+        if has_verdict:
+            print(
+                f"[SENTINEL TIMEOUT SUPPRESSED] task={tid} status={status} idle={int(idle_seconds)}s — "
+                f"gate verdict '{verdict_val}' already written, suppressing watchdog failure",
+                flush=True,
+            )
+            timeouts.pop(tid, None)
+            continue
+
+        # Issue #250: Gate tasks running full regression suites receive extended hard timeout
+        if _is_gate_task(task):
+            gate_timeout = task_gate_hard_timeout_seconds(hard_timeout)
+            if idle_seconds < gate_timeout:
+                timeouts.pop(tid, None)
+                continue
 
         existing_timeout = timeouts.get(tid)
         if existing_timeout and existing_timeout.get("updated_at") == updated_at:
