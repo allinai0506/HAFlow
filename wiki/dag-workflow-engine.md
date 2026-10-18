@@ -417,3 +417,13 @@ Evidence:
 - `herdr/git_adoption.py#_stale_commits` / `#classify_commit_state`
 - `bin/herdr-task#commit_task` / `#_adopt_head_if_attributable`
 - `tests/test_git_adoption_rebase.py`
+
+## SPEC 规格研发模板与浏览器验收契约
+
+`FACT`：`spec-development-v1` 将规格/澄清和方案/拆任务分别合并为单节点，实现后独立 test/review 同时就绪，acceptance 汇聚后进入 wrapup。review 要求只读依次执行 `ai-slop-cleaner --review` 与 `google-code-review`。三套研发模板的测试节点均声明本地服务与 ego-browser 真实 E2E 必过，缺失时 blocked；这是执行指令契约，未新增程序化 E2E 回执验证。
+
+Evidence:
+- `workflow_templates/spec-development-v1.yaml`
+- `workflow_templates/code-craft-v1.yaml`
+- `workflow_templates/software-development-v1.yaml`
+- `herdr/workflow.py#get_ready_nodes`

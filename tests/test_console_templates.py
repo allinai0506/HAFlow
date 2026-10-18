@@ -300,6 +300,27 @@ class TestTemplateLibraryBehavior(unittest.TestCase):
             text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_refreshing_same_template_preserves_node_details(self):
+        source = self.html
+        block = source[source.index('async function selectTemplateInLibrary('):
+                       source.index('function tplNodeCardHTML(')]
+        self.run_js(block, r'''
+const state={templates:[],currentTemplateDetail:{template:{id:'alpha'}}};
+const document={getElementById:()=>null};
+let closed=0;
+function renderTplCards(){}
+function closeTplNodeDrawer(){closed++}
+function renderTplDAG(){}
+async function api(url){return {template:{id:url.split('=')[1]},nodes:[]}}
+// SOURCE
+(async()=>{
+ await selectTemplateInLibrary('alpha');
+ assert.equal(closed,0,'刷新同一模板不得打断属性阅读');
+ await selectTemplateInLibrary('beta');
+ assert.equal(closed,1,'切换模板必须关闭旧节点属性');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+
     def test_template_selection_is_scoped_per_space(self):
         source = self.html
         block = source[source.index('function projectTemplateId('):
