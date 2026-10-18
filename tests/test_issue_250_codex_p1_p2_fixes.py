@@ -45,6 +45,16 @@ def _load_sentinel():
     return mod
 
 
+def _load_herdr_task():
+    from importlib.machinery import SourceFileLoader
+    path = HERDR_ROOT / "bin" / "herdr-task"
+    loader = SourceFileLoader("herdr_task_module", str(path))
+    spec = importlib.util.spec_from_loader("herdr_task_module", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
 class CodexReviewP1P2FixesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -658,6 +668,103 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
                 text=True,
                 timeout=10,
             )
+
+    def test_p1_authoritative_gate_identity_resolution(self):
+        """P1: Configured gates with non-heuristic names (like executive_briefing) resolve authoritatively."""
+        sentinel = _load_sentinel()
+        herdr_task = _load_herdr_task()
+        controller = _load_controller()
+
+        # 1. executive_briefing in business-research-v1 template has node_type: gate and gate: {...}
+        # It does NOT match heuristic names ("cleanroom", "gate", "test", "review", "wrapup").
+        wf_cfg_path = "workflow_templates/business-research-v1.yaml"
+        gate_task = {
+            "task_id": "wf-p1-exec-briefing",
+            "workflow_id": "wf-p1",
+            "node": "executive_briefing",
+            "stage": "executive_briefing",
+            "workflow_config": wf_cfg_path,
+        }
+        non_gate_task = {
+            "task_id": "wf-p1-market-scope",
+            "workflow_id": "wf-p1",
+            "node": "market_scope",
+            "stage": "market_scope",
+            "workflow_config": wf_cfg_path,
+        }
+
+        # Sentinel _is_gate_task
+        self.assertTrue(sentinel._is_gate_task(gate_task))
+        self.assertFalse(sentinel._is_gate_task(non_gate_task))
+
+        # herdr-task _is_gate_task
+        self.assertTrue(herdr_task._is_gate_task(gate_task))
+        self.assertFalse(herdr_task._is_gate_task(non_gate_task))
+
+        # Direct task with gate: True persists authoritative identity
+        explicit_gate_task = {
+            "task_id": "wf-p1-custom",
+            "node": "custom_arbitrary_name",
+            "gate": True,
+        }
+        self.assertTrue(sentinel._is_gate_task(explicit_gate_task))
+        self.assertTrue(herdr_task._is_gate_task(explicit_gate_task))
+
+        # Controller node_is_gate and resolve_gate_config
+        custom_node = {"id": "custom_signoff", "node_type": "gate"}
+        self.assertIsNotNone(controller.resolve_gate_config(custom_node, "custom_signoff"))
+        with patch.object(controller, "workflow_config_for", return_value={"nodes": [custom_node]}):
+            self.assertTrue(controller.node_is_gate("wf-p1", "custom_signoff"))
+
+    def test_p2_grace_seconds_rejects_inf_and_nan(self):
+        """P2: HERDR_GATE_HANDOFF_GRACE_SECONDS must reject inf, -inf, nan, and non-positive values."""
+        sentinel = _load_sentinel()
+        controller = _load_controller()
+
+        for invalid in ["inf", "+inf", "-inf", "nan", "NaN", "0", "-10", "abc"]:
+            with patch.dict(os.environ, {"HERDR_GATE_HANDOFF_GRACE_SECONDS": invalid}):
+                self.assertEqual(sentinel.task_gate_handoff_grace_seconds(), 300.0)
+                self.assertEqual(controller.task_gate_handoff_grace_seconds(), 300.0)
+
+        with patch.dict(os.environ, {"HERDR_GATE_HANDOFF_GRACE_SECONDS": "120.5"}):
+            self.assertEqual(sentinel.task_gate_handoff_grace_seconds(), 120.5)
+            self.assertEqual(controller.task_gate_handoff_grace_seconds(), 120.5)
+
+    def test_p2_controller_reconciles_rework_gate_task(self):
+        """P2: process_gate_verdict_reconciliations must reconcile gate task in status='rework'."""
+        controller = _load_controller()
+        task_id = "wf-p2-rework-task"
+        verdict_path = self.verdicts_dir / f"{task_id}.json"
+        verdict_path.write_text(
+            json.dumps({"verdict": "pass", "note": "verdict produced during rework"}),
+            encoding="utf-8",
+        )
+
+        now = time.time()
+        os.utime(str(verdict_path), (now, now))
+
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p2",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "pane_id": "p2",
+            "status": "rework",
+            "gate": True,
+            "rework_started_at": now - 100.0,
+            "version": 3,
+        }
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(controller, "load_tasks", return_value=[task]), \
+             patch.object(controller, "node_is_gate", return_value=True), \
+             patch.object(controller, "get_agent_runtime_status", return_value="idle"), \
+             patch.object(controller, "gate_verdict_ready", return_value=True), \
+             patch.object(controller, "_set_observed_status", return_value=True) as mock_set_status, \
+             patch.object(controller, "emit_done_if_allowed") as mock_emit:
+            processed = controller.process_gate_verdict_reconciliations()
+            self.assertEqual(processed, 1)
+            mock_set_status.assert_called_once_with(task, "agent_done", "gate_verdict_recovery")
 
 
 if __name__ == "__main__":

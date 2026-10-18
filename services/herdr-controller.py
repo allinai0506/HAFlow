@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import math
 import re
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -961,11 +962,17 @@ FIX_LOOP_SUPERSEDEABLE = {
 def resolve_gate_config(node, node_id):
     gate = (node or {}).get("gate") or get_stage_policy(node_id).get("gate")
 
+    if gate is None and (node or {}).get("node_type") == "gate":
+        gate = {}
+
     if gate is None:
         gate = GATE_DEFAULTS.get(node_id)
 
-    if not gate:
+    if not gate and (node or {}).get("node_type") != "gate":
         return None
+
+    if not isinstance(gate, dict):
+        gate = {}
 
     return {
         "retry_node": gate.get("retry_node", "implementation"),
@@ -3119,6 +3126,21 @@ def process_blocked_observations():
     return processed
 
 
+DEFAULT_GATE_HANDOFF_GRACE_SECONDS = 300.0
+
+
+def task_gate_handoff_grace_seconds():
+    raw = os.environ.get("HERDR_GATE_HANDOFF_GRACE_SECONDS")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val > 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_GATE_HANDOFF_GRACE_SECONDS
+
+
 def process_gate_verdict_reconciliations():
     """PR #250 & Codex P1: Reconcile gate tasks that have written a valid verdict.
 
@@ -3132,11 +3154,12 @@ def process_gate_verdict_reconciliations():
         status = task.get("status")
         workflow_id = task.get("workflow_id")
         node_id = task.get("node") or task.get("stage")
-        if not workflow_id or not node_id or not node_is_gate(workflow_id, node_id):
+        is_gate = bool(task.get("gate")) or (bool(workflow_id and node_id) and node_is_gate(workflow_id, node_id))
+        if not is_gate:
             continue
 
         task_id = task.get("task_id")
-        if status in {"working", "dispatched"}:
+        if status in {"working", "dispatched", "rework"}:
             if not _gate_verdict_is_fresh(task):
                 continue
             pane_id = task.get("pane_id")
@@ -3150,7 +3173,7 @@ def process_gate_verdict_reconciliations():
             if not runtime_settled:
                 # Issue #250 & Codex review: If runtime is not settled, allow adoption after bounded handoff grace
                 verdict_mtime = _gate_verdict_file_mtime(task)
-                grace = float(os.environ.get("HERDR_GATE_HANDOFF_GRACE_SECONDS", "300"))
+                grace = task_gate_handoff_grace_seconds()
                 if not verdict_mtime or (time.time() - verdict_mtime) < grace:
                     continue
             if gate_verdict_ready(task):

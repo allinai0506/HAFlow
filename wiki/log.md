@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-19] fix | 基于权威工作流配置判定门禁身份、有限宽限期与 rework 状态对账 (PR #266 Codex Review)
+
+- 背景：
+  1. GitHub Codex 自动化评审指出 PR #266 存在 3 项缺陷：
+     - [P1] `bin/herdr-task:_is_gate_task` 和 `services/herdr-sentinel.py:_is_gate_task` 仅依赖节点名称字符串启发式（`cleanroom`, `gate`, `test`, `review`, `wrapup`），对于命名不含上述字样的合法门禁节点（例如 `workflow_templates/business-research-v1.yaml` 中的 `executive_briefing`，其配置了 `node_type: gate`），派发时未落盘 `gate` 字段，导致判定为 False。Sentinel 判定非门禁后忽略其新鲜裁决直接超时置 failed，而 `herdr-task` 在后续尝试流转时又因非门禁身份拒绝 `failed -> completed` 强制采纳；
+     - [P2] 环境变量 `HERDR_GATE_HANDOFF_GRACE_SECONDS=inf` 会导致 Sentinel 与 Controller 将宽限期视为无穷大，永久抑制 watchdog 并防止超时流转；
+     - [P2] `services/herdr-controller.py:process_gate_verdict_reconciliations` 仅检查 `status in {"working", "dispatched"}`，漏掉了在 `rework` 状态下产出合法裁决的门禁任务（例如 Controller 重启跨生命周期场景）。
+- 变更：
+  1. **权威门禁身份判定与派发落盘**：`bin/herdr-task:_launch_task` 在派发时根据节点配置 `node.get("gate") or node.get("node_type") == "gate"` 显式持久化 `task["gate"] = True`；Sentinel 与 `herdr-task` 的 `_is_gate_task` 优先读取 `task["gate"]`，在未持久化时回退至 `herdr.projects:workflow_config_for` 权威配置及 `workflow_config` 文件解析；
+  2. **有限宽限期严格校验**：Sentinel 与 Controller 中的 `task_gate_handoff_grace_seconds()` 强制要求 `val > 0 and math.isfinite(val)`，非法或无穷大输入一律回退至默认值 `300.0`；
+  3. **扩展对账状态至 rework**：Controller `process_gate_verdict_reconciliations` 支持 `status in {"working", "dispatched", "rework"}`，并优先根据 `task.get("gate")` 校验门禁身份；Controller `resolve_gate_config` 增加对 `node_type: gate` 的支持。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 3 项专项回归测试（全量 15 个测试全部通过）；
+  2. `pytest -q tests/test_issue_250_*.py`（全量 30 项测试全部通过）；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。
+
 ## [2026-10-19] fix | 门禁完成证据 CAS 版本刷新、有界 watchdog 抑制与探针超时加固 (PR #266 Codex Review)
 
 - 背景：

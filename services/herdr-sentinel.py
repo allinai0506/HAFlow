@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import subprocess
@@ -85,7 +86,7 @@ def task_gate_handoff_grace_seconds():
     if raw is not None and raw.strip():
         try:
             val = float(raw.strip())
-            if val > 0:
+            if val > 0 and math.isfinite(val):
                 return val
         except (ValueError, TypeError):
             pass
@@ -135,12 +136,44 @@ def _task_has_valid_gate_verdict(task):
 
 
 def _is_gate_task(task):
+    if not task:
+        return False
+    if task.get("gate"):
+        return True
     node = str(task.get("node") or task.get("stage") or "").lower()
     if any(k in node for k in ("cleanroom", "gate")):
         return True
     if node in ("test", "review", "wrapup"):
         return True
-    return bool(task.get("gate"))
+    workflow_id = task.get("workflow_id")
+    node_id = task.get("node") or task.get("stage")
+    if workflow_id and node_id:
+        try:
+            from herdr.projects import workflow_config_for
+            wf_cfg = workflow_config_for(workflow_id) or {}
+            for n in wf_cfg.get("nodes", []):
+                if n.get("id") == node_id:
+                    if n.get("gate") or n.get("node_type") == "gate":
+                        return True
+                    break
+        except Exception:
+            pass
+    wf_path = task.get("workflow_config")
+    if wf_path and node_id:
+        try:
+            import yaml
+            p = Path(wf_path).expanduser()
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                for n in cfg.get("nodes", []):
+                    if n.get("id") == node_id:
+                        if n.get("gate") or n.get("node_type") == "gate":
+                            return True
+                        break
+        except Exception:
+            pass
+    return False
 
 
 def run(cmd, timeout=10):

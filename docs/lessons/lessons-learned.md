@@ -7312,6 +7312,8 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 | 强制流转裸奔并发竞争 | `force=True` 若未绑定当前观察到的版本号与状态快照，并发重试/流转会被强制完成直接抹掉 | 强制状态转移必须传递 `expected_status` 与 `expected_version` 执行 CAS 校验，发生并发写入时原子拒绝 |
 | 哨兵超时抑制被非门禁工位冒用 | 先查文件再判工位身份，会导致带残留同名文件的普通实现任务永久逃逸超时守护 | 哨兵必须先判定 `_is_gate_task` 门禁身份，严禁普通实现工位跳过 watchdog 守护 |
 | 人工仲裁无标准 CLI 命令入口 | 应急运维依赖直接修改底层数据库容易破坏版本和审计一致性 | 产品化提供 `herdr-task adopt-verdict` 命令，完成证据核验、事件落盘、SQLite 更新与状态广播全链条 |
+| 门禁身份启发式判定导致自定义门禁漏判 | 仅依节点名关键字（cleanroom/gate 等）判定门禁，导致自定义命名的合法门禁（如 executive_briefing）身份丢失 | 派发时根据工作流模板（node_type: gate / gate 字段）持久化 `task["gate"]=True`，判定回退至权威工作流配置 |
+| 环境变量无限值破坏超时保护 | 环境变量接受 inf/nan 会导致宽限期永久生效，watchdog 超时被无限期抑制 | 数值解析必须严格校验 `val > 0 and math.isfinite(val)`，非法或非有限数值一律回退至安全默认值 |
 
 ### 操作规范
 
@@ -7320,6 +7322,8 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 3. **门禁工位超时宽限**：门禁工位涉及编译、全量回归与大模型综合审计，基础超时默认翻倍（7200s）。
 4. **受控仲裁通道**：当门禁被异常置为 failed 但证据确凿时，使用 `herdr-task adopt-verdict <task_id> [--verdict blocked/pass]` 采纳，禁止直接 update 数据库；状态网关对非 watchdog 失败或非门禁任务强制拒绝。
 5. **执行纪元隔离**：裁决落盘与采纳必须校验 `mtime >= rework_started_at - 1.0`，返工启动时主动 unlink 历史裁决残留。
+6. **权威门禁身份校验**：工位派发时显式写入 `gate: True`，Sentinel、Controller 与 CLI 判定门禁身份时优先读字段并结合 `workflow_config_for` 权威定义，严禁纯依赖节点名字符串包含匹配。
+7. **宽限期有限性保障**：所有超时宽限期配置必须校验有限正浮点数（`math.isfinite`），严禁接受 `inf` 或非数导致守护机制瘫痪。
 
 ### 验证命令 / 守护测试
 
