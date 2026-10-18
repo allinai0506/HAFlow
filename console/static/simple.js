@@ -157,7 +157,7 @@ async function loadWorkflow() {
     $('taskCount').textContent=(d.tasks || []).length+' 项记录';
     $('stages').innerHTML=(d.stages || []).map(s=>`<li>${esc(s.label || s.key)}<small>${esc(label(s.status))}</small></li>`).join('');
     $('tasks').innerHTML=(d.tasks || []).map(t=>`<div class="task"><div>${esc(t.node_label || t.goal || t.task_id)}<small>${esc(t.failure_reason || t.blocked_reason || '')}</small></div><span>${esc(label(t.status))}</span></div>`).join('') || '<p class="empty">需求已登记，等待调度派发。</p>';
-    if(['failed','blocked'].includes(d.workflow.status)) notice('当前需求'+label(d.workflow.status)+'。可切换到专业工作台查看原因并处理。');
+    if(['failed','blocked'].includes(d.workflow.status)) notice('当前需求'+label(d.workflow.status)+'。可切换到流程工作台查看原因并处理。');
     await Promise.all([loadDecisions(wid,sequence),loadResults(wid,sequence)]);
   } catch(e) { if(sequence===model.sequence) { notice('执行状态加载失败：'+e.message); $('decisions').textContent='当前需求的待决事项暂不可读取，请刷新重试。'; $('resultList').textContent='成果暂不可读取'; } }
 }
@@ -347,9 +347,9 @@ async function pollJob() {
     model.job=null; try { sessionStorage.removeItem('haflow.simple.job'); } catch { }
     if(job.status==='failed') throw new Error(job.error || '启动失败');
     const match=String(job.output || '').match(/^WORKFLOW_ID=(\S+)$/m);
-    if(!match) throw new Error('启动响应未返回工作流 ID，请在专业工作台核对后再试');
+    if(!match) throw new Error('启动响应未返回工作流 ID，请在流程工作台核对后再试');
     const started=await api('/api/workflow?id='+encodeURIComponent(match[1])+'&lightweight=1');
-    if(!started.workflow?.project_id) throw new Error('工作流缺少所属项目，请在专业工作台核对');
+    if(!started.workflow?.project_id) throw new Error('工作流缺少所属项目，请在流程工作台核对');
     model.projectId=started.workflow.project_id; model.workflowId=match[1];
     $('requirementDialog').close(); $('jobStatus').textContent='';
     await refreshProjects();
