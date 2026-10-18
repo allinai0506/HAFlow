@@ -7248,3 +7248,41 @@ python3 -m pytest -q tests/test_delivery_pipeline.py tests/test_controller_progr
 ```
 
 关键回归：`test_scheduler_owned_task_offers_no_manual_git_step`（接管时无人工动作）、`test_manual_git_step_stays_available_when_the_scheduler_is_not_driving`（paused/完成/未知状态保留人工入口）、`test_gate_wait_disappears_once_both_gates_passed`（门禁 pass 后不再显示等待）、`test_human_owned_task_keeps_its_existing_label`（未接管不改徽章）、`test_controller_actions_no_longer_offer_a_manual_integrate`（真实 SQLite + 事件账本的读链）。
+
+## 173. 门禁汇聚轮的六种编排与裁决形态：缺派承诺、登记伪影、隔离绕池、漂移旋转、义务死端、契约-能力裁决（2026-10-18）
+
+### 问题背景
+
+wf-haflow-1018-02（issue #234 两条 P2 质量评估修复）从实现到收尾跑了 3 个实现轮、6 个 test 轮次与 2 个 review 轮次。代码缺陷本身很小（单点 decode + 回执补读 + 饱和/损坏语义），链路耗时几乎全部消耗在编排停摆与契约裁决上。本条与 §164、§170 同源但形态不重复：§170 记录漂移旋转的一般规则，本条记录该规则第二次实弹实例及其余五种新形态。每条均有共享区 decision note 或状态簿记可核查。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| plan 拆解 TaskA(P2-2)→TaskB(P2-1) 顺序执行，实现节点在仅 TaskA 完成后即推进，"TaskB 待 A 完成后补派"只是 note 里的承诺 | 节点完成度判定不认口头承诺；未派发项不入簿记就会以门禁 BLOCKED 的形式回来补课（首轮 test 门禁 blocked 的首要阻断即"TaskB 未交付"） | 顺序拆分的多任务计划必须把后续任务登记为机器可校验义务（node-config-set required_task_ids 或 controller 签发的后续操作），义务未清偿不得 advance |
+| recovery-op 178534 挂 `candidate_mismatch`：test-auto 收尾提交 29fea091（=候选 7d224812+closure 提交，仅存在于 test 克隆）被登记为候选 | verdict 基线无歧义时，mismatch 是门禁任务自身收尾提交造成的登记伪影，不是新缺陷；按伪影处理，不为其派发修复 | recovery 判定先比对 verdict 文件/验收回执绑定的 candidate_sha 与登记 SHA；伪影登记不阻塞流水线（n-1792325777357-ff5d） |
+| test 节点 `exclude_stage_agents=[implementation]`，健康池 [agy,codex,qodercli] 全被 implementation 占用 → 直派 fail-closed（r4 failed） | 隔离 fail-closed 是正确行为；池耗尽的出口是总指挥 opt-out 手派+审计登记，而不是拆隔离 | opt-out 的 agent 选择遵守"非最终 diff 作者、非增量范围作者"原则，选择理由写入 decision note 供独立复核（r6 选 qodercli、review-r2 避开 P2-1=agy/D1D2=codex 作者面） |
+| origin/main 执行期间前进 3 提交（dbd91a9 含 PR #265）→ r5 被 BASELINE STALE 在 launch 前拒绝 | §170 旋转规则第二次实弹命中：无冲突 rebase → freeze-candidate 重冻结 → 集成 refs 回写 → 双门禁在新候选重验，全程 30 分钟内完成且未损失验证结论 | 旋转必须附内容保持证明（上游 3 提交与本修复 diff 零文件重叠）与 rebased 预检全绿（103 passed+13 subtests）；同类停摆已两次出现，旋转口径固化于 n-1792331586268-4ad5 |
+| r3 用 `--allow-pending` 派发的任务退役时未挂链（replacement_pending=True 且 superseded_by=None），节点完备性走链在 r3 触底 → test 节点 complete=False 死锁 | `--allow-pending` 是例外通道：凡用它发出的任务，退役时必须补链或显式放弃，否则形成僵尸义务堵死整个节点（与 §164 的退役死锁同族不同形） | 死端诊断顺序：node_is_complete → 沿 superseded_by 走链 → 找第一个 None；显式出口是 `supersede --abandon`（只移除义务，不伪造替代者）（n-1792333606916-d835） |
+| 门禁契约要求"业务 E2E 从浏览器提交质量评估"，但 Console 全库无 quality 路由——质量评估按产品设计是只读 CLI | 模板/门禁文字与产品能力冲突时，禁止为验收虚构能力或擅自扩产品范围；由总指挥尽职调查后裁决范围解释并发布替代证据口径 | 裁决 note 必须含：能力不存在的代码证据（grep console 无路由）、等效口径（真实 CLI 链 + SQLite 独立回读 + 现有 Console 表面真实浏览器驱动刷新/重开）、不降低真实性的红线、用户推翻通道（n-1792330151841-f810） |
+
+### 操作规范
+
+1. 实现节点推进前核对 plan 拆解清单：每个未派发小节都有簿记义务或显式豁免记录，二者皆无 → 不推进。
+2. 遇 `candidate_mismatch` 先核 verdict 基线；基线明确且差异仅来自门禁任务自身收尾提交 → 记伪影、继续 fix-loop，不派修复。
+3. 路由隔离池耗尽：总指挥 opt-out 手派，note 记录 agent 选择与"非作者"论证；严禁放宽 exclude_stage_agents。
+4. 漂移旋转（第二次命中）：rebase 前确认零文件重叠，旋转后先本地预检全绿，再 `freeze-candidate` + 集成 refs 回写 + 重派复验。
+5. `--allow-pending` 派发的任务退役时必须 `--supersedes` 挂链或 `supersede --abandon`；收尾时 `check-obligations` 扫僵尸义务。
+6. 门禁措辞只认已交付能力：口径歧义由裁决 note 固化为可执行证据标准，后续轮次按口径核验、不再重复仲裁。
+
+### 验证命令 / 证据
+
+```bash
+# 义务链与僵尸 obligation 扫描（收尾前必跑）
+bin/herdr-task check-obligations
+# 漂移旋转后候选一致性
+git merge-base --is-ancestor origin/main <candidate_sha>
+bin/herdr-task freeze-candidate <workflow_id> --candidate-sha <sha> ...
+```
+
+证据：共享区 notes n-1792319495852-d33d（TaskB 补派承诺）、n-1792325777357-ff5d（candidate_mismatch 伪影）、n-1792331586268-4ad5（opt-out 审计 + rebase 旋转 + 重冻结）、n-1792333606916-d835（--abandon 解死端）、n-1792330151841-f810（D3 裁决）；回归测试 `tests/test_quality_assessment.py`（含 `test_historical_receipt_does_not_leak_across_runs`），候选 `ce5875b` 上 103 passed + 13 subtests。

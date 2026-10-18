@@ -2784,3 +2784,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 追加 [[../docs/lessons/lessons-learned]] §172：守护进程已接管的进行中状态不得渲染成终态，也不得再暴露第二个人工入口。
 - Evidence: `tests/test_delivery_pipeline.py`、`tests/test_console_delivery_pipeline.py`、`tests/test_controller_progress_actions.py`（新增回归）；console 专项 + 核心专项通过。PR: https://github.com/allinai0506/HAFlow/pull/264
 - 本记录描述本地隔离沙盒源码；分支已推送（PR #264），尚未合并、部署或重启 8765。
+
+## [2026-10-18] Fix | issue #234 质量评估两条 P2 收尾：双门禁汇聚于 ce5875b 与六步收尾
+- Updated [[quality-assessment]] 不推断的事：补写 D1 饱和核实预算语义（未覆盖证据前 20 条各 ≤10 行精确查询，核实不到保持未决并记 `verification_receipts_unresolved`，不投影测试异常；已证实失败仍上报）与 D2 损坏聚合语义（`stored_payload_corrupt`、≤8 样本行 id 不含原文、不吞同批合法事件、完整性保持 unknown）。
+- 修复链（issue #234）：P2-2 `2d9d818` 损坏账本载荷单点 decode 降级 unknown；P2-1 `48caf05` 截断窗口历史回执补读（严格 task+run、按行 id 去重）；D1/D2 `ce5875b` 饱和未核实证据显式 unresolved + 损坏行隔离不吞批。候选 `ce5875bd038308a36e0eebe05cf0792aff1167fd` = ef3b16b 无冲突 rebase 于 origin/main `dbd91a9` 之上。
+- 双门禁汇聚：test-auto-r6 与 review-auto-r2 verdict=pass 均绑定 ce5875b（验收回执事件 95059/95099）；回归 103 passed+13 subtests，真实 CLI probe 9/9 场景 + Console 浏览器证据。
+- 沉淀教训 `docs/lessons/lessons-learned.md` §173（缺派承诺、candidate_mismatch 登记伪影、隔离绕池 opt-out 审计、漂移旋转第二次命中、--allow-pending 义务死端、D3 契约-能力裁决）；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-02-wrapup.md`。
+- 本记录描述本地沙盒源码；交付 PR 保持 OPEN，未合并、未部署、未重启服务。

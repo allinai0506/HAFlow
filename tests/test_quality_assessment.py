@@ -8,6 +8,7 @@ experience rules.
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -171,6 +172,15 @@ class QualityJudgementTest(unittest.TestCase):
         self.assertEqual(report["trace_completeness"], "partial")
         self.assertEqual(report["process_quality"], "unknown")
         self.assertIn("trace_truncated", report["problem_codes"])
+
+    def test_event_cap_preserves_test_failures_beyond_the_cap(self):
+        from herdr.quality_assessment import _EVENT_CAP
+        events = [_event("task_started", f"filler-{i}") for i in range(_EVENT_CAP + 5)]
+        events.insert(_EVENT_CAP, _event("test_failed", "late-fail", command="pytest", exit_code=1))
+        report = assess_quality(TASK, RUN, outcome=_outcome(), events=events)
+        self.assertIn("trace_truncated", report["problem_codes"])
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
 
     def test_other_run_events_are_dropped(self):
         report = assess_quality(
@@ -891,6 +901,513 @@ class QualityReadTest(unittest.TestCase):
         self.assertEqual(report["test_anomalies"], [])
         self.assertNotIn("test_anomaly", report["problem_codes"])
 
+    def test_truncated_historical_event_window_keeps_the_authoritative_receipt(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-hist-cap"
+        hist_run = "run-hist-cap"
+        current_run = "run-current-cap"
+        self._insert_task(task_id, current_run)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-hist-cap"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-hist-cap"}}), hist_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-hist-cap")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("historical_run_trace_limited", report["problem_codes"])
+        self.assertIn("trace_truncated", report["problem_codes"])
+
+    def test_historical_receipt_supplement_boundary_2000_and_1999(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_1999 = "task-boundary-1999"
+        run_1999 = "run-boundary-1999"
+        self._insert_task(task_1999, "other-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_1999, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-1999"}}), run_1999),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_1999, 10 + index, run_1999, index + 2) for index in range(STORED_LIMIT - 3)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 50000, 'trajectory', ?, 2000)",
+                (task_1999, json.dumps({"verification": {"passed": True, "evidence_id": "ev-1999"}}), run_1999),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_1999, run_1999, eval_id="eval-1999")
+        report_1999 = assess_task_run(task_1999, run_1999, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report_1999["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report_1999["problem_codes"])
+        self.assertNotIn("trace_truncated", report_1999["problem_codes"])
+        self.assertEqual(report_1999["trace_completeness"], "unknown")
+        self.assertEqual(report_1999["process_quality"], "unknown")
+
+        task_2000 = "task-boundary-2000"
+        run_2000 = "run-boundary-2000"
+        self._insert_task(task_2000, "other-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_2000, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-2000"}}), run_2000),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_2000, 10 + index, run_2000, index + 2) for index in range(STORED_LIMIT - 2)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 50000, 'trajectory', ?, 2000)",
+                (task_2000, json.dumps({"verification": {"passed": True, "evidence_id": "ev-2000"}}), run_2000),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_2000, run_2000, eval_id="eval-2000")
+        report_2000 = assess_task_run(task_2000, run_2000, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report_2000["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report_2000["problem_codes"])
+        self.assertIn("trace_truncated", report_2000["problem_codes"])
+        self.assertEqual(report_2000["process_quality"], "unknown")
+
+    def test_supplemented_failed_receipt_survives_event_cap(self):
+        """Codex PR#267 P1: a paired failed receipt beyond the capped window
+        must still report the failure, not silently disappear."""
+        from herdr.execution_trace import STORED_LIMIT
+        task_cap = "task-cap-fail"
+        run_cap = "run-cap-fail"
+        self._insert_task(task_cap, "other-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_cap, json.dumps({"verification": {"failing_count": 1, "evidence_id": "ev-cap"}}), run_cap),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_cap, 10 + index, run_cap, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 50000, 'trajectory', ?, 5000)",
+                (task_cap, json.dumps({"verification": {"passed": True, "evidence_id": "ev-unrelated"}}), run_cap),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 50001, 'trajectory', ?, 5001)",
+                (task_cap, json.dumps({"verification": {"passed": False, "evidence_id": "ev-cap"}}), run_cap),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report_cap = assess_task_run(task_cap, run_cap, db_path=self.db, budget_s=0.2)
+        self.assertIn("trace_truncated", report_cap["problem_codes"])
+        self.assertIn("test_anomaly", report_cap["problem_codes"])
+        self.assertEqual(report_cap["process_quality"], "improvement_opportunity")
+
+    def test_nan_receipt_is_corrupt_and_cannot_mask_a_real_failure(self):
+        """Codex PR#267 P2: a verification receipt carrying non-finite JSON
+        constants is corrupt, not an authoritative verdict; the paired failed
+        tests row must stay visible with stored_payload_corrupt aggregated."""
+        task_nan = "task-nan-receipt"
+        run_nan = "run-nan-receipt"
+        self._insert_task(task_nan, "other-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_nan, json.dumps({"verification": {"failing_count": 1, "evidence_id": "ev-nan"}}), run_nan),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 2, 'trajectory', ?, 2)",
+                (task_nan, '{"verification": {"passed": true, "evidence_id": "ev-nan", "score": NaN}}', run_nan),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report_nan = assess_task_run(task_nan, run_nan, db_path=self.db, budget_s=0.2)
+        self.assertIn("stored_payload_corrupt", report_nan["problem_codes"])
+        self.assertIn("test_anomaly", report_nan["problem_codes"])
+        self.assertEqual(report_nan["process_quality"], "improvement_opportunity")
+
+    def test_historical_receipt_does_not_leak_across_runs(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-cross-leak"
+        hist_run = "run-hist-leak"
+        other_run = "run-other-leak"
+        self._insert_task(task_id, "current-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-cross"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-cross"}}), other_run),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100001, 'trajectory', NULL, 5001)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-cross"}})),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-cross-leak")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["test_anomalies"][0]["code"], "test_failed")
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_historical_multiple_pairings_and_unmatched_receipts(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-multi-pair"
+        hist_run = "run-multi-pair"
+        self._insert_task(task_id, "current-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 2, "evidence_id": "ev-pass"}}), hist_run),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 2, 'trajectory', ?, 2)",
+                (task_id, json.dumps({"verification": {"failing_count": 2, "evidence_id": "ev-fail"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 3) for index in range(STORED_LIMIT - 2)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-pass"}}), hist_run),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100001, 'trajectory', ?, 5001)",
+                (task_id, json.dumps({"verification": {"passed": False, "evidence_id": "ev-fail"}}), hist_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-multi-pair")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["test_anomalies"][0]["code"], "test_failed")
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_historical_unmatched_receipt_does_not_suppress_failure(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-unmatched"
+        hist_run = "run-unmatched"
+        self._insert_task(task_id, "current-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-target"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 5000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-different"}}), hist_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-unmatched")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_historical_receipt_supplement_saturation_keeps_window_evidence(self):
+        from herdr.execution_trace import STORED_LIMIT
+
+        task_id = "task-saturation"
+        hist_run = "run-saturation"
+        self._insert_task(task_id, "current-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_id, json.dumps({"verification": {"failing_count": 3, "evidence_id": "ev-target"}}), hist_run),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_id, 10 + index, hist_run, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, ?, 'trajectory', ?, ?)",
+                [
+                    (task_id, json.dumps({"verification": {"passed": True, "evidence_id": f"dummy-{i}"}}),
+                     1000 + i, hist_run, 3000 + i)
+                    for i in range(STORED_LIMIT)
+                ],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 100000, 'trajectory', ?, 90000)",
+                (task_id, json.dumps({"verification": {"passed": True, "evidence_id": "ev-target"}}), hist_run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._insert_outcome(task_id, hist_run, eval_id="eval-saturation")
+        report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertNotIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("trace_truncated", report["problem_codes"])
+
+    def _saturated_history(self, task_id, *, pairs=21, corrupt=False, paired=True):
+        hist_run = "historical-r3"
+        self._insert_task(task_id, "current-r3")
+        self._insert_outcome(task_id, hist_run, eval_id=task_id)
+        rows = []
+        for i in range(pairs):
+            rows.append(("tests_completed", json.dumps({"verification": {
+                "failing_count": 1, "evidence_id": f"z{i:03}",
+            }}), i + 1, hist_run))
+        rows.extend(("task_started", "{}", 100 + i, hist_run) for i in range(2000 - pairs))
+        rows.extend(("verification_completed", json.dumps({"verification": {
+            "passed": True, "evidence_id": f"a{i}",
+        }}), 5000 + i, hist_run) for i in range(2000))
+        if paired:
+            rows.extend(("verification_completed", json.dumps({"verification": {
+                "passed": True, "evidence_id": f"z{i:03}",
+            }}), 10000 + i, hist_run) for i in range(pairs))
+        if corrupt:
+            rows.append(("verification_completed", "{broken", 20000, hist_run))
+        # These receipts must never resolve this run's evidence.
+        rows.extend(("verification_completed", json.dumps({"verification": {
+            "passed": True, "evidence_id": "z000",
+        }}), 30000, foreign) for foreign in ("other-r3", None))
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, ?, ?, ?, 'trajectory', ?)",
+                [(task_id, *row) for row in rows],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return hist_run
+
+    def test_r3_saturated_21_pairs_do_not_confirm_unread_failure(self):
+        for pairs in (20, 21):
+            with self.subTest(pairs=pairs):
+                task_id = f"r3-pairs-{pairs}"
+                run = self._saturated_history(task_id, pairs=pairs)
+                report = assess_task_run(task_id, run, db_path=self.db)
+                self.assertEqual(report["test_anomalies"], [])
+                self.assertEqual(report["process_quality"], "unknown")
+                self.assertNotIn("stored_payload_corrupt", report["problem_codes"])
+
+    def test_r3_saturated_budget_exhaustion_is_explicitly_unresolved(self):
+        from herdr.quality_sources import load_quality_inputs
+
+        task_id = "r3-unresolved"
+        run = self._saturated_history(task_id, paired=False)
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        notes = [n for n in inputs["degradation"] if n["code"] == "verification_receipts_unresolved"]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["details"]["unresolved_count"], 1)
+        report = assess_task_run(task_id, run, db_path=self.db)
+        # Twenty exact absence checks still confirm their real failures.
+        self.assertEqual(len(report["test_anomalies"]), 20)
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
+    def test_r3_saturated_corrupt_receipt_preserves_legal_events(self):
+        from herdr.quality_sources import load_quality_inputs
+
+        task_id = "r3-corrupt"
+        run = self._saturated_history(task_id, pairs=1, corrupt=True, paired=False)
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        self.assertTrue(any(e["kind"] == "test_failed" for e in inputs["events"]))
+        self.assertTrue(any(e["kind"] == "agent_started" for e in inputs["events"]))
+        notes = [n for n in inputs["degradation"] if n["code"] == "stored_payload_corrupt"]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["details"]["corrupt_count"], 1)
+        self.assertNotIn("trajectory_unavailable", [n["code"] for n in inputs["degradation"]])
+        report = assess_task_run(task_id, run, db_path=self.db)
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["trace_completeness"], "unknown")
+
+    def test_r3_corrupt_saturated_receipt_with_successful_pair_stays_unknown(self):
+        from herdr.quality_sources import load_quality_inputs
+
+        task_id = "r3-corrupt-paired"
+        run = self._saturated_history(task_id, pairs=1, corrupt=True)
+        report = assess_task_run(task_id, run, db_path=self.db)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        conn = state_db.get_db_connection(self.db)
+        try:
+            # Valid JSON non-objects share the decoder's corrupt semantics.
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, 'verification_completed', ?, 40000, 'trajectory', ?)",
+                [(task_id, payload, run) for payload in ('[]', 'null', '"str"')]
+                + [(task_id, '{broken', foreign) for foreign in ('other-r3', None)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        notes = [n for n in inputs["degradation"] if n["code"] == "stored_payload_corrupt"]
+        self.assertEqual(notes[0]["details"]["corrupt_count"], 4)
+        self.assertLessEqual(len(notes[0]["details"]["sample_ids"]), 8)
+        self.assertTrue(any(e["kind"] == "test_passed" for e in inputs["events"]))
+
+    def test_r3_per_evidence_receipt_cap_does_not_confirm_failure(self):
+        from herdr.quality_sources import load_quality_inputs
+
+        task_id = "r3-receipt-cap"
+        run = self._saturated_history(task_id, pairs=1, paired=False)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, 'verification_completed', ?, ?, 'trajectory', ?)",
+                [(task_id, json.dumps({"evidence_id": "z000"}), 10000 + i, run) for i in range(10)]
+                + [(task_id, json.dumps({"verification": {"evidence_id": "z000", "passed": True}}), 20000, run)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        inputs = load_quality_inputs(task_id, run, db_path=self.db, roots={}, budget_s=0.2)
+        self.assertIn("verification_receipts_unresolved", [n["code"] for n in inputs["degradation"]])
+        report = assess_task_run(task_id, run, db_path=self.db)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertEqual(report["process_quality"], "unknown")
+
+    def test_r3_schema_only_receipt_is_not_a_verified_pair(self):
+        task_id = "r3-schema-pair"
+        run = self._saturated_history(task_id, pairs=1)
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id) VALUES ('wf-1', ?, 'verification_completed', ?, 4000, 'trajectory', ?)",
+                (task_id, json.dumps({"evidence_id": "z000"}), run),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report = assess_task_run(task_id, run, db_path=self.db)
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertEqual(report["process_quality"], "unknown")
+
+    def test_historical_receipt_query_sqlite_error_degrades_gracefully(self):
+        task_id = "task-sqlite-err"
+        hist_run = "run-sqlite-err"
+        self._insert_task(task_id, "current-run")
+        self._insert_outcome(task_id, hist_run, eval_id="eval-sqlite-err")
+
+        with (
+            patch("herdr.quality_sources._receipts_for_scope", side_effect=sqlite3.OperationalError("disk error")),
+            patch("herdr.quality_sources.STORED_LIMIT", 0),
+        ):
+            report = assess_task_run(task_id, hist_run, db_path=self.db, budget_s=0.2)
+            self.assertIn("trace_unavailable", report["problem_codes"])
+            self.assertEqual(report["trace_completeness"], "unknown")
+            self.assertEqual(report["process_quality"], "unknown")
+
     def test_missing_database_returns_a_report(self):
         missing = Path(self.tmp.name) / "absent.db"
         report = assess_task_run(TASK, RUN, db_path=missing)
@@ -949,6 +1466,147 @@ class QualityReadTest(unittest.TestCase):
         self.assertNotIn("quality_assessment", controller)
         self.assertNotIn("quality_assessment", outcome)
         self.assertNotIn("quality_assessment", experience)
+
+    def _insert_ledger_event(self, task_id, run_id, *, event_type="verification_completed",
+                             payload_json="{oops", timestamp=70, sequence=1):
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, ?, ?, ?, 'trajectory', ?, ?)",
+                (task_id, event_type, payload_json, timestamp, run_id, sequence),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_corrupt_stored_ledger_payload_is_unknown(self):
+        task_id, run_id = "task-corrupt", "run-corrupt"
+        self._insert_task(task_id, run_id)
+        self._insert_ledger_event(task_id, run_id)
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["correctness"], "success")
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertEqual(report["test_anomalies"], [])
+        self.assertEqual(report["rework_count"], 0)
+        self.assertEqual(report["blocked_count"], 0)
+
+    def test_corrupt_stored_ledger_payload_is_unknown_for_historical_run(self):
+        task_id = "task-histcorrupt"
+        owning_run = "run-histcorrupt-own"
+        historical_run = "run-histcorrupt-old"
+        self._insert_task(task_id, owning_run)
+        self._insert_ledger_event(task_id, historical_run, timestamp=71)
+        report = assess_task_run(task_id, historical_run, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertIn("historical_run_trace_limited", report["problem_codes"])
+        self.assertEqual(report["test_anomalies"], [])
+
+    def test_corrupt_ledger_payload_is_recorded_for_every_projectable_type(self):
+        from herdr.execution_trace import _PROJECTABLE_EVENT_TYPES
+
+        task_id, run_id = "task-corrupt-all", "run-corrupt-all"
+        self._insert_task(task_id, run_id)
+        for index, event_type in enumerate(_PROJECTABLE_EVENT_TYPES):
+            self._insert_ledger_event(
+                task_id, run_id, event_type=event_type,
+                timestamp=80 + index, sequence=index + 1,
+            )
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt-all")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertEqual(report["test_anomalies"], [])
+
+    def test_non_object_json_ledger_payload_counts_as_corrupt(self):
+        task_id, run_id = "task-corrupt-forms", "run-corrupt-forms"
+        self._insert_task(task_id, run_id)
+        for index, payload_json in enumerate(("[1,2]", '"str"', "null")):
+            self._insert_ledger_event(
+                task_id, run_id, payload_json=payload_json,
+                timestamp=100 + index, sequence=index + 1,
+            )
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt-forms")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+
+    def test_blank_ledger_payload_is_not_corrupt(self):
+        task_id, run_id = "task-blank-payload", "run-blank-payload"
+        self._insert_task(task_id, run_id)
+        self._insert_ledger_event(task_id, run_id, payload_json=None, timestamp=110, sequence=1)
+        self._insert_ledger_event(task_id, run_id, payload_json="", timestamp=111, sequence=2)
+        self._insert_ledger_event(task_id, run_id, payload_json="{}", timestamp=112, sequence=3)
+        self._insert_outcome(task_id, run_id, eval_id="eval-blank-payload")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertNotIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertEqual(report["trace_completeness"], "complete")
+        self.assertEqual(report["process_quality"], "acceptable")
+
+    def test_valid_object_missing_keys_is_not_corrupt(self):
+        task_id, run_id = "task-schema-gaps", "run-schema-gaps"
+        self._insert_task(task_id, run_id)
+        self._insert_ledger_event(
+            task_id, run_id, payload_json=json.dumps({"verification": {}}),
+            timestamp=120, sequence=1,
+        )
+        self._insert_ledger_event(
+            task_id, run_id, payload_json=json.dumps({"evidence_id": "ev-loose"}),
+            timestamp=121, sequence=2,
+        )
+        self._insert_outcome(task_id, run_id, eval_id="eval-schema-gaps")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertNotIn("stored_payload_corrupt", report["problem_codes"])
+
+    def test_corrupt_payload_keeps_the_real_anomaly_signal(self):
+        task_id, run_id = "task-corrupt-anomaly", "run-corrupt-anomaly"
+        self._insert_task(task_id, run_id)
+        self._insert_scoped_verification(
+            task_id, run_id, passed=False, evidence="ev-a6", timestamp=130,
+        )
+        self._insert_ledger_event(
+            task_id, run_id, event_type="task_artifact_checkpoint",
+            timestamp=131, sequence=2,
+        )
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt-anomaly")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["correctness"], "success")
+        self.assertEqual(report["trace_completeness"], "unknown")
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+        self.assertIn("stored_payload_corrupt", report["problem_codes"])
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(len(report["test_anomalies"]), 1)
+        self.assertEqual(report["rework_count"], 0)
+        self.assertEqual(report["blocked_count"], 0)
+
+    def test_clean_ledger_run_stays_acceptable(self):
+        task_id, run_id = "task-clean-ctrl", "run-clean-ctrl"
+        self._insert_task(task_id, run_id)
+        self._insert_scoped_verification(
+            task_id, run_id, passed=True, evidence="ev-clean", timestamp=140,
+        )
+        self._insert_outcome(task_id, run_id, eval_id="eval-clean-ctrl")
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(report["trace_completeness"], "complete")
+        self.assertEqual(report["process_quality"], "acceptable")
+        self.assertNotIn("stored_payload_corrupt", report["problem_codes"])
+
+    def test_corrupt_payload_assessment_does_not_change_the_database(self):
+        task_id, run_id = "task-corrupt-readonly", "run-corrupt-readonly"
+        self._insert_task(task_id, run_id)
+        self._insert_ledger_event(task_id, run_id, timestamp=150)
+        self._insert_outcome(task_id, run_id, eval_id="eval-corrupt-readonly")
+        before = hashlib.sha256(self.db.read_bytes()).hexdigest()
+        report = assess_task_run(task_id, run_id, db_path=self.db, budget_s=0.2)
+        self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before)
+        self.assertNotIn("assessment_unavailable", report["problem_codes"])
 
 
 class ReadonlyOutcomeTest(unittest.TestCase):

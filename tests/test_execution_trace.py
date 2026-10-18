@@ -1232,7 +1232,90 @@ def test_informational_options_are_not_claimed_as_file_read():
     assert [item.get("path") for item in reads] == ["notes.md"]
 
 
-def test_file_read_needs_explicit_success_signal_not_any_nonempty_receipt():
+def test_decode_stored_payload_contract():
+    from herdr.execution_trace import decode_stored_payload
+
+    assert decode_stored_payload(None) == ({}, False)
+    assert decode_stored_payload("") == ({}, False)
+    assert decode_stored_payload("{}") == ({}, False)
+    assert decode_stored_payload('{"passed": true}') == ({"passed": True}, False)
+    assert decode_stored_payload("{oops") == ({}, True)
+    assert decode_stored_payload("[1,2]") == ({}, True)
+    assert decode_stored_payload('"str"') == ({}, True)
+    assert decode_stored_payload("null") == ({}, True)
+    # Non-finite constants are invalid per RFC 8259 and rejected by SQLite
+    # json_valid: the decode path must match the SQL-side corruption guard.
+    assert decode_stored_payload('{"a": NaN}') == ({}, True)
+    assert decode_stored_payload('{"a": Infinity}') == ({}, True)
+    assert decode_stored_payload('{"a": -Infinity}') == ({}, True)
+
+
+def _corrupt_ledger_db(tmp_path, rows):
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id TEXT, node_id TEXT, task_id TEXT, agent_id TEXT,
+            event_type TEXT, payload_json TEXT, timestamp REAL,
+            source TEXT, run_id TEXT, sequence INTEGER
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO events (task_id, agent_id, event_type, payload_json, timestamp, source, run_id, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_corrupt_ledger_rows_skip_projection_and_aggregate_one_note(tmp_path):
+    from herdr.execution_trace import read_stored_events
+
+    rows = [
+        ("task-a", "codex", event_type, "{oops", 10 + index, "trajectory", "run-a", index + 1)
+        for index, event_type in enumerate(
+            ["verification_completed"] * 5 + ["tests_completed", "tool_execution",
+             "task_artifact_checkpoint", "candidate_frozen", "blocked_marker_observed"]
+        )
+    ]
+    rows.append(("task-a", "codex", "task_started", "{}", 99, "trajectory", "run-a", 99))
+    db = _corrupt_ledger_db(tmp_path, rows)
+
+    events, notes = read_stored_events(task_doc(commit=None), db)
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == "task_started"
+    corrupt = [note for note in notes if note["code"] == "stored_payload_corrupt"]
+    assert len(corrupt) == 1
+    details = corrupt[0]["details"]
+    assert details["corrupt_count"] == 10
+    assert len(details["sample_ids"]) == 8
+    assert "{oops" not in json.dumps(corrupt[0])
+    assert all(isinstance(item, str) and item for item in details["sample_ids"])
+
+
+def test_blank_and_object_ledger_payloads_do_not_record_corruption(tmp_path):
+    from herdr.execution_trace import read_stored_events
+
+    rows = [
+        ("task-a", "codex", "verification_completed", None, 10, "trajectory", "run-a", 1),
+        ("task-a", "codex", "verification_completed", "", 11, "trajectory", "run-a", 2),
+        ("task-a", "codex", "verification_completed", "{}", 12, "trajectory", "run-a", 3),
+    ]
+    db = _corrupt_ledger_db(tmp_path, rows)
+
+    events, notes = read_stored_events(task_doc(commit=None), db)
+
+    assert len(events) == 3
+    assert [note["code"] for note in notes] == []
+
     """Codex P2：回执有文本但无结构化 exit_code——只有明确成功标志才可认领 file_read。"""
     failure_text = _codex_rows([
         _codex_exec("s1", 'text(await tools.exec_command({cmd:"cat missing.txt",max_output_tokens:4000}));'),
