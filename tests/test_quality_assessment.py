@@ -173,6 +173,15 @@ class QualityJudgementTest(unittest.TestCase):
         self.assertEqual(report["process_quality"], "unknown")
         self.assertIn("trace_truncated", report["problem_codes"])
 
+    def test_event_cap_preserves_test_failures_beyond_the_cap(self):
+        from herdr.quality_assessment import _EVENT_CAP
+        events = [_event("task_started", f"filler-{i}") for i in range(_EVENT_CAP + 5)]
+        events.insert(_EVENT_CAP, _event("test_failed", "late-fail", command="pytest", exit_code=1))
+        report = assess_quality(TASK, RUN, outcome=_outcome(), events=events)
+        self.assertIn("trace_truncated", report["problem_codes"])
+        self.assertIn("test_anomaly", report["problem_codes"])
+        self.assertEqual(report["process_quality"], "improvement_opportunity")
+
     def test_other_run_events_are_dropped(self):
         report = assess_quality(
             TASK, RUN,
@@ -999,6 +1008,47 @@ class QualityReadTest(unittest.TestCase):
         self.assertNotIn("test_anomaly", report_2000["problem_codes"])
         self.assertIn("trace_truncated", report_2000["problem_codes"])
         self.assertEqual(report_2000["process_quality"], "unknown")
+
+    def test_supplemented_failed_receipt_survives_event_cap(self):
+        """Codex PR#267 P1: a paired failed receipt beyond the capped window
+        must still report the failure, not silently disappear."""
+        from herdr.execution_trace import STORED_LIMIT
+        task_cap = "task-cap-fail"
+        run_cap = "run-cap-fail"
+        self._insert_task(task_cap, "other-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_cap, json.dumps({"verification": {"failing_count": 1, "evidence_id": "ev-cap"}}), run_cap),
+            )
+            conn.executemany(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'task_started', '{}', ?, 'trajectory', ?, ?)",
+                [(task_cap, 10 + index, run_cap, index + 2) for index in range(STORED_LIMIT - 1)],
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 50000, 'trajectory', ?, 5000)",
+                (task_cap, json.dumps({"verification": {"passed": True, "evidence_id": "ev-unrelated"}}), run_cap),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 50001, 'trajectory', ?, 5001)",
+                (task_cap, json.dumps({"verification": {"passed": False, "evidence_id": "ev-cap"}}), run_cap),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report_cap = assess_task_run(task_cap, run_cap, db_path=self.db, budget_s=0.2)
+        self.assertIn("trace_truncated", report_cap["problem_codes"])
+        self.assertIn("test_anomaly", report_cap["problem_codes"])
+        self.assertEqual(report_cap["process_quality"], "improvement_opportunity")
 
     def test_historical_receipt_does_not_leak_across_runs(self):
         from herdr.execution_trace import STORED_LIMIT

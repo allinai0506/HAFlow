@@ -97,7 +97,12 @@ def assess_quality(
     if unscoped:
         codes.add("unscoped_evidence_ignored")
     if len(scoped) > _EVENT_CAP:
-        scoped = scoped[:_EVENT_CAP]
+        head = scoped[:_EVENT_CAP]
+        late_failures = [event for event in scoped[_EVENT_CAP:] if event.get("kind") == "test_failed"]
+        if late_failures:
+            room = min(len(late_failures), _EVENT_CAP)
+            head = head[:_EVENT_CAP - room] + late_failures[:room]
+        scoped = head
         trace_truncated = True
 
     anomalies = _anomalies(scoped)
