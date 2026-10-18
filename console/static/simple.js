@@ -389,7 +389,9 @@ function refreshView() {
   if([...document.querySelectorAll('.decision textarea')].some(input=>input.value.trim())) return;
   if($('progressDialog').open) {
     if(!document.querySelector('#progressDialog details[open]')) return loadWorkflow();
-  } else if($('results').hidden && !document.querySelector('#myRequests details[open]')) return selectProject(false);
+  } else if(!$('results').hidden) {
+    if(!document.querySelector('#results details[open]')) return loadResults(model.workflowId,model.sequence);
+  } else if(!document.querySelector('#myRequests details[open]')) return selectProject(false);
 }
 setInterval(refreshView,15000);
 refreshProjects();

@@ -480,3 +480,17 @@ await refreshView();assert.equal(loads,2);
 document.querySelectorAll=()=>[];document.querySelector=()=>({});
 await refreshView();assert.equal(loads,2);
 """)
+
+
+def test_results_refresh_without_interrupting_preview_or_expanded_records():
+    _run_simple_js(r"""
+document.hidden=false;document.querySelector=()=>null;document.querySelectorAll=()=>[];
+document.activeElement={closest(){return null}};model.workflowId='w';model.sequence=7;
+$('progressDialog').open=false;$('results').hidden=false;
+let loads=[];loadResults=async(wid,sequence)=>loads.push([wid,sequence]);
+await refreshView();assert.deepEqual(loads,[['w',7]]);
+document.querySelector=selector=>selector.includes('#results details')?{}:null;
+await refreshView();assert.equal(loads.length,1);
+document.querySelector=selector=>selector.includes('#previewDialog')?{}:null;
+await refreshView();assert.equal(loads.length,1);
+""")
