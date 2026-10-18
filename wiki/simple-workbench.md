@@ -14,3 +14,17 @@ Evidence:
 - `herdr/projects.py#create_project`
 - `workflow_templates/business-task-v1.yaml`
 - `tests/test_simple_workbench.py#test_real_http_create_start_decide_and_download`
+
+FACT：极简与空间工作台共用 `console/static/console-tokens.css`，右上角双向切换保留项目和需求身份。桌面左侧列出项目，窄屏改用选择器，仅查询所选项目。
+
+FACT：页面围绕“新建项目 → 新建需求 → 获得成果”展开。首页呈现需求列表，进度和人工决定在原生弹窗中查看；成果按需打开，默认显示最多三项可用文件或链接，其余记录折叠。`/api/workflows` 直接投影 SQLite 既有 status 字段，缺失为 unknown。
+
+FACT：新建需求先选择模板，排除 eng/sys 分类，保留自定义业务分类，默认匹配项目执行模式。模板搜索和详细说明折叠；模板声明的必填资料路径始终可见。需求说明必填，标题可选；未填写时以说明前80字符作为标题。项目仍需填写真实工作目录，没有上传能力。
+
+FACT：原生 dialog 固定头尾、正文滚动，保留错误输入和错误焦点。新建项目初始焦点为名称，新建需求为模板；Esc 关闭后回到入口。进度弹窗定时读取状态，正在填写的决定和展开的明细暂停刷新，避免覆盖输入或打断阅读。
+
+Evidence:
+- `console/static/simple.{html,css,js}`
+- `console/herdr_factory_console.py#api_workflows`
+- `tests/test_simple_workbench.py`
+- `docs/walkthroughs/20261018-simple-ui-unification.md`
