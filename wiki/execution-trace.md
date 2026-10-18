@@ -43,3 +43,5 @@ Claude 先按已记录的会话文件名直接打开。找不到时才逐个查�
 `FACT` 无原生工具适配（包括 Qoder）时明确提示缺口，已有报告仍可展示；`recorded_actions` 与原生 `agent_actions` 分开。存在具体操作或报告时，无详情的生命周期记录折叠保留。轨迹页的“本任务产出”复用产物页及其可读性、归属与失败语义。
 
 Evidence: `herdr/execution_trace.py::project_stored_event/trace_availability`；`herdr/native_session_trace.py::load_native_actions`；`console/herdr_factory_console.py::renderExecutionTrace/renderTaskDrawer`；`tests/test_execution_trace_api.py::test_ledger_reports_dispatch_artifacts_and_candidate_without_native_session`。
+
+`FACT` 轨迹页优先展示具体事件与执行者报告，再展示本任务产出；不重复渲染概览/运行时已有的完整属性卡，避免报告被推到首屏下方。Evidence: `renderTaskDrawer`；`tests/test_console_execution_trace.py::test_trace_drawer_prioritizes_execution_over_repeated_attributes_and_artifacts`。

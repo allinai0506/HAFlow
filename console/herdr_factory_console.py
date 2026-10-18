@@ -11752,8 +11752,8 @@ function renderTaskDrawer(){
   const labels={overview:'tdTabOverview',trace:'tdTabActivity',artifacts:'tdTabArtifacts',runtime:'tdTabRuntime'};
   for(const k of tabs){const el=document.getElementById(labels[k]);if(el){const on=tab===k;el.classList.toggle('active',on);el.setAttribute('aria-selected',on?'true':'false')}}
   let body='';
-  if(attrRows.length)body+=`<div class="td-attrs">${attrRows.map(r=>`<div class="td-attr-k">${esc(r[0])}</div><div class="td-attr-v">${esc(r[1])}</div>`).join('')}</div>`;
-  if(tab==='trace')body+='<div class="td-sec"><div class="td-lbl">本任务产出</div>'+renderTaskArtifacts(task,proj)+'</div>'+renderExecutionTrace(state.taskTrace);
+  if(attrRows.length&&tab!=='trace')body+=`<div class="td-attrs">${attrRows.map(r=>`<div class="td-attr-k">${esc(r[0])}</div><div class="td-attr-v">${esc(r[1])}</div>`).join('')}</div>`;
+  if(tab==='trace')body+=renderExecutionTrace(state.taskTrace)+'<div class="td-sec"><div class="td-lbl">本任务产出</div>'+renderTaskArtifacts(task,proj)+'</div>';
   else if(tab==='artifacts')body+=renderTaskArtifacts(task,proj);
   else if(tab==='runtime')body+=renderTaskRuntime(task,proj);
   else body+=renderTaskOverview(task,proj);

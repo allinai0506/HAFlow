@@ -528,3 +528,30 @@ assert.equal(clicked.open,true);
 '''
     result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_trace_drawer_prioritizes_execution_over_repeated_attributes_and_artifacts():
+    script = _extract(console.HTML_TEMPLATE, 'renderTaskDrawer')
+    script += r'''
+const assert=require('node:assert/strict');
+const elements={};
+const document={getElementById:id=>elements[id]||(elements[id]={classList:{toggle(){}},setAttribute(){}})};
+const task={task_id:'t',agent:'qodercli',status:'completed',stage_label:'测试',pane_id:'p'};
+const state={selectedTaskDetail:{task,proj:{}},taskDrawerTab:'trace',taskTrace:{}};
+function taskDisplayName(){return '测试'}
+function taskDurationSecs(){return 12}
+function humanStatus(s){return s}
+function formatElapsed(){return '12s'}
+function taskDrawerMenuHtml(){return ''}
+function taskDisplayStart(){return null}
+function esc(s){return String(s)}
+function renderExecutionTrace(){return '<div>具体执行报告</div>'}
+function renderTaskArtifacts(){return '<div>产物查看下载</div>'}
+renderTaskDrawer();
+const html=elements.taskDrawerBody.innerHTML;
+assert.ok(html.indexOf('具体执行报告')<html.indexOf('产物查看下载'));
+assert.ok(!html.includes('td-attrs'));
+assert.ok(html.includes('产物查看下载'));
+'''
+    result = subprocess.run(['node','-e',script],capture_output=True,text=True,check=False)
+    assert result.returncode == 0, result.stderr
