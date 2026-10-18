@@ -589,3 +589,244 @@ def test_superseded_archived_report_remains_readable(tmp_path, monkeypatch):
     row = next(r for r in project_for_tasks('wf', [task])['items'] if r.get('rel_path') == 'report.md')
     assert row['status'] == 'historical'
     assert read_deliverable('wf', [task], [], 't', row['id'], download=True)['body'] == b'valuable result\n'
+
+
+def test_post_archive_bypass_indexer_write_does_not_block_close(tmp_path, monkeypatch):
+    store, clone, _ = scene(tmp_path, monkeypatch, mode="git")
+    cli = load_cli(monkeypatch, store, clone)
+    finalize = cli._finalize_one
+
+    def interleave(task, **kwargs):
+        # External indexer (codegraph daemon) writes into .codegraph/ after archive
+        cg_dir = clone / ".codegraph"
+        cg_dir.mkdir(exist_ok=True)
+        (cg_dir / "daemon.log").write_text("codegraph daemon active\n")
+        return finalize(task, **kwargs)
+
+    monkeypatch.setattr(cli, "_finalize_one", interleave)
+    res = cli.close_workflow("wf")
+    assert res["close_state"] == "completed"
+    assert not clone.exists()
+    assert store.get_workflow("wf")["status"] == "completed"
+
+
+def test_resurrected_residual_bypass_shell_is_safely_reclaimed_without_deadlock(tmp_path, monkeypatch):
+    import shutil
+    from herdr import clone_archive
+
+    store, clone, _ = scene(tmp_path, monkeypatch, mode="git")
+    cli = load_cli(monkeypatch, store, clone)
+    task = store.get_task("t")
+    archive = clone_archive.preserve_clone(task, cli.CLONE_ROOT)
+    store.update_task_metadata(
+        "t",
+        {"clone_archive": archive, "clone_reclaim_started": archive["manifest_sha256"]},
+    )
+    shutil.rmtree(clone)
+
+    # External daemon resurrects clone directory path with a new inode containing only .codegraph/
+    clone.mkdir()
+    (clone / ".codegraph").mkdir()
+    (clone / ".codegraph" / "daemon.log").write_text("resurrected daemon log\n")
+
+    # dry run should succeed and report clone_would_delete = True
+    dry = cli.close_workflow("wf", dry_run=True)
+    assert dry["tasks"][0]["clone_would_delete"] is True
+
+    # Real close should succeed, clean up the residual shell, and not fail with clone instance changed
+    res = cli.close_workflow("wf")
+    assert res["close_state"] == "completed"
+    assert not clone.exists()
+
+
+def test_resurrected_foreign_non_bypass_directory_fails_source_verification(tmp_path, monkeypatch):
+    import shutil
+    from herdr import clone_archive
+
+    store, clone, _ = scene(tmp_path, monkeypatch, mode="git")
+    cli = load_cli(monkeypatch, store, clone)
+    task = store.get_task("t")
+    archive = clone_archive.preserve_clone(task, cli.CLONE_ROOT)
+    store.update_task_metadata(
+        "t",
+        {"clone_archive": archive, "clone_reclaim_started": archive["manifest_sha256"]},
+    )
+    shutil.rmtree(clone)
+
+    # Recreate clone directory with foreign user files (NOT a bypass shell)
+    clone.mkdir()
+    (clone / "untracked_work.txt").write_text("new unarchived work\n")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.close_workflow("wf", dry_run=True)
+    assert exc.value.code == 2
+    assert clone.exists()
+
+
+def test_resurrected_residual_shell_fails_if_archive_corrupted_or_missing(tmp_path, monkeypatch):
+    import shutil
+    from herdr import clone_archive
+
+    store, clone, _ = scene(tmp_path, monkeypatch, mode="git")
+    cli = load_cli(monkeypatch, store, clone)
+    task = store.get_task("t")
+    archive = clone_archive.preserve_clone(task, cli.CLONE_ROOT)
+    store.update_task_metadata(
+        "t",
+        {"clone_archive": archive, "clone_reclaim_started": archive["manifest_sha256"]},
+    )
+    shutil.rmtree(clone)
+
+    # Recreate clone directory as residual shell
+    clone.mkdir()
+    (clone / ".codegraph").mkdir()
+    (clone / ".codegraph" / "daemon.log").write_text("resurrected daemon log\n")
+
+    # Corrupt archive file
+    import tarfile
+    archive_path = Path(archive["path"])
+    archive_path.write_bytes(b"corrupted archive data")
+
+    with pytest.raises((ValueError, tarfile.TarError, OSError)):
+        clone_archive.verify_source(task, cli.CLONE_ROOT, archive)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.close_workflow("wf", dry_run=True)
+    assert exc.value.code == 2
+
+    # Remove archive file completely
+    archive_path.unlink()
+    with pytest.raises((FileNotFoundError, ValueError, OSError)):
+        clone_archive.verify_source(task, cli.CLONE_ROOT, archive)
+
+
+def test_residual_shell_bounds_and_prunes_large_bypass_tree(tmp_path):
+    from herdr.clone_archive import is_residual_clone_shell
+
+    root = tmp_path / "residual_clone"
+    root.mkdir()
+    cg = root / ".codegraph"
+    cg.mkdir()
+    nested = cg / "nested" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "index.db").write_text("dummy index db")
+    (cg / "daemon.log").write_text("running")
+    (root / ".DS_Store").write_bytes(b"\x00")
+
+    # Should prune .codegraph and identify residual shell as True
+    assert is_residual_clone_shell(root) is True
+
+    # If non-bypass subfolder with file exists, must return False
+    foreign_dir = root / "src"
+    foreign_dir.mkdir()
+    (foreign_dir / "index.js").write_text("console.log('hi')")
+    assert is_residual_clone_shell(root) is False
+
+
+def test_teardown_output_diagnosis_ignores_untracked_bypass_artifacts_but_surfaces_tracked():
+    from herdr.repo_hygiene import teardown_output_diagnosis
+
+    # Case 1: Untracked bypass artifacts must be ignored
+    porcelain_bypass_only = (
+        "?? .codegraph/\n"
+        "?? .codegraph/codegraph.db\n"
+        "?? .DS_Store\n"
+        "?? daemon.sock\n"
+        "?? sub/.codegraph/cache\n"
+    )
+    diag = teardown_output_diagnosis(porcelain_bypass_only, task_id="t1")
+    assert diag["reason"] == ""
+    assert diag["blocked_files"] == []
+    assert diag["blocked_total"] == 0
+
+    # Case 2: Untracked non-bypass project file must be reported
+    porcelain_with_real_file = (
+        "?? .codegraph/\n"
+        "?? src/new_module.py\n"
+    )
+    diag = teardown_output_diagnosis(porcelain_with_real_file, task_id="t1")
+    assert diag["reason"] == "unpreserved_worktree_output"
+    assert "src/new_module.py" in diag["blocked_files"]
+    assert ".codegraph/" not in diag["blocked_files"]
+
+    # Case 3: Tracked changes under bypass directory must still be surfaced and blocked
+    porcelain_tracked_bypass = "M  .codegraph/tracked_file.py\n"
+    diag = teardown_output_diagnosis(porcelain_tracked_bypass, task_id="t1")
+    assert diag["reason"] == "unpreserved_worktree_output"
+    assert ".codegraph/tracked_file.py" in diag["blocked_files"]
+
+
+def test_teardown_output_guard_permits_untracked_bypass_in_clean_git_clone(tmp_path, monkeypatch):
+    store, clone, _ = scene(tmp_path, monkeypatch, mode="git")
+    cli = load_cli(monkeypatch, store, clone)
+    task = store.get_task("t")
+    assert "clone_archive" not in task
+
+    # External indexer drops untracked .codegraph into the clone
+    cg_dir = clone / ".codegraph"
+    cg_dir.mkdir()
+    (cg_dir / "index.db").write_text("index data")
+
+    # Output guard should return empty reason
+    output = cli._teardown_output_guard(task)
+    assert output["reason"] == ""
+
+    # Regular untracked project output must still block
+    (clone / "untracked_work.txt").write_text("important")
+    output = cli._teardown_output_guard(task)
+    assert output["reason"] == "unpreserved_worktree_output"
+
+
+def test_delete_residual_clone_shell_atomic_revalidation_preserves_file(tmp_path):
+    from herdr.clone_archive import delete_residual_clone_shell
+
+    clone_root = tmp_path / "clones"
+    clone_root.mkdir()
+    residual = clone_root / "t1-clone"
+    residual.mkdir()
+    (residual / ".codegraph").mkdir()
+    (residual / ".codegraph" / "db").write_text("data")
+
+    # Regular file injected before deletion
+    (residual / "deliverable.txt").write_text("precious")
+    result = delete_residual_clone_shell(residual, clone_root=clone_root)
+    assert result is False
+    assert residual.exists()
+    assert (residual / "deliverable.txt").exists()
+
+    # Once the regular file is removed, deletion succeeds
+    (residual / "deliverable.txt").unlink()
+    result = delete_residual_clone_shell(residual, clone_root=clone_root)
+    assert result is True
+    assert not residual.exists()
+
+
+def test_close_workflow_aborts_and_preserves_file_injected_at_residual_shell_deletion(tmp_path, monkeypatch):
+    import shutil
+    from herdr import clone_archive
+
+    store, clone, _ = scene(tmp_path, monkeypatch, mode="git")
+    cli = load_cli(monkeypatch, store, clone)
+    task = store.get_task("t")
+    archive = clone_archive.preserve_clone(task, cli.CLONE_ROOT)
+    store.update_task_metadata(
+        "t",
+        {"clone_archive": archive, "clone_reclaim_started": archive["manifest_sha256"]},
+    )
+    shutil.rmtree(clone)
+
+    # Recreate clone as residual shell
+    clone.mkdir()
+    (clone / ".codegraph").mkdir()
+    (clone / ".codegraph" / "daemon.log").write_text("live daemon\n")
+
+    # Inject regular file into residual shell right before close-workflow
+    (clone / "surprising_output.txt").write_text("do not delete me!")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.close_workflow("wf", dry_run=False)
+    assert exc.value.code == 2
+
+    # Residual clone shell and injected file MUST be preserved
+    assert clone.exists()
+    assert (clone / "surprising_output.txt").exists()

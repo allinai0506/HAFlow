@@ -2772,9 +2772,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 事故披露：并发测试线程内各自 `patch(Path.home)` 竞态曾向真实 `~/.gemini/antigravity-cli/settings.json` 泄漏 2 条临时条目，已精确剔除（其余 79 条与 0600 逐位保持）。
 - Evidence：trust+worker 37 passed、影响面 7 套件 106 passed、compileall/diff-check 干净；教训补写于 §168/§169 与 r2 bug-report"第三轮"小节。PR #259 保持 OPEN 不合并。
 
+## [2026-10-18] fix | 旁路索引排除与沙盒残壳自动回收（Issue #254）
+- Updated [[task-lifecycle]] §5.2.1：`herdr/clone_archive.py` 排除 `.codegraph/`、`*.sock` 等外部索引进程产物，归档后旁路追加不阻断源内容校验；定义外部工具残壳判定白名单，对已归档且仅剩残壳的目录放行 inode 漂移并由收尾流程安全删除，解除收尾死锁。
+- `services/herdr-worker.py` 在克隆初始化时清理父仓库带入的 `.codegraph`，并在上下文中声明禁止外部索引进程挂载至沙盒。
+- 沉淀教训 `docs/lessons/lessons-learned.md` §171。
+- Evidence: `tests/test_workflow_clone_reclaim.py`（46 passed，新增 9 项旁路追加、残壳回收、外来文件检测与 Codex P1/P2 闭环回归），`bin/herdr-task close-workflow wf-haflow-1017-01 --dry-run` 实跑通过。
+
 ## [2026-10-18] Update | 自动集成等待状态在专业工作台可见（issue #253）
 - Updated [[flow-workbench]] §10：新增 `herdr/delivery_pipeline.py` 纯投影（阶段 / 调度器归属 / 待过门禁 / commit→integration_branch→候选发布时间）；`committed` 且守护进程已接管的 git 任务徽章改为「等待集成 · 等待门禁: …」，调度控制不再产出人工「并入目标分支」动作，改列归属说明；节点卡片与任务抽屉新增交付管道行。
 - 门禁定义复用 `workflow_progress.gate_retry_node` 单一入口；等待原因只读既有事实（任务字段、门禁 `stage_verdict`、`candidate_published` 事件），未建第二事实源。
-- 追加 [[../docs/lessons/lessons-learned]] §171：守护进程已接管的进行中状态不得渲染成终态，也不得再暴露第二个人工入口。
+- 追加 [[../docs/lessons/lessons-learned]] §172：守护进程已接管的进行中状态不得渲染成终态，也不得再暴露第二个人工入口。
 - Evidence: `tests/test_delivery_pipeline.py`、`tests/test_console_delivery_pipeline.py`、`tests/test_controller_progress_actions.py`（新增回归）；console 专项 + 核心专项通过。PR: https://github.com/allinai0506/HAFlow/pull/264
 - 本记录描述本地隔离沙盒源码；分支已推送（PR #264），尚未合并、部署或重启 8765。

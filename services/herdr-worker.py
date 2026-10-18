@@ -116,6 +116,13 @@ def sanitize_clone_sandbox(clone, launch_identity=None):
     exclusions = ["-e", "/.herdr-launch-identity.json"] if launch_identity else []
     subprocess.run(["git", "-C", str(clone), "clean", "-fd",
                     *exclusions], capture_output=True, check=True)
+    from herdr.clone_archive import BYPASS_IGNORED_DIRS
+    for ignored in BYPASS_IGNORED_DIRS:
+        ignored_path = Path(clone) / ignored
+        if ignored_path.is_dir() and not ignored_path.is_symlink():
+            shutil.rmtree(ignored_path, ignore_errors=True)
+        elif ignored_path.is_file() or ignored_path.is_symlink():
+            ignored_path.unlink(missing_ok=True)
     if launch_identity:
         from herdr.task_resources import write_worker_launch_identity
         # A tracked/foreign tag restored by reset must fail before Pane creation.
@@ -657,7 +664,8 @@ def write_task_context(clone, agent, branch, shared_docs=None, mode="git", conte
         lines.extend([
             "branch_policy=stay_on_assigned_branch",
             "delivery_policy=no_push_or_pr_before_integration",
-            "Do not create or switch branches. Do not push or create a PR before platform integration.",
+            "bypass_policy=no_external_indexers_in_clones",
+            "Do not create or switch branches. Do not push or create a PR before platform integration. Do not attach persistent indexers to ~/.herdr-controller/clones/**.",
         ])
     lines.extend([
         f"agent={agent}",

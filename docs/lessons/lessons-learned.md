@@ -7181,9 +7181,43 @@ wf-haflow-1018-01（issue #255）从 craft 到 wrapup 期间 main 持续前进�
 决策留痕与 `gate-verdicts/`；后续纳入平台 reverification 路由专项（Selective
 Reverification：候选更新含文档双方追加不构成非影响策略，必须重验）。
 
+## 171. 旁路索引进程产物不得侵入沙盒归档清单，复活残壳必须具备安全回收判定（2026-10-18）
+
+### 问题背景
+
+工作流收尾（`close-workflow`）时，外部旁路索引进程（如 CodeGraph MCP 服务或常驻 daemon）会写入或复活沙盒目录：
+1. 任务归档后，外部进程向 clone 内写入 `.codegraph/daemon.log`，导致源内容校验报 `clone output changed after archive`。
+2. clone 回收删除后，外部索引进程重新在 `clones/<task_id>` 下创建 `.codegraph`，使该目录以新 inode“复活”（仅剩残壳）。重试收尾时，inode 不匹配导致报 `clone instance changed`，且 escape flags 设计上不允许绕过归档校验，引发无法收尾死锁（wf-haflow-1017-01 实测复现，issue #254）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 外部索引日志侵入归档清单 | 旁路诊断不属于工作区成果，变动不应改变执行现场 | 归档清单显式排除 `.codegraph/`、`*.sock` 等旁路条目，比对时自动忽略旁路差异 |
+| 回收后残壳复活导致 inode 漂移死锁 | 物理目录存在不等于仍为活动沙盒实例 | 建立外部工具残壳判定白名单；对已归档且仅存残壳的目录允许安全自动回收 |
+| 残壳异常放行绕过归档完整性校验 | 残壳放行仅豁免工作区比对，绝不能免除恢复归档自身校验 | 即使满足残壳条件，也必须完整校验 manifest 与 archive SHA-256，损坏/缺失归档坚决阻断 |
+| 外部大索引目录导致残壳递归卡顿 | 残壳判定被高频调用，不可盲目递归外部巨型索引树 | 残壳判定遇已知旁路目录（如 `.codegraph`）必须就地剪枝，并施加条目上限与超时保护 |
+| CoW 克隆将父仓库守护进程配置带入沙盒 | 隔离沙盒不应继承父仓库的本地常驻 daemon | 克隆初始化时主动清洗 `.codegraph`，并在上下文中声明禁止挂载索引进程 |
+
+### 操作规范
+
+1. `herdr/clone_archive.py` 维护显式旁路忽略目录与白名单规则，`_inventory` 与打包不记录旁路产物，`verify_source` 剥离旁路比对并放行残壳，但严禁短路归档哈希与清单校验。
+2. `is_residual_clone_shell` 对已知旁路目录原地剪枝（`dirs[:] = [d for d in dirs if d not in BYPASS_IGNORED_DIRS]`），同时设定 5 秒超时与条目上限，严防长索引树阻塞控制流。
+3. `bin/herdr-task` 在 `_teardown_output_guard`、`owns_clone` 和最终回收检查中识别残壳，支持自动回收，避免收尾死锁。
+4. `services/herdr-worker.py` 在 `sanitize_clone_sandbox` 阶段清理源仓库带入的 `.codegraph`。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_workflow_clone_reclaim.py -k "bypass or resurrected"
+bin/herdr-task close-workflow wf-haflow-1017-01 --dry-run
+```
+
+涵盖归档后旁路追加、残壳复活安全回收、损坏归档拦截及现存 7 任务工作流实跑通过。
+
 ---
 
-## 171. 守护进程已接管的进行中状态不能渲染成终态，也不能再留人工入口（2026-10-18）
+## 172. 守护进程已接管的进行中状态不能渲染成终态，也不能再留人工入口（2026-10-18）
 
 ### 问题背景
 

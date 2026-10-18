@@ -6644,6 +6644,9 @@ def _teardown_output_guard(task):
         path = Path(clone).expanduser()
         if path.is_symlink():
             return {"reason": "clone_identity_unknown"}
+        from herdr.clone_archive import is_residual_clone_shell
+        if task.get("clone_archive") and is_residual_clone_shell(path):
+            return {"reason": ""}
         tag = path / ".herdr-launch-identity.json"
         if tag.exists():
             try:
@@ -6935,8 +6938,12 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
                 def owns_clone(original):
                     try:
                         current = os.stat(original["path"])
-                        return ((current.st_dev, current.st_ino) == (original["device"], original["inode"])
-                                and not retain_new_output())
+                        if (current.st_dev, current.st_ino) == (original["device"], original["inode"]):
+                            return not retain_new_output()
+                        from herdr.clone_archive import is_residual_clone_shell
+                        if is_residual_clone_shell(Path(original["path"])):
+                            return not retain_new_output()
+                        return False
                     except OSError:
                         return False
                 def delete_owned_clone():
@@ -6947,6 +6954,10 @@ def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, out
                         kernel.update_task_metadata(task_id, {
                             "clone_reclaim_started": reclaim_archive["manifest_sha256"],
                         }, store=_get_store())
+                    path_obj = Path(clone)
+                    from herdr.clone_archive import is_residual_clone_shell, delete_residual_clone_shell
+                    if is_residual_clone_shell(path_obj):
+                        return delete_residual_clone_shell(path_obj, clone_root=CLONE_ROOT)
                     return delete_clone_safely(clone)
                 action = close_claim.action(
                     "clone:" + task_id, identity, owns_clone, delete_owned_clone,
@@ -7517,8 +7528,17 @@ def _close_workflow_owned(
         sys.exit(2)
 
     if not dry_run:
-        remaining = [task["task_id"] for task in tasks if task.get("clone_path")
-                     and os.path.lexists(os.path.expanduser(task["clone_path"]))]
+        from herdr.clone_archive import is_residual_clone_shell, delete_residual_clone_shell
+        remaining = []
+        for task in tasks:
+            clone = task.get("clone_path")
+            if clone and os.path.lexists(os.path.expanduser(clone)):
+                path = Path(clone).expanduser()
+                if task.get("clone_archive") and is_residual_clone_shell(path):
+                    if delete_residual_clone_shell(path, clone_root=CLONE_ROOT):
+                        if not os.path.lexists(path):
+                            continue
+                remaining.append(task["task_id"])
         if remaining:
             print("[CLOSE ABORT] sandbox reclamation incomplete: " + ", ".join(remaining))
             sys.exit(2)

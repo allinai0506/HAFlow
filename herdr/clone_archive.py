@@ -24,6 +24,63 @@ MAX_BYTES = 1024 * 1024 * 1024
 MAX_ENTRIES = 100000
 MAX_SECONDS = 120
 
+# Explicit bypass directories and files produced by external indexers, IDEs,
+# and live IPC daemons (e.g. CodeGraph MCP daemon, Unix sockets).
+# These artifacts are out-of-band diagnostics, not project deliverables or workspace
+# source code. Capturing or verifying them violates the boundary rule that
+# "side-channel diagnostics must not alter execution status" (AGENTS.md §4.10).
+BYPASS_IGNORED_DIRS = frozenset({
+    ".codegraph",  # CodeGraph MCP / local index daemon runtime artifacts (db, pid, logs)
+})
+
+BYPASS_IGNORED_FILE_SUFFIXES = (
+    ".sock",  # Live IPC sockets or socket placeholders
+)
+
+BYPASS_IGNORED_FILE_NAMES = frozenset({
+    ".DS_Store",  # macOS Finder directory metadata
+})
+
+
+def is_bypass_rel_path(rel: str | Path) -> bool:
+    """Check if a relative path belongs to known external indexers or bypass artifacts."""
+    parts = Path(rel).parts
+    for part in parts[:-1]:
+        if part in BYPASS_IGNORED_DIRS:
+            return True
+    if parts:
+        name = parts[-1]
+        if name in BYPASS_IGNORED_DIRS or name in BYPASS_IGNORED_FILE_NAMES:
+            return True
+        if any(name.endswith(suffix) for suffix in BYPASS_IGNORED_FILE_SUFFIXES):
+            return True
+    return False
+
+
+def is_residual_clone_shell(root: Path) -> bool:
+    """Check if a clone directory contains only external bypass artifacts (no actual workspace)."""
+    if not root.is_dir() or root.is_symlink():
+        return False
+    if (root / ".git").exists() or (root / ".herdr-launch-identity.json").exists():
+        return False
+    deadline = time.monotonic() + 5
+    count = 0
+    try:
+        for current, dirs, files in os.walk(root, followlinks=False):
+            candidates = sorted(dirs + files)
+            dirs[:] = [d for d in dirs if d not in BYPASS_IGNORED_DIRS]
+            for name in candidates:
+                count += 1
+                if count > MAX_ENTRIES or time.monotonic() > deadline:
+                    return False
+                p = Path(current) / name
+                rel = p.relative_to(root).as_posix()
+                if not is_bypass_rel_path(rel):
+                    return False
+    except OSError:
+        return False
+    return True
+
 
 def _digest(handle):
     digest = hashlib.sha256()
@@ -70,14 +127,22 @@ def _inventory(root):
         raise error
 
     for current, dirs, files in os.walk(root, followlinks=False, onerror=failed):
+        dirs[:] = [d for d in dirs if d not in BYPASS_IGNORED_DIRS]
         for name in sorted(dirs + files):
             path = Path(current) / name
             info = path.lstat()
-            if stat.S_ISSOCK(info.st_mode):
-                continue  # Live IPC endpoint, not recoverable file content.
+            if (
+                stat.S_ISSOCK(info.st_mode)
+                or name.endswith(".sock")
+                or name in BYPASS_IGNORED_FILE_NAMES
+                or name in BYPASS_IGNORED_DIRS
+            ):
+                continue  # Live IPC endpoint, external indexer, or transient metadata.
+            rel = path.relative_to(root).as_posix()
+            if is_bypass_rel_path(rel):
+                continue
             if len(entries) >= MAX_ENTRIES or time.monotonic() > deadline:
                 raise ValueError("archive inventory budget exceeded")
-            rel = path.relative_to(root).as_posix()
             if stat.S_ISLNK(info.st_mode):
                 item = {"type": "symlink", "target": os.readlink(path)}
             elif stat.S_ISDIR(info.st_mode):
@@ -231,13 +296,20 @@ def verify_source(task, clone_root, archive):
     root = _root(task, clone_root)
     info = root.stat()
     if (info.st_dev, info.st_ino) != (archive["device"], archive["inode"]):
-        raise ValueError("clone instance changed")
+        if not is_residual_clone_shell(root):
+            raise ValueError("clone instance changed")
     manifest = archive_manifest(dict(task, clone_archive=archive))
     current = _inventory(root)
+    manifest_entries = {
+        k: v for k, v in manifest["entries"].items() if not is_bypass_rel_path(k)
+    }
     deleting = task.get("clone_reclaim_started") == archive["manifest_sha256"]
-    if current != manifest["entries"] and not (
-        deleting
-        and all(manifest["entries"].get(rel) == item for rel, item in current.items())
+    if current != manifest_entries and not (
+        is_residual_clone_shell(root)
+        or (
+            deleting
+            and all(manifest_entries.get(rel) == item for rel, item in current.items())
+        )
     ):
         raise ValueError("clone output changed after archive")
     with open(archive["path"], "rb") as handle:
@@ -279,3 +351,48 @@ def plan_clone(task, clone_root):
         "clone_would_delete": True,
         "deletion_condition": "archive verified and source identity/content unchanged",
     }
+
+
+def delete_residual_clone_shell(root: str | Path, *, clone_root: str | Path | None = None) -> bool:
+    """Safely reclaim a residual clone shell with atomic claim and boundary revalidation.
+
+    Prevents race conditions where a concurrent process or external indexer
+    creates a non-bypass regular file after the initial shell check. The directory is
+    atomically claimed via rename, revalidated to ensure no non-bypass artifacts
+    were introduced, and only deleted if it remains a pure residual shell.
+    If revalidation fails, the directory is restored to its original name and preserved.
+    """
+    raw_path = Path(os.path.expanduser(str(root)))
+    if raw_path.is_symlink() or not raw_path.exists():
+        return False
+    root_path = Path(os.path.realpath(str(raw_path)))
+    if not root_path.exists():
+        return False
+    if clone_root:
+        real_clone_root = os.path.realpath(os.path.expanduser(str(clone_root)))
+        try:
+            common = os.path.commonpath([real_clone_root, str(root_path)])
+        except ValueError:
+            return False
+        if common != real_clone_root or str(root_path) == real_clone_root:
+            return False
+
+    if not is_residual_clone_shell(root_path):
+        return False
+
+    staged = root_path.parent / f"{root_path.name}.reclaim-{os.getpid()}-{time.time_ns()}"
+    try:
+        root_path.rename(staged)
+    except OSError:
+        return False
+
+    if not is_residual_clone_shell(staged):
+        try:
+            staged.rename(root_path)
+        except OSError:
+            pass
+        return False
+
+    import shutil
+    shutil.rmtree(staged, ignore_errors=True)
+    return not staged.exists()

@@ -397,6 +397,14 @@ Console 继续以原成果 ID 预览/下载经过哈希校验的归档文件；�
   归档校验通过后有条件的 `clone_would_delete`，包括文档/context/failed，不创建归档或修改状态。
 - 首份归档为不可变恢复点；真正删除前持久化 `clone_reclaim_started`。删除中断后，
   仅同一目录实例且剩余内容为归档子集时允许续删，不用残余目录覆盖完整归档。
+- 外部旁路产物排除：`.codegraph/`、`*.sock`、`.DS_Store` 等已知外部旁路/索引进程产物不纳入归档清单（`_inventory`），
+  归档后向这些目录的写入不阻断 `verify_source`。
+- 外部工具残壳安全回收：clone 回收删除后，若被常驻索引服务（如 CodeGraph MCP）在原路径复活出
+  仅含旁路产物的残壳目录（无 `.git`、无 identity、且全目录仅含白名单旁路条目），
+  `verify_source`、`_teardown_output_guard` 与 `owns_clone` 自动识别为残壳并允许回收删除，
+  避免由于 inode 漂移引发 `clone instance changed` 收尾死锁。即使放行残壳，
+  `verify_source` 仍必须完整校验归档文件清单与 SHA-256 完整性，损坏归档坚决阻断；残壳遍历对已知旁路目录原地剪枝防长耗时阻塞。
+
 - failed Task 回收 clone 后仍为 failed；阶段 `cleanup` 不执行此归档删除策略。
 - 恢复归档不自动过期，也不保证释放与原沙盒等量的磁盘空间。未登记的手工沙盒、
   无 Task 归属的启动失败目录及历史已完成关闭回执不在本路径中自动扫描删除。
