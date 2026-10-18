@@ -1050,6 +1050,35 @@ class QualityReadTest(unittest.TestCase):
         self.assertIn("test_anomaly", report_cap["problem_codes"])
         self.assertEqual(report_cap["process_quality"], "improvement_opportunity")
 
+    def test_nan_receipt_is_corrupt_and_cannot_mask_a_real_failure(self):
+        """Codex PR#267 P2: a verification receipt carrying non-finite JSON
+        constants is corrupt, not an authoritative verdict; the paired failed
+        tests row must stay visible with stored_payload_corrupt aggregated."""
+        task_nan = "task-nan-receipt"
+        run_nan = "run-nan-receipt"
+        self._insert_task(task_nan, "other-run")
+        conn = state_db.get_db_connection(self.db)
+        try:
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'tests_completed', ?, 1, 'trajectory', ?, 1)",
+                (task_nan, json.dumps({"verification": {"failing_count": 1, "evidence_id": "ev-nan"}}), run_nan),
+            )
+            conn.execute(
+                "INSERT INTO events (workflow_id, task_id, event_type, payload_json, "
+                "timestamp, source, run_id, sequence) VALUES "
+                "('wf-1', ?, 'verification_completed', ?, 2, 'trajectory', ?, 2)",
+                (task_nan, '{"verification": {"passed": true, "evidence_id": "ev-nan", "score": NaN}}', run_nan),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        report_nan = assess_task_run(task_nan, run_nan, db_path=self.db, budget_s=0.2)
+        self.assertIn("stored_payload_corrupt", report_nan["problem_codes"])
+        self.assertIn("test_anomaly", report_nan["problem_codes"])
+        self.assertEqual(report_nan["process_quality"], "improvement_opportunity")
+
     def test_historical_receipt_does_not_leak_across_runs(self):
         from herdr.execution_trace import STORED_LIMIT
 

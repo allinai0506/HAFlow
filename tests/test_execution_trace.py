@@ -1243,6 +1243,11 @@ def test_decode_stored_payload_contract():
     assert decode_stored_payload("[1,2]") == ({}, True)
     assert decode_stored_payload('"str"') == ({}, True)
     assert decode_stored_payload("null") == ({}, True)
+    # Non-finite constants are invalid per RFC 8259 and rejected by SQLite
+    # json_valid: the decode path must match the SQL-side corruption guard.
+    assert decode_stored_payload('{"a": NaN}') == ({}, True)
+    assert decode_stored_payload('{"a": Infinity}') == ({}, True)
+    assert decode_stored_payload('{"a": -Infinity}') == ({}, True)
 
 
 def _corrupt_ledger_db(tmp_path, rows):

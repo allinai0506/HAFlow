@@ -512,17 +512,23 @@ def decode_stored_payload(payload_json: Any) -> Tuple[Dict[str, Any], bool]:
 
     NULL, empty, and valid object documents are not corrupt: legacy empty
     payloads stay ``(obj, False)``. Invalid JSON or valid non-object JSON is
-    corrupt and yields no payload.
+    corrupt and yields no payload. Python's non-finite extensions (NaN,
+    Infinity) are invalid JSON and SQLite rejects them via ``json_valid``,
+    so they must follow the corruption path too.
     """
     if payload_json is None or payload_json == "":
         return {}, False
     try:
-        payload = json.loads(payload_json)
-    except json.JSONDecodeError:
+        payload = json.loads(payload_json, parse_constant=_reject_nonfinite)
+    except (json.JSONDecodeError, ValueError):
         return {}, True
     if not isinstance(payload, dict):
         return {}, True
     return payload, False
+
+
+def _reject_nonfinite(name: str) -> Any:
+    raise ValueError(f"invalid JSON constant: {name}")
 
 
 def _corrupt_payload_note(corrupt_ids: Sequence[Any]) -> Dict[str, Any]:
