@@ -93,6 +93,8 @@ CLI Agent 在从未信任过的目录首启会弹交互式信任对话框（如 
 
 `FACT` 信任阻塞的启动失败证据携带有界、脱敏的 pane 文字片段（异常消息与 `HERDR_WORKER_FAILURE.trust_evidence`），足以识别 trust 对话框，不再仅剩状态码。
 
+`FACT` agy 信任写入保持 settings.json 原权限（issue #255 B-1，候选 a7036d2）：写入分支内 `stat.S_IMODE` 捕获原模式、`replace()` 前 chmod 临时文件，逐位保持（0640 等非硬编码）；目标不存在时按 0o600 首次创建；捕获失败 fail-closed（WARN + False）。grok/claude handler 的同型 replace 携模隐患为已知存量，待后续独立任务（见 lessons §168）。
+
 Evidence:
 - `herdr/workspace_trust.py#_TRUST_HANDLERS` / `#preseed_trust_target` / `#_exact_case_path`
 - `herdr/workspace_trust.py#ensure_agy_workspace_trust`

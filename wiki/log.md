@@ -2737,3 +2737,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - `services/herdr-worker.py` TRUST_REQUIRED 失败路径新增有界脱敏 pane 片段证据（异常消息与 HERDR_WORKER_FAILURE.trust_evidence）。
 - Evidence: `tests/test_workspace_trust.py`、`tests/test_herdr_worker.py`；真实链路对照实验（agy 1.4.2：未预埋目录复现对话框→TRUST_REQUIRED，预埋目录 `herdr agent start` 直达 READY）。
 - 补充 `docs/lessons/lessons-learned.md` §167：无头探针通过不等于交互式启动可用；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust.md`。
+
+## [2026-10-18] Fix | issue #255 B-1 信任写入保持原权限 + 双门禁汇聚收尾
+- Fixed [[preflight-and-health]] §3.3：`ensure_agy_workspace_trust` 原子 replace 携模放宽权限（0600→0644）修复——写前 `S_IMODE` 捕获、replace 前 chmod tmp、首建 0o600、fail-closed；候选 `a7036d2` 经 cleanroom_test-r5 / cleanroom_review-r5 双门禁 pass（三点一致：任务/verdict 文件/冻结记录 94417）。
+- Evidence: 3 个权限用例 RED(8b581c3)→GREEN(a7036d2)；黑盒实测 0600→0600/0640 保持/首建 0600；影响面 7 套件 97 passed。
+- 补充 `docs/lessons/lessons-learned.md` §168（原子写携模陷阱）与 §169（基线漂移与汇聚期四种编排停摆）；复盘见 `docs/bug-reports/2026-10-18-haflow-issue-255-agy-trust-r2.md`；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-01-wrapup.md`。
+- 本记录描述本地源码；PR 保持 OPEN，合并决策留人工。

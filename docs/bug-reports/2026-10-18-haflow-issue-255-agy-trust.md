@@ -128,3 +128,14 @@ agy（见"已知限制"）。
 **已知限制**：`ensure_grok_workspace_trust` / `ensure_claude_workspace_trust` 的
 同型 replace 携模隐患未在本次修复（范围纪律：B-1 仅点名 agy 路径），应作为后续
 独立小任务处理。
+
+## 交付与双门禁汇聚（收尾增补，2026-10-18）
+
+- 候选线三轮基线旋转（f76c630→9bfcb6d8→52f0369→8b581c3，内容保持 rebase）后，
+  B-1 返工提交 `a7036d2` 冻结为最终候选（candidate_frozen 事件 94417，integration
+  ref `refs/herdr/tasks/haflow-issue-255-agy-trust-r2`）。
+- cleanroom_test-r5 / cleanroom_review-r5 双门禁 **pass**：权限实测 0600→0600、
+  影响面 7 套件 97 passed、eval 100/CONVERGED；B-1 闭合、残余风险（D-1/D-2/D-3/
+  R-1/R-2/R-3）全部非阻塞。
+- 交付 PR 与六步收尾状态表见 `docs/walkthroughs/20261018-wf-haflow-1018-01-wrapup.md`；
+  编排停摆教训归档见 `docs/lessons/lessons-learned.md` §169。
