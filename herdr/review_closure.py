@@ -388,7 +388,11 @@ def collect_deferred_evidence(store, task: Any) -> Tuple[bool, str, Optional[Dic
             "normal receipt (deferred is not justified)"
         ), None
     remotes: List[str] = []
-    for path in (task.get("clone_path"), task.get("source_repo")):
+    source_repo = task.get("source_repo") or task.get("project_root")
+    check_paths = [source_repo] if source_repo else [task.get("clone_path")]
+    for path in check_paths:
+        if not path:
+            continue
         for url in git_remote_urls(path):
             if url not in remotes:
                 remotes.append(url)
@@ -472,13 +476,14 @@ def delivery_identity(store, task: Any) -> Tuple[List[str], str, str, str]:
     Priority:
     1. The workflow's authoritative ``pull_request_created`` delivery record
        (exact owner/repo, the PR number and certified candidate SHA).
-    2. The project's authoritative ``source_repo`` remotes (trusted remotes
-       ``upstream`` then ``origin``). When ``source_repo`` supplies delivery
-       identities, ``clone_path`` is never consulted, preventing workers from
-       injecting rogue remotes (issue #227).
-    3. Fallback to ``clone_path`` remotes only when ``source_repo`` is
-       unavailable or has no GitHub remotes. In ``clone_path``, only trusted
-       delivery remotes (``upstream``, ``origin``) are accepted.
+    2. Immutable ``delivery_identities`` captured at task launch.
+    3. The project's authoritative ``source_repo`` remotes (trusted remotes
+       ``upstream`` then ``origin``).
+
+    Remotes in the worker-owned ``clone_path`` are NEVER trusted for delivery
+    identity because the worker controls that clone and can manipulate git
+    remotes (e.g. `git remote set-url origin https://github.com/attacker/repo.git`).
+    When no authoritative identity exists, this fails closed (Codex P1 on PR #265).
     """
     task = task or {}
     workflow_id = str(task.get("workflow_id") or "").strip()
@@ -506,17 +511,25 @@ def delivery_identity(store, task: Any) -> Tuple[List[str], str, str, str]:
                     str(payload.get("candidate_sha") or "").strip().lower(),
                 )
 
-    source_repo = task.get("source_repo")
+    launch_identities = task.get("delivery_identities")
+    if isinstance(launch_identities, list) and launch_identities:
+        clean = [str(i).strip() for i in launch_identities if str(i).strip()]
+        if clean:
+            return clean, "", "launch_delivery_identity", ""
+
+    source_repo = task.get("source_repo") or task.get("project_root")
+    if not source_repo and workflow_id and hasattr(store, "get_workflow"):
+        try:
+            wf = store.get_workflow(workflow_id)
+            if isinstance(wf, dict):
+                source_repo = wf.get("project_root")
+        except (OSError, ValueError, RuntimeError):
+            source_repo = None
+
     if source_repo:
         source_identities = _path_delivery_identities(source_repo)
         if source_identities:
             return source_identities, "", "repository_remote", ""
-
-    clone_path = task.get("clone_path")
-    if clone_path:
-        clone_identities = _path_delivery_identities(clone_path)
-        if clone_identities:
-            return clone_identities, "", "repository_remote", ""
 
     return [], "", "", ""
 
