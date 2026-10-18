@@ -279,6 +279,106 @@ class TestWorkspaceTrust(unittest.TestCase):
 
         self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
 
+    # --- Codex review on PR #259: fail-closed preservation + concurrent launches ---
+
+    def _agy_conf_path(self):
+        conf = self.home / ".gemini" / "antigravity-cli" / "settings.json"
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        return conf
+
+    def test_agy_malformed_settings_is_preserved_and_fails_closed(self):
+        """A corrupted settings.json must never be silently replaced with an
+        empty object: that destroys unrelated user config (model, permissions).
+        The handler must leave the original bytes intact and report failure."""
+        conf = self._agy_conf_path()
+        original = "{ not valid json !!"
+        conf.write_text(original, encoding="utf-8")
+        os.chmod(conf, 0o600)
+        target_path = self.home / "agy_corrupt_project"
+        target_path.mkdir(parents=True)
+
+        with patch("pathlib.Path.home", return_value=self.home):
+            self.assertFalse(workspace_trust.ensure_agy_workspace_trust(target_path))
+
+        self.assertEqual(conf.read_text(encoding="utf-8"), original)
+        self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
+
+    def test_agy_non_object_settings_is_preserved(self):
+        """JSON that parses but is not an object (list/scalar) must be
+        preserved, not treated as an empty config."""
+        conf = self._agy_conf_path()
+        conf.write_text('["legacy-array"]', encoding="utf-8")
+        os.chmod(conf, 0o600)
+
+        with patch("pathlib.Path.home", return_value=self.home):
+            self.assertFalse(workspace_trust.ensure_agy_workspace_trust(self.home / "p"))
+
+        self.assertEqual(conf.read_text(encoding="utf-8"), '["legacy-array"]')
+
+    def test_agy_unreadable_settings_fails_closed(self):
+        """A temporarily unreadable existing file (EACCES) must fail closed
+        with the original file untouched, instead of being overwritten."""
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("chmod 000 does not restrict root")
+        conf = self._agy_conf_path()
+        original = json.dumps({"model": "keep-me", "trustedWorkspaces": []})
+        conf.write_text(original, encoding="utf-8")
+        os.chmod(conf, 0o000)
+        try:
+            with patch("pathlib.Path.home", return_value=self.home):
+                self.assertFalse(workspace_trust.ensure_agy_workspace_trust(self.home / "p"))
+        finally:
+            os.chmod(conf, 0o600)
+        self.assertEqual(conf.read_text(encoding="utf-8"), original)
+
+    def test_agy_concurrent_launches_keep_both_entries(self):
+        """Two workflows launching agy concurrently must not drop entries:
+        read-modify-write is serialized across processes and tmp files are
+        per-write unique (no shared fixed .json.tmp)."""
+        import threading
+
+        conf = self._agy_conf_path()
+        conf.write_text(json.dumps({"model": "m", "trustedWorkspaces": []}), encoding="utf-8")
+        os.chmod(conf, 0o600)
+        proj_a = self.home / "proj_a"
+        proj_b = self.home / "proj_b"
+        proj_a.mkdir()
+        proj_b.mkdir()
+        errors = []
+
+        def add(path):
+            try:
+                if not workspace_trust.ensure_agy_workspace_trust(path):
+                    errors.append(path)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        old_mask = os.umask(0o022)
+        try:
+            # Single patch for the whole test: per-thread patch contexts race,
+            # one thread's __exit__ would restore the real HOME mid-run.
+            with patch("pathlib.Path.home", return_value=self.home):
+                threads = [threading.Thread(target=add, args=(p,)) for p in (proj_a, proj_b)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+        finally:
+            os.umask(old_mask)
+
+        self.assertEqual(errors, [])
+        data = json.loads(conf.read_text(encoding="utf-8"))
+        trusted = data["trustedWorkspaces"]
+        canon_a = workspace_trust._exact_case_path(os.path.realpath(str(proj_a)))
+        canon_b = workspace_trust._exact_case_path(os.path.realpath(str(proj_b)))
+        self.assertIn(canon_a, trusted)
+        self.assertIn(canon_b, trusted)
+        self.assertEqual(data.get("model"), "m")
+        self.assertEqual(conf.stat().st_mode & 0o777, 0o600)
+        leftovers = [p.name for p in conf.parent.iterdir()
+                     if p.name != "settings.json" and not p.name.endswith(".lock")]
+        self.assertEqual(leftovers, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -94,36 +95,76 @@ def ensure_agy_workspace_trust(repo_path: Path | str) -> bool:
     try:
         canonical = _exact_case_path(os.path.realpath(str(Path(repo_path).expanduser().absolute())))
         config = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
-        data = {}
-        if config.exists():
+        config.parent.mkdir(parents=True, exist_ok=True)
+        import fcntl
+        # Different workflows launch concurrently and the controller only
+        # serializes within one workflow: serialize the whole read-modify-
+        # write across processes (PR #259 review P1).
+        with open(config.parent / (config.name + ".lock"), "a+") as lock:
+            deadline = time.monotonic() + _AGY_SETTINGS_LOCK_TIMEOUT
+            while True:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise ValueError("agy settings lock timeout; original file preserved")
+                    time.sleep(0.05)
             try:
-                data = json.loads(config.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                data = {}
-        if not isinstance(data, dict):
-            data = {}
-        trusted = data.get("trustedWorkspaces")
-        if not isinstance(trusted, list):
-            trusted = []
-            data["trustedWorkspaces"] = trusted
-        if canonical not in trusted:
-            trusted.append(canonical)
-            config.parent.mkdir(parents=True, exist_ok=True)
-            # replace() carries the tmp file's mode, so a tmp created under
-            # umask 022 would widen the user's real 0600 settings.json to
-            # 0644 on the first agy dispatch (issue #255 review B-1).
-            try:
-                mode = stat.S_IMODE(config.stat().st_mode)
-            except FileNotFoundError:
-                mode = 0o600
-            tmp = config.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            os.chmod(tmp, mode)
-            tmp.replace(config)
-        return True
+                return _agy_trust_write_locked(config, canonical)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     except (OSError, ValueError, TypeError) as exc:
         print(f"[WORKSPACE TRUST WARN] agy trust failed for {repo_path}: {exc}", file=sys.stderr)
         return False
+
+
+_AGY_SETTINGS_LOCK_TIMEOUT = 5.0
+
+
+def _agy_trust_write_locked(config: Path, canonical: str) -> bool:
+    try:
+        raw = config.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        data = {}
+    else:
+        # An unreadable or malformed existing file must fail closed: treating
+        # it as an empty config and overwriting would destroy unrelated user
+        # settings (model, permissions) despite the preservation contract
+        # (PR #259 review P1).
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("agy settings root is not an object; original file preserved")
+    trusted = data.get("trustedWorkspaces")
+    if trusted is None:
+        trusted = []
+        data["trustedWorkspaces"] = trusted
+    elif not isinstance(trusted, list):
+        raise ValueError("agy trustedWorkspaces is not a list; original file preserved")
+    if canonical in trusted:
+        return True
+    trusted.append(canonical)
+    # replace() carries the tmp file's mode, so a tmp created under
+    # umask 022 would widen the user's real 0600 settings.json to 0644 on
+    # the first agy dispatch (issue #255 review B-1).
+    try:
+        mode = stat.S_IMODE(config.stat().st_mode)
+    except FileNotFoundError:
+        mode = 0o600
+    fd, tmp_name = tempfile.mkstemp(dir=str(config.parent), prefix=".settings-", suffix=".tmp")
+    try:
+        os.write(fd, (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+        os.fchmod(fd, mode)
+        os.replace(tmp_name, str(config))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(fd)
+    return True
 
 
 _TRUST_HANDLERS = {

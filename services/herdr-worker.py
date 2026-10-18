@@ -852,15 +852,43 @@ def _trust_blocked_evidence(text):
     if not text:
         return ""
     from herdr.agent_adapter import _strip_ansi
+    from herdr.deep_preflight import TRUST_PATTERNS
+    from herdr.supervisor.state import redact_text
     lines = []
     for raw in _strip_ansi(str(text)).splitlines():
         line = raw.strip()
         if not line:
             continue
-        line = re.sub(r"(?i)(api[_ -]?key|token|secret|authorization|bearer)\s*[:=]?\s*\S+", r"\1=[REDACTED]", line)
-        lines.append(line)
-    snippet = " | ".join(lines)
-    return snippet[:400]
+        # Central redactor covers password=/sk-…/quoted access_token shapes
+        # that a local ad-hoc regex missed (PR #259 review P1).
+        lines.append(redact_text(line))
+    joined = " | ".join(lines)
+    if len(joined) <= 400:
+        return joined
+    match_idx = -1
+    for i, line in enumerate(lines):
+        if any(re.search(pattern, line, re.IGNORECASE) for pattern in TRUST_PATTERNS):
+            match_idx = i
+            break
+    if match_idx < 0:
+        # Keep the freshest output instead of the oldest when nothing matched.
+        return joined[-400:]
+    # Head truncation dropped the dialog line when an earlier banner filled
+    # the budget; center the window on the matched prompt (PR #259 P2).
+    core = lines[match_idx][:400]
+    before, after = [], []
+    used = len(core)
+    i = match_idx - 1
+    while i >= 0 and used + len(lines[i]) + 3 <= 400:
+        before.insert(0, lines[i])
+        used += len(lines[i]) + 3
+        i -= 1
+    j = match_idx + 1
+    while j < len(lines) and used + len(lines[j]) + 3 <= 400:
+        after.append(lines[j])
+        used += len(lines[j]) + 3
+        j += 1
+    return " | ".join(before + [core] + after)[:400]
 
 
 def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=20):
@@ -895,7 +923,7 @@ def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=2
                 verdict = startup_readiness(agent_kind, started, runtime, transcript.stdout)
                 if verdict["status"] != "UNKNOWN":
                     if verdict["status"] == "TRUST_REQUIRED":
-                        verdict["terminal_text"] = transcript.stdout[:4096]
+                        verdict["terminal_text"] = transcript.stdout[-4096:]
                     return verdict
         except (RuntimeError, ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
             verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "probe_failed"}

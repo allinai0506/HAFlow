@@ -183,6 +183,35 @@ class TestStartAgent(unittest.TestCase):
         self.assertNotIn("\x1b", snippet)
         self.assertNotIn("\n", snippet)
 
+    def test_trust_evidence_uses_central_redactor(self):
+        """Codex PR #259 P1: the ad-hoc regex missed password=/sk-…/quoted
+        access_token shapes; pane evidence must pass through the repository's
+        central redactor (herdr.supervisor.state.redact_text)."""
+        _, payload = self._assert_trust_blocked_failure_evidence(
+            "agy",
+            "Do you trust the contents of this project?\n"
+            "password=hunter2\n"
+            "export OPENAI_API_KEY=sk-abcd12345678\n"
+            '{"access_token": "xyzzy12345678"}\n',
+        )
+        snippet = payload["trust_evidence"]
+        for secret in ("hunter2", "sk-abcd12345678", "xyzzy12345678"):
+            self.assertNotIn(secret, snippet)
+        self.assertIn("trust", snippet.lower())
+
+    def test_trust_evidence_keeps_prompt_after_long_banner(self):
+        """Codex PR #259 P2: head truncation dropped the matched trust dialog
+        when earlier output filled the budget; evidence must contain the
+        matching prompt line."""
+        banner = "=" * 450
+        _, payload = self._assert_trust_blocked_failure_evidence(
+            "agy",
+            banner + "\nDo you trust the contents of this project?\n> Yes, I trust this folder\n",
+        )
+        snippet = payload["trust_evidence"]
+        self.assertLessEqual(len(snippet), 400)
+        self.assertIn("do you trust", snippet.lower())
+
     def test_non_trust_startup_failure_evidence_has_no_trust_snippet(self):
         """The trust evidence field is specific to TRUST_REQUIRED blocking;
         other startup failures must not fabricate one."""
