@@ -7041,3 +7041,25 @@ python3 -m pytest -q tests/test_workflow_clone_reclaim.py tests/test_workflow_cl
 `python3.13 -m pytest -q tests/test_simple_workbench.py`
 
 `test_started_workflow_uses_actual_owner_after_git_root_normalization` 覆盖归属变化和启动后读回失败两个分支；隔离浏览器已验证 Git 子目录启动后显示新工作流标题及其真实所属项目。
+
+---
+
+## 167. 多入口详情统一必须按同一对象验证完整页面，不能用共享任务行代替（2026-10-18）
+
+### 问题背景
+
+用户要求流程图节点与列表任务的单任务详情一致。`e7fb86e` 只复用了任务行，列表仍走 `openTaskDrawer`、画布仍走旧节点概览；后续调整轨迹顺序、缓存与排版仍未覆盖真正的入口差异。用户再次提供两张详情截图后，`ecb638e` 将画布点击接到现有任务详情。
+
+### 经验教训
+
+共享数据、共享列表行和共享完整详情是不同验收层次。入口相同文字或 helper 存在，不能证明用户打开的是同一对象、同一内容。历史产物是否可读，也不能由它是否有资格计入当前交付来代替判断。
+
+### 操作规范
+
+明确两张截图各自的入口、对象 ID 与展示范围；优先让入口调用同一个详情装配函数。对同一任务从两个真实入口分别操作，对比全部要求页签。默认当前任务，历史任务明确标记；无任务的流程节点不伪造任务详情。发现误解后修正验收目标，不用无关界面修补冒充需求闭合。
+
+### 验证命令 / 守护测试
+
+`python3.13 -m pytest -q tests/test_console_execution_trace.py tests/test_deliverables.py`
+
+`test_canvas_node_and_list_row_open_the_same_task_detail` 原先失败于画布未打开详情；覆盖当前、历史与未派发节点。真实浏览器对 `haflow-issue-255-agy-trust-r2` 从画布和列表打开，概览、轨迹、产物、运行时四页签的完整显示文本逐项相同。
