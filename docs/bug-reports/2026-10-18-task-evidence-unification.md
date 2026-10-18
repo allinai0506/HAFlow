@@ -61,3 +61,9 @@ Qoder 历史逐条工具调用未被适配；无记录时不能恢复具体 shel
 实际展示回归：完整属性卡、产物和内部自检卡片排在轨迹事件前，具体执行报告被挤出首屏。最小修复为轨迹先事件后产出，并省略其他页签已有的重复完整属性卡。新增回归测试先失败于报告顺序，覆盖报告优先、属性去重与产物保留；不改事件采集、状态、下载权限与共享任务行。
 
 轨迹优先修复验证：204 passed, 3 subtests passed（退出码 0）；Ruff correctness、compileall、diff check 均通过。
+
+## 检查跟进：同一工作流画布不刷新
+
+用户明确问题集中于流程图和列表不一致。发现 `renderFlowGraph` 只检查 workflow ID；同 workflow 更新直接调用只处理 selected 的 `updateFlowSelection` 后返回，列表读取最新任务，画布却保留旧节点和连线。
+
+新增 RED→GREEN 测试复现 working/claude/1 快照更新到 completed/qodercli/2 后画布仍为 working；修复将 graph projection 纳入复用条件。投影未变仍复用，变化则按既有构建逻辑重建节点和连线，不引入第二套任务状态。真实 X6/Dagre 隔离浏览器点击更新验证了这些字段及下游 waiting→working 的同步。77 passed, 3 subtests passed；Ruff correctness/diff check 通过。尚不能把此缺陷等同于用户所有展示差异；正在等待用户明确画布卡片或侧栏任务页。

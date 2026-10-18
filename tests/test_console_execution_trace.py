@@ -555,3 +555,44 @@ assert.ok(html.includes('产物查看下载'));
 '''
     result = subprocess.run(['node','-e',script],capture_output=True,text=True,check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_flow_graph_refreshes_changed_projection_but_reuses_unchanged_graph():
+    script = _extract(console.HTML_TEMPLATE, 'renderFlowGraph')
+    script += r'''
+const assert=require('node:assert/strict');
+const state={workflowId:'wf',flowSelectedNodeId:'a'};
+let projection={nodes:[{id:'a',label:'实现',status:'working',agents:['claude'],task_count:1},{id:'b',status:'waiting'}],edges:[{from:'a',to:'b'}]};
+const document={getElementById:id=>id==='flowCanvas'?{clientWidth:800}:null};
+let builds=0;
+const window={dagre:{graphlib:{},layout(){}},X6:{Graph:class{
+ constructor(){this.nodes=[];this.edges=[];this.generation=++builds}
+ addNode(n){this.nodes.push(n)}
+ addEdge(e){this.edges.push(e)}
+ on(){}
+}}};
+function flowGraphData(){return projection}
+function ensureFlowCardShape(){return true}
+function dagreLayoutPositions(){return {}}
+function destroyFlowGraph(){state.flowGraph=null;state.flowGraphWfId=null}
+function updateFlowSelection(){}
+function fitFlowGraph(){}
+renderFlowGraph();
+assert.equal(state.flowGraph.nodes[0].data.status,'working');
+renderFlowGraph();
+assert.equal(builds,1);
+projection=JSON.parse(JSON.stringify(projection));
+projection.nodes[0].status='completed';
+projection.nodes[0].agents=['qodercli'];
+projection.nodes[0].task_count=2;
+projection.nodes[1].status='working';
+renderFlowGraph();
+assert.equal(state.flowGraph.nodes[0].data.status,'completed');
+assert.deepEqual(state.flowGraph.nodes[0].data.agents,['qodercli']);
+assert.equal(state.flowGraph.nodes[0].data.task_count,2);
+assert.equal(state.flowGraph.edges[0].attrs.line.stroke,'#4f46e5');
+renderFlowGraph();
+assert.equal(builds,2);
+'''
+    result = subprocess.run(['node','-e',script],capture_output=True,text=True,check=False)
+    assert result.returncode == 0, result.stderr

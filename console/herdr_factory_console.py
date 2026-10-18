@@ -10910,7 +10910,7 @@ function switchWorkflowView(v){state.workflowView=(v==='list'?'list':'flow');con
 function switchFlowInspectorTab(t){state.flowInspectorTab=t;['Summary','Tasks','Context','Runtime'].forEach(k=>{const el=document.getElementById('flowTab'+k);if(el)el.classList.toggle('active',k.toLowerCase()===t);});renderNodeInspector();}
 function selectFlowNode(id){state.flowSelectedNodeId=id;updateFlowSelection();renderNodeInspector();}
 function updateFlowSelection(){try{if(!state.flowGraph||!state.flowGraph.getCellById)return;const g=flowGraphData();(g.nodes||[]).forEach(n=>{try{const cell=state.flowGraph.getCellById(n.id);if(!cell||!cell.getData||!cell.setData)return;const sel=String(state.flowSelectedNodeId||'')===String(n.id);const data=cell.getData()||{};if(!!data.selected===sel)return;cell.setData(Object.assign({},data,{selected:sel}));}catch(err){}});}catch(e){}}
-function destroyFlowGraph(){try{if(state.flowGraph&&state.flowGraph.dispose)state.flowGraph.dispose();}catch(e){}state.flowGraph=null;state.flowGraphWfId=null;const c=document.getElementById('flowCanvas');if(c)c.innerHTML='';}
+function destroyFlowGraph(){try{if(state.flowGraph&&state.flowGraph.dispose)state.flowGraph.dispose();}catch(e){}state.flowGraph=null;state.flowGraphWfId=null;state.flowGraphProjectionKey=null;const c=document.getElementById('flowCanvas');if(c)c.innerHTML='';}
 function resizeFlowGraph(){try{const cv=document.getElementById('flowCanvas');const host=document.getElementById('flowCanvasWrap')||cv;if(!cv||!host||!state.flowGraph)return;const w=host.clientWidth||cv.clientWidth||800;const h=Math.max(280,cv.clientHeight||host.clientHeight||480);if(state.flowGraph.resize)state.flowGraph.resize(w,h);}catch(e){}}
 function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomToFit){state.flowGraph.zoomToFit({padding:24,maxScale:1});if(state.flowGraph.centerContent)state.flowGraph.centerContent();}else if(state.flowGraph.centerContent)state.flowGraph.centerContent();}catch(e){}}
 function flowZoomIn(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(0.15);}catch(e){}}
@@ -10970,7 +10970,8 @@ function renderFlowGraph(){
     if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}
     return;
   }
-  if(state.flowGraph&&state.flowGraphWfId===state.workflowId){
+  const projectionKey=JSON.stringify(g);
+  if(state.flowGraph&&state.flowGraphWfId===state.workflowId&&state.flowGraphProjectionKey===projectionKey){
     updateFlowSelection();
     return;
   }
@@ -11009,6 +11010,7 @@ function renderFlowGraph(){
     });
     state.flowGraph=graph;
     state.flowGraphWfId=state.workflowId;
+    state.flowGraphProjectionKey=projectionKey;
     const nodesMap={};
     nodes.forEach(n=>{nodesMap[n.id]=n;});
     const activeIncomingNodes=new Set();

@@ -172,3 +172,9 @@ Evidence:
 `FACT` 列表与流程图 Inspector 的任务页共用 `renderTaskRow()`，显示相同任务名称、ID、执行者、状态与操作菜单；侧栏仅改变布局。`flowTasksForNode()` 只按节点筛选同一份 `workflow.tasks`，保留已替代任务供查看历史；节点状态聚合仍排除已替代任务。概览的当前任务区也复用同一任务行。
 
 Evidence: `console/herdr_factory_console.py::renderTaskRow/renderTasks/renderNodeInspector/flowTasksForNode`；`tests/test_console_execution_trace.py::test_flow_and_list_render_identical_task_content_and_history`。
+
+## 同一工作流的数据刷新
+
+`FACT` 画布复用同时检查 workflow ID 与完整 graph projection 的序列化键。节点状态、执行者、任务计数或边发生变化时重建节点和连线；投影未变时只更新选中态，避免每次读取都重建。销毁画布同时清理投影键。
+
+Evidence: `renderFlowGraph/destroyFlowGraph`；`tests/test_console_execution_trace.py::test_flow_graph_refreshes_changed_projection_but_reuses_unchanged_graph`。隔离浏览器使用真实 X6/Dagre 验证同 workflow 的 working/claude/1 → completed/qodercli/2 变化，不修改生产任务状态。
