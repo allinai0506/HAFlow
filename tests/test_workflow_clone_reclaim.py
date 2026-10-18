@@ -578,3 +578,14 @@ def test_force_still_closes_status_explicitly_observed_as_paused(tmp_path, monke
     assert result.returncode == 0, result.stdout + result.stderr
     assert not clone.exists() and store.get_task("t").get("clone_archive")
     assert store.get_workflow("wf")["status"] == "completed"
+
+
+def test_superseded_archived_report_remains_readable(tmp_path, monkeypatch):
+    store, clone, env = scene(tmp_path, monkeypatch)
+    assert close(env).returncode == 0
+    task = store.get_task('t')
+    task.update(status='superseded', superseded_by='new-task')
+    from herdr.deliverables import project_for_tasks, read_deliverable
+    row = next(r for r in project_for_tasks('wf', [task])['items'] if r.get('rel_path') == 'report.md')
+    assert row['status'] == 'historical'
+    assert read_deliverable('wf', [task], [], 't', row['id'], download=True)['body'] == b'valuable result\n'

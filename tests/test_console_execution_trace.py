@@ -34,6 +34,24 @@ def _extract(html, name):
     raise AssertionError(name)
 
 
+#: The delivery-pipeline display helpers the shared task row / drawer render
+#: through (`herdr/delivery_pipeline` → `taskBadge`/`deliveryWaitHtml`).  The
+#: node harnesses below must carry the real sources: stubbing them would let a
+#: broken badge pass, and the harness must not fall behind the render chain.
+DELIVERY_DISPLAY_HELPERS = (
+    "deliveryOf", "deliveryGates", "deliveryReason", "deliveryOverridesStatus",
+    "taskStatusLabel", "taskStatusClass", "taskBadge", "deliveryWaitHtml",
+    "deliveryClock", "deliveryPipelineLine", "cleanStageLabel",
+    "taskDrawerNumTs", "humanStatus",
+)
+
+
+def _delivery_script(html, skip=()):
+    return '\n'.join(
+        _extract(html, name) for name in DELIVERY_DISPLAY_HELPERS if name not in skip
+    )
+
+
 def test_trace_tab_keeps_the_other_tabs_and_has_no_sample_data():
     html = console.HTML_TEMPLATE
     assert ">执行轨迹</button>" in html
@@ -462,4 +480,173 @@ const state={taskTraceSeq:1,taskDrawerTab:'trace',selectedTaskId:'task-a',taskTr
 })().catch((err)=>{console.error(err);process.exit(1)});
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=15)  # noqa: PLW1510
+    assert result.returncode == 0, result.stderr
+
+
+def test_flow_and_list_render_identical_task_content_and_history():
+    names = ['esc', 'renderTasks', 'renderTaskRow', 'flowTasksForNode', 'renderNodeInspector']
+    script = '\n'.join(_extract(console.HTML_TEMPLATE, n) for n in names if n != 'renderTaskRow' or 'function renderTaskRow(' in console.HTML_TEMPLATE)
+    # cleanStageLabel / humanStatus are stubbed below, so only the helpers this
+    # harness does not define are carried in.
+    script += "\n" + _delivery_script(
+        console.HTML_TEMPLATE, skip=("cleanStageLabel",),
+    )
+    script += r'''
+const assert=require('node:assert/strict');
+const elements={tasks:{},flowInspectorBody:{},flowInspTitle:{},flowInspMeta:{}};
+const document={getElementById:id=>elements[id]};
+const task={task_id:'test-auto',node:'test',agent:'qodercli',status:'superseded',superseded_by:'test-r2'};
+const state={workflow:{tasks:[task]},workflowId:'wf',flowSelectedNodeId:'test',flowInspectorTab:'tasks'};
+function updateAttentionHub(){}
+function taskDisplayName(){return '洁净室回归测试'}
+function badge(s){return '<b>'+s+'</b>'}
+function flowNodeById(){return {id:'test',label:'测试',node_type:'agent',status:'waiting'}}
+function cleanStageLabel(s){return s}
+function humanNodeStatus(s){return s}
+function flowNodeStatus(n,s){return s}
+renderTasks();
+renderNodeInspector();
+assert.equal(flowTasksForNode('test').length,1);
+assert.equal(elements.flowInspectorBody.innerHTML,elements.tasks.innerHTML);
+assert.ok(elements.tasks.innerHTML.includes('洁净室回归测试'));
+assert.ok(elements.tasks.innerHTML.includes('qodercli'));
+assert.ok(elements.tasks.innerHTML.includes('superseded'));
+assert.ok(elements.tasks.innerHTML.includes('成果会签'));
+'''
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_recorded_reports_are_visible_and_routine_status_is_collapsed():
+    names = ['esc', 'taskDrawerNumTs', 'traceClock', 'traceDotClass', 'traceDetailRows', 'renderExecutionTrace']
+    script = '\n'.join(_extract(console.HTML_TEMPLATE, n) for n in names)
+    script += r'''
+const assert=require('node:assert/strict');
+const html=renderExecutionTrace({status:'ready',availability:'recorded_actions',degradation:[{code:'native_unsupported'}],events:[
+  {kind:'task_completed',title:'任务完成',timestamp:20},
+  {kind:'progress_report',title:'阶段报告',timestamp:10,detail:'174项回归已执行',details:{observation_id:'obs-report',sha256:'abc'}}
+]});
+assert.ok(html.includes('174项回归已执行'));
+assert.ok(html.includes('产物回执'));
+assert.ok(html.includes('obs-report'));
+assert.ok(html.includes('暂无原生工具轨迹适配'));
+assert.ok(!html.includes('当前仅有任务状态记录'));
+assert.ok(html.indexOf('174项回归已执行') < html.indexOf('<details'));
+assert.ok(html.includes('<summary>任务状态记录（1）</summary>'));
+'''
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_task_menu_opens_the_clicked_view_instead_of_a_duplicate_task_id():
+    script = _extract(console.HTML_TEMPLATE, 'toggleTaskMenu')
+    script += r'''
+const assert=require('node:assert/strict');
+const clicked={classList:{contains:()=>false,add:s=>{clicked.open=s==='open'}}};
+const document={getElementById:()=>{throw Error('would select hidden list menu')}};
+function closeAllTaskMenus(){}
+function closeMoreMenu(){}
+toggleTaskMenu({stopPropagation(){},currentTarget:{closest:()=>clicked}},'same-task');
+assert.equal(clicked.open,true);
+'''
+    result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_trace_drawer_prioritizes_execution_over_repeated_attributes_and_artifacts():
+    script = _extract(console.HTML_TEMPLATE, 'renderTaskDrawer')
+    script += "\n" + _delivery_script(
+        console.HTML_TEMPLATE, skip=("humanStatus",),
+    )
+    script += r'''
+const assert=require('node:assert/strict');
+const elements={};
+const document={getElementById:id=>elements[id]||(elements[id]={classList:{toggle(){}},setAttribute(){}})};
+const task={task_id:'t',agent:'qodercli',status:'completed',stage_label:'测试',pane_id:'p'};
+const state={selectedTaskDetail:{task,proj:{}},taskDrawerTab:'trace',taskTrace:{}};
+function taskDisplayName(){return '测试'}
+function taskDurationSecs(){return 12}
+function humanStatus(s){return s}
+function formatElapsed(){return '12s'}
+function taskDrawerMenuHtml(){return ''}
+function taskDisplayStart(){return null}
+function esc(s){return String(s)}
+function renderExecutionTrace(){return '<div>具体执行报告</div>'}
+function renderTaskArtifacts(){return '<div>产物查看下载</div>'}
+renderTaskDrawer();
+const html=elements.taskDrawerBody.innerHTML;
+assert.ok(html.indexOf('具体执行报告')<html.indexOf('产物查看下载'));
+assert.ok(!html.includes('td-attrs'));
+assert.ok(html.includes('产物查看下载'));
+'''
+    result = subprocess.run(['node','-e',script],capture_output=True,text=True,check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_flow_graph_refreshes_changed_projection_but_reuses_unchanged_graph():
+    script = _extract(console.HTML_TEMPLATE, 'renderFlowGraph')
+    script += r'''
+const assert=require('node:assert/strict');
+const state={workflowId:'wf',flowSelectedNodeId:'a'};
+let projection={nodes:[{id:'a',label:'实现',status:'working',agents:['claude'],task_count:1},{id:'b',status:'waiting'}],edges:[{from:'a',to:'b'}]};
+const document={getElementById:id=>id==='flowCanvas'?{clientWidth:800}:null};
+let builds=0;
+const window={dagre:{graphlib:{},layout(){}},X6:{Graph:class{
+ constructor(){this.nodes=[];this.edges=[];this.generation=++builds}
+ addNode(n){this.nodes.push(n)}
+ addEdge(e){this.edges.push(e)}
+ on(){}
+}}};
+function flowGraphData(){return projection}
+function ensureFlowCardShape(){return true}
+function dagreLayoutPositions(){return {}}
+function destroyFlowGraph(){state.flowGraph=null;state.flowGraphWfId=null}
+function updateFlowSelection(){}
+function fitFlowGraph(){}
+renderFlowGraph();
+assert.equal(state.flowGraph.nodes[0].data.status,'working');
+renderFlowGraph();
+assert.equal(builds,1);
+projection=JSON.parse(JSON.stringify(projection));
+projection.nodes[0].status='completed';
+projection.nodes[0].agents=['qodercli'];
+projection.nodes[0].task_count=2;
+projection.nodes[1].status='working';
+renderFlowGraph();
+assert.equal(state.flowGraph.nodes[0].data.status,'completed');
+assert.deepEqual(state.flowGraph.nodes[0].data.agents,['qodercli']);
+assert.equal(state.flowGraph.nodes[0].data.task_count,2);
+assert.equal(state.flowGraph.edges[0].attrs.line.stroke,'#4f46e5');
+renderFlowGraph();
+assert.equal(builds,2);
+'''
+    result = subprocess.run(['node','-e',script],capture_output=True,text=True,check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_canvas_node_and_list_row_open_the_same_task_detail():
+    script = '\n'.join(_extract(console.HTML_TEMPLATE,n) for n in ['selectFlowNode','flowTasksForNode','onTaskRowClick'])
+    script += r'''
+const assert=require('node:assert/strict');
+const state={workflow:{tasks:[
+ {task_id:'old',node:'craft',status:'superseded',superseded_by:'current'},
+ {task_id:'current',node:'craft',status:'cleaned'},
+ {task_id:'unrelated',node:'review',status:'working'}
+]}};
+let opened=[];
+function updateFlowSelection(){}
+function renderNodeInspector(){}
+function openTaskDrawer(id){opened.push(id)}
+const window={getSelection:()=>({toString:()=>''})};
+selectFlowNode('craft');
+assert.deepEqual(opened,['current']);
+onTaskRowClick({target:{closest:()=>null}},'current');
+assert.deepEqual(opened,['current','current']);
+state.workflow.tasks=[{task_id:'old',node:'craft',status:'superseded'}];
+selectFlowNode('craft');
+assert.equal(opened.at(-1),'old');
+selectFlowNode('not-dispatched');
+assert.equal(opened.length,3);
+'''
+    result=subprocess.run(['node','-e',script],capture_output=True,text=True,check=False)
     assert result.returncode == 0, result.stderr

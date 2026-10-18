@@ -3340,6 +3340,19 @@ button { cursor: pointer; }
   grid-template-columns: 20px minmax(200px, 1fr) 120px auto 28px;
   cursor: pointer;
 }
+#flowInspectorBody .task {
+  flex-shrink: 0;
+  grid-template-columns: 16px minmax(0, 1fr) auto 24px;
+  gap: 8px;
+  padding: 12px 0;
+  cursor: pointer;
+}
+#flowInspectorBody .task-main { flex-direction: column; gap: 4px; }
+#flowInspectorBody .task-id { white-space: normal; overflow-wrap: anywhere; }
+#flowInspectorBody .task-name { white-space: normal; }
+#flowInspectorBody .task-agent { grid-column: 2; grid-row: 2; }
+#flowInspectorBody .task-status { grid-column: 3; grid-row: 1 / 3; }
+#flowInspectorBody .task-menu { grid-column: 4; grid-row: 1 / 3; }
 .task:last-child {
   border-bottom: none;
   border-bottom-left-radius: var(--radius-md);
@@ -3995,6 +4008,7 @@ button { cursor: pointer; }
   margin-right: 4px;
 }
 .trace-timeline .td-ev { grid-template-columns: 76px 18px 1fr; }
+.trace-ev .td-ev-title, .trace-ev .td-ev-detail { display: block; }
 button.trace-ev {
   appearance: none;
   border: 0;
@@ -7310,7 +7324,7 @@ const VIEW_KEY='herdrConsoleView';
 function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
 function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
 function closeAllTaskMenus(){document.querySelectorAll('.task-menu.open').forEach(m=>m.classList.remove('open'))}
-function toggleTaskMenu(e,tid){e.stopPropagation();const m=document.getElementById('taskMenu_'+tid);if(!m)return;const wasOpen=m.classList.contains('open');closeAllTaskMenus();closeMoreMenu();if(!wasOpen)m.classList.add('open')}
+function toggleTaskMenu(e){e.stopPropagation();const m=e.currentTarget.closest('.task-menu');if(!m)return;const wasOpen=m.classList.contains('open');closeAllTaskMenus();closeMoreMenu();if(!wasOpen)m.classList.add('open')}
 function onTaskRowClick(e,tid){if(e.target.closest('.task-menu'))return;if(window.getSelection&&window.getSelection().toString())return;openTaskDrawer(tid)}
 document.addEventListener('click',e=>{
   const dd=document.getElementById('moreDropdown');
@@ -10246,47 +10260,48 @@ function renderTasks(){
     ts=ts.filter(t=>['dispatched','working','rework','paused'].includes(t.status));
   }
   if(!ts.length){e.innerHTML=`<div class="empty">${f==='all'?'暂无任务':'当前筛选无匹配任务'}</div>`;return}
-  e.innerHTML=ts.map(t=>{
-    const isDone=['completed','committed','integrated','cleaned'].includes(t.status);
-    const isAct=['working','dispatched','rework','in_progress'].includes(t.status);
-    const isBlk=['blocked','failed'].includes(t.status);
-    const iconCls=isDone?'done':isAct?'working':isBlk?'blocked':'pending';
-    const iconChar=isDone?'✓':isAct?'●':isBlk?'!':'○';
-    return `
-    <div class="task" data-task-id="${esc(t.task_id)}" onclick="onTaskRowClick(event, '${esc(t.task_id)}')">
-      <span class="task-icon ${iconCls}">${iconChar}</span>
-      <div class="task-main">
-        <span class="task-id">${esc(t.task_id)}</span>
-        <span class="task-name">${esc(taskDisplayName(t))}</span>
+  e.innerHTML=ts.map(renderTaskRow).join('')
+}
+function renderTaskRow(t){
+  const isDone=['completed','committed','integrated','cleaned'].includes(t.status);
+  const isAct=['working','dispatched','rework','in_progress'].includes(t.status);
+  const isBlk=['blocked','failed'].includes(t.status);
+  const iconCls=isDone?'done':isAct?'working':isBlk?'blocked':'pending';
+  const iconChar=isDone?'✓':isAct?'●':isBlk?'!':'○';
+  return `
+  <div class="task" data-task-id="${esc(t.task_id)}" onclick="onTaskRowClick(event, '${esc(t.task_id)}')">
+    <span class="task-icon ${iconCls}">${iconChar}</span>
+    <div class="task-main">
+      <span class="task-id">${esc(t.task_id)}</span>
+      <span class="task-name">${esc(taskDisplayName(t))}</span>
+    </div>
+    <span class="task-agent"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><circle cx="12" cy="8" r="4"/><path d="M6 20v-2a6 6 0 0 1 12 0v2"/></svg>${esc(t.agent||'未分配')}</span>
+    <div class="task-status">${deliveryWaitHtml(t)}${taskBadge(t)}</div>
+    <div class="task-menu">
+      <button class="task-menu-btn" title="更多操作" onclick="toggleTaskMenu(event)">···</button>
+      <div class="task-dropdown-menu" onclick="event.stopPropagation()">
+        <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();openSignoffChamber('${esc(t.task_id)}')">成果会签</button>
+        <button class="task-dropdown-item" onclick="closeAllTaskMenus();showPane('${esc(t.pane_id||'')}')">查看工位</button>
+        <button class="task-dropdown-item" onclick="closeAllTaskMenus();askCoordinator('${esc(t.task_id)}')">让总指挥处理</button>
+        ${['blocked','failed','rework'].includes(t.status)||t.stage_verdict==='blocked'||(t.blocker&&t.blocker.length)?`
+          <button class="task-dropdown-item" style="color:var(--primary);font-weight:600" onclick="closeAllTaskMenus();openControllerCockpitModal()">⚡ 查看解卡方案</button>
+        `:''}
+        ${['working','dispatched','rework','blocked','paused'].includes(t.status)?`
+          <div class="task-dropdown-divider"></div>
+          <button class="task-dropdown-item" style="color:var(--primary)" onclick="closeAllTaskMenus();showSteerModal('${esc(t.task_id)}')">留话指导</button>
+          <button class="task-dropdown-item danger" onclick="closeAllTaskMenus();haltTaskPrompt('${esc(t.task_id)}')">紧急叫停</button>
+        `:''}
+        ${t.status==='rework'?`
+          <div class="task-dropdown-divider"></div>
+          <button class="task-dropdown-item" style="color:var(--warning);font-weight:600" onclick="closeAllTaskMenus();forceReviewTask('${esc(t.task_id)}')">唤醒评审</button>
+        `:''}
+        ${t.stage_verdict==='blocked'?`
+          <div class="task-dropdown-divider"></div>
+          <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();forcePassTask('${esc(t.workflow_id||state.workflowId)}','${esc(t.node||t.stage)}',{task_id:'${esc(t.task_id||'')}',expected_version:${t.version!==undefined&&t.version!==null?t.version:'null'},expected_pane_id:'${esc(t.pane_id||'')}',pane_id:'${esc(t.pane_id||'')}'})">强制放行</button>
+        `:''}
       </div>
-      <span class="task-agent"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><circle cx="12" cy="8" r="4"/><path d="M6 20v-2a6 6 0 0 1 12 0v2"/></svg>${esc(t.agent||'未分配')}</span>
-      <div class="task-status">${deliveryWaitHtml(t)}${taskBadge(t)}</div>
-      <div class="task-menu" id="taskMenu_${esc(t.task_id)}">
-        <button class="task-menu-btn" title="更多操作" onclick="toggleTaskMenu(event, '${esc(t.task_id)}')">···</button>
-        <div class="task-dropdown-menu" onclick="event.stopPropagation()">
-          <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();openSignoffChamber('${esc(t.task_id)}')">成果会签</button>
-          <button class="task-dropdown-item" onclick="closeAllTaskMenus();showPane('${esc(t.pane_id||'')}')">查看工位</button>
-          <button class="task-dropdown-item" onclick="closeAllTaskMenus();askCoordinator('${esc(t.task_id)}')">让总指挥处理</button>
-          ${['blocked','failed','rework'].includes(t.status)||t.stage_verdict==='blocked'||(t.blocker&&t.blocker.length)?`
-            <button class="task-dropdown-item" style="color:var(--primary);font-weight:600" onclick="closeAllTaskMenus();openControllerCockpitModal()">⚡ 查看解卡方案</button>
-          `:''}
-          ${['working','dispatched','rework','blocked','paused'].includes(t.status)?`
-            <div class="task-dropdown-divider"></div>
-            <button class="task-dropdown-item" style="color:var(--primary)" onclick="closeAllTaskMenus();showSteerModal('${esc(t.task_id)}')">留话指导</button>
-            <button class="task-dropdown-item danger" onclick="closeAllTaskMenus();haltTaskPrompt('${esc(t.task_id)}')">紧急叫停</button>
-          `:''}
-          ${t.status==='rework'?`
-            <div class="task-dropdown-divider"></div>
-            <button class="task-dropdown-item" style="color:var(--warning);font-weight:600" onclick="closeAllTaskMenus();forceReviewTask('${esc(t.task_id)}')">唤醒评审</button>
-          `:''}
-          ${t.stage_verdict==='blocked'?`
-            <div class="task-dropdown-divider"></div>
-            <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();forcePassTask('${esc(t.workflow_id||state.workflowId)}','${esc(t.node||t.stage)}',{task_id:'${esc(t.task_id||'')}',expected_version:${t.version!==undefined&&t.version!==null?t.version:'null'},expected_pane_id:'${esc(t.pane_id||'')}',pane_id:'${esc(t.pane_id||'')}'})">强制放行</button>
-          `:''}
-        </div>
-      </div>
-    </div>`;
-  }).join('')
+    </div>
+  </div>`;
 }
 
 function toggleSpaceMenu(ev){if(ev)ev.stopPropagation();const m=document.getElementById('spaceMenu');if(m)m.hidden=!m.hidden;}
@@ -10841,7 +10856,6 @@ function ensureFlowCardShape(){
       const wrap=document.createElement('div');
       wrap.className='flow-node-card is-'+(n.status||'waiting')+(n.selected?' is-selected':'');
       wrap.innerHTML=flowCardInner(n);
-      wrap.addEventListener('click',function(){if(n.id)selectFlowNode(n.id);});
       return wrap;
     }
   });
@@ -10908,6 +10922,7 @@ function deliverableCountsText(counts){
   counts=counts||{};
   const parts=['已产生 '+(Number(counts.present)||0)+' 项'];
   if(counts.workspace)parts.push('工作区文件 '+counts.workspace+' 项');
+  if(counts.historical)parts.push('历史产物 '+counts.historical+' 项');
   if(counts.missing)parts.push('未产生 '+counts.missing+' 项');
   if(counts.unconfirmed)parts.push('不可确认 '+counts.unconfirmed+' 项');
   if(counts.unavailable)parts.push('不可读取 '+counts.unavailable+' 项');
@@ -10998,7 +11013,7 @@ function flowOverviewHtml(node, tasks){
     return '<div class="flow-check"><span class="flow-mark '+kind+'">'+mark+'</span><span>'+esc(item[1])+'</span></div>';
   }).join('');
   const live=(tasks||[]).filter(t=>['cleaned','completed','committed','integrated','superseded'].indexOf(t.status)<0).slice(0,6);
-  const rows=live.length?live.map(t=>'<div class="flow-task-row" onclick="openTaskDrawer(\''+esc(t.task_id)+'\')"><div><b>'+esc(t.task_id)+'</b><small>'+esc(t.agent||'未分配')+'</small></div><span class="fn-pill">'+esc(humanStatus(t.status))+'</span></div>').join(''):'<div class="empty">暂无进行中的任务</div>';
+  const rows=live.length?live.map(renderTaskRow).join(''):'<div class="empty">暂无进行中的任务</div>';
   const nodePacked=workflowDeliverables();
   const nodeItems=(nodePacked.items||[]).filter(item=>String(item.node_id)===String(node.id));
   const nodeNotice=deliverableNoteHtml(nodePacked);
@@ -11012,9 +11027,17 @@ function pickDefaultFlowNodeId(nodes){if(!nodes||!nodes.length)return null;const
 function setWorkspaceMode(mode){const fw=document.getElementById('flowWrap');const tl=document.getElementById('tasks');const st=document.getElementById('stages');const fs=document.getElementById('flowSummary');const ab=document.getElementById('flowAttnBar');const ctlP=document.getElementById('controllerTabView');const tplP=document.getElementById('templatesTabView');const arcP=document.getElementById('archiveTabView');const logP=document.getElementById('logsTabView');const shell=document.querySelector('.shell');if(shell)shell.dataset.workspace=mode||'flow';const isSys=(mode==='aux'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs');const bar=document.getElementById('canvasToolbar');if(bar)bar.style.display=isSys?'none':'flex';const tg=document.querySelector('.flow-view-toggle');if(tg)tg.style.display=isSys?'none':'inline-flex';const tf=document.querySelector('.task-filters');if(tf)tf.style.display=(isSys||mode!=='list')?'none':'flex';if(fw)fw.style.display=mode==='flow'?'flex':'none';if(fs)fs.style.display=(mode==='flow')?'block':'none';if(ab&&isSys)ab.style.display='none';if(st)st.style.display='none';if(tl)tl.style.display=(mode==='flow'||mode==='ctl'||mode==='templates'||mode==='archive'||mode==='logs')?'none':'block';if(ctlP)ctlP.hidden=(mode!=='ctl');if(tplP)tplP.hidden=(mode!=='templates');if(arcP)arcP.hidden=(mode!=='archive');if(logP)logP.hidden=(mode!=='logs');if(typeof renderDeliverables==='function')renderDeliverables();}
 function switchWorkflowView(v){state.workflowView=(v==='list'?'list':'flow');const bf=document.getElementById('viewFlowBtn');if(bf)bf.classList.toggle('active',state.workflowView==='flow');const bl=document.getElementById('viewListBtn');if(bl)bl.classList.toggle('active',state.workflowView==='list');setWorkspaceMode(state.workflowView);if(state.workflowView==='flow')requestAnimationFrame(()=>{resizeFlowGraph();fitFlowGraph();});else renderTasks();}
 function switchFlowInspectorTab(t){state.flowInspectorTab=t;['Summary','Tasks','Context','Runtime'].forEach(k=>{const el=document.getElementById('flowTab'+k);if(el)el.classList.toggle('active',k.toLowerCase()===t);});renderNodeInspector();}
-function selectFlowNode(id){state.flowSelectedNodeId=id;updateFlowSelection();renderNodeInspector();}
+function selectFlowNode(id){
+  state.flowSelectedNodeId=id;
+  updateFlowSelection();
+  renderNodeInspector();
+  const tasks=flowTasksForNode(id).filter(t=>t.task_id);
+  const current=tasks.filter(t=>t.status!=='superseded'&&!t.superseded_by);
+  const task=current[current.length-1]||tasks[tasks.length-1];
+  if(task)openTaskDrawer(task.task_id);
+}
 function updateFlowSelection(){try{if(!state.flowGraph||!state.flowGraph.getCellById)return;const g=flowGraphData();(g.nodes||[]).forEach(n=>{try{const cell=state.flowGraph.getCellById(n.id);if(!cell||!cell.getData||!cell.setData)return;const sel=String(state.flowSelectedNodeId||'')===String(n.id);const data=cell.getData()||{};if(!!data.selected===sel)return;cell.setData(Object.assign({},data,{selected:sel}));}catch(err){}});}catch(e){}}
-function destroyFlowGraph(){try{if(state.flowGraph&&state.flowGraph.dispose)state.flowGraph.dispose();}catch(e){}state.flowGraph=null;state.flowGraphWfId=null;const c=document.getElementById('flowCanvas');if(c)c.innerHTML='';}
+function destroyFlowGraph(){try{if(state.flowGraph&&state.flowGraph.dispose)state.flowGraph.dispose();}catch(e){}state.flowGraph=null;state.flowGraphWfId=null;state.flowGraphProjectionKey=null;const c=document.getElementById('flowCanvas');if(c)c.innerHTML='';}
 function resizeFlowGraph(){try{const cv=document.getElementById('flowCanvas');const host=document.getElementById('flowCanvasWrap')||cv;if(!cv||!host||!state.flowGraph)return;const w=host.clientWidth||cv.clientWidth||800;const h=Math.max(280,cv.clientHeight||host.clientHeight||480);if(state.flowGraph.resize)state.flowGraph.resize(w,h);}catch(e){}}
 function fitFlowGraph(){try{if(!state.flowGraph)return;if(state.flowGraph.zoomToFit){state.flowGraph.zoomToFit({padding:24,maxScale:1});if(state.flowGraph.centerContent)state.flowGraph.centerContent();}else if(state.flowGraph.centerContent)state.flowGraph.centerContent();}catch(e){}}
 function flowZoomIn(){try{if(state.flowGraph&&state.flowGraph.zoom)state.flowGraph.zoom(0.15);}catch(e){}}
@@ -11074,7 +11097,8 @@ function renderFlowGraph(){
     if(errBox){errBox.style.display='block';errBox.textContent='当前工作流暂无可用节点定义（legacy 或空定义，已 fail-soft，不伪造连线）。';}
     return;
   }
-  if(state.flowGraph&&state.flowGraphWfId===state.workflowId){
+  const projectionKey=JSON.stringify(g);
+  if(state.flowGraph&&state.flowGraphWfId===state.workflowId&&state.flowGraphProjectionKey===projectionKey){
     updateFlowSelection();
     return;
   }
@@ -11113,6 +11137,7 @@ function renderFlowGraph(){
     });
     state.flowGraph=graph;
     state.flowGraphWfId=state.workflowId;
+    state.flowGraphProjectionKey=projectionKey;
     const nodesMap={};
     nodes.forEach(n=>{nodesMap[n.id]=n;});
     const activeIncomingNodes=new Set();
@@ -11172,8 +11197,8 @@ function renderFlowGraph(){
   }
 }
 function flowNodeById(id){const g=flowGraphData();return (g.nodes||[]).find(n=>n.id===id)||null;}
-function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId)&&t.status!=='superseded'&&!t.superseded_by);}
-function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='未选择';body.innerHTML='<div class="empty insp-empty"><strong>还没有选中节点</strong><span>在流程图里点一个阶段，这里会显示任务、上下文和运行情况。</span></div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-task-row" onclick="openTaskDrawer('${esc(t.task_id)}')"><span><strong>${esc(t.task_id)}</strong><span class="muted"> · ${esc(t.agent||'未分配')}</span>${deliveryWaitHtml(t)}</span><span>${taskBadge(t)}</span></div>`).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${taskBadge(t)}${deliveryWaitHtml(t)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>交付管道</dt><dd>${esc(deliveryPipelineLine(t)||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-act-group"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:4px 8px;font-size:12px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
+function flowTasksForNode(nodeId){const ts=(state.workflow&&state.workflow.tasks)||[];return ts.filter(t=>String(t.node||t.stage||'')===String(nodeId));}
+function renderNodeInspector(){const body=document.getElementById('flowInspectorBody');const title=document.getElementById('flowInspTitle');const meta=document.getElementById('flowInspMeta');if(!body)return;const node=flowNodeById(state.flowSelectedNodeId);if(!node){if(title)title.textContent='节点详情';if(meta)meta.textContent='未选择';body.innerHTML='<div class="empty insp-empty"><strong>还没有选中节点</strong><span>在流程图里点一个阶段，这里会显示任务、上下文和运行情况。</span></div>';return;}if(title)title.textContent=cleanStageLabel(node.label||node.id);if(meta)meta.textContent=(node.node_type||'agent').toUpperCase()+' · '+flowNodeStatus(node,humanNodeStatus(node.status));const tab=state.flowInspectorTab||'summary';if(tab==='tasks'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(renderTaskRow).join(''):'<div class="empty">该节点暂无任务</div>';return;}if(tab==='context'){const ctx=(state.workflow&&state.workflow.context)||{required:[],optional:[]};const req=ctx.required||[];const opt=ctx.optional||[];body.innerHTML=`<div class="proj-sec"><div class="proj-lbl">必需上下文</div>${req.length?req.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="proj-sec"><div class="proj-lbl">可选上下文</div>${opt.length?opt.map(c=>`<div>· ${esc(typeof c==='string'?c:(c.id||c))}</div>`).join(''):'<div class="muted">—</div>'}</div><div class="muted" style="margin-top:8px">仅显示真实 Context Contract；无绑定信息时不伪造已加载。</div>`;return;}if(tab==='runtime'){const nts=flowTasksForNode(node.id);body.innerHTML=nts.length?nts.map(t=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(t.task_id)}</strong> ${badge(t.status)}</div><dl class="flow-kv" style="margin-top:8px"><dt>执行者</dt><dd>${esc(t.agent||'—')}</dd><dt>工位</dt><dd>${esc(t.pane_id||'—')}</dd><dt>更新</dt><dd>${esc(t.updated_at||t.last_activity_at||'—')}</dd><dt>交付管道</dt><dd>${esc(deliveryPipelineLine(t)||'—')}</dd><dt>结论</dt><dd>${esc(t.stage_verdict||'—')}</dd></dl></div>`).join(''):'<div class="empty">暂无运行时信息</div>';return;}const nts=flowTasksForNode(node.id);const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===node.id)||(node.task_ids||[]).includes(a.blocker_task_id||a.old_task_id));const shown=mine.slice(0,2);const actHtml=shown.length?`<div class="flow-act-group"><div class="flow-sec">需要处理</div>${shown.map(a=>`<div class="flow-node-card" style="margin-bottom:8px"><div><strong>${esc(a.title||a.action_id)}</strong></div><div class="muted" style="margin:4px 0">${esc(a.effect||a.description||'')}</div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="mini" onclick="locateControllerTask('${esc(a.blocker_task_id||a.old_task_id||'')}')">查看任务</button><button class="btn primary" style="padding:4px 8px;font-size:12px" onclick="executeControllerAction('${esc(a.action_id)}','${esc(state.workflowId)}')">一键执行</button></div></div>`).join('')}</div>`:(node.has_attention?'<div class="muted">该节点需关注，暂无可用一键解卡建议，请查看任务详情。</div>':'');body.innerHTML=flowOverviewHtml(node, nts)+actHtml;}
 let _resizeFlowDebounce=null;
 window.addEventListener('resize',()=>{
   clearTimeout(_resizeFlowDebounce);
@@ -11628,6 +11653,8 @@ function traceDetailRows(ev){
   if(ev.timestamp!==null&&ev.timestamp!==undefined)add('原始时间',ev.timestamp);
   add('来源',d.source||ev.source);
   add('证据',d.source_ref||ev.source_ref);
+  add('产物回执',d.observation_id);
+  add('SHA-256',d.sha256);
   return rows;
 }
 function renderExecutionTrace(model){
@@ -11645,10 +11672,14 @@ function renderExecutionTrace(model){
   else if(model.availability==='task_events')banner='<div class="trace-note">当前仅有任务状态记录，尚无可验证的执行者操作明细。</div>';
   if(events.length&&(codes.includes('native_unavailable')||codes.includes('native_corrupt')))banner+='<div class="trace-note">原生会话记录暂不可用，以下为已保存的任务状态。</div>';
   if(events.length&&refused&&model.availability!=='agent_actions')banner+='<div class="trace-note">原生会话无法确认属于当前任务，已仅展示已确认的任务记录。</div>';
+  if(codes.includes('native_unsupported'))banner+='<div class="trace-note">该执行者暂无原生工具轨迹适配；以下展示已保存的派发、报告与产物回执。</div>';
   if(codes.includes('native_truncated'))banner+='<div class="trace-note">执行轨迹已截断，仅显示已读取的部分。</div>';
   if(!events.length)return banner;
-  const timed=events.filter(e=>e.timestamp!==null&&e.timestamp!==undefined);
-  const untimed=events.filter(e=>e.timestamp===null||e.timestamp===undefined);
+  const statusKinds=['task_created','agent_started','task_completed','task_dispatched'];
+  const lifecycle=model.availability!=='task_events'?events.filter(e=>statusKinds.includes(e.kind)&&!e.detail):[];
+  const actions=events.filter(e=>!lifecycle.includes(e));
+  const timed=actions.filter(e=>e.timestamp!==null&&e.timestamp!==undefined);
+  const untimed=actions.filter(e=>e.timestamp===null||e.timestamp===undefined);
   const renderList=(list)=>{
     const icons={file_read:'▤',file_edit:'✎',test_passed:'✓',test_failed:'✗',retry:'↻',commit:'⊂⊃'};
     return list.map((e,i)=>{
@@ -11666,6 +11697,7 @@ function renderExecutionTrace(model){
   let html=banner+'<div class="td-timeline trace-timeline">'+renderList(timed);
   if(untimed.length)html+='<div class="trace-note">以下记录没有原始时间，不与已知时间的事件比较先后。</div>'+renderList(untimed);
   html+='</div>';
+  if(lifecycle.length)html+='<details class="td-sec"><summary>任务状态记录（'+lifecycle.length+'）</summary>'+renderList(lifecycle)+'</details>';
   if(model.appendError)html+='<div class="trace-note">后续轨迹加载失败：'+esc(model.appendError)+'</div><button class="btn mini" type="button" onclick="loadMoreTaskTrace()">重试</button>';
   else if(model.has_more)html+='<button class="btn mini" type="button" onclick="loadMoreTaskTrace()">加载更多</button>';
   return html;
@@ -11853,8 +11885,8 @@ function renderTaskDrawer(){
   const labels={overview:'tdTabOverview',trace:'tdTabActivity',artifacts:'tdTabArtifacts',runtime:'tdTabRuntime'};
   for(const k of tabs){const el=document.getElementById(labels[k]);if(el){const on=tab===k;el.classList.toggle('active',on);el.setAttribute('aria-selected',on?'true':'false')}}
   let body='';
-  if(attrRows.length)body+=`<div class="td-attrs">${attrRows.map(r=>`<div class="td-attr-k">${esc(r[0])}</div><div class="td-attr-v">${esc(r[1])}</div>`).join('')}</div>`;
-  if(tab==='trace')body+=renderExecutionTrace(state.taskTrace);
+  if(attrRows.length&&tab!=='trace')body+=`<div class="td-attrs">${attrRows.map(r=>`<div class="td-attr-k">${esc(r[0])}</div><div class="td-attr-v">${esc(r[1])}</div>`).join('')}</div>`;
+  if(tab==='trace')body+=renderExecutionTrace(state.taskTrace)+'<div class="td-sec"><div class="td-lbl">本任务产出</div>'+renderTaskArtifacts(task,proj)+'</div>';
   else if(tab==='artifacts')body+=renderTaskArtifacts(task,proj);
   else if(tab==='runtime')body+=renderTaskRuntime(task,proj);
   else body+=renderTaskOverview(task,proj);

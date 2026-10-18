@@ -39,6 +39,7 @@ FILE_SUFFIXES = TEXT_SUFFIXES | {
 }
 STATUS_LABELS = {
     "present": "已产生",
+    "historical": "历史产物（任务已替代）",
     "missing": "未产生",
     "unavailable": "不可读取",
     "verified": "已验证",
@@ -58,7 +59,7 @@ class DeliverableError(Exception):
 
 
 def pack(items: List[Dict[str, Any]], error: str = "", truncated: bool = False) -> Dict[str, Any]:
-    counts = {"present": 0, "missing": 0, "unavailable": 0, "verified": 0, "workspace": 0, "unconfirmed": 0}
+    counts = {"present": 0, "missing": 0, "unavailable": 0, "verified": 0, "workspace": 0, "unconfirmed": 0, "historical": 0}
     for item in items:
         status = item.get("status")
         if status in counts:
@@ -132,7 +133,7 @@ def read_deliverable(
     item = next((row for row in packed["items"] if row.get("id") == deliverable_id), None)
     if item is None:
         raise DeliverableError("not_found", 404, "找不到这项成果")
-    if not item.get("readable") or item.get("status") not in {"present", "workspace"}:
+    if not item.get("readable") or item.get("status") not in {"present", "workspace", "historical"}:
         raise DeliverableError("unavailable", 409, item.get("reason") or "成果当前不可读取")
     task = owned[0]
     workspace = _workspace(task)
@@ -340,20 +341,19 @@ def _is_formal(rel: str, expected: Iterable[str], registered: Iterable[str], git
 def _file_item(task, node_id, node_label, rel, retired, formal) -> Dict[str, Any]:
     name = Path(rel).name
     kind, type_label = _classify(name)
+    actions = ["view", "download"] if Path(name).suffix.lower() in TEXT_SUFFIXES else ["download"]
     if retired:
-        status, reason, actions = "unavailable", "所属任务已替代，不能当作当前成果打开。", []
+        status, reason = "historical", "所属任务已替代，仅供历史查阅，不计入当前交付。"
     elif formal:
         status, reason = "present", ""
-        actions = ["view", "download"] if Path(name).suffix.lower() in TEXT_SUFFIXES else ["download"]
     else:
         status = "workspace"
         reason = "这个文件在任务工作区里，但没有登记为本次任务的交付成果。"
-        actions = ["view", "download"] if Path(name).suffix.lower() in TEXT_SUFFIXES else ["download"]
     return _base(
         task, node_id, node_label,
         kind=kind, key=rel, name=name, type_label=type_label,
         status=status, reason=reason, actions=actions,
-        readable=not retired, rel_path=rel,
+        readable=True, rel_path=rel,
     )
 
 
@@ -440,8 +440,8 @@ def _git_items(task, node_id, node_label, retired, changed, workspace=None, *, h
     if sha:
         items.append(_base(
             task, node_id, node_label, kind="git_commit", key=sha, name=f"提交 {sha[:12]}",
-            type_label="代码交付", status="unavailable" if retired else "present",
-            reason="所属任务已替代。" if retired else "这是提交记录，不能当作文件下载。",
+            type_label="代码交付", status="historical" if retired else "present",
+            reason="这是历史提交记录，不能当作文件下载。" if retired else "这是提交记录，不能当作文件下载。",
             actions=[], readable=False,
             rel_path="", sha=sha, branch=str(task.get("branch") or task.get("integration_branch") or ""),
         ))
@@ -449,9 +449,9 @@ def _git_items(task, node_id, node_label, retired, changed, workspace=None, *, h
     if url:
         items.append(_base(
             task, node_id, node_label, kind="git_pr", key=url, name="Pull Request",
-            type_label="代码交付", status="unavailable" if retired else "present",
+            type_label="代码交付", status="historical" if retired else "present",
             reason="所属任务已替代。" if retired else "",
-            actions=[] if retired else ["open"], readable=False, rel_path="", url=url,
+            actions=["open"], readable=False, rel_path="", url=url,
         ))
     if changed and not retired:
         shown = changed[:15]

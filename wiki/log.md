@@ -2732,9 +2732,31 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 ## [2026-10-18] Updated | 工作台模式并排切换
 - Updated [[simple-workbench]]: 左上同排“极简工作台 / 流程工作台”，当前模式高亮，保留项目及需求上下文；原空间工作台更名为流程工作台。
 
+## [2026-10-18] fix | 执行轨迹复用报告回执、任务视图统一
+- Updated [[execution-trace]]: 记录阶段报告、产物回执、候选版本及原生适配缺口；生命周期记录折叠。
+- Updated [[flow-workbench]]: Inspector 与列表共用任务行，历史任务可见且不参与当前节点聚合。
+
+## [2026-10-18] fix | 历史产物允许查阅和下载
+- Updated [[flow-workbench]]: 已替代任务产物的读取能力与当前交付资格分开；保留路径、敏感文件和归档校验，历史产物不满足当前节点预期。
+
+## [2026-10-18] fix | 恢复执行轨迹的信息优先级
+- Updated [[execution-trace]]: 具体事件与报告置于产物之前；轨迹页不重复完整属性卡，保留历史产物下载和任务视图共用行。
+
+## [2026-10-18] fix | 画布按最新图投影刷新
+- Updated [[flow-workbench]]: 修复同 workflow 只更新选中态导致节点与连线保留旧数据；投影变化重建，未变复用。
+
+## [2026-10-18] fix | 侧栏任务行禁止压缩
+- 共享任务行在 Inspector flex 容器中保持自然高度，避免执行者与下一任务编号重叠；不改变任务内容及列表布局。
+
+## [2026-10-18] fix | 流程图和列表打开同一任务详情
+- Updated [[flow-workbench]]: 有任务的画布节点直达现有任务抽屉，共用四页签；保留当前/历史任务选择和无任务节点的定义概览。
+
+## [2026-10-18] docs | PR 交付状态与入口一致性教训
+- 更新任务修复记录为最终实现、部署候选、完整验证和已知边界；工程教训 §167 固化同对象、双入口、完整页签验收。
+
 ## [2026-10-18] Update | 自动集成等待状态在专业工作台可见（issue #253）
 - Updated [[flow-workbench]] §10：新增 `herdr/delivery_pipeline.py` 纯投影（阶段 / 调度器归属 / 待过门禁 / commit→integration_branch→候选发布时间）；`committed` 且守护进程已接管的 git 任务徽章改为「等待集成 · 等待门禁: …」，调度控制不再产出人工「并入目标分支」动作，改列归属说明；节点卡片与任务抽屉新增交付管道行。
 - 门禁定义复用 `workflow_progress.gate_retry_node` 单一入口；等待原因只读既有事实（任务字段、门禁 `stage_verdict`、`candidate_published` 事件），未建第二事实源。
-- 追加 [[../docs/lessons/lessons-learned]] §167：守护进程已接管的进行中状态不得渲染成终态，也不得再暴露第二个人工入口。
+- 追加 [[../docs/lessons/lessons-learned]] §168：守护进程已接管的进行中状态不得渲染成终态，也不得再暴露第二个人工入口。
 - Evidence: `tests/test_delivery_pipeline.py`、`tests/test_console_delivery_pipeline.py`、`tests/test_controller_progress_actions.py`（新增回归）；console 专项 + 核心专项通过。
 - 本记录描述本地隔离沙盒源码；尚未推送、合并、部署或重启 8765。
