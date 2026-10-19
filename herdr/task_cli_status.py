@@ -1,6 +1,7 @@
 """Task status transitions, verdict acceptance, and adoption safeguards."""
 
 import os
+import json
 import sys
 from pathlib import Path
 
@@ -260,3 +261,72 @@ def set_task_status(task_id, new_status, verdict=None, note=None, affected_task_
         record_gate_note(task, verdict, note)
 
     print(f"{task_id}: {old_status} -> {new_status}")
+
+
+def adopt_task_verdict(task_id, verdict=None, note=None, operator="human", as_json=False, *,
+                       load_tasks, find_task, is_gate_task,
+                       authenticate_evidence, set_task_status):
+    """Adopt gate verdict from gate-verdict file into task (productizing manual arbitration)."""
+    data = load_tasks()
+    task = find_task(data, task_id)
+    if not task:
+        print(f"Task not found: {task_id}", file=sys.stderr)
+        sys.exit(1)
+
+    if not is_gate_task(task):
+        print(f"Task {task_id} is not a gate task", file=sys.stderr)
+        sys.exit(2)
+
+    affected_ids = []
+    if not verdict:
+        ok, res_or_err = authenticate_evidence(task)
+        if not ok:
+            print(f"No valid gate verdict found for task {task_id}", file=sys.stderr)
+            sys.exit(2)
+        verdict, file_note, affected_ids, _ = res_or_err
+        note = note or file_note
+    else:
+        ok, res_or_err = authenticate_evidence(task, expected_verdict=verdict)
+        if not ok:
+            print(f"[ADOPT VERDICT REFUSED] task {task_id}: {res_or_err}", file=sys.stderr)
+            sys.exit(2)
+        _, file_note, file_aff, _ = res_or_err
+        note = note or file_note
+        if verdict == "blocked" and file_aff and not affected_ids:
+            affected_ids = file_aff
+
+    if not verdict or verdict not in ("pass", "blocked"):
+        print(f"No valid gate verdict found for task {task_id}", file=sys.stderr)
+        sys.exit(2)
+
+    if verdict == "blocked" and not (note or "").strip():
+        note = f"gate verdict blocked (adopted by {operator})"
+
+    old_status = task.get("status")
+    set_task_status(
+        task_id,
+        "completed",
+        verdict=verdict,
+        note=note,
+        affected_task_ids=affected_ids if affected_ids else None,
+        skip_operator=operator,
+    )
+
+    result = {
+        "task_id": task_id,
+        "status": "completed",
+        "previous_status": old_status,
+        "verdict": verdict,
+        "note": note,
+        "affected_task_ids": affected_ids,
+        "operator": operator,
+    }
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"[GATE VERDICT ADOPTED] task={task_id} status={old_status} -> completed "
+            f"verdict={verdict} note=\"{note}\""
+        )
+        print("HERDR_GATE_ADOPT_RESULT=" + json.dumps(result, ensure_ascii=False))
+    return 0
