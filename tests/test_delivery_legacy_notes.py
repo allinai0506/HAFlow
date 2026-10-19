@@ -172,13 +172,14 @@ def test_ignored_note_is_not_a_claim_even_with_an_edge(docs_root):
     assert ignored in delivery_record.unidentified_delivery_notes([ignored])
 
 def test_launch_preflight_degrades_legacy_notes_and_uses_the_frozen_candidate(docs_root, capsys, monkeypatch):
-    module = load_script("herdr-task-legacy-notes-preflight", "bin/herdr-task")
+    from herdr import task_cli_launch_preflight as module
     legacy = _legacy_note()
     frozen = "c" * 40
     monkeypatch.setattr(module, "_frozen_candidate_sha", lambda workflow_id: frozen)
 
-    resolved = module._preflight_delivery_identity(
+    resolved = module.preflight_delivery_identity(
         WF, "review", f"{WF}-review-auto", claim=frozen,
+        get_store=lambda: pytest.fail("valid frozen identity must not write state"),
     )
 
     assert resolved == {"candidate_sha": frozen, "identity_source": "frozen"}

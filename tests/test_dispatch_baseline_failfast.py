@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LAUNCH_PATH = ROOT / "bin" / "herdr-task"
+LAUNCH_PATH = ROOT / "herdr" / "task_cli_launch_orchestrator.py"
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -118,6 +118,42 @@ class TestProbeClaimFreshness(GitFixture):
         self.assertEqual(result["dev_tip"], self.dev_tip)
         self.assertEqual(result["claim_sha"], self.stale_claim)
 
+
+class TestBaselineFreshnessPreflight(GitFixture):
+    def test_stale_claim_records_failure_before_launch_resources(self):
+        from types import SimpleNamespace
+        from herdr.state_store import SQLiteStateStore
+        from herdr.task_cli_launch import record_router_failure_task
+        from herdr.task_cli_launch_preflight import preflight_baseline_freshness
+
+        store = SQLiteStateStore(self.tmp / "state.db")
+        args = SimpleNamespace(
+            node="test", stage=None, candidate_sha=self.stale_claim, onto=None,
+            workflow_id="wf-stale", task_id="task-stale", run_id="run-stale",
+        )
+
+        with self.assertRaises(SystemExit) as raised:
+            preflight_baseline_freshness(
+                args,
+                str(self.source),
+                "dev",
+                get_store=lambda: store,
+                record_router_failure=lambda *call_args, **kwargs: record_router_failure_task(
+                    *call_args,
+                    **kwargs,
+                    get_store=lambda: store,
+                    new_run_id=lambda: "run-stale",
+                    now=lambda: 100,
+                    release_agent_reservation=lambda _task_id: None,
+                ),
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(store.get_task("task-stale")["status"], "failed")
+        events = store.list_events(task_id="task-stale", event_type="baseline_stale_refused")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["behind_by"], 2)
+
     def test_fresh_claim_at_dev_tip_is_fresh(self):
         from herdr.launch_baseline import probe_claim_freshness
         result = probe_claim_freshness(
@@ -161,7 +197,7 @@ class TestProbeClaimFreshness(GitFixture):
 
 
 class TestLaunchOrderGuard(unittest.TestCase):
-    """结构性护栏：`_launch_task` 内预检必须先于一切资源创建。
+    """结构性护栏：launch owner 内预检必须先于一切资源创建。
 
     若将来有人把校验移回 worker 之后（重蹈 #5），此测试变红。
     """
@@ -169,9 +205,9 @@ class TestLaunchOrderGuard(unittest.TestCase):
     def _launch_fn(self):
         tree = ast.parse(LAUNCH_PATH.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_launch_task":
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_task_orchestrated":
                 return node
-        self.fail("_launch_task not found")
+        self.fail("launch_task_orchestrated not found")
 
     def _first_call_line(self, fn, name):
         for node in ast.walk(fn):
@@ -184,7 +220,7 @@ class TestLaunchOrderGuard(unittest.TestCase):
         fn = self._launch_fn()
         gate = self._first_call_line(fn, "_preflight_baseline_freshness")
         self.assertIsNotNone(
-            gate, "_launch_task 必须调用 _preflight_baseline_freshness",
+            gate, "launch_task_orchestrated 必须调用 _preflight_baseline_freshness",
         )
         for resource_call in (
             "ensure_stage_topology",

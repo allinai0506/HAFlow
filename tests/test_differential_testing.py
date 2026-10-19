@@ -205,6 +205,35 @@ FAILED tests/test_old.py::test_legacy - AssertionError
             self.assertIn("verdict=blocked", proc_block.stdout)
             self.assertIn("tests/test_bar.py::test_new", proc_block.stdout)
 
+    def test_differential_test_handler_preserves_cli_output_contract(self):
+        import io
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+        from herdr.task_cli_verification import differential_test
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate = Path(tmpdir) / "candidate.txt"
+            candidate.write_text(
+                "FAILED tests/test_new.py::test_new - AssertionError\n",
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                candidate_output=str(candidate),
+                base_output=None,
+                base_snapshot=None,
+                domain="software",
+                candidate_exit_code=1,
+                base_exit_code=0,
+            )
+
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                differential_test(args)
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("DIFFERENTIAL_TEST: verdict=blocked", output.getvalue())
+        self.assertIn("tests/test_new.py::test_new", output.getvalue())
+
     def test_candidate_crash_with_nonzero_exit_not_masked(self):
         """When candidate test command exits non-zero but outputs no failing test names
         (e.g. runner crash, syntax error, or unparsed summary), it must NOT be masked as pass.

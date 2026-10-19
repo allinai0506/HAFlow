@@ -62,6 +62,23 @@ def test_overflow_refused_before_routing_or_supersede(scene, capsys):
     assert store.list_events(event_type='node_overflow_acknowledged') == []
 
 
+def test_cli_capacity_handler_refuses_overflow_before_writing_ack(scene, capsys):
+    from herdr.task_cli_resources import check_launch_capacity
+
+    _, store, _, _, args = scene
+    args.supersedes = None
+    args.ack_overflow = False
+    tasks = store.list_tasks(workflow_id='wf')
+    project = store.get_workflow('wf')
+
+    with pytest.raises(SystemExit) as raised:
+        check_launch_capacity(args, project, tasks, 'plan', get_store=lambda: store)
+
+    assert raised.value.code == 2
+    assert '--ack-overflow' in capsys.readouterr().out
+    assert store.list_events(event_type='node_overflow_acknowledged') == []
+
+
 def test_ack_is_durable_before_external_routing(scene):
     cli, store, _, _, args = scene
     args.ack_overflow = True

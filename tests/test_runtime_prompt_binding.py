@@ -31,20 +31,22 @@ def test_durable_prepared_prompt_uses_same_artifact_cli(tmp_path):
     assert receipt['prompt']==prompts[0]
 
 def test_initial_loop_and_context_commands_bind_artifact(tmp_path,monkeypatch):
-    import importlib.machinery,importlib.util
     from types import SimpleNamespace
     from herdr import task_resources
+    from herdr.task_cli_execution import handle_dispatch_task
     root=Path(__file__).resolve().parents[1]
-    loader=importlib.machinery.SourceFileLoader('binding_cli',str(root/'bin/herdr-task'));spec=importlib.util.spec_from_loader(loader.name,loader);cli=importlib.util.module_from_spec(spec);loader.exec_module(cli)
     store=SQLiteStateStore(tmp_path/'state.db');store.save_workflow({'workflow_id':'wf','status':'running'})
     store.save_task({'task_id':'t','workflow_id':'wf','run_id':'r','status':'pending','pane_id':'p','clone_path':str(tmp_path)})
     (tmp_path/'.herdr-loop').mkdir()
-    monkeypatch.setattr(cli,'_get_store',lambda:store);monkeypatch.setattr(cli,'load_tasks',lambda:{'tasks':store.list_tasks()})
-    monkeypatch.setattr(cli,'_compile_working_context_ref',lambda task:'context-reference')
     monkeypatch.setattr(task_resources,'owned_live_pane',lambda task:(True,'identity_match'))
     prompts=[]
-    monkeypatch.setattr(cli.subprocess,'run',lambda argv,**kwargs:(prompts.append(argv[-1]) or SimpleNamespace(returncode=0)))
-    cli.dispatch_task('t','work')
+    monkeypatch.setattr(subprocess,'run',lambda argv,**kwargs:(prompts.append(argv[-1]) or SimpleNamespace(returncode=0)))
+    handle_dispatch_task(
+        't','work',get_store=lambda:store,
+        set_status=lambda *_args,**_kwargs:None,
+        compile_context_ref=lambda _task:'context-reference',
+        fetch_rules_block=lambda _task:'',
+    )
     assert str(root/'bin/herdr-loop')+' eval' in prompts[0]
     assert str(root/'bin/herdr-task')+' working-context get' in prompts[0]
     assert '~/HAFlow/bin/herdr-loop' not in prompts[0]

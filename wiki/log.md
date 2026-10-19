@@ -3119,3 +3119,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 证据：`tests/test_task_type_vocabulary.py`（choices 与 CLI 一致、未知值拒绝、旧词表映射、全部 shipped 模板词表断言）；`tests/test_resume_transition.py`（隔离状态库中真实 CLI 迁移）；目标回归 432 项通过、96 个子用例；`launch --task-type docs` 通过 argparse（修复前同类值在此被拒绝）。
 - 说明：早先口头汇报称模板非法值只有 3 个，实际是 4 个（多出 code）；初次扫描按文件名分组时折叠了每份文件的匹配。全模板断言已覆盖全部节点。完整 launch 到 dispatched 需真实 Herdr 工作区绑定，临时环境未覆盖。
 - 关联：PR #274；本体评审记录 SC-013、SC-016；教训 §176（见 PR #275）。
+
+
+## [2026-10-19] Refactor | `herdr-task` 收敛为薄入口（≤500 行）
+
+- Updated [[task-lifecycle]]：修正 Task CLI 模块边界，记录 475 行入口、parser/entry/command 分发、各命令族 binding factory 与 owner 模块职责。
+- 追加 `docs/lessons/lessons-learned.md` §177：抽取大型 CLI 时通过实时 namespace/deps 保留动态调用 seam，并将 AST/patch 测试迁移到真实 owner。
+- Evidence：`bin/herdr-task#main`、`herdr/task_cli_entry.py#main`、`herdr/task_cli_*_bindings.py`、`tests/test_task_cli_entry.py`、`tests/test_task_cli_workflow.py`。

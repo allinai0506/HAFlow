@@ -22,9 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from herdr.evaluator import select_default_test_command  # noqa: E402
-from tests.test_fix_loop_pr1 import _load_module  # noqa: E402
-
-_cli = _load_module("c05b_cli", ROOT / "bin" / "herdr-task")
+from herdr.task_cli_launch import auto_init_task_loop, refuse_loop_launch  # noqa: E402
 
 
 class SelectDefaultTestCommandTest(unittest.TestCase):
@@ -138,7 +136,7 @@ class AutoInitTestCommandContractTest(unittest.TestCase):
             )
 
         with patch("herdr.evaluator.init_loop", forbidden_init):
-            result = _cli.auto_init_task_loop(
+            result = auto_init_task_loop(
                 clone, "backend task", [], node="implementation", task_type="fix"
             )
         self.assertEqual(result["refused"], "multi_stack_ambiguous")
@@ -151,7 +149,7 @@ class AutoInitTestCommandContractTest(unittest.TestCase):
             "herdr.evaluator.init_loop",
             lambda **kwargs: captured.update(kwargs),
         ):
-            result = _cli.auto_init_task_loop(
+            result = auto_init_task_loop(
                 clone, "backend task", [], test_cmd="mvn -q test",
                 node="implementation", task_type="fix",
             )
@@ -165,7 +163,7 @@ class AutoInitTestCommandContractTest(unittest.TestCase):
             "herdr.evaluator.init_loop",
             lambda **kwargs: captured.update(kwargs),
         ):
-            result = _cli.auto_init_task_loop(
+            result = auto_init_task_loop(
                 clone, "frontend task", [], node="implementation", task_type="fix"
             )
         self.assertIsNone(result)
@@ -178,7 +176,7 @@ class AutoInitTestCommandContractTest(unittest.TestCase):
             raise AssertionError("pytest must not be guessed for a Java-only repo")
 
         with patch("herdr.evaluator.init_loop", forbidden_init):
-            result = _cli.auto_init_task_loop(
+            result = auto_init_task_loop(
                 clone, "java task", [], node="implementation", task_type="fix"
             )
         self.assertEqual(result["refused"], "java_without_explicit_contract")
@@ -206,17 +204,14 @@ class RefuseLoopLaunchTest(unittest.TestCase):
             "detail": "multiple stacks detected at repo root",
         }
 
-        with patch.object(
-            _cli, "_reclaim_unregistered_launch_resources",
-            side_effect=lambda *a, **k: reclaimed.append(k),
-        ), patch.object(_cli, "_get_store", return_value=store), patch(
-            "builtins.print"
-        ) as fake_print:
+        with patch("builtins.print") as fake_print:
             with self.assertRaises(SystemExit) as ctx:
-                _cli._refuse_loop_launch(
+                refuse_loop_launch(
                     args, refusal,
                     clone_path=self._tmp.name, pane_id="w2:p9",
                     pane_source="dynamic",
+                    reclaim_resources=lambda *a, **k: reclaimed.append(k),
+                    get_store=lambda: store,
                 )
 
         self.assertEqual(ctx.exception.code, 2)
@@ -242,16 +237,14 @@ class RefuseLoopLaunchTest(unittest.TestCase):
         )
         args = SimpleNamespace(workflow_id="wf", node="implementation")
 
-        with patch.object(
-            _cli, "_reclaim_unregistered_launch_resources", return_value=None
-        ), patch.object(_cli, "_get_store", return_value=store), patch(
-            "builtins.print"
-        ):
+        with patch("builtins.print"):
             with self.assertRaises(SystemExit) as ctx:
-                _cli._refuse_loop_launch(
+                refuse_loop_launch(
                     args, {"refused": "java_without_explicit_contract", "detail": "x"},
                     clone_path=self._tmp.name, pane_id=None,
                     pane_source="dynamic",
+                    reclaim_resources=lambda *a, **k: None,
+                    get_store=lambda: store,
                 )
 
         self.assertEqual(ctx.exception.code, 2)

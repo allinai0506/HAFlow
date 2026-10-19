@@ -7435,3 +7435,37 @@ bin/herdr-task launch --task-id T-PLAN --workflow wf-x --node impl --source g --
 ```
 
 证据：`tests/conftest.py`（HOME 隔离）、`tests/test_os_sandbox_boundary.py`（真实 HOME 恢复）、`tests/test_test_isolation.py`；全量隔离运行 4908 通过 / 3 跳过 / 1 失败（即 test_03，已修复），真实 `projects/` 运行前后均为 1504；1497 个旧临时目录已移入 `~/.sandboxes/quarantine/console-test-pollution-20261019/older-tmp-projects`（含可逆清单）。关联：候选本体评审 `ontology/proposals/OEP-0001-review-r1.md` 的 SC-013、SC-016。n 解死端）、n-1792330151841-f810（D3 裁决）；回归测试 `tests/test_quality_assessment.py`（含 `test_historical_receipt_does_not_leak_across_runs`），候选 `ce5875b` 上 103 passed + 13 subtests。
+
+
+## 177. 巨型 CLI 拆分需保持实时依赖绑定与测试所有权（2026-10-19）
+
+### 问题背景
+
+`bin/herdr-task` 从大型单文件拆为职责模块时，既有调用方和测试仍依赖 CLI 的兼容命名空间。若抽取时把依赖快照固化在 import 时，或只搬实现却不迁移结构测试，运行时 monkeypatch 与静态约束就会脱离真实 owner。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 提取后的处理器仍需调用方的状态库、运行时函数和常量 | 依赖装配应在边界显式传入，并由绑定工厂读取调用方的实时 namespace，避免 import 时冻结 monkeypatch seam | binding factory 接受 namespace 并返回兼容调用点；领域处理逻辑归属单独 owner 模块 |
+| AST 测试仍在旧入口脚本查找已迁移函数 | 代码所有权改变后，结构测试锚点必须跟随实现迁移，否则测试要么误报，要么不再约束真实代码 | 搜索并更新旧脚本符号断言至当前 owner；保留真实 CLI 行为和状态读回验证 |
+
+### 操作规范（已固化到 `herdr/task_cli_*_bindings.py` 与对应测试）
+
+1. **显式绑定**：将共享状态、文件路径和副作用函数通过 `deps` 或 namespace binding 传给 owner，不在新模块复制权威来源。
+2. **迁移所有权测试**：移动函数后，更新 AST/patch 点至真实 owner，并运行旧调用方回归。
+3. **保留端到端证据**：至少验证可执行 CLI 入口、临时状态库写入和读回；行数下降本身不构成行为验收。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_task_cli_entry.py tests/test_task_cli_workflow.py tests/test_task_cli_workflow_close.py tests/test_workflow_finalize.py tests/test_workflow_clone_reclaim.py tests/test_fix_bug1002_teardown.py tests/test_pane_transcript_archive.py tests/test_close_workflow_receipt_cli.py
+python3 bin/herdr-task --help
+```
+
+### 相关文档 / 关联证据
+
+- Git commit `aa0795419771763482b495f122778484d70afc2f`（重放到最新 main 前的交付候选）
+- `herdr/task_cli_entry.py`
+- `herdr/task_cli_*_bindings.py`
+- `tests/test_task_cli_entry.py`

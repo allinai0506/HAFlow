@@ -23,6 +23,7 @@ import tempfile
 import unittest
 
 import pytest
+from herdr.task_cli_resources import reclaim_unregistered_launch_resources
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1533,9 +1534,11 @@ class LaunchReclaimTest(unittest.TestCase):
                          side_effect=lambda tid: calls.__setitem__(
                              "reservation", calls["reservation"] + 1)), \
             patch.object(self._ht, "delete_clone_safely", return_value=True):
-            self._ht._reclaim_unregistered_launch_resources(
+            reclaim_unregistered_launch_resources(
                 self._args(), clone_path=str(clone), pane_id="%7:p1",
-                pane_source="dynamic")
+                pane_source="dynamic", close_pane=self._ht.close_pane,
+                delete_clone_safely=self._ht.delete_clone_safely,
+                release_agent_reservation=self._ht.release_agent_reservation)
 
         self.assertEqual(calls["herdr"], 1)
         self.assertEqual(calls["tmux"], 0, "must not use raw tmux kill-pane")
@@ -1561,9 +1564,11 @@ class LaunchReclaimTest(unittest.TestCase):
                          side_effect=lambda tid: calls.__setitem__(
                              "reservation", calls["reservation"] + 1)), \
             patch.object(self._ht, "delete_clone_safely", return_value=True):
-            self._ht._reclaim_unregistered_launch_resources(
+            reclaim_unregistered_launch_resources(
                 self._args(), clone_path=str(clone), pane_id="%3:p9",
-                pane_source="prebuilt")
+                pane_source="prebuilt", close_pane=self._ht.close_pane,
+                delete_clone_safely=self._ht.delete_clone_safely,
+                release_agent_reservation=self._ht.release_agent_reservation)
 
         self.assertEqual(calls["pane_close"], 0, "borrowed pane must survive")
         self.assertEqual(calls["tmux"], 0)
@@ -1584,9 +1589,11 @@ class LaunchReclaimTest(unittest.TestCase):
             patch.object(self._ht, "release_agent_reservation",
                          return_value=None), \
             patch.object(self._ht, "delete_clone_safely", return_value=True):
-            self._ht._reclaim_unregistered_launch_resources(
+            reclaim_unregistered_launch_resources(
                 self._args(), clone_path=str(clone), pane_id="%5:p2",
-                pane_source="dynamic")
+                pane_source="dynamic", close_pane=self._ht.close_pane,
+                delete_clone_safely=self._ht.delete_clone_safely,
+                release_agent_reservation=self._ht.release_agent_reservation)
 
     def test_reclaim_continues_when_pane_close_raises(self):
         """资源回收必须逐项尽力,前一步失败不能阻断后续释放。"""
@@ -1604,9 +1611,11 @@ class LaunchReclaimTest(unittest.TestCase):
                          side_effect=lambda tid: released.__setitem__(
                              "n", released["n"] + 1)), \
             patch.object(self._ht, "delete_clone_safely", return_value=True):
-            self._ht._reclaim_unregistered_launch_resources(
+            reclaim_unregistered_launch_resources(
                 self._args(), clone_path=str(clone), pane_id="%9:p1",
-                pane_source="dynamic")
+                pane_source="dynamic", close_pane=self._ht.close_pane,
+                delete_clone_safely=self._ht.delete_clone_safely,
+                release_agent_reservation=self._ht.release_agent_reservation)
 
         self.assertEqual(released["n"], 1)
 

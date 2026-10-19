@@ -1,9 +1,7 @@
 """Tests for the herdr-task ops-center aggregation entry."""
 
-import importlib
-import importlib.machinery
-import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,30 +10,21 @@ import sys
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERDR_ROOT))
-
-
-def _import_herdr_task():
-    task_bin = HERDR_ROOT / "bin" / "herdr-task"
-    spec = importlib.util.spec_from_loader(
-        "herdr_task_ops_center_test",
-        importlib.machinery.SourceFileLoader(
-            "herdr_task_ops_center_test",
-            str(task_bin),
-        ),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_ht = _import_herdr_task()
+from herdr import ops_center_projection as _projection
+from herdr.ops_center_projection import _build_workflow_cards
+from herdr.ops_center_helpers import (
+    _node_delivery_complete,
+    _node_task_status_counts,
+    _normalize_workflow_nodes,
+    _suggested_actions_for_anomaly,
+)
+from herdr.task_cli_tasks import safe_workflow as _safe_workflow
 
 
 class TestOpsCenterPayload(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="herdr-ops-center-")
         self.task_file = str(Path(self.tmp.name) / "tasks.json")
-        _ht.TASKS_FILE = self.task_file
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -43,6 +32,16 @@ class TestOpsCenterPayload(unittest.TestCase):
     def _write_tasks(self, tasks):
         with open(self.task_file, "w", encoding="utf-8") as f:
             json.dump({"tasks": tasks}, f)
+
+    def _project_payload(self, *, workflow_id=None, now=None, include_tasks=False):
+        tasks = json.loads(Path(self.task_file).read_text(encoding="utf-8"))["tasks"]
+        return _projection._ops_center_payload(
+            workflow_id=workflow_id,
+            now=now,
+            include_tasks=include_tasks,
+            snapshot_tasks=tasks,
+            workflow_lookup=lambda wid: _safe_workflow(wid, load_workflow=lambda _: {}),
+        )
 
     def _fleet_row(self, payload, agent):
         for row in payload["agent_fleet"]:
@@ -91,8 +90,8 @@ class TestOpsCenterPayload(unittest.TestCase):
         self._write_tasks(tasks)
 
         runtime_status = {"p-impl": "working", "p-test": "idle"}
-        with patch.object(_ht, "_agent_runtime_status", side_effect=lambda pane: runtime_status.get(pane)):
-            payload = _ht._ops_center_payload(workflow_id=None, now=300, include_tasks=False)
+        with patch.object(_projection, "_agent_runtime_status", side_effect=lambda pane: runtime_status.get(pane)):
+            payload = self._project_payload(workflow_id=None, now=300, include_tasks=False)
 
         self.assertEqual(payload["scope"], "all")
         self.assertEqual(payload["boss"]["running_workflows"], 2)
@@ -146,8 +145,8 @@ class TestOpsCenterPayload(unittest.TestCase):
             "p-impl": "idle",
             "p-review": None,
         }
-        with patch.object(_ht, "_agent_runtime_status", side_effect=lambda pane: status_map.get(pane)):
-            payload = _ht._ops_center_payload(workflow_id="wf-alpha", now=800, include_tasks=False)
+        with patch.object(_projection, "_agent_runtime_status", side_effect=lambda pane: status_map.get(pane)):
+            payload = self._project_payload(workflow_id="wf-alpha", now=800, include_tasks=False)
 
         anomaly_kinds = self._anomaly_kinds(payload)
         self.assertIn("TOKEN_EXHAUSTED", anomaly_kinds)
@@ -176,8 +175,8 @@ class TestOpsCenterPayload(unittest.TestCase):
             }
         ]
         self._write_tasks(tasks)
-        with patch.object(_ht, "_agent_runtime_status", side_effect=lambda _: "idle"):
-            payload = _ht._ops_center_payload(workflow_id="wf-alpha", now=1000, include_tasks=False)
+        with patch.object(_projection, "_agent_runtime_status", side_effect=lambda _: "idle"):
+            payload = self._project_payload(workflow_id="wf-alpha", now=1000, include_tasks=False)
 
         agent = self._fleet_row(payload, "qodercli")
         self.assertIsNotNone(agent)
@@ -186,7 +185,7 @@ class TestOpsCenterPayload(unittest.TestCase):
         self.assertEqual(agent["health"], "STALE")
         self.assertEqual(agent["task_status"], "working")
 
-        detail = _ht._suggested_actions_for_anomaly("BLOCKED", tasks[0])
+        detail = _suggested_actions_for_anomaly("BLOCKED", tasks[0])
         self.assertIn("重试", detail["actions"])
 
     def test_ops_center_handles_invalid_failed_at(self):
@@ -208,7 +207,7 @@ class TestOpsCenterPayload(unittest.TestCase):
         ]
         self._write_tasks(tasks)
 
-        payload = _ht._ops_center_payload(workflow_id="wf-alpha", now=400, include_tasks=False)
+        payload = self._project_payload(workflow_id="wf-alpha", now=400, include_tasks=False)
         self.assertEqual(payload["anomalies"][0]["kind"], "FAILED")
 
     def test_ops_center_degrades_when_runtime_probe_fails(self):
@@ -228,11 +227,11 @@ class TestOpsCenterPayload(unittest.TestCase):
         self._write_tasks(tasks)
 
         with patch.object(
-            _ht.subprocess,
+            subprocess,
             "run",
-            side_effect=_ht.subprocess.TimeoutExpired(cmd="herdr", timeout=3),
+            side_effect=subprocess.TimeoutExpired(cmd="herdr", timeout=3),
         ):
-            payload = _ht._ops_center_payload(workflow_id="wf-alpha", now=400)
+            payload = self._project_payload(workflow_id="wf-alpha", now=400)
 
         agent = self._fleet_row(payload, "opencode")
         self.assertEqual(agent["runtime_status"], None)
@@ -244,13 +243,12 @@ class TestSupersededStats(unittest.TestCase):
     """Superseded tasks must not pollute ops-center node card totals.
 
     The predicate here must stay in sync with is_node_complete in
-    services/herdr-controller.py and node_status in bin/herdr-task.
+    services/herdr-controller.py and node_status in herdr/task_cli_workflow.py.
     """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="herdr-superseded-stats-")
         self.task_file = str(Path(self.tmp.name) / "tasks.json")
-        _ht.TASKS_FILE = self.task_file
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -265,18 +263,31 @@ class TestSupersededStats(unittest.TestCase):
                 f,
             )
 
+    def _project_payload(self, *, workflow_id=None, now=None, include_tasks=False):
+        tasks = json.loads(Path(self.task_file).read_text(encoding="utf-8"))["tasks"]
+        return _projection._ops_center_payload(
+            workflow_id=workflow_id,
+            now=now,
+            include_tasks=include_tasks,
+            snapshot_tasks=tasks,
+                workflow_lookup=lambda wid: _safe_workflow(wid, load_workflow=lambda _: {}),
+        )
+
     def _card(self):
         with patch.object(
-            _ht, "_agent_runtime_status", side_effect=lambda _: None
-        ), patch.object(_ht, "load_workflow", return_value={"nodes": [{"id": "plan"}]}):
-            payload = _ht._ops_center_payload(
-                workflow_id="wf-1", now=1000, include_tasks=False
+            _projection, "_agent_runtime_status", side_effect=lambda _: None
+        ):
+            tasks = json.loads(Path(self.task_file).read_text(encoding="utf-8"))["tasks"]
+            payload = _projection._ops_center_payload(
+                workflow_id="wf-1", now=1000, include_tasks=False,
+                snapshot_tasks=tasks,
+                workflow_lookup=lambda _: ({"nodes": [{"id": "plan"}]}, "wf-1"),
             )
         self.assertEqual(len(payload["workflow_cards"]), 1)
         return payload["workflow_cards"][0]
 
     def test_counts_exclude_superseded_tasks(self):
-        counts = _ht._node_task_status_counts([
+        counts = _node_task_status_counts([
             {"task_id": "t1", "status": "cleaned"},
             {"task_id": "t2", "status": "superseded", "superseded_by": "t3"},
             {"task_id": "t3", "status": "cleaned"},
@@ -286,7 +297,7 @@ class TestSupersededStats(unittest.TestCase):
         self.assertEqual(counts["superseded"], 1)
 
     def test_counts_exclude_superseded_by_carrying_tasks(self):
-        counts = _ht._node_task_status_counts([
+        counts = _node_task_status_counts([
             {"task_id": "t1", "status": "cleaned", "superseded_by": "t2"},
         ])
         self.assertEqual(counts["total"], 0)
@@ -337,23 +348,32 @@ class TestSupersededStats(unittest.TestCase):
 
 class PlannedNodeStatusTest(unittest.TestCase):
     def test_cli_and_card_do_not_complete_missing_planned_tasks(self):
+        from herdr.task_cli_workflow import node_status
         tasks = [{"task_id": "t1", "workflow_id": "wf-plan", "node": "implementation", "status": "integrated", "integration_mode": "git"}]
         cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}
         import io
         from contextlib import redirect_stdout
-        with patch.object(_ht, "_safe_workflow", return_value=(cfg, "wf-plan")), patch.object(_ht, "resolve_node", return_value={"node_label": "implementation", "stage_label": "implementation"}), patch.object(_ht, "load_tasks", return_value={"tasks": tasks}):
-            cards = _ht._build_workflow_cards({"wf-plan": tasks}, 1)
-            self.assertNotEqual(cards[0]["nodes"][0]["status"], "completed")
-            output = io.StringIO()
-            with redirect_stdout(output):
-                _ht.node_status("wf-plan", "implementation")
-            self.assertFalse(json.loads(output.getvalue())["complete"])
+        workflow_lookup = lambda _: (cfg, "wf-plan")
+        cards = _build_workflow_cards({"wf-plan": tasks}, 1, workflow_lookup=workflow_lookup)
+        self.assertNotEqual(cards[0]["nodes"][0]["status"], "completed")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            node_status(
+                "wf-plan", "implementation",
+                resolve_node=lambda *_: {"node_label": "implementation", "stage_label": "implementation"},
+                load_tasks=lambda: {"tasks": tasks}, safe_workflow=workflow_lookup,
+                normalize_workflow_nodes=_normalize_workflow_nodes,
+                node_delivery_complete=_node_delivery_complete,
+            )
+        self.assertFalse(json.loads(output.getvalue())["complete"])
 
 
 class PersistedWorkflowConfigTest(unittest.TestCase):
     def test_node_status_uses_recorded_config_file_with_real_store(self):
-        from herdr import projects
+        from herdr.task_cli_workflow import node_status
+        from herdr.task_cli_tasks import load_workflow
         from herdr.state_store import SQLiteStateStore
+        from herdr.workflow import normalize_workflow
         import io
         from contextlib import redirect_stdout
         with tempfile.TemporaryDirectory() as td:
@@ -362,20 +382,38 @@ class PersistedWorkflowConfigTest(unittest.TestCase):
             store = SQLiteStateStore(Path(td) / "state.db")
             store.save_workflow({"workflow_id": "wf-plan", "status": "running", "workflow_file": str(cfg), "config": {}})
             store.save_task({"task_id": "t1", "workflow_id": "wf-plan", "node": "implementation", "status": "integrated", "integration_mode": "git"})
-            with patch.object(_ht, "get_state_store", return_value=store), patch.object(projects, "_get_store", return_value=store), patch.object(_ht, "load_tasks", return_value={"tasks": store.list_tasks()}):
-                output = io.StringIO()
-                with redirect_stdout(output):
-                    _ht.node_status("wf-plan", "implementation")
-                self.assertFalse(json.loads(output.getvalue())["complete"])
+            workflow_loader = lambda workflow_id: load_workflow(workflow_id, deps={
+                "get_state_store": lambda: store,
+                "workflow_config_for": lambda _: None,
+                "normalize_workflow": normalize_workflow,
+                "workflow_file": str(cfg),
+            })
+            output = io.StringIO()
+            with redirect_stdout(output):
+                node_status(
+                    "wf-plan", "implementation",
+                    resolve_node=lambda *_: {"node_label": "implementation", "stage_label": "implementation"},
+                    load_tasks=lambda: {"tasks": store.list_tasks()},
+                    safe_workflow=lambda wid: _safe_workflow(wid, load_workflow=workflow_loader),
+                    normalize_workflow_nodes=_normalize_workflow_nodes,
+                    node_delivery_complete=_node_delivery_complete,
+                )
+            self.assertFalse(json.loads(output.getvalue())["complete"])
 
 
     def test_missing_recorded_config_never_borrows_global_legacy(self):
-        from herdr import projects
+        from herdr.task_cli_tasks import load_workflow
         from herdr.state_store import SQLiteStateStore
+        from herdr.workflow import normalize_workflow
         with tempfile.TemporaryDirectory() as td:
             legacy = Path(td) / "legacy.json"
             legacy.write_text(json.dumps({"nodes": [{"id": "foreign"}]}))
             store = SQLiteStateStore(Path(td) / "state.db")
             store.save_workflow({"workflow_id": "wf-plan", "status": "running", "workflow_file": str(Path(td) / "missing.json"), "nodes": [{"id": "implementation", "required_task_ids": ["t3"]}]})
-            with patch.object(_ht, "get_state_store", return_value=store), patch.object(projects, "_get_store", return_value=store), patch.object(projects, "LEGACY_WORKFLOW_FILE", legacy):
-                self.assertEqual(_ht.load_workflow("wf-plan")["nodes"][0]["id"], "implementation")
+            result = load_workflow("wf-plan", deps={
+                "get_state_store": lambda: store,
+                "workflow_config_for": lambda _: {"nodes": [{"id": "foreign"}]},
+                "normalize_workflow": normalize_workflow,
+                "workflow_file": str(legacy),
+            })
+            self.assertEqual(result["nodes"][0]["id"], "implementation")

@@ -26,7 +26,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKER_PATH = ROOT / "services" / "herdr-worker.py"
-LAUNCH_PATH = ROOT / "bin" / "herdr-task"
+LAUNCH_PATH = ROOT / "herdr" / "task_cli_launch_orchestrator.py"
+REGISTRATION_PATH = ROOT / "herdr" / "task_cli_launch_registration.py"
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -331,12 +332,19 @@ class TestLaunchFieldPersistence(unittest.TestCase):
     def _launch_fn(self):
         tree = ast.parse(LAUNCH_PATH.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_launch_task":
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_task_orchestrated":
                 return node
-        self.fail("_launch_task not found")
+        self.fail("launch_task_orchestrated not found")
+
+    def _registration_fn(self):
+        tree = ast.parse(REGISTRATION_PATH.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "register_launched_task":
+                return node
+        self.fail("register_launched_task not found")
 
     def test_task_record_literal_persists_anchor_and_onto(self):
-        fn = self._launch_fn()
+        fn = self._registration_fn()
         keys = set()
         for node in ast.walk(fn):
             if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
