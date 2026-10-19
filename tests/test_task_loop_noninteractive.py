@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 import pytest
+from herdr.task_cli_launch import auto_init_task_loop
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,8 +32,7 @@ def test_default_npm_evaluation_finishes_without_watch(tmp_path, monkeypatch):
                     "if not os.environ.get('CI'): time.sleep(30)\n")
     command = shlex.quote(sys.executable) + ' ' + shlex.quote(str(test))
     (tmp_path / 'package.json').write_text(json.dumps({'scripts': {'test': command}}))
-    task = load_cli('task_loop_noninteractive', 'herdr-task')
-    task.auto_init_task_loop(tmp_path, 'noninteractive gate', [], node='implementation')
+    auto_init_task_loop(tmp_path, 'noninteractive gate', [], node='implementation')
     original = subprocess.Popen.communicate
     def bounded(process, *args, **kwargs):
         if kwargs.get('timeout') == 300:
@@ -50,9 +50,8 @@ def test_default_npm_evaluation_finishes_without_watch(tmp_path, monkeypatch):
 def test_explicit_task_test_command_is_preserved(tmp_path):
     (tmp_path / 'package.json').write_text(json.dumps({'scripts': {'test': 'false'}}))
     command = "printf '2 passed in 0.1s\\n'"
-    task = load_cli('task_loop_explicit', 'herdr-task')
-    task.auto_init_task_loop(tmp_path, 'explicit module contract', [], test_cmd=command,
-                             lint_cmd='true', node='implementation')
+    auto_init_task_loop(tmp_path, 'explicit module contract', [], test_cmd=command,
+                        lint_cmd='true', node='implementation')
     metrics, converged, _ = load_cli('loop_explicit', 'herdr-loop').run_evaluation(tmp_path)
     assert converged and metrics.passed_tests == 2
     goal = (tmp_path / '.herdr-loop' / 'GOAL.md').read_text()

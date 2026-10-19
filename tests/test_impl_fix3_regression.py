@@ -1076,6 +1076,7 @@ def test_router_failure_lifecycle_does_not_report_success_when_event_write_fails
     tmp_path, monkeypatch
 ):
     module, store, root = make_router_lifecycle(tmp_path, monkeypatch)
+    from herdr.task_cli_launch import record_router_failure_task
 
     class EventFailingStore:
         def __getattr__(self, name):
@@ -1085,10 +1086,15 @@ def test_router_failure_lifecycle_does_not_report_success_when_event_write_fails
             raise OSError("event disk full")
 
     args = launch_args(root, "review-event-failure")
-    monkeypatch.setattr(module, "_get_store", lambda: EventFailingStore())
     with pytest.raises(RuntimeError, match="router failure lifecycle"):
-        module._record_router_failure_task(
-            args, "review", RuntimeError("empty review pool")
+        record_router_failure_task(
+            args,
+            "review",
+            RuntimeError("empty review pool"),
+            get_store=lambda: EventFailingStore(),
+            new_run_id=lambda: "test-run",
+            now=lambda: 100,
+            release_agent_reservation=lambda _task_id: None,
         )
     assert store.get_task("review-event-failure")["status"] == "failed"
 

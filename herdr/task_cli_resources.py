@@ -216,3 +216,42 @@ def check_launch_capacity(args, project, tasks, node_id, *, get_store,
                           if task.get("workflow_id") == args.workflow_id
                           and (task.get("node") or task.get("stage")) == node_id))
         sys.exit(2)
+
+
+def reclaim_unregistered_launch_resources(
+    args, clone_path="", pane_id="", pane_source="", *, close_pane,
+    delete_clone_safely, release_agent_reservation,
+):
+    """Release only resources owned by a launch refused before task registration."""
+    task_id = getattr(args, "task_id", "")
+    if pane_id:
+        owned = str(pane_source or "dynamic").strip().lower() != "prebuilt"
+        if owned:
+            try:
+                if close_pane(pane_id):
+                    print(f"[LAUNCH RECLAIM] pane closed pane={pane_id}")
+                else:
+                    print(f"[LAUNCH RECLAIM] pane close failed pane={pane_id}", file=sys.stderr)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                print(f"[LAUNCH RECLAIM WARN] pane={pane_id}: {exc}", file=sys.stderr)
+        else:
+            print(
+                f"[LAUNCH RECLAIM] prebuilt pane retained pane={pane_id} "
+                "(borrowed pool; ownership not taken)"
+            )
+
+    if clone_path:
+        try:
+            if delete_clone_safely(clone_path):
+                print(f"[LAUNCH RECLAIM] clone removed {clone_path}")
+            else:
+                print(f"[LAUNCH RECLAIM] clone retained {clone_path}", file=sys.stderr)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"[LAUNCH RECLAIM WARN] clone={clone_path}: {exc}", file=sys.stderr)
+
+    if task_id:
+        try:
+            release_agent_reservation(task_id)
+            print(f"[LAUNCH RECLAIM] reservation released task={task_id}")
+        except (ImportError, AttributeError, OSError, ValueError, RuntimeError) as exc:
+            print(f"[LAUNCH RECLAIM WARN] reservation task={task_id}: {exc}", file=sys.stderr)
