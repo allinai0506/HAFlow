@@ -688,20 +688,20 @@ Evidence:
 
 ## Task CLI 模块边界
 
-`FACT` `bin/herdr-task` 保留 CLI 装配入口和兼容调用点；参数定义由 `herdr/task_cli_parser*.py` 按命令族组织。Ops Center 投影与有界运行时探测位于 `herdr/ops_center.py` 及其 helpers/projection 模块；rollout、runs、observability、execution、resources 和 verification 命令分别由对应 `herdr/task_cli_*.py` 模块承载。Git adoption 探测与 workspace fingerprint 也独立于脚本入口。
+`FACT` `bin/herdr-task` 是不超过 500 行的可执行入口，负责环境初始化、兼容命名空间绑定与 `main()` 启动。参数定义和命令路由分别位于 `herdr/task_cli_parser*.py`、`herdr/task_cli_entry.py` 与 `herdr/task_cli.py`。各命令族的动态依赖装配位于 `herdr/task_cli_*_bindings.py`，具体处理逻辑位于对应 owner 模块；binding factory 从调用方实时 namespace 取依赖，以保留 CLI 兼容名称和既有 monkeypatch seam。
 
-`FACT` 此次是分阶段拆分。task launch、dispatch、commit/integrate、cleanup/finalize、workflow lifecycle 和 `main()` 命令分发仍由 `bin/herdr-task` 承载。
+`FACT` Ops Center、rollout、runs、observability、execution、resources、verification、state、status、analysis、launch、dispatch、adoption、teardown、workflow、evidence 与 review closure 均已移出 CLI 脚本。Git adoption 探测与 workspace fingerprint 由独立模块维护。
 
 Evidence:
+- `bin/herdr-task#main`
+- `herdr/task_cli_entry.py#main`
+- `herdr/task_cli_review.py#_enforce_wrapup_review_closure/record_review_closure`
+- `herdr/task_cli_launch_command_bindings.py#build_launch_command_bindings`
+- `herdr/task_cli_teardown_bindings.py#build_teardown_bindings`
+- `herdr/task_cli_workflow.py#resume_task`
 - `herdr/task_cli_parser.py#build_parser`
-- `herdr/task_cli_observability.py`
-- `herdr/task_cli_rollout.py`
-- `herdr/task_cli_runs.py`
-- `herdr/task_cli_execution.py`
-- `herdr/task_cli_resources.py`
-- `herdr/task_cli_verification.py`
 - `herdr/ops_center.py#build_ops_center_payload`
 - `herdr/git_adoption_probe.py`
 - `herdr/workspace_fingerprint.py`
-- `bin/herdr-task#_launch_task/dispatch_task/integrate_task/cleanup_task/main`
-- `tests/test_ops_center_read_path.py`
+- `tests/test_task_cli_entry.py`
+- `tests/test_task_cli_workflow.py`
