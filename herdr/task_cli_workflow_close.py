@@ -7,6 +7,81 @@ import tarfile
 from pathlib import Path
 
 
+def close_workflow(
+    workflow_id,
+    include_coordinator=False,
+    purge_clones=False,
+    dry_run=False,
+    abandon=False,
+    force=False,
+    accept_escalated=False,
+    confirm_force=None,
+    *,
+    get_store,
+    workflow_close_claim,
+    business_gate_blockers,
+    validate_delivery_inventory,
+    close_workflow_owned,
+    build_delivery_report,
+):
+    """Validate, claim, execute and receipt a workflow close operation."""
+    if not abandon:
+        store = get_store()
+        if store.get_workflow(workflow_id):
+            authority, config, owned_tasks = store.read_workflow_snapshot(workflow_id)
+            try:
+                validate_delivery_inventory(authority, config, owned_tasks)
+            except ValueError as exc:
+                print(f"[CLOSE ABORT] {exc}")
+                sys.exit(2)
+            missing_business = business_gate_blockers(
+                store, authority, config, owned_tasks
+            )
+            if missing_business:
+                print(
+                    "[CLOSE ABORT] business acceptance unavailable: "
+                    + ", ".join(missing_business)
+                )
+                sys.exit(2)
+    options = dict(
+        include_coordinator=include_coordinator,
+        purge_clones=purge_clones,
+        abandon=abandon,
+        force=force,
+        accept_escalated=accept_escalated,
+    )
+    with workflow_close_claim(
+        get_store(), workflow_id, dry_run=dry_run, options=options
+    ) as claim:
+        if claim.state == "completed":
+            print(json.dumps(claim.receipt, ensure_ascii=False))
+            return claim.receipt
+        if claim.state == "in_progress":
+            report = {"workflow_id": workflow_id, "close_state": "in_progress"}
+            print(json.dumps(report))
+            return report
+        report = close_workflow_owned(
+            workflow_id,
+            include_coordinator,
+            purge_clones,
+            dry_run,
+            abandon,
+            force,
+            accept_escalated,
+            confirm_force,
+            close_claim=claim if not dry_run else None,
+        )
+        facts = build_delivery_report(workflow_id, get_store())
+        import hashlib
+
+        report["delivery_report"] = facts
+        report["delivery_report_sha256"] = hashlib.sha256(
+            json.dumps(facts, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        report["execution_mode"] = "dry-run" if dry_run else "execute"
+        return report if dry_run else claim.complete(report)
+
+
 def close_workflow_owned(
     workflow_id,
     include_coordinator=False,

@@ -1485,68 +1485,28 @@ def close_workflow(
     accept_escalated=False,
     confirm_force=None,
 ):
+    from herdr.business_gate import business_gate_blockers
+    from herdr.delivery_report import build_delivery_report
+    from herdr.task_cli_workflow_close import close_workflow as handle_close_workflow
+    from herdr.workflow import validate_delivery_inventory
     from herdr.workflow_close import workflow_close_claim
 
-    if not abandon:
-        from herdr.business_gate import business_gate_blockers
-
-        store = _get_store()
-        if store.get_workflow(workflow_id):
-            authority, config, owned_tasks = store.read_workflow_snapshot(workflow_id)
-            from herdr.workflow import validate_delivery_inventory
-
-            try:
-                validate_delivery_inventory(authority, config, owned_tasks)
-            except ValueError as exc:
-                print(f"[CLOSE ABORT] {exc}")
-                sys.exit(2)
-            missing_business = business_gate_blockers(
-                store, authority, config, owned_tasks
-            )
-            if missing_business:
-                print(
-                    "[CLOSE ABORT] business acceptance unavailable: "
-                    + ", ".join(missing_business)
-                )
-                sys.exit(2)
-    options = dict(
-        include_coordinator=include_coordinator,
-        purge_clones=purge_clones,
-        abandon=abandon,
-        force=force,
-        accept_escalated=accept_escalated,
+    return handle_close_workflow(
+        workflow_id,
+        include_coordinator,
+        purge_clones,
+        dry_run,
+        abandon,
+        force,
+        accept_escalated,
+        confirm_force,
+        get_store=_get_store,
+        workflow_close_claim=workflow_close_claim,
+        business_gate_blockers=business_gate_blockers,
+        validate_delivery_inventory=validate_delivery_inventory,
+        close_workflow_owned=_close_workflow_owned,
+        build_delivery_report=build_delivery_report,
     )
-    with workflow_close_claim(
-        _get_store(), workflow_id, dry_run=dry_run, options=options
-    ) as claim:
-        if claim.state == "completed":
-            print(json.dumps(claim.receipt, ensure_ascii=False))
-            return claim.receipt
-        if claim.state == "in_progress":
-            report = {"workflow_id": workflow_id, "close_state": "in_progress"}
-            print(json.dumps(report))
-            return report
-        report = _close_workflow_owned(
-            workflow_id,
-            include_coordinator,
-            purge_clones,
-            dry_run,
-            abandon,
-            force,
-            accept_escalated,
-            confirm_force,
-            close_claim=claim if not dry_run else None,
-        )
-        from herdr.delivery_report import build_delivery_report
-        import hashlib
-
-        facts = build_delivery_report(workflow_id, _get_store())
-        report["delivery_report"] = facts
-        report["delivery_report_sha256"] = hashlib.sha256(
-            json.dumps(facts, sort_keys=True, ensure_ascii=False).encode()
-        ).hexdigest()
-        report["execution_mode"] = "dry-run" if dry_run else "execute"
-        return report if dry_run else claim.complete(report)
 
 
 def _close_workflow_owned(

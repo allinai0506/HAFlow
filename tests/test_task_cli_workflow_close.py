@@ -1,6 +1,37 @@
 import pytest
+from contextlib import contextmanager
 
 from herdr.task_cli_workflow_close import close_workflow_owned
+
+
+def test_close_workflow_returns_existing_claim_receipt_without_teardown():
+    from herdr.task_cli_workflow_close import close_workflow
+
+    calls = []
+
+    class Claim:
+        state = 'completed'
+        receipt = {'workflow_id': 'wf-1', 'close_state': 'completed'}
+
+    @contextmanager
+    def claim(store, workflow_id, *, dry_run, options):
+        calls.append((store, workflow_id, dry_run, options))
+        yield Claim()
+
+    report = close_workflow(
+        'wf-1', abandon=True,
+        get_store=lambda: 'store',
+        workflow_close_claim=claim,
+        close_workflow_owned=lambda *args, **kwargs: pytest.fail('already closed'),
+        business_gate_blockers=lambda *args: pytest.fail('abandon skips gate'),
+        validate_delivery_inventory=lambda *args: None,
+        build_delivery_report=lambda *args: {},
+    )
+    assert report == Claim.receipt
+    assert calls == [('store', 'wf-1', False, {
+        'include_coordinator': False, 'purge_clones': False, 'abandon': True,
+        'force': False, 'accept_escalated': False,
+    })]
 
 
 def test_close_unknown_workflow_exits_before_resource_operations():
