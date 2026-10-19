@@ -1,8 +1,5 @@
 """Tests for the herdr-task ops-center aggregation entry."""
 
-import importlib
-import importlib.machinery
-import importlib.util
 import json
 import subprocess
 import tempfile
@@ -13,23 +10,6 @@ import sys
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERDR_ROOT))
-
-
-def _import_herdr_task():
-    task_bin = HERDR_ROOT / "bin" / "herdr-task"
-    spec = importlib.util.spec_from_loader(
-        "herdr_task_ops_center_test",
-        importlib.machinery.SourceFileLoader(
-            "herdr_task_ops_center_test",
-            str(task_bin),
-        ),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_ht = _import_herdr_task()
 from herdr import ops_center_projection as _projection
 from herdr.ops_center_projection import _build_workflow_cards
 from herdr.ops_center_helpers import (
@@ -45,7 +25,6 @@ class TestOpsCenterPayload(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="herdr-ops-center-")
         self.task_file = str(Path(self.tmp.name) / "tasks.json")
-        _ht.TASKS_FILE = self.task_file
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -61,7 +40,7 @@ class TestOpsCenterPayload(unittest.TestCase):
             now=now,
             include_tasks=include_tasks,
             snapshot_tasks=tasks,
-            workflow_lookup=lambda wid: _safe_workflow(wid, load_workflow=_ht.load_workflow),
+            workflow_lookup=lambda wid: _safe_workflow(wid, load_workflow=lambda _: {}),
         )
 
     def _fleet_row(self, payload, agent):
@@ -270,7 +249,6 @@ class TestSupersededStats(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="herdr-superseded-stats-")
         self.task_file = str(Path(self.tmp.name) / "tasks.json")
-        _ht.TASKS_FILE = self.task_file
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -292,15 +270,18 @@ class TestSupersededStats(unittest.TestCase):
             now=now,
             include_tasks=include_tasks,
             snapshot_tasks=tasks,
-            workflow_lookup=lambda wid: _safe_workflow(wid, load_workflow=_ht.load_workflow),
+                workflow_lookup=lambda wid: _safe_workflow(wid, load_workflow=lambda _: {}),
         )
 
     def _card(self):
         with patch.object(
             _projection, "_agent_runtime_status", side_effect=lambda _: None
-        ), patch.object(_ht, "load_workflow", return_value={"nodes": [{"id": "plan"}]}):
-            payload = self._project_payload(
-                workflow_id="wf-1", now=1000, include_tasks=False
+        ):
+            tasks = json.loads(Path(self.task_file).read_text(encoding="utf-8"))["tasks"]
+            payload = _projection._ops_center_payload(
+                workflow_id="wf-1", now=1000, include_tasks=False,
+                snapshot_tasks=tasks,
+                workflow_lookup=lambda _: ({"nodes": [{"id": "plan"}]}, "wf-1"),
             )
         self.assertEqual(len(payload["workflow_cards"]), 1)
         return payload["workflow_cards"][0]
@@ -373,25 +354,26 @@ class PlannedNodeStatusTest(unittest.TestCase):
         import io
         from contextlib import redirect_stdout
         workflow_lookup = lambda _: (cfg, "wf-plan")
-        with patch.object(_ht, "resolve_node", return_value={"node_label": "implementation", "stage_label": "implementation"}), patch.object(_ht, "load_tasks", return_value={"tasks": tasks}):
-            cards = _build_workflow_cards({"wf-plan": tasks}, 1, workflow_lookup=workflow_lookup)
-            self.assertNotEqual(cards[0]["nodes"][0]["status"], "completed")
-            output = io.StringIO()
-            with redirect_stdout(output):
-                node_status(
-                    "wf-plan", "implementation", resolve_node=_ht.resolve_node,
-                    load_tasks=_ht.load_tasks, safe_workflow=workflow_lookup,
-                    normalize_workflow_nodes=_normalize_workflow_nodes,
-                    node_delivery_complete=_node_delivery_complete,
-                )
-            self.assertFalse(json.loads(output.getvalue())["complete"])
+        cards = _build_workflow_cards({"wf-plan": tasks}, 1, workflow_lookup=workflow_lookup)
+        self.assertNotEqual(cards[0]["nodes"][0]["status"], "completed")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            node_status(
+                "wf-plan", "implementation",
+                resolve_node=lambda *_: {"node_label": "implementation", "stage_label": "implementation"},
+                load_tasks=lambda: {"tasks": tasks}, safe_workflow=workflow_lookup,
+                normalize_workflow_nodes=_normalize_workflow_nodes,
+                node_delivery_complete=_node_delivery_complete,
+            )
+        self.assertFalse(json.loads(output.getvalue())["complete"])
 
 
 class PersistedWorkflowConfigTest(unittest.TestCase):
     def test_node_status_uses_recorded_config_file_with_real_store(self):
-        from herdr import projects
         from herdr.task_cli_workflow import node_status
+        from herdr.task_cli_tasks import load_workflow
         from herdr.state_store import SQLiteStateStore
+        from herdr.workflow import normalize_workflow
         import io
         from contextlib import redirect_stdout
         with tempfile.TemporaryDirectory() as td:
@@ -400,26 +382,38 @@ class PersistedWorkflowConfigTest(unittest.TestCase):
             store = SQLiteStateStore(Path(td) / "state.db")
             store.save_workflow({"workflow_id": "wf-plan", "status": "running", "workflow_file": str(cfg), "config": {}})
             store.save_task({"task_id": "t1", "workflow_id": "wf-plan", "node": "implementation", "status": "integrated", "integration_mode": "git"})
-            with patch.object(_ht, "get_state_store", return_value=store), patch.object(projects, "_get_store", return_value=store), patch.object(_ht, "load_tasks", return_value={"tasks": store.list_tasks()}):
-                output = io.StringIO()
-                with redirect_stdout(output):
-                    node_status(
-                        "wf-plan", "implementation", resolve_node=_ht.resolve_node,
-                        load_tasks=_ht.load_tasks,
-                        safe_workflow=lambda workflow_id: _safe_workflow(workflow_id, load_workflow=_ht.load_workflow),
-                        normalize_workflow_nodes=_normalize_workflow_nodes,
-                        node_delivery_complete=_node_delivery_complete,
-                    )
-                self.assertFalse(json.loads(output.getvalue())["complete"])
+            workflow_loader = lambda workflow_id: load_workflow(workflow_id, deps={
+                "get_state_store": lambda: store,
+                "workflow_config_for": lambda _: None,
+                "normalize_workflow": normalize_workflow,
+                "workflow_file": str(cfg),
+            })
+            output = io.StringIO()
+            with redirect_stdout(output):
+                node_status(
+                    "wf-plan", "implementation",
+                    resolve_node=lambda *_: {"node_label": "implementation", "stage_label": "implementation"},
+                    load_tasks=lambda: {"tasks": store.list_tasks()},
+                    safe_workflow=lambda wid: _safe_workflow(wid, load_workflow=workflow_loader),
+                    normalize_workflow_nodes=_normalize_workflow_nodes,
+                    node_delivery_complete=_node_delivery_complete,
+                )
+            self.assertFalse(json.loads(output.getvalue())["complete"])
 
 
     def test_missing_recorded_config_never_borrows_global_legacy(self):
-        from herdr import projects
+        from herdr.task_cli_tasks import load_workflow
         from herdr.state_store import SQLiteStateStore
+        from herdr.workflow import normalize_workflow
         with tempfile.TemporaryDirectory() as td:
             legacy = Path(td) / "legacy.json"
             legacy.write_text(json.dumps({"nodes": [{"id": "foreign"}]}))
             store = SQLiteStateStore(Path(td) / "state.db")
             store.save_workflow({"workflow_id": "wf-plan", "status": "running", "workflow_file": str(Path(td) / "missing.json"), "nodes": [{"id": "implementation", "required_task_ids": ["t3"]}]})
-            with patch.object(_ht, "get_state_store", return_value=store), patch.object(projects, "_get_store", return_value=store), patch.object(projects, "LEGACY_WORKFLOW_FILE", legacy):
-                self.assertEqual(_ht.load_workflow("wf-plan")["nodes"][0]["id"], "implementation")
+            result = load_workflow("wf-plan", deps={
+                "get_state_store": lambda: store,
+                "workflow_config_for": lambda _: {"nodes": [{"id": "foreign"}]},
+                "normalize_workflow": normalize_workflow,
+                "workflow_file": str(legacy),
+            })
+            self.assertEqual(result["nodes"][0]["id"], "implementation")

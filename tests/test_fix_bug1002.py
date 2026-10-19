@@ -137,16 +137,20 @@ def test_project_config_rejects_known_foreign_required_task(tmp_path):
 
 
 def test_cli_config_load_does_not_hide_schema_error(tmp_path):
-    from tests.test_herdr_task_ops_center import _ht
+    from herdr import projects, task_cli_tasks
+    from herdr.workflow import normalize_workflow
     from herdr.state_store import SQLiteStateStore
     store = SQLiteStateStore(tmp_path / 'cli-config.db')
     path = tmp_path / 'workflow.json'
     path.write_text(json.dumps({'nodes': [{'id': 'implementation', 'required_task_ids': 'bad'}]}))
     store.save_workflow({'workflow_id': 'wf-1', 'status': 'running', 'workflow_file': str(path)})
-    with patch.object(_ht, 'get_state_store', return_value=store), \
-         patch.object(_ht, 'workflow_config_for', return_value={'nodes': []}):
+    deps = {'get_state_store': lambda: store,
+            'workflow_config_for': lambda _: {'nodes': []},
+            'normalize_workflow': normalize_workflow,
+            'workflow_file': str(tmp_path / 'legacy.json')}
+    with patch.object(projects, 'workflow_config_for', return_value={'nodes': []}):
         with pytest.raises(ValueError, match='required_task_ids'):
-            _ht.load_workflow('wf-1')
+            task_cli_tasks.load_workflow('wf-1', deps=deps)
 
 
 @pytest.mark.parametrize('enforce', [False, True])
@@ -183,16 +187,20 @@ def test_ops_config_error_cannot_look_completed():
 
 
 def test_cli_load_rejects_known_foreign_reference(tmp_path):
-    from tests.test_herdr_task_ops_center import _ht
+    from herdr import task_cli_tasks
+    from herdr.workflow import normalize_workflow
     from herdr.state_store import SQLiteStateStore
     store = SQLiteStateStore(tmp_path / 'cli-foreign.db')
     path = tmp_path / 'workflow.json'
     path.write_text(json.dumps({'nodes': [{'id': 'implementation', 'required_task_ids': ['foreign']}]}))
     store.save_workflow({'workflow_id': 'wf-1', 'status': 'running', 'workflow_file': str(path)})
     store.save_task({**_task(task_id='foreign'), 'workflow_id': 'wf-other'})
-    with patch.object(_ht, 'get_state_store', return_value=store):
-        with pytest.raises(ValueError, match='required_task_out_of_workflow'):
-            _ht.load_workflow('wf-1')
+    deps = {'get_state_store': lambda: store,
+            'workflow_config_for': lambda _: None,
+            'normalize_workflow': normalize_workflow,
+            'workflow_file': str(tmp_path / 'legacy.json')}
+    with pytest.raises(ValueError, match='required_task_out_of_workflow'):
+        task_cli_tasks.load_workflow('wf-1', deps=deps)
 
 
 
