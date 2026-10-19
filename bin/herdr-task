@@ -299,31 +299,6 @@ def find_task(data, task_id):
     return lookup(data, task_id)
 
 
-def add_task(args):
-    from herdr.task_cli_tasks import add_task as handle
-
-    return handle(
-        args,
-        deps={
-            "load_tasks": load_tasks,
-            "find_task": find_task,
-            "new_run_id": new_run_id,
-            "now": _now,
-            "init_status_history": _init_status_history,
-            "save_tasks": save_tasks,
-            "get_store": _get_store,
-            "trajectory_ledger": TrajectoryLedger,
-            "record_trajectory_event": record_trajectory_event_best_effort,
-        },
-    )
-
-
-def get_task(task_id):
-    from herdr.task_cli_tasks import get_task as handle
-
-    return handle(task_id, deps={"load_tasks": load_tasks, "find_task": find_task})
-
-
 from herdr import task_cli_observability as _ops_cli
 from herdr import task_cli_runs as _runs_cli
 from herdr.task_cli_rollout import (
@@ -1650,11 +1625,6 @@ def cmd_workflow_recovery(args):
     return handle(args)
 
 
-def list_tasks(workflow_id=None):
-    from herdr.task_cli_tasks import list_tasks as handle
-    return handle(workflow_id, deps={"load_tasks": load_tasks})
-
-
 def _task_head_sha(task):
     from herdr.task_cli_evidence import task_head_sha
 
@@ -1753,11 +1723,6 @@ def create_pull_request(args):
 def merge_pull_request(args):
     from herdr.task_cli_delivery import merge_pull_request as handle
     return handle(args, get_store=_get_store)
-
-
-def check_zombie_obligations(data=None):
-    from herdr.task_cli_tasks import check_zombie_obligations as handle
-    return handle(data, deps={"load_tasks": load_tasks})
 
 
 def main():
