@@ -2982,3 +2982,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 双门禁汇聚：test-auto-r6 与 review-auto-r2 verdict=pass 均绑定 ce5875b（验收回执事件 95059/95099）；回归 103 passed+13 subtests，真实 CLI probe 9/9 场景 + Console 浏览器证据。
 - 沉淀教训 `docs/lessons/lessons-learned.md` §173（缺派承诺、candidate_mismatch 登记伪影、隔离绕池 opt-out 审计、漂移旋转第二次命中、--allow-pending 义务死端、D3 契约-能力裁决）；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-02-wrapup.md`。
 - 本记录描述本地沙盒源码；交付 PR 保持 OPEN，未合并、未部署、未重启服务。
+
+## [2026-10-19] Refactor | 拆分 herdr-task CLI 职责
+- Updated [[task-lifecycle]]：记录 parser、Ops Center、rollout、runs、observability、execution、resources、verification、Git adoption 与 workspace fingerprint 的模块边界，并明确剩余 lifecycle/dispatch 仍在 CLI 脚本中。
+- Evidence：`herdr/task_cli_parser.py`、`herdr/ops_center.py`、`herdr/task_cli_rollout.py`、`herdr/task_cli_runs.py`、`herdr/task_cli_observability.py`、`herdr/task_cli_execution.py`、`herdr/task_cli_resources.py`、`herdr/task_cli_verification.py`、`herdr/git_adoption_probe.py`、`herdr/workspace_fingerprint.py`。
+- PR #269 基于 PR #266 源分支；本次变更待 CI 与评审，未合并或部署。
