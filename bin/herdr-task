@@ -221,8 +221,11 @@ from herdr.ops_center_helpers import (
 )
 
 
-from herdr import task_cli_observability as _ops_cli
-from herdr import task_cli_runs as _runs_cli
+from herdr.task_cli_analysis_bindings import build_analysis_bindings
+
+globals().update(build_analysis_bindings(globals()))
+
+
 from herdr.task_cli_rollout import (
     _rollout_db_path,
     _rollout_stage_label,
@@ -241,43 +244,6 @@ from herdr.task_cli_rollout import (
     _cmd_rollout_history,
     _cmd_rollout_check_guard,
 )
-
-
-def cmd_observe(args):
-    return _ops_cli.cmd_observe(args, get_store=_get_store)
-
-
-def cmd_compact(args):
-    return _ops_cli.cmd_compact(args, get_store=_get_store)
-
-
-def cmd_route_shadow(args):
-    return _ops_cli.cmd_route_shadow(args, get_store=_get_store)
-
-
-_parse_shadow_since = _ops_cli._parse_shadow_since
-cmd_shadow_eval = _ops_cli.cmd_shadow_eval
-cmd_canary_eval = _ops_cli.cmd_canary_eval
-
-
-def cmd_metrics(args):
-    return _runs_cli.cmd_metrics(args, get_store=_get_store)
-
-
-def cmd_working_context(args):
-    return _runs_cli.cmd_working_context(args, get_store=_get_store)
-
-
-def cmd_eval(args):
-    return _runs_cli.cmd_eval(args, get_store=_get_store)
-
-
-def cmd_replay(args):
-    return _runs_cli.cmd_replay(args, get_store=_get_store)
-
-
-def cmd_eval_compare(args):
-    return _runs_cli.cmd_eval_compare(args, get_store=_get_store)
 
 
 from herdr.task_cli_status_bindings import build_status_bindings
