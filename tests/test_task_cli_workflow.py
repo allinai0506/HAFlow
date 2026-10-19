@@ -1,6 +1,6 @@
 import json
 
-from herdr.task_cli_workflow import node_status, supersede_task
+from herdr.task_cli_workflow import node_status, stage_reset, supersede_task
 
 
 def test_node_status_empty_node_uses_resolved_labels(capsys):
@@ -33,3 +33,20 @@ def test_supersede_missing_task_exits_before_store_access():
         )
     assert error.value.code == 1
     assert calls == []
+
+
+def test_stage_reset_removes_only_the_selected_workflow_stage(tmp_path):
+    from pathlib import Path
+
+    state_path = tmp_path / 'stage-state.json'
+    state_path.write_text(json.dumps({
+        'wf-1:build': {'phase': 'queued'}, 'wf-1:test': {'phase': 'notified'},
+        'wf-2:test': {'phase': 'queued'},
+    }))
+    stage_reset(
+        'wf-1', 'test', stage_state_file=str(state_path),
+        path_exists=lambda path: Path(path).exists(),
+    )
+    assert json.loads(state_path.read_text()) == {
+        'wf-1:build': {'phase': 'queued'}, 'wf-2:test': {'phase': 'queued'},
+    }

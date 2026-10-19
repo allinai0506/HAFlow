@@ -230,3 +230,102 @@ def supersede_task(task_id, new_task_id=None, reason=None, allow_new_run=False,
     if new_task_id:
         msg += f" (by {new_task_id})"
     print(msg)
+
+
+def stage_reset(workflow_id, stage=None, *, stage_state_file, path_exists=os.path.exists):
+    """Clear queued/notified stage advance locks for one workflow or stage."""
+    if not path_exists(stage_state_file):
+        print("stage-state.json not found — nothing to reset.")
+        return
+    with open(stage_state_file, "r", encoding="utf-8") as handle:
+        state = json.load(handle)
+    prefix = f"{workflow_id}:"
+    removed = []
+    for key in list(state.keys()):
+        if key.startswith(prefix) and (stage is None or key == f"{prefix}{stage}"):
+            del state[key]
+            removed.append(key)
+    temporary = stage_state_file + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+    os.replace(temporary, stage_state_file)
+    if removed:
+        for key in removed:
+            print(f"[RESET] cleared: {key}")
+    else:
+        target = f"{prefix}{stage}" if stage else f"{prefix}*"
+        print(f"[RESET] no entries found for: {target}")
+
+
+def force_advance(workflow_id, stage=None, *, reset_stage):
+    """Clear stage locks so the Controller can re-evaluate workflow progress."""
+    reset_stage(workflow_id, stage)
+    print(
+        f"[ADVANCE] stage-state cleared for workflow={workflow_id}."
+        " Controller will re-evaluate within ~2 seconds."
+    )
+
+
+def reopen_workflow(workflow_id, *, get_store, reopen_owned):
+    from herdr.workflow_close import workflow_lifecycle_lock
+    with workflow_lifecycle_lock(get_store(), workflow_id) as acquired:
+        if not acquired:
+            print(f"[REOPEN BUSY] workflow={workflow_id}: lifecycle operation in progress")
+            sys.exit(75)
+        return reopen_owned(workflow_id)
+
+
+def reopen_owned_workflow(
+    workflow_id, *, load_workflow_entry, herdr, get_store, now,
+    sync_workflows_projection, workflows_file, reset_stage,
+):
+    entry, entries = load_workflow_entry(workflow_id)
+    if entry is None:
+        print(f"Unknown workflow: {workflow_id}")
+        sys.exit(1)
+    if entry.get("status") != "completed":
+        print(
+            f"[REOPEN ABORT] workflow={workflow_id} "
+            f"status={entry.get('status')}: only completed workflows can reopen"
+        )
+        sys.exit(2)
+    coordinator_pane = entry.get("coordinator_pane_id")
+    if not coordinator_pane:
+        print(f"[REOPEN ABORT] workflow={workflow_id}: record has no coordinator_pane_id")
+        sys.exit(2)
+    listing = herdr("pane", "list")
+    alive = False
+    if listing.returncode == 0:
+        try:
+            result = json.loads(listing.stdout).get("result", {})
+            panes = result.get("panes", result) if isinstance(result, dict) else result
+            alive = any(pane.get("pane_id") == coordinator_pane for pane in (panes or []))
+        except (json.JSONDecodeError, TypeError):
+            alive = False
+    if not alive:
+        print(
+            f"[REOPEN ABORT] coordinator pane {coordinator_pane} is not alive; "
+            "rebuild the coordinator pane first, then reopen"
+        )
+        sys.exit(2)
+    store = get_store()
+    try:
+        from herdr import kernel
+        kernel.transition_workflow(
+            workflow_id=workflow_id, to_status="in_progress",
+            reason="workflow_reopened", source="herdr-task",
+            metadata={"suppress_auto_close": True, "reopened_at": now()},
+            store=store,
+        )
+    except Exception as exc:
+        print(f"Error reopening workflow {workflow_id}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    workflow_path = workflows_file or os.environ.get("WORKFLOWS_FILE")
+    sync_workflows_projection(
+        store=store, wf_file=Path(workflow_path) if workflow_path else None,
+    )
+    reset_stage(workflow_id)
+    print(
+        f"[WORKFLOW REOPENED] {workflow_id} "
+        "(suppress_auto_close latch set; clears on first active task)"
+    )

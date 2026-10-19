@@ -3360,142 +3360,29 @@ def _clear_suppress_auto_close(workflow_id):
 
 
 def reopen_workflow(workflow_id):
-    from herdr.workflow_close import workflow_lifecycle_lock
-    with workflow_lifecycle_lock(_get_store(), workflow_id) as acquired:
-        if not acquired:
-            print(f"[REOPEN BUSY] workflow={workflow_id}: lifecycle operation in progress")
-            sys.exit(75)
-        return _reopen_workflow_owned(workflow_id)
-
-
-def _reopen_workflow_owned(workflow_id):
-    """重开已关闭的 workflow(fix-loop 续用同一 workflow/PR 上下文)。
-
-    仅 completed 可重开;总指挥 pane 必须存活(验收与派发的消息终点)。
-    重开即置 suppress_auto_close 闩,防止周期 sweep 在 fix task 派发前
-    将 workflow 自消除回 completed。
-    """
-    entry, entries = _load_workflow_entry(workflow_id)
-
-    if entry is None:
-        print(f"Unknown workflow: {workflow_id}")
-        sys.exit(1)
-
-    if entry.get("status") != "completed":
-        print(
-            f"[REOPEN ABORT] workflow={workflow_id} "
-            f"status={entry.get('status')}: only completed workflows can reopen"
-        )
-        sys.exit(2)
-
-    coordinator_pane = entry.get("coordinator_pane_id")
-
-    if not coordinator_pane:
-        print(
-            f"[REOPEN ABORT] workflow={workflow_id}: "
-            "record has no coordinator_pane_id"
-        )
-        sys.exit(2)
-
-    listing = _herdr("pane", "list")
-    alive = False
-
-    if listing.returncode == 0:
-        try:
-            result = json.loads(listing.stdout).get("result", {})
-            panes = (
-                result.get("panes", result)
-                if isinstance(result, dict)
-                else result
-            )
-            alive = any(
-                pane.get("pane_id") == coordinator_pane
-                for pane in (panes or [])
-            )
-        except (json.JSONDecodeError, TypeError):
-            alive = False
-
-    if not alive:
-        print(
-            f"[REOPEN ABORT] coordinator pane {coordinator_pane} is not alive; "
-            "rebuild the coordinator pane first, then reopen"
-        )
-        sys.exit(2)
-
-    store = _get_store()
-    try:
-        from herdr import kernel
-        kernel.transition_workflow(
-            workflow_id=workflow_id,
-            to_status="in_progress",
-            reason="workflow_reopened",
-            source="herdr-task",
-            metadata={"suppress_auto_close": True, "reopened_at": _now()},
-            store=store,
-        )
-    except Exception as exc:
-        print(f"Error reopening workflow {workflow_id}: {exc}", file=sys.stderr)
-        sys.exit(2)
-
-    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
-    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
-
-    stage_reset(workflow_id)
-
-    print(
-        f"[WORKFLOW REOPENED] {workflow_id} "
-        f"(suppress_auto_close latch set; clears on first active task)"
+    from herdr.task_cli_workflow import reopen_workflow as handle_reopen
+    from herdr.task_cli_workflow import reopen_owned_workflow
+    return handle_reopen(
+        workflow_id, get_store=_get_store,
+        reopen_owned=lambda wid: reopen_owned_workflow(
+            wid, load_workflow_entry=_load_workflow_entry, herdr=_herdr,
+            get_store=_get_store, now=_now,
+            sync_workflows_projection=sync_workflows_projection,
+            workflows_file=globals().get("WORKFLOWS_FILE"),
+            reset_stage=stage_reset,
+        ),
     )
 
 
 def stage_reset(workflow_id, stage=None):
-    """Clear stage-state.json advance lock(s) for a workflow.
-
-    Removes 'queued' or 'notified' entries that may be permanently
-    preventing the Controller from re-triggering stage advance events.
-    Use when a workflow is stuck and manual intervention is needed.
-    """
-    stage_path = STAGE_STATE_FILE
-    if not os.path.exists(stage_path):
-        print("stage-state.json not found — nothing to reset.")
-        return
-
-    with open(stage_path, "r", encoding="utf-8") as f:
-        state = json.load(f)
-
-    prefix = f"{workflow_id}:"
-    removed = []
-    for key in list(state.keys()):
-        if key.startswith(prefix):
-            if stage is None or key == f"{prefix}{stage}":
-                del state[key]
-                removed.append(key)
-
-    tmp = stage_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, stage_path)
-
-    if removed:
-        for k in removed:
-            print(f"[RESET] cleared: {k}")
-    else:
-        target = f"{prefix}{stage}" if stage else f"{prefix}*"
-        print(f"[RESET] no entries found for: {target}")
+    from herdr.task_cli_workflow import stage_reset as reset
+    return reset(workflow_id, stage, stage_state_file=STAGE_STATE_FILE,
+                 path_exists=os.path.exists)
 
 
 def force_advance(workflow_id, stage=None):
-    """Force re-evaluation of stage advance for a workflow.
-
-    Clears existing stage-state locks for the given stage(s) so the
-    Controller daemon will re-check DAG completion and re-notify the
-    coordinator on its next cycle (~2 s).
-    """
-    stage_reset(workflow_id, stage)
-    print(
-        f"[ADVANCE] stage-state cleared for workflow={workflow_id}."
-        " Controller will re-evaluate within ~2 seconds."
-    )
+    from herdr.task_cli_workflow import force_advance as advance
+    return advance(workflow_id, stage, reset_stage=stage_reset)
 
 
 def cmd_workflow_migration(args):
