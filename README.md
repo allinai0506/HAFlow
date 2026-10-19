@@ -47,7 +47,7 @@
 - **核心语言与环境**：Python 3.9+（经过 Python 3.13 严格验证）、PEP 517/621 规范。
 - **配置与编排契约**：PyYAML、JSON Schema 契约、Kahn 算法有向无环图拓扑排序。
 - **常驻后台系统**：macOS LaunchAgent 集群架构（Controller 核心调度、Sentinel 看门狗、Notifier 原生通知、Web Console 控制台）。
-- **Web Console 前端**（HAFlow 控制台）：Python 标准库 HTTP 服务 + 内嵌 HTML5/CSS3/原生 JavaScript，无前端框架与 npm 构建链；通过 JSON API 提供 Dashboard 与运维驾驶舱。
+- **Web Console 前端**（HAFlow 控制台）：Python 标准库 HTTP 服务 + 独立 HTML5/CSS3/原生 JavaScript 模板，无前端框架与 npm 构建链；通过 JSON API 提供 Dashboard 与运维驾驶舱。
 - **底座通信与现场控制**：终端多工位管理底座、Unix Domain Socket 跨进程 IPC。
 - **版本控制与沙盒隔离**：Git CoW 物理克隆隔离、基于 Git Tree 校验的 Task Baseline 差异比对。
 - **测试框架**：Pytest 自动化回归测试套件。

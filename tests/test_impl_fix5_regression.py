@@ -150,7 +150,7 @@ def _patch_empty_review_router(tmp_path, module, store, pool, config):
         "execution": {"mode": "git"},
     }
     return (
-        patch.object(module, "project_for_workflow", return_value=project),
+        patch.object(module.inventory, "project_for_workflow", return_value=project),
         patch.object(agent_router, "_get_store", return_value=store),
         patch.object(agent_router, "workflow_config_for", return_value=config),
         patch.object(agent_router, "ensure_pool_for_project", return_value=pool),

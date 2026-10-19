@@ -1,3 +1,4 @@
+from tests.support.console_source import console_source
 #!/usr/bin/env python3
 """Console API for pipeline actions and human decision intake.
 
@@ -31,8 +32,8 @@ def console_env(tmp_path, monkeypatch):
     monkeypatch.setenv("WORKFLOWS_FILE", str(wf_file))
     monkeypatch.setenv("TASKS_FILE", str(tasks_file))
     monkeypatch.setenv(wd.DOCS_DIR_ENV, str(docs_dir))
-    monkeypatch.setattr(c, "WORKFLOWS_FILE", str(wf_file))
-    monkeypatch.setattr(c, "TASKS_FILE", str(tasks_file))
+    monkeypatch.setattr(c.common, "WORKFLOWS_FILE", str(wf_file))
+    monkeypatch.setattr(c.common, "TASKS_FILE", str(tasks_file))
 
     wf_data = {
         "workflows": {
@@ -118,7 +119,7 @@ def test_execute_action_task_git_step_runs_commands_in_order(console_env):
         calls.append(list(cmd))
         return MagicMock(returncode=0, stdout="ok", stderr="")
 
-    with patch.object(c, "run", side_effect=fake_run):
+    with patch.object(c.common, "run", side_effect=fake_run):
         res = c.api_controller_execute_action({
             "type": "task_git_step",
             "task_id": "wf-test-02-impl",
@@ -143,7 +144,7 @@ def test_execute_action_task_git_step_stops_at_first_failure(console_env):
             return MagicMock(returncode=2, stdout="", stderr="cannot set from status")
         return MagicMock(returncode=0, stdout="ok", stderr="")
 
-    with patch.object(c, "run", side_effect=fake_run):
+    with patch.object(c.common, "run", side_effect=fake_run):
         with pytest.raises(RuntimeError) as exc:
             c.api_controller_execute_action({
                 "type": "task_git_step",
@@ -162,7 +163,7 @@ def test_execute_action_redrive_uses_herdr_binary_with_wait(console_env):
         calls.append(list(cmd))
         return MagicMock(returncode=0, stdout="delivered", stderr="")
 
-    with patch.object(c, "run", side_effect=fake_run):
+    with patch.object(c.common, "run", side_effect=fake_run):
         res = c.api_controller_execute_action({
             "type": "redrive",
             "task_id": "wf-test-02-working",
@@ -180,7 +181,7 @@ def test_execute_action_clear_escalation(console_env):
     """argv is core-authored, so the task must really carry the escalation."""
     _set_escalated(console_env, "wf-test-02-impl")
     calls = []
-    with patch.object(c, "run", side_effect=lambda cmd, timeout=20, check=False:
+    with patch.object(c.common, "run", side_effect=lambda cmd, timeout=20, check=False:
                       (calls.append(list(cmd)),
                        MagicMock(returncode=0, stdout="ok", stderr=""))[1]):
         res = c.api_controller_execute_action({
@@ -210,7 +211,7 @@ def test_action_backed_branches_refuse_an_unknown_task(console_env):
 
 def test_redrive_uses_the_herdr_binary_declared_by_the_core(console_env):
     calls = []
-    with patch.object(c, "run", side_effect=lambda cmd, timeout=20, check=False:
+    with patch.object(c.common, "run", side_effect=lambda cmd, timeout=20, check=False:
                       (calls.append(list(cmd)),
                        MagicMock(returncode=0, stdout="delivered", stderr=""))[1]):
         res = c.api_controller_execute_action({
@@ -234,15 +235,15 @@ def test_execute_action_rejects_unknown_task_git_step(console_env):
 
 def test_console_does_not_keep_its_own_copy_of_the_delivery_chain(console_env):
     """A second argv table in the shell would drift from the core's."""
-    src = Path(c.__file__).read_text(encoding="utf-8")
+    src = console_source(Path(__file__).resolve().parents[1])
     assert "PIPELINE_STEP_COMMANDS" not in src
-    assert "herdr_controller_actions.GIT_PIPELINE_FORWARD" in src
+    assert "herdr_controller_actions.GIT_PIPELINE_FORWARD" in console_source(Path(__file__).resolve().parents[1])
 
 
 def test_execute_action_ignores_client_supplied_argv(console_env):
     """argv comes from the core table, never from the request body."""
     calls = []
-    with patch.object(c, "run", side_effect=lambda cmd, timeout=20, check=False:
+    with patch.object(c.common, "run", side_effect=lambda cmd, timeout=20, check=False:
                       (calls.append(list(cmd)),
                        MagicMock(returncode=0, stdout="ok", stderr=""))[1]):
         c.api_controller_execute_action({
@@ -263,7 +264,7 @@ def test_close_workflow_force_is_not_reachable_from_the_api(console_env):
     hand a crafted POST a one-click workflow kill.
     """
     calls = []
-    with patch.object(c, "run", side_effect=lambda cmd, timeout=20, check=False:
+    with patch.object(c.common, "run", side_effect=lambda cmd, timeout=20, check=False:
                       (calls.append(list(cmd)),
                        MagicMock(returncode=0, stdout="ok", stderr=""))[1]):
         c.api_controller_execute_action({
@@ -276,8 +277,8 @@ def test_close_workflow_force_is_not_reachable_from_the_api(console_env):
 
 def test_halt_and_steer_reuse_the_existing_in_process_helpers(console_env):
     """No reason to shell out when herdr.steering already does it in-process."""
-    with patch.object(c, "api_task_halt", return_value={"ok": True}) as halt, \
-         patch.object(c, "api_task_steer", return_value={"ok": True}) as steer:
+    with patch.object(c.task_api, "api_task_halt", return_value={"ok": True}) as halt, \
+         patch.object(c.task_api, "api_task_steer", return_value={"ok": True}) as steer:
         c.api_controller_execute_action({
             "type": "halt", "task_id": "wf-test-02-working",
             "workflow_id": "wf-test-02", "reason": "人工制动",
@@ -309,7 +310,7 @@ def test_every_generated_pipeline_step_is_executable_through_the_api(console_env
     }
     assert generated, "expected at least one pipeline step to advertise"
     for step in generated:
-        with patch.object(c, "run", side_effect=lambda *a, **k:
+        with patch.object(c.common, "run", side_effect=lambda *a, **k:
                           MagicMock(returncode=0, stdout="ok", stderr="")):
             out = c.api_controller_execute_action({
                 "type": "task_git_step", "task_id": "wf-test-02-impl",

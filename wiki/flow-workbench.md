@@ -8,7 +8,20 @@
 
 Console 的 Workflow 主区是**运行态 DAG 工作台**：Header + Attention Hub + Flow Canvas + Node Inspector + Task Drawer + Controller Actions。它是只读投影层，不参与工作流定义与执行语义。
 
-## 1. 分层职责
+## 1. Console 源码模块边界
+
+```
+HTTP/auth (`console/http_server.py`)
+  ├── read_api.py ─── inventory.py / runtime.py ─── herdr read models
+  ├── workflow_api.py / task_api.py / control_api.py ─── herdr command/core
+  └── page.py ─── static/console.html
+common.py supplies stable paths and subprocess calls; workflow_policy.py holds shared gate validation.
+herdr_factory_console.py remains the direct-script entrypoint and compatibility export surface.
+```
+
+Console modules assemble transport and projections; Workflow decisions remain in `herdr/`. The main page is loaded from the versioned static resource in the same immutable release snapshot as the Python package.
+
+## 2. 分层职责
 
 ```
 Workflow Definition (herdr/workflow.py normalize_workflow
@@ -25,7 +38,7 @@ Flow Canvas  →  Node Inspector（概览 / 任务 / 上下文 / 运行）
 
 `workflow_graph_projection(workflow, tasks, blockers)` 无 I/O、无 DOM、无模型调用，可被 Web Console / API / Desktop 复用。
 
-## 2. 真相来源
+## 3. 真相来源
 
 | 输出 | 唯一权威 | 备注 |
 | :--- | :--- | :--- |
@@ -38,7 +51,7 @@ Flow Canvas  →  Node Inspector（概览 / 任务 / 上下文 / 运行）
 
 **Fail-soft**：legacy `stages`-only 或空定义返回有限 nodes + `edges: []`，不崩溃、不伪造连线。
 
-## 3. 节点状态聚合
+## 4. 节点状态聚合
 
 优先级严格确定，同一 Task 集合必得同一结果：
 
@@ -55,7 +68,7 @@ blocked > failed > rework > working > completed > waiting
 
 语义与既有 `stage_summary` 一致，未引入第三套状态模型。
 
-## 4. 依赖与离线约束
+## 5. 依赖与离线约束
 
 - `@antv/x6@3.1.8` → `console/static/vendor/x6-3.1.8.min.js`（全局 `X6`）
 - `@dagrejs/dagre@3.1.1` → `console/static/vendor/dagre-3.1.1.min.js`（全局 `dagre`）
@@ -64,13 +77,13 @@ blocked > failed > rework > working > completed > waiting
 - 运行时**零 CDN**（无 unpkg / jsdelivr / cdnjs）；断网可用
 - `scripts/install-herdr-console.sh` 负责 `rsync console/static/` 到 `~/.herdr-console/static/`，否则部署后 vendor 丢失
 
-## 5. Read-mostly 契约
+## 6. Read-mostly 契约
 
 X6 的编辑能力全部显式关闭：`nodeMovable` / `edgeMovable` / `edgeLabelMovable` / `arrowheadMovable` / `vertexMovable` / `vertexAddable` / `vertexDeletable` / `edgeAddable` / `connecting` 全部置否。节点可点击，图可 zoom / pan / fit，但**不存在任何保存路径**，`depends_on` 与节点定义无法被 UI 改写。
 
 生命周期：`initFlowGraph` / `renderFlowGraph` / `destroyFlowGraph` / `resizeFlowGraph` / `fitFlowGraph`。工作流切换必须销毁旧图并清空选中，避免重复 Graph 实例与陈旧监听。
 
-## 6. 容器归属（Console 单页面唯一所有权）
+## 7. 容器归属（Console 单页面唯一所有权）
 
 `#tasks` 是被多方复用的共享容器：Workflow 任务列表、运维驾驶舱、我的仪表板、历史/未注册空间面板都写它。因此显示归属必须由单一入口裁决：
 
@@ -84,7 +97,7 @@ setWorkspaceMode('aux')    → 显示 #tasks（运维/仪表板/空间面板）�
 
 Inspector 默认选中同样必须确定性：blocked > failed > working > rework > waiting-next > first。
 
-## 7. 复用既有链路
+## 8. 复用既有链路
 
 Inspector 不新建第二套详情或解卡系统：
 
@@ -92,7 +105,7 @@ Inspector 不新建第二套详情或解卡系统：
 - 阻塞节点 → `executeControllerAction(actionId)` + 既有 `/api/controller/execute-action`
 - 视图切换到「任务列表」→ 既有 `renderTasks()`，不重写任务列表
 
-## 8. 明确不做
+## 9. 明确不做
 
 Workflow Builder / 拖拽持久化 / Stencil / 版本化 UI / 发布 / MiniMap / ELK / React / React Flow / BPMN / 全局 IA 重构，均不属于本层。交付成果区也不改节点自动完成条件。
 
@@ -104,7 +117,7 @@ Workflow Builder / 拖拽持久化 / Stencil / 版本化 UI / 发布 / MiniMap /
 
 Evidence: `console/herdr_factory_console.py::workflow_detail/loadWorkflow/loadWorkflowExtras`；`tests/test_console_workflow_latency.py`。
 
-## 9. 交付成果
+## 10. 交付成果
 
 `FACT` 工作流页在 `flow` / `list` 模式显示 `#deliverablesPanel`。Workflow、Node、Task 三处读同一份目录：Workflow 汇总各 Node，Node 汇总所属 Task，Task 抽屉「产物」只显示该 Task 的行。身份是 `sha256(task_id + kind + key)` 的前 20 位。
 
@@ -117,14 +130,14 @@ Evidence: `console/herdr_factory_console.py::workflow_detail/loadWorkflow/loadWo
 Evidence:
 - `herdr/deliverables.py` — `project_for_tasks` / `read_deliverable` / `resolve_workspace_file`
 - `herdr/projection.py` — `project_workflow` 附带 `deliverables`
-- `console/herdr_factory_console.py` — `api_workflow_deliverables` / `renderDeliverables` / `renderTaskArtifacts`
+- `console/read_api.py`, `console/static/console.html` — `api_workflow_deliverables` / `renderDeliverables` / `renderTaskArtifacts`
 - `tests/test_deliverables.py`
 
 Evidence:
 - `herdr/workflow_graph.py` — `workflow_graph_projection` / `aggregate_node_status` / `pick_default_node`
 - `herdr/workflow.py` — `normalize_workflow` / `context_contract_ids` / `validate_workflow_dag`
 - `herdr/projects.py` — `workflow_config_for`
-- `console/herdr_factory_console.py` — `workflow_definition_for` / `workflow_graph_for` / `setWorkspaceMode` / `renderFlowGraph` / `renderNodeInspector` / `send_static`
+- `console/read_api.py`, `console/static/console.html` — `workflow_definition_for` / `workflow_graph_for` / `setWorkspaceMode` / `renderFlowGraph` / `renderNodeInspector` / `send_static`
 - `tests/test_workflow_graph_projection.py` — DAG 边精确性、并行拓扑、状态聚合、legacy fail-soft、自定义扇出、context 不伪造
 - `tests/test_console_flow_workbench.py` — 视图切换、容器归属、画布生命周期、依赖缺失 fail-soft、无 CDN
 - PR: https://github.com/allinai0506/HAFlow/pull/114
@@ -162,7 +175,7 @@ Evidence:
 `FACT` 迟到继续帧不得穿越空间/弹窗上下文：切空间或连续点选后，迟到的 `/api/template` 详情按 `state.templateDetailSequence` 序号丢弃；弹窗重开时旧弹窗迟到的下拉填充按 `state.templateSelectSeq[selId]` 丢弃；保存模板的记账固定写回发起空间（请求前捕获 `sid`，已切换空间时只记账不改写当前界面）；模板库回落（项目模板已删除/不可用）将回落项同步为空间选择，保证选中卡片、详情、DAG/编辑按钮与"选用并启动"一致。
 
 Evidence:
-- `console/herdr_factory_console.py` — `workflow_stages` / `_project_workflow_template` / `project_detail` / `effectiveTemplateId` / `rememberSpaceTemplate` / `selectTemplateInLibrary` / `populateTemplateSelect` / `launchWithCurrentTemplate` / `saveTemplate` / `selectSpace`
+- `console/read_api.py`, `console/static/console.html` — `workflow_stages` / `_project_workflow_template` / `project_detail` / `effectiveTemplateId` / `rememberSpaceTemplate` / `selectTemplateInLibrary` / `populateTemplateSelect` / `launchWithCurrentTemplate` / `saveTemplate` / `selectSpace`
 - `tests/test_console_project_creation.py` — 冻结定义优先级（直接调用 + `workflow_detail` 级）、`workflow_template` 暴露
 - `tests/test_console_templates.py` — `TestTemplateLibraryBehavior`（空间隔离、仅用户点选记账、preferred 透传、保存模板记账、过期详情/填充丢弃、保存按发起空间记账、回落对齐、直开视图水合重绘）
 - `tests/test_console_workflow_latency.py` — 启动调度性能回归（`__templates__` 先调度模板库、overview 后台水合不阻塞启动）
@@ -187,7 +200,7 @@ Evidence: `renderFlowGraph/destroyFlowGraph`；`tests/test_console_execution_tra
 
 Evidence: `selectFlowNode/openTaskDrawer/onTaskRowClick`；`tests/test_console_execution_trace.py::test_canvas_node_and_list_row_open_the_same_task_detail`。
 
-## 10. 交付管道可见性：commit → 集成 → 归档（issue #253）
+## 11. 交付管道可见性：commit → 集成 → 归档（issue #253）
 
 `FACT` 一个 `integration_mode=git` 的任务进入 `completed` / `committed` 后，控制器 registry watcher 会自己跑完整条交付链（`_check_finalize_retry` → `finalize_completed_task`：commit → integrate → `cleanup_ready` → `cleaned`）。这段窗口里任务不是终态，界面却曾把它渲染成终态语感的「已提交」，同时给出人工「并入目标分支」按钮——用户看不出系统在等什么，按钮还与守护进程争抢同一分支。
 
@@ -211,7 +224,7 @@ Evidence:
 - `herdr/delivery_pipeline.py` — `delivery_projection` / `scheduler_owns_next_step` / `pending_gate_nodes` / `stage_of`
 - `herdr/workflow_progress.py` — `gate_retry_node`（门禁定义的唯一公开入口）
 - `herdr/controller_actions.py` — `_git_pipeline_actions` 按归属跳过守护进程已接管的步骤
-- `console/herdr_factory_console.py` — `attach_delivery` / `candidate_publication_times` / `api_task_projection` / `taskBadge` / `deliveryWaitHtml` / `deliveryPipelineLine` / `renderSchedulerAttribution`（列表与 Inspector 共用的 `renderTaskRow` 内渲染徽章与等待原因）
+- `console/read_api.py`, `console/static/console.html` — `attach_delivery` / `candidate_publication_times` / `api_task_projection` / `taskBadge` / `deliveryWaitHtml` / `deliveryPipelineLine` / `renderSchedulerAttribution`（列表与 Inspector 共用的 `renderTaskRow` 内渲染徽章与等待原因）
 - `tests/test_delivery_pipeline.py` — 纯投影与归属反例（paused/非 git/context/已升级/未知状态）
 - `tests/test_console_delivery_pipeline.py` — 服务端真实 SQLite + 事件账本读链、`workflow_detail` / `api_workflow_controller_actions`、Node 渲染断言
 - `tests/test_controller_progress_actions.py` — 调度器接管不产出人工 integrate，其余链路动作保留

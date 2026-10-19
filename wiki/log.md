@@ -2791,3 +2791,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 双门禁汇聚：test-auto-r6 与 review-auto-r2 verdict=pass 均绑定 ce5875b（验收回执事件 95059/95099）；回归 103 passed+13 subtests，真实 CLI probe 9/9 场景 + Console 浏览器证据。
 - 沉淀教训 `docs/lessons/lessons-learned.md` §173（缺派承诺、candidate_mismatch 登记伪影、隔离绕池 opt-out 审计、漂移旋转第二次命中、--allow-pending 义务死端、D3 契约-能力裁决）；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-02-wrapup.md`。
 - 本记录描述本地沙盒源码；交付 PR 保持 OPEN，未合并、未部署、未重启服务。
+
+- 2026-10-19：将 Console 入口拆为 HTTP、查询、运行现场、Workflow、Task、控制和共享校验模块；主页面模板转为 release 快照内的 `console/static/console.html`，直接脚本入口继续提供兼容导出。Evidence: `console/herdr_factory_console.py`, `console/http_server.py`, `console/read_api.py`, `tests/test_console_module_boundaries.py`.

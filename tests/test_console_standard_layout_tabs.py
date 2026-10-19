@@ -10,12 +10,15 @@ Validates the native Light Theme incremental iteration contracts:
 7. Proper MIME type for static HTML serving.
 """
 
+from tests.support.console_source import console_source
+
 import importlib.machinery
 import importlib.util
 import re
 import subprocess
 import unittest
 from pathlib import Path
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -162,7 +165,7 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
 
     def test_pure_light_theme_palette(self):
         """4. 100% Light theme: No dark terminal backgrounds in sidebar, top bar, or main canvas."""
-        source = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+        source = console_source(ROOT)
         # Ensure dark backgrounds are not used as layout container backgrounds
         self.assertNotIn(".top {\n  background: #14161a", source)
         self.assertNotIn(".sidebar {\n  background: #14161a", source)
@@ -175,13 +178,13 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
 
     def test_static_html_mime_type(self):
         """6. Static file serving should correctly identify .html as text/html."""
-        source = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+        source = console_source(ROOT)
         self.assertIn("text/html; charset=utf-8' if suffix in ('.html', '.htm')", source)
 
     def test_no_spacing_grid_violations(self):
         """7. Verify strict adherence to 4/8/12/16px spacing rules in console."""
         bad_spacing_regex = re.compile(r'(padding|margin|gap)[^:;}]*:[^;}]*[^0-9.](5|6|7|9|10|11|13|14)px')
-        source = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+        source = console_source(ROOT)
         matches = []
         for line in source.splitlines():
             m = bad_spacing_regex.search(line)

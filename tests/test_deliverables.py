@@ -1,5 +1,7 @@
 """Workflow deliverable projection and safe file access."""
 
+from tests.support.console_source import console_source
+
 import os
 from pathlib import Path
 
@@ -343,9 +345,7 @@ def test_console_read_uses_the_same_catalog(tmp_path, monkeypatch):
 
 
 def test_console_uses_deliverable_section_and_same_api():
-    source = Path(__file__).resolve().parents[1].joinpath(
-        "console", "herdr_factory_console.py"
-    ).read_text(encoding="utf-8")
+    source = console_source(Path(__file__).resolve().parents[1])
     assert 'id="deliverablesPanel"' in source
     assert "交付成果" in source
     assert "/api/workflow/deliverable" in source
@@ -597,7 +597,7 @@ def test_console_task_view_omits_sibling_expectations(tmp_path, monkeypatch):
         lambda tid: {"task_id": tid, "workflow_id": "wf-biz"},
     )
     _seed_console_workflow(tmp_path, monkeypatch, tasks, nodes)
-    console._deliverable_observation_loader = lambda task_id: (
+    console.read_api._deliverable_observation_loader = lambda task_id: (
         [{"metadata": {"artifact_path": str(first / "客户原始资料.pdf")}}]
         if task_id == "task-a" else []
     )
@@ -605,7 +605,7 @@ def test_console_task_view_omits_sibling_expectations(tmp_path, monkeypatch):
         workflow = console.api_workflow_deliverables("wf-biz")
         own = console.api_task_projection("task-a")
     finally:
-        console._deliverable_observation_loader = None
+        console.read_api._deliverable_observation_loader = None
 
     workflow_names = {item["name"]: item["status"] for item in workflow["items"]}
     assert workflow_names["requirements.md"] == "present"
@@ -628,8 +628,8 @@ def test_task_projection_keeps_soft_catalog_error(tmp_path, monkeypatch):
     }], [{"id": "requirements"}])
     def forbid_global(*args, **kwargs):
         raise AssertionError("task catalog must use its readonly workflow snapshot")
-    monkeypatch.setattr(console, "tasks_for_workflow", forbid_global)
-    monkeypatch.setattr(console, "workflows", forbid_global)
+    monkeypatch.setattr(console.inventory, "tasks_for_workflow", forbid_global)
+    monkeypatch.setattr(console.inventory, "workflows", forbid_global)
     monkeypatch.setattr(
         console.herdr_deliverables, "project_for_tasks",
         lambda *args, **kwargs: d.pack([], error="无法列出 Git 变更，未列出的文件不代表尚未生成。"),
@@ -646,7 +646,7 @@ def test_console_projects_persisted_pr_receipt_for_cleaned_task(tmp_path, monkey
 
     db = tmp_path / 'state.db'
     monkeypatch.setenv('HERDR_STATE_DB', str(db))
-    monkeypatch.setattr(console, '_deliverable_pr_loader', console._load_deliverable_pr)
+    monkeypatch.setattr(console.read_api, '_deliverable_pr_loader', console._load_deliverable_pr)
     task = {'task_id': 'impl', 'workflow_id': 'wf-biz', 'node': 'impl', 'status': 'cleaned'}
     _seed_console_workflow(tmp_path, monkeypatch, [task], [])
     state_db.record_event({'workflow_id': 'wf-biz', 'task_id': 'impl',
@@ -676,7 +676,7 @@ def test_console_excludes_unowned_or_unconfirmed_pr_events(tmp_path, monkeypatch
 
     db = tmp_path / 'state.db'
     monkeypatch.setenv('HERDR_STATE_DB', str(db))
-    monkeypatch.setattr(console, '_deliverable_pr_loader', console._load_deliverable_pr)
+    monkeypatch.setattr(console.read_api, '_deliverable_pr_loader', console._load_deliverable_pr)
     task = {'task_id': 'impl', 'workflow_id': 'wf-biz', 'node': 'impl', 'status': 'cleaned'}
     _seed_console_workflow(tmp_path, monkeypatch, [task], [])
     state_db.record_event({'workflow_id': workflow, 'task_id': task_id,

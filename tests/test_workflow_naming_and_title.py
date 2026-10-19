@@ -190,7 +190,7 @@ _con = _load_module("herdr_console_naming_test", HERDR_ROOT / "console" / "herdr
 
 class TestConsoleWorkflowTitleIntegration(unittest.TestCase):
     def test_run_workflow_includes_title_flag(self):
-        with mock.patch.object(_con, "run") as mock_run:
+        with mock.patch.object(_con.common, "run") as mock_run:
             mock_run.return_value = type("Completed", (), {"returncode": 0, "stdout": "wf-1\n", "stderr": ""})()
             _con.run_workflow("/tmp/demo", "具体需求", agent="auto", template="t1", title="任务标题")
             cmd = mock_run.call_args[0][0]

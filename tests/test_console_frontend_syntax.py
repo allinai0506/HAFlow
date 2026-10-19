@@ -62,15 +62,11 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
         result = subprocess.run([node, "-e", harness], text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr or "sidebar title failed to refresh")
 
-    def test_html_template_is_raw_string_in_source(self):
-        """Guard against Python escape issues: HTML_TEMPLATE must be declared as raw string r''' or r\"\"\"."""
-        source = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
-        match = re.search(r"HTML_TEMPLATE\s*=\s*(r['\"]{3})", source)
-        self.assertIsNotNone(
-            match,
-            "HTML_TEMPLATE must be declared with a raw string prefix r''' or r\"\"\" "
-            "to prevent Python from mutating \\n in JS regexes and split strings.",
-        )
+    def test_html_template_is_canonical_utf8_resource(self):
+        template = ROOT / "console" / "static" / "console.html"
+        source = template.read_text(encoding="utf-8")
+        self.assertTrue(template.is_file())
+        self.assertTrue(source.startswith("<!doctype html>"))
 
     def test_javascript_syntax_clean_in_template(self):
         """Extract inline <script> block and validate with node -c to catch JS syntax crashes."""
@@ -211,14 +207,14 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
             json.dump({"nodes": [{"id": "review", "node_type": "gate"}]}, f)
             workflow_path = f.name
         try:
-            with patch.object(self.console, "workflow_by_id", return_value={
+            with patch.object(self.console.inventory, "workflow_by_id", return_value={
                 "workflow_id": "wf-1", "project_id": "p-1",
-            }), patch.object(self.console, "project_for_workflow", return_value={
+            }), patch.object(self.console.inventory, "project_for_workflow", return_value={
                 "workflow_file": workflow_path,
-            }), patch.object(self.console, "tasks_for_workflow", return_value=[{
+            }), patch.object(self.console.inventory, "tasks_for_workflow", return_value=[{
                 "task_id": "t-1", "workflow_id": "wf-1", "node": "review",
                 "status": "completed",
-            }]), patch.object(self.console, "agent_runtime", return_value=None), patch.object(
+            }]), patch.object(self.console.runtime, "agent_runtime", return_value=None), patch.object(
                 self.console.herdr_projection, "detect_workflow_stalls", return_value=None,
             ):
                 detail = self.console.workflow_detail("wf-1")

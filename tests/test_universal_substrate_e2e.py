@@ -44,8 +44,8 @@ def e2e_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERDR_MCP_REGISTRY", str(mcp_file))
     monkeypatch.setenv("CHECKPOINTS_DIR", str(cp_dir))
 
-    monkeypatch.setattr(c, "WORKFLOWS_FILE", str(wf_file))
-    monkeypatch.setattr(c, "TASKS_FILE", str(tasks_file))
+    monkeypatch.setattr(c.common, "WORKFLOWS_FILE", str(wf_file))
+    monkeypatch.setattr(c.common, "TASKS_FILE", str(tasks_file))
     from unittest.mock import MagicMock
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: MagicMock(returncode=0, stdout="", stderr=""))
 

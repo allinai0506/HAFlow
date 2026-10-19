@@ -1,5 +1,7 @@
 """inner_loop_exhausted stays a machine code; people see Chinese."""
 
+from tests.support.console_source import console_source
+
 import importlib.machinery
 import importlib.util
 import json
@@ -12,7 +14,7 @@ from herdr.projection import extract_task_blockers
 from herdr.reason_labels import INNER_LOOP_EXHAUSTED_TEXT, human_reason
 
 ROOT = Path(__file__).resolve().parents[1]
-CONSOLE = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+CONSOLE = console_source(ROOT)
 NOTIFIER = (ROOT / "services" / "herdr-notifier.py").read_text(encoding="utf-8")
 SENTINEL = (ROOT / "services" / "herdr-sentinel.py").read_text(encoding="utf-8")
 

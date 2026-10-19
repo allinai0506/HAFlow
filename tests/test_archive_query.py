@@ -1,3 +1,4 @@
+from tests.support.console_source import console_source
 #!/usr/bin/env python3
 """Tests for the task archive query core (herdr/archive.py) and the console
 /api/archive endpoint.
@@ -151,8 +152,8 @@ def archive_console_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
     monkeypatch.setenv("WORKFLOWS_FILE", str(wf_file))
     monkeypatch.setenv("TASKS_FILE", str(tasks_file))
-    monkeypatch.setattr(console, "WORKFLOWS_FILE", str(wf_file))
-    monkeypatch.setattr(console, "TASKS_FILE", str(tasks_file))
+    monkeypatch.setattr(console.common, "WORKFLOWS_FILE", str(wf_file))
+    monkeypatch.setattr(console.common, "TASKS_FILE", str(tasks_file))
 
     reset_state_store()
     yield {"console": console, "db_file": db_file, "tasks_file": tasks_file}
@@ -195,7 +196,7 @@ def test_console_archive_query_filters_and_pagination(archive_console_env):
 
 
 def test_console_archive_route_is_registered():
-    source = (Path(__file__).resolve().parent.parent / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+    source = console_source(Path(__file__).resolve().parents[1])
     assert "'/api/archive'" in source
     assert "'/api/workflows'" in source
     assert "def archive_query(" in source
@@ -204,7 +205,7 @@ def test_console_archive_route_is_registered():
 
 def test_console_workflows_api_wiring(archive_console_env):
     console = archive_console_env["console"]
-    wf_file = archive_console_env["console"].WORKFLOWS_FILE
+    wf_file = archive_console_env["console"].common.WORKFLOWS_FILE
     workflows_data = {
         "workflows": {
             "wf-proj1-01": {

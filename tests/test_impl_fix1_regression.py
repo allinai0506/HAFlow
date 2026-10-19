@@ -438,7 +438,7 @@ def test_router_failure_does_not_acquire_a_pane(tmp_path, monkeypatch):
     project = {
         "project_id": "p", "project_root": str(tmp_path), "execution": {"mode": "git"},
     }
-    with patch.object(module, "project_for_workflow", return_value=project), \
+    with patch.object(module.inventory, "project_for_workflow", return_value=project), \
          patch.object(module, "ensure_stage_topology", side_effect=AssertionError("pane topology called")), \
          patch.object(module, "choose_agent", side_effect=RuntimeError("empty review pool")), \
          patch.object(module, "acquire_pane_for_task", side_effect=AssertionError("pane acquired")), \

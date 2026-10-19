@@ -1,3 +1,4 @@
+from tests.support.console_source import console_source
 #!/usr/bin/env python3
 """Frontend contracts for the Controller decision + pipeline surfaces.
 
@@ -12,8 +13,9 @@ import re
 import unittest
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parent.parent
-CONSOLE_SRC = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+CONSOLE_SRC = console_source(ROOT)
 
 
 def _js() -> str:

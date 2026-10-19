@@ -698,13 +698,13 @@ class ConsoleGateTest(unittest.TestCase):
     def test_create_candidate_refuses_blocked_verdict(self):
         patchers = [
             patch.object(
-                _con, "load_json",
+                _con.common, "load_json",
                 side_effect=lambda path, default: {
                     "workflows": {"wf-1": {"status": "in_progress"}}
                 },
             ),
             patch.object(
-                _con, "tasks_for_workflow",
+                _con.inventory, "tasks_for_workflow",
                 return_value=[
                     {"task_id": "rev1", "status": "cleaned",
                      "stage_verdict": "blocked"}
@@ -715,7 +715,7 @@ class ConsoleGateTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-        with patch.object(_con, "run") as run_mock:
+        with patch.object(_con.common, "run") as run_mock:
             with self.assertRaises(RuntimeError) as ctx:
                 _con.create_candidate("wf-1")
 
@@ -726,11 +726,11 @@ class ConsoleGateTest(unittest.TestCase):
     def test_manual_advance_refuses_blocked_verdict(self):
         patchers = [
             patch.object(
-                _con, "workflow_detail",
+                _con.read_api, "workflow_detail",
                 return_value={"stages": [], "workflow": {}, "project": {}},
             ),
             patch.object(
-                _con, "tasks_for_workflow",
+                _con.inventory, "tasks_for_workflow",
                 return_value=[
                     {"task_id": "rev1", "status": "cleaned",
                      "stage_verdict": "blocked"}
@@ -741,7 +741,7 @@ class ConsoleGateTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-        with patch.object(_con, "run") as run_mock:
+        with patch.object(_con.common, "run") as run_mock:
             with self.assertRaises(RuntimeError) as ctx:
                 _con.manual_advance("wf-1")
 
