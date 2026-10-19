@@ -207,35 +207,9 @@ ANOMALY_ACTIONS = {
 }
 
 
-def load_workflow(workflow_id=None):
-    from herdr.task_cli_tasks import load_workflow as handle
+from herdr.task_cli_state_bindings import build_state_bindings
 
-    return handle(
-        workflow_id,
-        deps={
-            "get_state_store": get_state_store,
-            "workflow_config_for": workflow_config_for,
-            "normalize_workflow": normalize_workflow,
-            "workflow_file": WORKFLOW_FILE,
-        },
-    )
-
-
-def resolve_node(node_id, workflow_id=None):
-    from herdr.task_cli_tasks import resolve_node as handle
-
-    return handle(
-        node_id,
-        workflow_id,
-        deps={
-            "ensure_node_runtime": ensure_node_runtime,
-            "load_workflow": load_workflow,
-            "find_node": find_node,
-        },
-    )
-
-
-resolve_stage = resolve_node
+globals().update(build_state_bindings(globals()))
 
 
 from herdr.ops_center_helpers import (
@@ -245,58 +219,6 @@ from herdr.ops_center_helpers import (
     _normalize_workflow_nodes,
     _now,
 )
-
-
-def ops_center(args):
-    from herdr.ops_center import build_ops_center_payload
-
-    payload = build_ops_center_payload(
-        workflow_id=getattr(args, "workflow_id", None),
-        include_tasks=getattr(args, "include_tasks", False),
-        db_path=_state_db_path(),
-    )
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-def _state_db_path():
-    from herdr.task_cli_state import state_db_path
-
-    return state_db_path(
-        environ=os.environ,
-        tasks_file=globals().get("TASKS_FILE"),
-        workflow_file=globals().get("WORKFLOW_FILE"),
-        workflows_file=globals().get("WORKFLOWS_FILE"),
-        default_workflow_file=_DEFAULT_WORKFLOW_FILE,
-    )
-
-
-def _get_store():
-    from herdr.task_cli_state import get_store
-
-    return get_store(state_db_path=_state_db_path, get_state_store=get_state_store)
-
-
-def load_tasks():
-    from herdr.task_cli_state import load_tasks as read_tasks
-
-    return read_tasks(get_store=_get_store)
-
-
-def save_tasks(data):
-    from herdr.task_cli_state import save_tasks as persist_tasks
-
-    return persist_tasks(
-        data,
-        get_store=_get_store,
-        sync_tasks_projection=sync_tasks_projection,
-        tasks_file=globals().get("TASKS_FILE"),
-    )
-
-
-def find_task(data, task_id):
-    from herdr.task_cli_state import find_task as lookup
-
-    return lookup(data, task_id)
 
 
 from herdr import task_cli_observability as _ops_cli
