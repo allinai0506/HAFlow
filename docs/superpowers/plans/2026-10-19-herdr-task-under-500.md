@@ -36,28 +36,27 @@
 
 For each family, first identify the exact functions, imported globals, dynamic module shims, tests, and existing domain API owners. Add or adapt a behavior-level test around the current CLI/SQLite/temp-Git path before moving the code. Extract one ownership slice at a time, adjust direct dependency seams and tests in the same change, then run the focused suite and `git diff --check`. Preserve a runnable CLI after every migration PR. Avoid mechanical function forwarding and avoid changing state or side-effect ordering.
 
-## Task 1: Extract the CLI Application Facade
+## Task 1: Characterize the Existing CLI Contract
 
 **Files:**
-- Create: `herdr/task_cli.py`
-- Modify: `bin/herdr-task`, `herdr/task_cli_parser.py`, existing parser-family modules as required
-- Test: CLI parser and subprocess tests, plus new `tests/test_task_cli_entrypoint.py`
+- Modify: parser/subprocess tests only, plus new `tests/test_task_cli_entrypoint.py`
+- Do not move `main()` yet: remaining handlers still live in `bin/herdr-task`, and importing those handlers back into `herdr/` would violate dependency direction.
 
 **Interfaces:**
-- Produces: `herdr.task_cli.main(argv=None)` as the sole executable entry target.
-- Consumes: the existing parser builders and existing command-family functions; exact imports are determined from current routing, with no compatibility namespace copy.
+- Produces: behavior-level baseline tests for parser help, executable startup, and error/exit behavior.
+- Consumes: the current executable and `herdr.task_cli_parser.build_parser()` without changing production code.
 
 - [ ] Capture a baseline of `--help`, representative success/error stdout and stderr, and exit codes for one command from each existing parser family using subprocesses and temporary state.
 - [ ] Add subprocess assertions in `tests/test_task_cli_entrypoint.py` for entry invocation, help, and the `WorkflowClosedError` user-facing message and exit status.
-- [ ] Move parser construction and routing from `main()` into `herdr/task_cli.py`, preserving argument defaults and handler selection.
-- [ ] Reduce `bin/herdr-task` to bootstrap and delegation; temporarily keep not-yet-extracted handler implementations in their owning modules until later tasks.
+- [ ] Record representative help, success/error output, exit status, and temporary-StateStore readback for launch, delivery, workflow, and evidence command families.
+- [ ] Keep `bin/herdr-task` unchanged in this task so every command remains runnable while handler ownership is migrated in Tasks 2–4.
 - [ ] Run parser-family and entrypoint tests, compare captured CLI contract, and run `git diff --check`.
 
 ## Task 2: Extract Task Launch and Execution
 
 **Files:**
 - Modify: `herdr/task_cli_execution.py`; add a focused task launch module only if it owns substantive orchestration
-- Modify: `bin/herdr-task` during transition, then `herdr/task_cli.py` routing
+- Modify: `bin/herdr-task` to import handlers from their owner modules while keeping its current parser and `main()` routing
 - Test: `tests/test_launch_reconcile_cli.py`, `tests/test_pane_lifecycle_capacity.py`, `tests/test_scheduler_dispatch_e2e.py`, `tests/test_dispatch_idempotency.py`, `tests/test_delivery_rework.py`, `tests/test_issue_250_adopt_verdict_cli.py`, and related launch/status tests identified by monkeypatch inventory
 
 **Interfaces:**
@@ -75,7 +74,7 @@ For each family, first identify the exact functions, imported globals, dynamic m
 
 **Files:**
 - Create or modify: `herdr/task_cli_delivery.py`
-- Modify: `herdr/task_cli.py` routing and remaining transition code in `bin/herdr-task`
+- Modify: existing `bin/herdr-task` routing imports and move delivery handlers to the delivery owner; keep parser routing in place
 - Test: `tests/test_delivery_lifecycle.py`, `tests/test_commit_adopt.py`, `tests/test_task_delivery.py`, `tests/test_finalize_git_index_wait.py`, `tests/test_cli_receipt_delivery.py`, `tests/test_delivered_base_frozen_pin.py`, and relevant temporary-Git tests
 
 **Interfaces:**
@@ -93,7 +92,7 @@ For each family, first identify the exact functions, imported globals, dynamic m
 
 **Files:**
 - Create or modify: `herdr/task_cli_workflow.py`, `herdr/task_cli_evidence.py`
-- Modify: `herdr/task_cli.py` routing and remaining transition code in `bin/herdr-task`
+- Modify: existing `bin/herdr-task` routing imports and move workflow/evidence handlers to their owners; keep parser routing in place
 - Test: `tests/test_workflow_lifecycle_matrix.py`, `tests/test_workflow_finalize.py`, `tests/test_workflow_repair_contracts.py`, `tests/test_close_workflow_receipt_cli.py`, `tests/test_wrapup_review_closure.py`, `tests/test_note_add_fields.py`, `tests/test_zombie_obligation_regression.py`, and acceptance/delivery evidence tests
 
 **Interfaces:**
@@ -107,18 +106,21 @@ For each family, first identify the exact functions, imported globals, dynamic m
 - [ ] Migrate test imports and monkeypatches; retain subprocess coverage for CLI-visible behavior.
 - [ ] Run workflow/evidence suites and `git diff --check`; verify no domain module imports the executable.
 
-## Task 5: Remove Compatibility Shims and Close the Entry Boundary
+## Task 5: Move Routing and Close the Entry Boundary
 
 **Files:**
-- Modify: `bin/herdr-task`, `herdr/task_cli.py`, command-family modules, any production module that dynamically loads the script
+- Create: `herdr/task_cli.py`
+- Modify: `bin/herdr-task`, command-family modules, any production module that dynamically loads the script
 - Create: `tests/test_task_cli_architecture.py`
 - Test: all affected CLI, launch, delivery, workflow, evidence, and existing extracted-family tests
 
 **Interfaces:**
-- Produces: final `bin/herdr-task` at no more than 500 lines; no production import path back to the executable.
+- Produces: final `bin/herdr-task` at no more than 500 lines; `herdr.task_cli.main(argv=None)` owns parser routing; no production import path back to the executable.
 - Consumes: all family handlers and subprocess contract tests from Tasks 1–4.
 
-- [ ] Search the repository for imports, `SourceFileLoader` usage, `sys.modules` injection, copied globals, and monkeypatches targeting `bin/herdr-task`; migrate remaining in-repository call sites.
+- [ ] Search the repository for imports, `SourceFileLoader` usage, `sys.modules` injection, copied globals, and monkeypatches targeting `bin/herdr-task`; migrate remaining in-repository call sites and confirm each parser handler already has an owning module.
+- [ ] Move the existing parser dispatch into `herdr.task_cli.main(argv=None)` and keep its command selection, argument defaults, exception text, and exit statuses unchanged.
+- [ ] Replace the old inline router with path bootstrap, delegation to `herdr.task_cli.main(argv=None)`, and the existing `WorkflowClosedError` message/exit contract.
 - [ ] Remove dynamic compatibility proxies and duplicate handler copies only after callers use owning modules.
 - [ ] Add architecture tests that assert the entry line count and production import direction using module/import metadata rather than handler source-text assertions.
 - [ ] Confirm every registered parser command resolves to exactly one owning handler and run help/output/error/exit-code subprocess checks.

@@ -66,11 +66,11 @@ A command module may use subprocesses or persistence where the command itself is
 
 ## Migration sequence
 
-1. **CLI facade and routing:** move inline `main()` command bodies into their owning existing or new family modules. Keep command parsing and observable CLI contracts stable.
-2. **Task launch/execution:** move launch and dispatch orchestration, then rework/status/adoption flows, reducing oversized functions at their state and recovery boundaries.
-3. **Git delivery:** move commit/integrate/cleanup/finalize and candidate attribution under delivery ownership.
-4. **Workflow administration and evidence:** move workflow lifecycle, notes, delivery records, acceptance, and remaining operator commands.
-5. **Thin-entry closeout:** leave the executable bootstrap in `bin/herdr-task`; add an architecture guard for the 500-line limit and import direction; verify every parser command, success/error output, and affected real persistence/Git flows.
+1. **Characterize the existing entry contract:** capture parser, output, exit, and state behavior while keeping the currently runnable monolithic router intact.
+2. **Task launch/execution:** move launch and dispatch orchestration, then rework/status/adoption flows, reducing oversized functions at their state and recovery boundaries. Keep the old router importing the new owning modules during migration.
+3. **Git delivery:** move commit/integrate/cleanup/finalize and candidate attribution under delivery ownership; keep the old router importing the new owning modules during migration.
+4. **Workflow administration and evidence:** move workflow lifecycle, notes, delivery records, acceptance, and remaining operator commands; keep the old router importing the new owning modules during migration.
+5. **Thin-entry closeout:** after every command handler has an owner, move parser routing to `herdr.task_cli`, leave only bootstrap and error/exit handling in `bin/herdr-task`, remove compatibility loading, and add line-limit/import-direction guards. Verify every parser command, success/error output, and affected real persistence/Git flows.
 
 Each migration PR must be behavior-preserving and independently testable. A PR may leave `bin/herdr-task` above 500 lines while the approved sequence is in progress; the final migration PR must satisfy the line-count guard. Update this document if source inspection shows a proposed boundary conflicts with an existing owner module.
 
