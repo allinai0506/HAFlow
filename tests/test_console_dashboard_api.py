@@ -1,11 +1,14 @@
 """Console dashboard API + page contracts (read-only, bounded, real clocks)."""
 
+from tests.support.console_source import console_source
+
 import json
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
 from unittest.mock import patch
 
 import pytest
@@ -31,9 +34,9 @@ def dash_env(tmp_path, monkeypatch):
     ]
     wfmap = {"wf-1": {"workflow_id": "wf-1", "title": "w1",
                       "status": "running", "project_root": "/tmp/p1"}}
-    monkeypatch.setattr(c, "tasks", lambda: [dict(t) for t in tasks])
-    monkeypatch.setattr(c, "workflows", lambda: dict(wfmap))
-    monkeypatch.setattr(c, "dashboard_inventory", lambda: (c.tasks(), c.workflows()))
+    monkeypatch.setattr(c.inventory, "tasks", lambda: [dict(t) for t in tasks])
+    monkeypatch.setattr(c.inventory, "workflows", lambda: dict(wfmap))
+    monkeypatch.setattr(c.read_api, "dashboard_inventory", lambda: ([dict(t) for t in tasks], dict(wfmap)))
     wf_file = tmp_path / "workflows.json"
     tasks_file = tmp_path / "tasks.json"
     wf_file.write_text(json.dumps({"workflows": wfmap}), encoding="utf-8")
@@ -72,7 +75,7 @@ def test_dashboard_data_readonly_and_failure_isolated(dash_env):
 
 
 def test_dashboard_integrated_into_homepage():
-    src = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+    src = console_source(ROOT)
     for token in ("showDashboard", "exitDashboard", "loadDashboard",
                   "renderDashboard", "dashMode", "dashButton", "qView",
                   "view=dashboard", "dashTimer",
@@ -93,7 +96,7 @@ def test_dashboard_light_theme_reuses_homepage_tokens():
 
 
 def test_dashboard_two_column_layout_attention_first():
-    src = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+    src = console_source(ROOT)
     for token in ("dash-layout", "dash-main", "dash-rail", "position:sticky"):
         assert token in src, f"missing layout token: {token}"
     body = re.search(r"function renderDashboard\(\)\{(.*?)\n\}\nasync function dashSignoff",
@@ -122,9 +125,9 @@ def test_dashboard_data_filters_by_workflow(monkeypatch):
     ]
     wfmap = {"wf-1": {"workflow_id": "wf-1", "title": "w1"},
              "wf-2": {"workflow_id": "wf-2", "title": "w2"}}
-    monkeypatch.setattr(c, "tasks", lambda: [dict(t) for t in tasks])
-    monkeypatch.setattr(c, "workflows", lambda: dict(wfmap))
-    monkeypatch.setattr(c, "dashboard_inventory", lambda: (c.tasks(), c.workflows()))
+    monkeypatch.setattr(c.inventory, "tasks", lambda: [dict(t) for t in tasks])
+    monkeypatch.setattr(c.inventory, "workflows", lambda: dict(wfmap))
+    monkeypatch.setattr(c.read_api, "dashboard_inventory", lambda: ([dict(t) for t in tasks], dict(wfmap)))
     with patch.object(c.herdr_workflow_docs, "load_notes", return_value=[]):
         payload = c.dashboard_data(workflow_id="wf-1")
     assert payload["scope"] == "wf-1"
@@ -143,7 +146,7 @@ def test_dashboard_data_unknown_workflow_fail_soft(dash_env):
 
 
 def test_dashboard_workflow_selector_tokens():
-    src = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+    src = console_source(ROOT)
     for token in ("dashWfSel", "dashSelectWorkflow", "dashOpenWorkflow",
                   "进入该工作流", "dashWorkflowId", "workflow_id="):
         assert token in src, f"missing workflow filter token: {token}"

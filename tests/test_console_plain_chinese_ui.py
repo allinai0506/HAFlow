@@ -1,3 +1,4 @@
+from tests.support.console_source import console_source
 #!/usr/bin/env python3
 """Console buttons must be plain Chinese, not engineering jargon.
 
@@ -10,10 +11,11 @@ import re
 import unittest
 from pathlib import Path
 
+
 from herdr import controller_actions as ca
 
 ROOT = Path(__file__).resolve().parent.parent
-CONSOLE_SRC = (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+CONSOLE_SRC = console_source(ROOT)
 
 # 只在面向用户的文案里禁止；task_id / 工位号是定位信息，允许出现。
 JARGON = re.compile(

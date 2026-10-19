@@ -9,6 +9,8 @@
 - console api() forwards Authorization header (static guard)
 """
 
+from tests.support.console_source import console_source
+
 import os
 import tempfile
 import time
@@ -144,6 +146,6 @@ def test_audit_prefilter_keeps_old_own_record():
 
 
 def test_console_api_forwards_authorization():
-    text = Path("console/herdr_factory_console.py").read_text()
+    text = console_source(Path(__file__).resolve().parents[1])
     assert "Authorization" in text
     assert "herdr_hub_token" in text

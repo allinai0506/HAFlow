@@ -186,19 +186,19 @@ class TestRunWorkflowTemplate(unittest.TestCase):
         return type("Completed", (), {"returncode": 0, "stdout": "WORKFLOW_ID\n", "stderr": ""})()
 
     def test_run_workflow_forwards_template_flag(self):
-        with patch.object(self.module, "run", return_value=self.completed()) as run_command:
+        with patch.object(self.module.common, "run", return_value=self.completed()) as run_command:
             self.module.run_workflow("/tmp/project", "需求", "auto", "bidding")
         cmd = run_command.call_args.args[0]
         self.assertEqual(cmd[cmd.index("--template") + 1], "bidding")
 
     def test_run_workflow_defaults_to_software_development(self):
-        with patch.object(self.module, "run", return_value=self.completed()) as run_command:
+        with patch.object(self.module.common, "run", return_value=self.completed()) as run_command:
             self.module.run_workflow("/tmp/project", "需求")
         cmd = run_command.call_args.args[0]
         self.assertEqual(cmd[cmd.index("--template") + 1], "software-development-v1")
 
     def test_start_workflow_job_carries_template_to_run_workflow(self):
-        with patch.object(self.module, "run_workflow", return_value="WORKFLOW_ID") as run_workflow:
+        with patch.object(self.module.workflow_api, "run_workflow", return_value="WORKFLOW_ID") as run_workflow:
             job = self.module.start_workflow_job("/tmp/project", "需求", "auto", "bidding")
         for _ in range(50):
             if self.module.workflow_job_status(job["job_id"])["status"] != "running":

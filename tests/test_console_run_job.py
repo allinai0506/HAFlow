@@ -36,7 +36,7 @@ class TestConsoleRunJob(unittest.TestCase):
 
     def test_successful_start_is_reported(self):
         module = load_console()
-        with patch.object(module, "run_workflow", return_value="WORKFLOW_ID"):
+        with patch.object(module.workflow_api, "run_workflow", return_value="WORKFLOW_ID"):
             job = module.start_workflow_job("/tmp/project", "需求")
             result = self.wait_for_terminal(module, job["job_id"])
         self.assertEqual(result["status"], "succeeded")
@@ -44,7 +44,7 @@ class TestConsoleRunJob(unittest.TestCase):
 
     def test_failed_start_preserves_error(self):
         module = load_console()
-        with patch.object(module, "run_workflow", side_effect=RuntimeError("preflight failed")):
+        with patch.object(module.workflow_api, "run_workflow", side_effect=RuntimeError("preflight failed")):
             job = module.start_workflow_job("/tmp/project", "需求")
             result = self.wait_for_terminal(module, job["job_id"])
         self.assertEqual(result["status"], "failed")
@@ -53,19 +53,24 @@ class TestConsoleRunJob(unittest.TestCase):
     def test_workflow_command_allows_preflight_and_dispatch_time(self):
         module = load_console()
         completed = type("Completed", (), {"returncode": 0, "stdout": "WORKFLOW_ID\n", "stderr": ""})()
-        with patch.object(module, "run", return_value=completed) as run_command:
+        with patch.object(module.common, "run", return_value=completed) as run_command:
             self.assertEqual(module.run_workflow("/tmp/project", "需求"), "WORKFLOW_ID")
         self.assertEqual(run_command.call_args.args[1], 600)
 
 
 class TestConsoleDeepPreflight(unittest.TestCase):
+    def setUp(self):
+        from console import common
+        original = common.HERDR_ROOT
+        self.addCleanup(setattr, common, "HERDR_ROOT", original)
+
     @staticmethod
     def fake_completed():
         return type("Completed", (), {"returncode": 0, "stdout": '{"agents":[]}', "stderr": ""})()
 
     def test_uses_the_deep_preflight_cli_entrypoint(self):
         module = load_console()
-        with patch.object(module, "run", return_value=self.fake_completed()) as run_command:
+        with patch.object(module.common, "run", return_value=self.fake_completed()) as run_command:
             result = module.deep_preflight({"project_id": "p1"})
         command = run_command.call_args.args[0]
         self.assertEqual(command[0], str(ROOT / "bin" / "herdr-deep-preflight"))
@@ -75,7 +80,7 @@ class TestConsoleDeepPreflight(unittest.TestCase):
 
     def test_deep_preflight_supports_single_agent_flag(self):
         module = load_console()
-        with patch.object(module, "run", return_value=self.fake_completed()) as run_command:
+        with patch.object(module.common, "run", return_value=self.fake_completed()) as run_command:
             result = module.deep_preflight({"project_id": "p1"}, agent="opencode")
         command = run_command.call_args.args[0]
         self.assertEqual(command[0], str(ROOT / "bin" / "herdr-deep-preflight"))
@@ -88,15 +93,15 @@ class TestConsoleDeepPreflight(unittest.TestCase):
             lib = Path(tmp) / "herdr" / "deep_preflight.py"
             lib.parent.mkdir()
             lib.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            module.HERDR_ROOT = Path(tmp)
-            with patch.object(module, "run", return_value=self.fake_completed()) as run_command:
+            module.common.HERDR_ROOT = Path(tmp)
+            with patch.object(module.common, "run", return_value=self.fake_completed()) as run_command:
                 module.deep_preflight({"project_id": "p1"})
             self.assertEqual(run_command.call_args.args[0][0], str(lib))
 
     def test_missing_install_reports_the_checked_path(self):
         module = load_console()
         with tempfile.TemporaryDirectory() as tmp:
-            module.HERDR_ROOT = Path(tmp)
+            module.common.HERDR_ROOT = Path(tmp)
             with self.assertRaises(RuntimeError) as ctx:
                 module.deep_preflight({"project_id": "p1"})
         self.assertIn("未安装", str(ctx.exception))

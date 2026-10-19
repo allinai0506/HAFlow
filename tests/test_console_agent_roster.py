@@ -24,9 +24,9 @@ def load_console():
 class TestConsoleAgentRoster(unittest.TestCase):
     def test_preflight_uses_shared_resolver(self):
         module = load_console()
-        with patch.object(module, "pool", return_value={}), \
-             patch.object(module, "agent_loads", return_value={}), \
-             patch.object(module, "resolve_agent_binary",
+        with patch.object(module.runtime, "pool", return_value={}), \
+             patch.object(module.runtime, "agent_loads", return_value={}), \
+             patch.object(module.runtime, "resolve_agent_binary",
                           side_effect=lambda a: "/bin/fake-codex" if a == "codex" else None):
             rows = module.preflight({"project_id": "p1"})
         by_agent = {r["agent"]: r for r in rows}

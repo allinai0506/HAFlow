@@ -77,11 +77,11 @@ def test_workflows_for_project_sorted_by_created_at_desc(monkeypatch, tmp_path):
 
 def test_project_detail_latest_workflow_is_newest_not_lexicographic(monkeypatch, tmp_path):
     _seed(monkeypatch, tmp_path)
-    monkeypatch.setattr(c, "project_by_id", lambda pid: {"project_id": pid, "workspace_id": "w1"})
-    monkeypatch.setattr(c, "tabs", lambda ws: [])
-    monkeypatch.setattr(c, "panes", lambda ws: [])
-    monkeypatch.setattr(c, "slots", lambda p: [])
-    monkeypatch.setattr(c, "preflight", lambda p: [])
+    monkeypatch.setattr(c.inventory, "project_by_id", lambda pid: {"project_id": pid, "workspace_id": "w1"})
+    monkeypatch.setattr(c.runtime, "tabs", lambda ws: [])
+    monkeypatch.setattr(c.runtime, "panes", lambda ws: [])
+    monkeypatch.setattr(c.runtime, "slots", lambda p: [])
+    monkeypatch.setattr(c.runtime, "preflight", lambda p: [])
 
     detail = c.project_detail("p1")
     assert detail["latest_workflow_id"] == "wf-proj-0915-01"

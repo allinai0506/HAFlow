@@ -28,6 +28,8 @@ class TestWorkflowStartSync(unittest.TestCase):
         module = load_projects()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            original_workflows_file = module.WORKFLOWS_FILE
+            self.addCleanup(setattr, module, "WORKFLOWS_FILE", original_workflows_file)
             module.WORKFLOWS_FILE = root / "workflows.json"
             project = {
                 "project_id": "project-1",

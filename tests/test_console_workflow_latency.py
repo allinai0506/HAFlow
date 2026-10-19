@@ -15,10 +15,10 @@ def test_lightweight_detail_uses_current_snapshot_without_workspace_scan(tmp_pat
     state_db.save_task({'task_id': 't-foreign', 'workflow_id': 'wf-foreign'}, db_path=db)
     def forbidden(*args, **kwargs):
         pytest.fail('lightweight detail must not scan workspaces or list all workflows')
-    monkeypatch.setattr(c, 'workflows', forbidden)
-    monkeypatch.setattr(c, 'api_workflow_deliverables', forbidden)
-    monkeypatch.setattr(c, 'agent_runtime', forbidden)
-    monkeypatch.setattr(c, 'tasks', forbidden)
+    monkeypatch.setattr(c.inventory, 'workflows', forbidden)
+    monkeypatch.setattr(c.read_api, 'api_workflow_deliverables', forbidden)
+    monkeypatch.setattr(c.runtime, 'agent_runtime', forbidden)
+    monkeypatch.setattr(c.inventory, 'tasks', forbidden)
     detail = c.workflow_detail('wf-fast', lightweight=True)
     assert detail['workflow']['workflow_id'] == 'wf-fast'
     assert [t['task_id'] for t in detail['tasks']] == ['t-fast']
@@ -89,7 +89,7 @@ def test_lightweight_graph_keeps_foreign_required_task_diagnostic(tmp_path, monk
     state_db.save_task({'task_id':'foreign-task','workflow_id':'wf-other','node':'impl'},db_path=db)
     def forbidden():
         pytest.fail('full task inventory must not be loaded')
-    monkeypatch.setattr(c,'tasks',forbidden)
+    monkeypatch.setattr(c.inventory,'tasks',forbidden)
     d=c.workflow_detail('wf-fast',lightweight=True)
     assert d['tasks']==[]
     assert d['graph']['nodes'][0]['completion_issues']==[
@@ -149,12 +149,12 @@ def test_auxiliary_reads_do_not_load_the_global_registry(tmp_path, monkeypatch, 
     state_db.save_task({'task_id': 'foreign', 'workflow_id': 'wf-other'}, db_path=db)
     def forbidden(*args, **kwargs):
         pytest.fail('workflow auxiliary reads must not load global workflow/task inventory')
-    monkeypatch.setattr(c, 'workflows', forbidden)
-    monkeypatch.setattr(c, 'tasks_for_workflow', forbidden)
+    monkeypatch.setattr(c.inventory, 'workflows', forbidden)
+    monkeypatch.setattr(c.inventory, 'tasks_for_workflow', forbidden)
     if endpoint == 'deliverables':
         result = c.api_workflow_deliverables('wf-local')
         assert all(item.get('task_id') != 'foreign' for item in result['items'])
     else:
-        monkeypatch.setattr(c, 'api_workflow_recovery', lambda wid: {'operations': []})
+        monkeypatch.setattr(c.workflow_api, 'api_workflow_recovery', lambda wid: {'operations': []})
         result = c.api_workflow_controller_actions('wf-local')
         assert result['workflow_id'] == 'wf-local'

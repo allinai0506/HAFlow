@@ -6,26 +6,29 @@
 > **标语：让人和多个 AI Agent 一起把事情做完**  
 > *Human + Agent, in Flow*  
 
-产品名与标语以 `console/herdr_factory_console.py` 顶部的 `PRODUCT_NAME` / `PRODUCT_TAGLINE` 常量为唯一事实来源（first-class citizen）：页面标题、侧边栏品牌区均由该常量注入，禁止在 HTML/JS 中散落硬编码。前端界面文案统一使用纯中文，领域名词按用户确认的映射翻译：**Tab=工作流节点/阶段、Pane=智能体工位、Agent=执行者、Task=任务、Workspace=项目空间、Workflow=工作流**（顶部指标卡固定为「项目空间」、「活跃工作流」；紧凑场景允许短形"工位/节点"）；`auto`、Router、agent 名称（opencode/codex/claude 等）与后端状态枚举及 API 协议字段保持原样。
+产品名与标语以 `console/common.py` 中的 `PRODUCT_NAME` / `PRODUCT_TAGLINE` 常量为唯一事实来源：页面标题、侧边栏品牌区均由该常量注入，禁止在 HTML/JS 中散落硬编码。前端界面文案统一使用纯中文，领域名词按用户确认的映射翻译：**Tab=工作流节点/阶段、Pane=智能体工位、Agent=执行者、Task=任务、Workspace=项目空间、Workflow=工作流**（顶部指标卡固定为「项目空间」、「活跃工作流」；紧凑场景允许短形"工位/节点"）；`auto`、Router、agent 名称（opencode/codex/claude 等）与后端状态枚举及 API 协议字段保持原样。
 
 这里是 HAFlow 控制台的仓库内 canonical source。此前 Console 只有部署副本 `~/.herdr-console/herdr_factory_console.py`，导致前端改动无法随仓库审查、同步和回滚。
 
 ## 技术栈
 
 - **服务端**：Python 3，使用标准库 `http.server.BaseHTTPRequestHandler` 与 `ThreadingHTTPServer`，不依赖 Flask/FastAPI 等 Web 框架。
-- **前端**：服务端脚本内嵌 HTML5、CSS3 和原生 JavaScript；通过 DOM API、`fetch` 和 `setInterval` 实现页面渲染、交互与轮询。
+- **前端**：`console/static/console.html` 保存主页面模板；`console/page.py` 注入品牌常量。Simple 工作台及样式脚本也放在 `console/static/`。
 - **接口格式**：JSON over HTTP，统一返回 `{ok, data, error}` 结构；`/api/ops-center` 代理 `bin/herdr-task ops-center`。
-- **数据来源**：`~/.herdr-controller/*.json` 任务/Workflow 注册表，以及 `herdr` CLI 的 Pane、Agent、Workspace 查询结果。
+- **数据来源**：`console/common.py` 提供路径和子进程基础设施；`inventory.py` / `runtime.py` 读取状态和运行现场；`read_api.py` 投影详情、轨迹、成果和看板；`workflow_api.py`、`task_api.py`、`workflow_policy.py`、`control_api.py` 按操作职责装配既有 `herdr` 核心。`http_server.py` 独占 HTTP 认证、路由及响应格式。
 - **运行与部署**：macOS LaunchAgent `com.user.herdr-factory-console`，默认监听 `127.0.0.1:8765`；仓库源通过安装脚本同步为 `~/.herdr-console` 运行副本。
-- **构建依赖**：无 npm、Node.js、SPA 框架或前端打包步骤；部署是 Python 文件和 AppleScript 的文件同步。
+- **构建依赖**：无 npm、Node.js、SPA 框架或前端打包步骤；页面模板随 Git release archive 部署，`console/` Python 包由启动入口直接导入。
 
 ## 运行架构
 
 ```text
-console/herdr_factory_console.py
-        │ scripts/install-herdr-console.sh
-        ▼
-~/.herdr-console/herdr_factory_console.py
+console/herdr_factory_console.py  (薄启动 / 兼容导出)
+        ├── http_server.py ──→ read_api / workflow_api / task_api / control_api
+        ├── page.py ─────────→ static/console.html
+        └── common / inventory / runtime / workflow_policy
+                 │ scripts/install-herdr-console.sh: git archive release snapshot
+                 ▼
+~/.herdr-controller/releases/<commit>/console/
         │ com.user.herdr-factory-console LaunchAgent
         ▼
 http://127.0.0.1:8765/
@@ -41,7 +44,7 @@ http://127.0.0.1:8765/
 ./scripts/install-herdr-console.sh
 ```
 
-脚本会同步 `herdr_factory_console.py` 与 `launcher.applescript`，然后按项目规范重启 `com.user.herdr-factory-console`。可使用 `--no-restart` 只同步文件。
+脚本将完整 Git commit 打包到 `~/.herdr-controller/releases/<commit>`，校验快照并更新 LaunchAgent。运行时导入整个 `console/` Python 包，页面模板及静态资源留在 release 快照中；入口文件或模块不能单独复制部署。可使用 `--no-restart` 只发布配置，不激活服务。
 
 ## 任务归档查询 API
 

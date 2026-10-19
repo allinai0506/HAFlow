@@ -348,7 +348,7 @@ def test_ledger_reports_dispatch_artifacts_and_candidate_without_native_session(
         ('task-a', 'task_artifact_checkpoint', '{"summary":"WRONG_RUN"}', 50, 'other-run'))
     conn.commit()
     conn.close()
-    monkeypatch.setattr(console, 'state_db_path', lambda: path)
+    monkeypatch.setattr(console.read_api, 'state_db_path', lambda: path)
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     result = console.api_task_trajectory('task-a')
     encoded = json.dumps(result, ensure_ascii=False)

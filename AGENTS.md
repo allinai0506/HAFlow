@@ -29,7 +29,7 @@
 | `herdr/trajectory.py`、`herdr/observation.py` | 执行历史与可引用证据。 |
 | `herdr/decision/`、`herdr/supervisor/`、`herdr/observer/` | 判断接口、监督策略、旁路诊断。 |
 | `herdr/workflow_docs.py`、`workflow_templates/` | Workflow 共享文档与 YAML 模板。 |
-| `console/`、`scripts/`、`tests/` | 控制台源码、安装运维、自动化测试。 |
+| `console/`、`scripts/`、`tests/` | Console 启动入口、HTTP/查询/操作职责模块、静态页面资源、安装运维与自动化测试。 |
 
 新能力是否存在，以当前分支源码为准；未合并 PR 和规划不是已交付事实。
 Console 的规范源代码在 `console/`；部署脚本是 `scripts/install-herdr-console.sh`。

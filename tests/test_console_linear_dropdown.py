@@ -1,5 +1,7 @@
 """Tests for Linear-style Standard Workflow Dropdown in HAFlow Console."""
 
+from tests.support.console_source import console_source
+
 from pathlib import Path
 import unittest
 
@@ -9,8 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class TestConsoleLinearDropdown(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        path = ROOT / "console" / "herdr_factory_console.py"
-        cls.source = path.read_text(encoding="utf-8")
+        cls.source = console_source(ROOT)
 
     def test_linear_dropdown_css_tokens(self):
         """Guard that Linear dropdown design system tokens and classes exist."""

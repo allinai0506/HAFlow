@@ -1,4 +1,6 @@
 """User decisions rebuild responsibility without erasing unknown delivery."""
+
+from tests.support.console_source import console_source
 import importlib.util
 from pathlib import Path
 import pytest
@@ -106,7 +108,7 @@ def test_console_read_and_post_share_recovery_contract(scene, monkeypatch):
     old = cancelled(scene)
     spec=importlib.util.spec_from_file_location('ui_recovery_console',Path(__file__).resolve().parents[1]/'console/herdr_factory_console.py')
     console=importlib.util.module_from_spec(spec);spec.loader.exec_module(console)
-    monkeypatch.setattr(console,'TASKS_FILE',scene.store.db_path.parent/'tasks.json')
+    monkeypatch.setattr(console.common,'TASKS_FILE',scene.store.db_path.parent/'tasks.json')
     view=console.api_workflow_recovery('wf')
     shown=next(o for o in view['operations'] if o['id']==old['id'])
     assert 'restore_scope' in [a['action'] for a in shown['recovery']['actions']]
@@ -286,7 +288,7 @@ def test_successful_user_recovery_reaches_real_registration_without_extra_send(s
 @pytest.mark.parametrize('change',['switch','loading','replace','cancel','during_refresh'])
 def test_open_recovery_form_binds_original_workflow_even_if_user_switches(outcome,change):
     import json,subprocess
-    source=(Path(__file__).resolve().parents[1]/'console/herdr_factory_console.py').read_text()
+    source=console_source(Path(__file__).resolve().parents[1])
     functions='function currentRecovery(nodeId){'+source.split('function currentRecovery(nodeId){',1)[1].split('function decideRecovery(',1)[0]
     op={'id':7,'version':1,'workflow_id':'wf','payload':{'node_id':'test'}}
     op['recovery']={'summary':'取消范围','next_step':'核实现场','candidate_sha':SHA,
@@ -327,7 +329,7 @@ def test_user_restore_flows_through_controller_and_still_waits_for_registration(
 
 def test_late_workflow_refresh_keeps_controller_recovery_page():
     import subprocess
-    source=(Path(__file__).resolve().parents[1]/'console/herdr_factory_console.py').read_text()
+    source=console_source(Path(__file__).resolve().parents[1])
     start=source.index('async function loadWorkflow(')
     function=source[start:].split('\nfunction ',1)[0].split('\nasync function ',1)[0]
     script='''const state={workflowId:'wf',workflow:{workflow:{workflow_id:'wf'}},openWorkflowTabIds:[]};
@@ -380,7 +382,7 @@ def test_late_unbound_launch_and_registration_cannot_capture_human_epoch(scene):
 
 def test_missing_recovery_response_does_not_render_all_clear():
     import subprocess
-    source=(Path(__file__).resolve().parents[1]/'console/herdr_factory_console.py').read_text()
+    source=console_source(Path(__file__).resolve().parents[1])
     functions='function currentRecovery(nodeId){'+source.split('function currentRecovery(nodeId){',1)[1].split('function decideRecovery(',1)[0]
     script="const state={workflowId:'wf',workflow:{workflow:{workflow_id:'wf'}},controllerActionsData:null};\n"+functions+"\nconsole.log(renderRecoveryPanel('wf'));"
     result=subprocess.run(['node','-e',script],text=True,capture_output=True,timeout=10)

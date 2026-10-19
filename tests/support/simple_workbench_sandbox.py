@@ -39,11 +39,11 @@ def configure(root, stack):
     from console import herdr_factory_console as console
     from herdr import projects, state_store, workflow, workspace_trust
     state_store.reset_state_store()
-    for module in (console, projects):
+    for module in (console.common, projects):
         stack.enter_context(patch.object(module, 'ROOT', root))
         for key, name in [('PROJECTS_FILE', 'projects.json'), ('WORKFLOWS_FILE', 'workflows.json')]:
             stack.enter_context(patch.object(module, key, root / name))
-    stack.enter_context(patch.object(console, 'TASKS_FILE', root / 'tasks.json'))
+    stack.enter_context(patch.object(console.common, 'TASKS_FILE', root / 'tasks.json'))
     stack.enter_context(patch.object(workflow, 'USER_TEMPLATES_DIR', root / 'templates'))
     loader = importlib.machinery.SourceFileLoader('simple_sandbox_factory', str(ROOT / 'bin/herdr-factory'))
     spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -69,7 +69,7 @@ def configure(root, stack):
     stack.enter_context(patch.object(factory, 'ensure_pool_for_project', lambda *a: None))
     stack.enter_context(patch.object(factory, 'set_workflow_agent_override', lambda *a: None))
     stack.enter_context(patch.object(factory, 'run_workflow_preflight', lambda *a, **k: (['sandbox'], {})))
-    actual_run = console.run
+    actual_run = console.common.run
     def run(command, timeout=20, check=False):
         if command[0] == str(ROOT / 'bin/herdr-factory'):
             # Preserve real run command parsing, start core and persisted frozen definition.
@@ -95,7 +95,7 @@ def configure(root, stack):
         if command[0] == 'herdr':
             return subprocess.CompletedProcess(command, 0, json.dumps({'result': {'workspaces': [], 'tabs': [], 'panes': []}}), '')
         return actual_run(command, timeout, check)
-    stack.enter_context(patch.object(console, 'run', run))
+    stack.enter_context(patch.object(console.common, 'run', run))
     return console, factory
 
 

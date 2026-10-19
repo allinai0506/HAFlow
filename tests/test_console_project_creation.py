@@ -281,13 +281,13 @@ class ConsoleWorkflowStagesTest(unittest.TestCase):
             {"id": "deep_execution", "label": "2专项深度执行"},
             {"id": "review_and_delivery", "label": "3评审验收与交付归档"},
         ])
-        with patch.object(self.console, "workflow_by_id", return_value={
+        with patch.object(self.console.inventory, "workflow_by_id", return_value={
             "workflow_id": "wf-1", "project_id": "p-1",
             "requirement": "REQ",
-        }), patch.object(self.console, "project_for_workflow",
+        }), patch.object(self.console.inventory, "project_for_workflow",
                          return_value={"workflow_file": wf_file}), \
-             patch.object(self.console, "tasks_for_workflow", return_value=[]), \
-             patch.object(self.console, "agent_runtime", return_value=None), \
+             patch.object(self.console.inventory, "tasks_for_workflow", return_value=[]), \
+             patch.object(self.console.runtime, "agent_runtime", return_value=None), \
              patch.object(
                  self.console.herdr_projection,
                  "detect_workflow_stalls", return_value=None,
@@ -328,13 +328,13 @@ class ConsoleWorkflowStagesTest(unittest.TestCase):
             {"id": "cleanroom_test", "label": "2净室测试"},
             {"id": "wrapup", "label": "收尾"},
         ]}
-        with patch.object(self.console, "workflow_by_id", return_value={
+        with patch.object(self.console.inventory, "workflow_by_id", return_value={
             "workflow_id": "wf-1", "project_id": "p-1",
             "requirement": "REQ", "config": frozen,
-        }), patch.object(self.console, "project_for_workflow",
+        }), patch.object(self.console.inventory, "project_for_workflow",
                          return_value={"workflow_file": project_wf_file}), \
-             patch.object(self.console, "tasks_for_workflow", return_value=[]), \
-             patch.object(self.console, "agent_runtime", return_value=None), \
+             patch.object(self.console.inventory, "tasks_for_workflow", return_value=[]), \
+             patch.object(self.console.runtime, "agent_runtime", return_value=None), \
              patch.object(
                  self.console.herdr_projection,
                  "detect_workflow_stalls", return_value=None,
@@ -360,7 +360,7 @@ class ConsoleWorkflowStagesTest(unittest.TestCase):
         ]
         for t in tasks:
             state_db.save_task(t, db_path=db)
-        with patch.object(self.console, "load_json", return_value={"tasks": []}):
+        with patch.object(self.console.common, "load_json", return_value={"tasks": []}):
             actual = self.console.tasks_for_workflow("wf-current")
             loads = self.console.agent_loads("p-current")
         self.assertEqual(actual, [state_db.get_task("task-current", db_path=db)])
@@ -380,12 +380,12 @@ class ConsoleProjectTemplateExposureTest(unittest.TestCase):
         spec.loader.exec_module(cls.console)
 
     def _detail(self, record):
-        with patch.object(self.console, "project_by_id", return_value=record), \
-             patch.object(self.console, "workflows_for_project", return_value=[]), \
-             patch.object(self.console, "tabs", return_value=[]), \
-             patch.object(self.console, "panes", return_value=[]), \
-             patch.object(self.console, "slots", return_value=[]), \
-             patch.object(self.console, "preflight", return_value=[]):
+        with patch.object(self.console.inventory, "project_by_id", return_value=record), \
+             patch.object(self.console.inventory, "workflows_for_project", return_value=[]), \
+             patch.object(self.console.runtime, "tabs", return_value=[]), \
+             patch.object(self.console.runtime, "panes", return_value=[]), \
+             patch.object(self.console.runtime, "slots", return_value=[]), \
+             patch.object(self.console.runtime, "preflight", return_value=[]):
             return self.console.project_detail(record["project_id"])
 
     def test_project_detail_exposes_current_workflow_template(self):

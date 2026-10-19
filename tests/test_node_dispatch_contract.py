@@ -1,4 +1,6 @@
 """A notification must retain responsibility until the real Task is registered."""
+
+from tests.support.console_source import console_source
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -472,7 +474,7 @@ def test_console_renders_dispatch_wait_owner_deadline_and_decision(tmp_path):
     node = shutil.which('node')
     if node is None:
         pytest.skip('node unavailable for Console runtime rendering')
-    source = (ROOT / 'console/herdr_factory_console.py').read_text()
+    source = console_source(ROOT)
     renderer = source.split('function currentRecovery(nodeId){', 1)[1].split('function decideRecovery(', 1)[0]
     renderer = 'function currentRecovery(nodeId){' + renderer
     operations = [{'id': 1, 'version': 4, 'status': 'awaiting_result', 'started': 1,

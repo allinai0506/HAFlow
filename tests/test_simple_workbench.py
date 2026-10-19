@@ -26,7 +26,7 @@ def test_simple_page_and_project_reload(server, tmp_path, monkeypatch):
     registry.write_text(json.dumps({'projects': {'/business': {
         'project_id': 'p-business', 'project_root': '/business', 'project_name': '业务'
     }}}))
-    monkeypatch.setattr(c, 'PROJECTS_FILE', registry)
+    monkeypatch.setattr(c.common, 'PROJECTS_FILE', registry)
     with urllib.request.urlopen(server + '/simple') as response:
         page = response.read().decode()
     assert '新建项目' in page and '新建需求' in page and '获得成果' in page
@@ -56,7 +56,7 @@ def test_run_workflow_passes_context_to_real_cli(tmp_path, monkeypatch):
     def run(command, timeout):
         calls.append(command)
         return type('Result', (), {'returncode': 0, 'stdout': 'WORKFLOW_ID=wf-real\n', 'stderr': ''})()
-    monkeypatch.setattr(c, 'run', run)
+    monkeypatch.setattr(c.common, 'run', run)
     c.run_workflow(str(tmp_path), '分析', template='context-smoke-test', context={'workspace': str(tmp_path), 'common': str(tmp_path)})
     assert calls[0].count('--context') == 2
     assert f'workspace={tmp_path}' in calls[0]
@@ -141,7 +141,7 @@ def test_real_http_create_start_decide_and_download(tmp_path, monkeypatch):
 
 def test_run_rejects_empty_root_before_starting(server, monkeypatch):
     started = []
-    monkeypatch.setattr(c, 'start_workflow_job', lambda *a, **kw: started.append(a) or {})
+    monkeypatch.setattr(c.workflow_api, 'start_workflow_job', lambda *a, **kw: started.append(a) or {})
     request = urllib.request.Request(server+'/api/run', data=b'{"requirement":"work"}', headers={'Content-Type':'application/json'})
     with pytest.raises(urllib.error.HTTPError):
         urllib.request.urlopen(request)

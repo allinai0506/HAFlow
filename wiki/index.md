@@ -37,7 +37,7 @@
 | :--- | :--- | :--- |
 | **修改任务状态流转或添加新状态** | [[task-lifecycle]] | `herdr/transitions.py`, `herdr/kernel.py:transition_task/workflow` |
 | **回放一次 Agent 执行的历史事实** | [[task-lifecycle]] §1.2 | `herdr/trajectory.py`, `herdr/state_db.py`, `bin/herdr-task`, `services/herdr-controller.py` |
-| **在任务详情查看 Agent 执行轨迹** | [[execution-trace]] | `herdr/execution_trace.py`, `herdr/native_session_trace.py`, `console/herdr_factory_console.py` |
+| **在任务详情查看 Agent 执行轨迹** | [[execution-trace]] | `herdr/execution_trace.py`, `herdr/native_session_trace.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
 | **评估一次 Agent 执行的业务结果和过程质量** | [[quality-assessment]] | `herdr/quality_assessment.py`, `herdr/quality_sources.py`, `bin/herdr-quality` |
 | **诊断一次运行是否卡住/异常/重复失败 (Trajectory Observer)** | [[trajectory-observer]] | `herdr/observer/`, `herdr/state_db.py:trajectory_findings`, `services/herdr-controller.py:registry_watcher`, `bin/herdr-task:observe` |
 | **为下一 Agent 生成可追溯的当前工作记忆 (Semantic Context Compact)** | [[semantic-context-compact]] | `herdr/context_compact.py`, `herdr/state_db.py:context_packs`, `bin/herdr-task:compact` |
@@ -50,19 +50,19 @@
 | **新增支持的 AI Agent CLI** | [[common-change-paths]] | `herdr/agent_binary.py`, `herdr/preflight.py`, `herdr/deep_preflight.py` |
 | **排查后台服务不推进、状态不同步** | [[architecture]] | `services/herdr-controller.py` |
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
-| **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/herdr_factory_console.py` |
-| **使用或修改极简项目/需求/成果工作台** | [[simple-workbench]] | `console/static/simple.js`, `console/herdr_factory_console.py` |
-| **修改 Workflow 主区画布 / Inspector / 视图切换** | [[flow-workbench]] | `herdr/workflow_graph.py`, `console/herdr_factory_console.py`, `console/static/vendor/` |
-| **任务停在「已提交/集成中」，想知道代码合到哪、在等什么** | [[flow-workbench]] §10 | `herdr/delivery_pipeline.py`, `herdr/controller_actions.py`, `console/herdr_factory_console.py` |
-| **查看工作流交付成果（文件、提交、PR）** | [[flow-workbench]] | `herdr/deliverables.py`, `herdr/projection.py`, `console/herdr_factory_console.py` |
+| **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
+| **使用或修改极简项目/需求/成果工作台** | [[simple-workbench]] | `console/static/simple.js`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
+| **修改 Workflow 主区画布 / Inspector / 视图切换** | [[flow-workbench]] | `herdr/workflow_graph.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html`, `console/static/vendor/` |
+| **任务停在「已提交/集成中」，想知道代码合到哪、在等什么** | [[flow-workbench]] §10 | `herdr/delivery_pipeline.py`, `herdr/controller_actions.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
+| **查看工作流交付成果（文件、提交、PR）** | [[flow-workbench]] | `herdr/deliverables.py`, `herdr/projection.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
 | **工位实时打断与插话纠偏 (Steering Mesh & AgentAdapter)** | [[task-lifecycle]] | `herdr/steering.py`, `herdr/agent_adapter.py`, `bin/herdr-task:steer/adapters` |
-| **Agent 终端等待输入与人工交互闭环 (Interaction Loop)** | [[task-lifecycle]] | `herdr/interaction_loop.py`, `console/herdr_factory_console.py` |
-| **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/herdr_factory_console.py` |
+| **Agent 终端等待输入与人工交互闭环 (Interaction Loop)** | [[task-lifecycle]] | `herdr/interaction_loop.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
+| **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |
 | **状态流转网关、嵌入式状态引擎、统一事件流、检查点快照 (State Transition Gateway, StateStore, WorkflowEvent & Checkpoint Store)** | [[task-lifecycle]], [[domain-model]] | `herdr/transitions.py`, `herdr/kernel.py`, `herdr/state_store.py`, `herdr/state_db.py`, `bin/herdr-task` |
 | **跨节点文档/证据共享与 stale 治理 (Workflow Shared Docs)** | [[task-lifecycle]] §5 | `herdr/workflow_docs.py`, `bin/herdr-task:note-add/note-list` |
 | **代码审查基准评测与上下文对照实验 (ReviewBench)** | [[review-benchmark]] | `herdr/review_benchmark.py`, `bin/herdr-review-bench` |
-| **企业经验中心与业务规则跨员工复用 (Experience Hub)** | [[enterprise-experience-hub]] | `herdr/experience/`, `bin/herdr-experience-hub`, `console/herdr_factory_console.py` |
+| **企业经验中心与业务规则跨员工复用 (Experience Hub)** | [[enterprise-experience-hub]] | `herdr/experience/`, `bin/herdr-experience-hub`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
 | **更新或扩展 Wiki 本身** | [[WIKI]] / [[log]] | `wiki/WIKI.md` |
 
 ---

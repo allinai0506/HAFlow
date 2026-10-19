@@ -21,8 +21,8 @@ def console_actions_env(tmp_path, monkeypatch):
 
     monkeypatch.setenv("WORKFLOWS_FILE", str(wf_file))
     monkeypatch.setenv("TASKS_FILE", str(tasks_file))
-    monkeypatch.setattr(c, "WORKFLOWS_FILE", str(wf_file))
-    monkeypatch.setattr(c, "TASKS_FILE", str(tasks_file))
+    monkeypatch.setattr(c.common, "WORKFLOWS_FILE", str(wf_file))
+    monkeypatch.setattr(c.common, "TASKS_FILE", str(tasks_file))
     db = tmp_path / "state.db"
     monkeypatch.setenv("HERDR_STATE_DB", str(db))
 
@@ -99,7 +99,7 @@ def test_api_controller_execute_action_launch(console_actions_env):
         "agent": "codex",
         "prompt": "修复测试缺陷",
     }
-    with patch.object(c, "run") as mock_run:
+    with patch.object(c.common, "run") as mock_run:
         c.api_workflow_controller_actions('wf-test-01')
         with pytest.raises(RuntimeError, match='持久恢复'):
             c.api_controller_execute_action(payload)
@@ -117,7 +117,7 @@ def test_api_controller_execute_action_force_pass_advance(console_actions_env):
         })
 
     # Missing expected_version must be refused (isolate from recovery obligation check)
-    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+    with patch.object(c.workflow_api, "api_workflow_recovery", return_value={"operations": []}):
         with pytest.raises(RuntimeError) as exc:
             c.api_controller_execute_action({
                 "type": "force_pass_advance",
@@ -139,7 +139,7 @@ def test_api_controller_execute_action_force_pass_advance(console_actions_env):
         "confirmed": True,
         "reason": "人工在控制台审核确认通过",
     }
-    with patch.object(c.herdr_kernel, "force_pass_gate") as mock_gate, patch.object(c, "manual_advance") as mock_adv:
+    with patch.object(c.herdr_kernel, "force_pass_gate") as mock_gate, patch.object(c.workflow_api, "manual_advance") as mock_adv:
         c.api_workflow_controller_actions('wf-test-01')
         with pytest.raises(RuntimeError, match='持久恢复'):
             c.api_controller_execute_action(payload)
