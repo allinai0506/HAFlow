@@ -334,6 +334,7 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
              patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "notify_stall"), \
              patch.object(sentinel, "update_statuses", return_value=True) as mock_update_statuses:
             # Because task is NOT a gate task, the leftover verdict must NOT suppress timeout!
             sentinel.check_task_stalls([task], state, now=now)
@@ -621,6 +622,7 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
              patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "notify_stall"), \
              patch.object(sentinel, "update_statuses", return_value=True) as mock_update_statuses:
             changed = sentinel.check_task_stalls([task], state, now=now)
 
@@ -986,6 +988,7 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         mock_store = MagicMock()
         with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
              patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "notify_stall"), \
              patch.object(sentinel, "update_statuses", return_value=True) as mock_update_statuses:
             sentinel.check_task_stalls([task], state, now=now)
             # Watchdog should NOT be suppressed; timeout must trigger update_statuses
@@ -1001,6 +1004,7 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         os.utime(str(verdict_file), (skew_mtime, skew_mtime))
         with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
              patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "notify_stall"), \
              patch.object(sentinel, "update_statuses", return_value=True) as mock_update_statuses:
             sentinel.check_task_stalls([task], state, now=now)
             # Small skew within grace: Watchdog must be suppressed!
