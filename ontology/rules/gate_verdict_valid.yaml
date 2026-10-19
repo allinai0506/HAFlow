@@ -6,11 +6,11 @@ inputs:
 - gate
 - task
 returns: boolean
-logic_ref: bin/herdr-task:set_status
+logic_ref: herdr/task_cli_status.py:set_task_status
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: L2402-2419
+  source: herdr/task_cli_status.py
+  locator: set_task_status L84-98
   confidence: high
 outputs:
 - valid

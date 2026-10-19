@@ -33,6 +33,6 @@ evidence:
   locator: release_agent_reservation L283-297
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: release 调用点 L4263-4265
+  source: herdr/task_cli_launch_orchestrator.py
+  locator: release 调用点 L287, L536
   confidence: high

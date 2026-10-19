@@ -39,6 +39,6 @@ verification:
   target: git 目标分支 + tasks.status
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: integrate 实现 L6461-6515
+  source: herdr/task_cli_integration.py
+  locator: integrate_task L9-410
   confidence: high

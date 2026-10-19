@@ -319,12 +319,12 @@ evidence:
   locator: single funnel L133-253
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: CLI 前置校验与 fallback 矩阵 L132-156, L2451-2522
+  source: bin/herdr-task; herdr/task_cli_status.py
+  locator: CLI 前置校验与 fallback 矩阵 L130-155 / L80-91
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: set_status L877（CLI set 入口与 verdict 规则）
+  source: herdr/task_cli_status.py
+  locator: set_task_status L9-130（CLI set 入口与 verdict 规则）
   confidence: high
 out_of_matrix_writers:
 - from: completed

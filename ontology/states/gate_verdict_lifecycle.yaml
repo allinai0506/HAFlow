@@ -52,8 +52,8 @@ unknowns:
 - 结论与任务状态的一致性约束（例如 rework 后是否必须重新 completed）未在矩阵中声明
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: set_status L877-1019（verdict 规则 L941-958；同状态写入先于 no-op 检测 L970-998）
+  source: herdr/task_cli_status.py
+  locator: set_task_status L9-130（verdict 规则 L25-45；同状态写入先于 no-op 检测 L92-98）
   confidence: high
 - kind: implemented
   source: herdr/delivery_rework.py

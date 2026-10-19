@@ -33,8 +33,8 @@ retry:
   note: 未在候选中核对超时与重试配置
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: "build_parser() L6971-6972"
+  source: herdr/task_cli_parser.py
+  locator: "build_parser() L11-30"
   confidence: high
 - kind: implemented
   source: herdr/task_cli_parser_workflow.py

@@ -46,8 +46,8 @@ verification:
   target: state.db workflows.status
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: close-workflow preflight L5497-5502 / closing 迁移 L5677-5680 / _mark_workflow_completed L5273-5300 / completed 调用 L5810
+  source: herdr/task_cli_workflow_close.py
+  locator: close-workflow preflight L119-128 / closing 迁移 L345-355 / mark_workflow_completed L588-615 / completed 调用 L512-518
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py

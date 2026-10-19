@@ -36,8 +36,8 @@ verification:
   target: 克隆文件指纹
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: verify-baseline 实现 L4831-5026
+  source: herdr/task_cli_verification.py
+  locator: verify_baseline L11-300
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py

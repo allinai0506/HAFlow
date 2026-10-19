@@ -46,8 +46,8 @@ properties:
   notes: 快照文件的 SHA256 校验和（持久化于 DB 任务行中以实现单向防篡改引用，见 ADR-0006）
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: set_status L877-1019
+  source: herdr/task_cli_status.py
+  locator: set_task_status L9-130
   confidence: high
 - kind: implemented
   source: herdr/direct_dispatch.py

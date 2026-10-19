@@ -13,8 +13,8 @@ evidence:
   locator: L2-4, L22-81
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: launch 调用 L3332-3348
+  source: herdr/task_cli_resources.py
+  locator: launch_capacity_error 调用 L250-285
   confidence: high
 outputs:
 - within_limit

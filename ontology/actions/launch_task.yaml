@@ -53,12 +53,12 @@ verification:
   target: state.db tasks[task_id].status
 evidence:
 - kind: implemented
-  source: bin/herdr-task
+  source: herdr/task_cli_parser_execution.py
   locator: launch parser L73-115（--task-type choices L89-101）
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: launch 流程 L4183-4191, L4197, L4244, L4263-4265, L4446, L4560-4562, L4685
+  source: herdr/task_cli_launch.py; herdr/task_cli_launch_orchestrator.py
+  locator: launch 流程 L10-370 / L10-540
   confidence: high
 - kind: implemented
   source: services/herdr-worker.py

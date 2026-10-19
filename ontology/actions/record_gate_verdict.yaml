@@ -44,8 +44,8 @@ verification:
   target: tasks[task_id].stage_verdict
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: set_status L877-1019（verdict 规则 L941-958）
+  source: herdr/task_cli_status.py
+  locator: set_task_status L9-130（verdict 规则 L25-45）
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py

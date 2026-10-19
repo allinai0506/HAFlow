@@ -157,8 +157,8 @@ evidence:
   locator: pause/resume L311-384
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: close-workflow closing 闩 L7415-7460
+  source: herdr/task_cli_workflow_close.py
+  locator: close-workflow closing 闩 L345-365
   confidence: high
 - kind: implemented
   source: herdr/state_db.py
@@ -172,8 +172,8 @@ out_of_matrix_writers:
   writer: herdr-task close-workflow --force：validate_workflow_transition(force=True) 跳过边合法性
   evidence:
   - kind: implemented
-    source: bin/herdr-task
-    locator: close-workflow preflight L7273-7287
+    source: herdr/task_cli_workflow_close.py
+    locator: close-workflow preflight L119-128
     confidence: high
 - from: （无）
   to: running

@@ -24,6 +24,6 @@ evidence:
   locator: _clean_reservations L260-280 / 预占写入 L809-819
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: launch 预占调用 L3697-3749；释放 L4263-4265
+  source: herdr/task_cli_launch.py; herdr/task_cli_launch_orchestrator.py
+  locator: launch 预占调用 L154-194；释放 L287, L536
   confidence: high
