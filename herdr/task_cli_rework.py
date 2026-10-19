@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import subprocess
 import sys
 import time
 import uuid
@@ -339,3 +340,44 @@ def _cleanup_gate_for_rework(task, delivery_id=None, store=None, *, deps):
             run_id=task.get("run_id"),
             source="herdr-task",
         )
+
+
+def autosave_clone_wip(task, *, run_command, internal_untracked_exact):
+    INTERNAL_UNTRACKED_EXACT = internal_untracked_exact
+    "Supersede 前把 clone 工作树变更存成 WIP commit(best-effort)。\n\n    fix1/fix4 的实现曾以未提交形态 stranded 在 retained clone 里。\n    只含工作树文件变更,不含 .herdr-loop 等内部装配目录;失败只告警，\n    永不阻断作废本身。不 push（分支归属与网络留给集成流程）。\n    "
+    task_id = (task or {}).get("task_id") or "unknown-task"
+    clone = (task or {}).get("clone_path") or ""
+    branch = (task or {}).get("branch") or ""
+    if not clone or not branch:
+        return False
+    if not os.path.isdir(os.path.join(clone, ".git")):
+        return False
+
+    def _git(*args, timeout=15):
+        return run_command(
+            ["git", "-C", clone, *args], text=True, capture_output=True, timeout=timeout
+        )
+
+    try:
+        status = _git("status", "--porcelain")
+        if status.returncode != 0 or not (status.stdout or "").strip():
+            return False
+        add = _git("add", "-A")
+        if add.returncode != 0:
+            print(
+                f"[WIP AUTOSAVE WARN] {task_id}: git add failed: {(add.stderr or '').strip()[:200]}"
+            )
+            return False
+        _git("reset", "-q", "--", *sorted(INTERNAL_UNTRACKED_EXACT))
+        staged = _git("diff", "--cached", "--quiet")
+        if staged.returncode == 0:
+            return False
+        commit = _git("commit", "-m", f"wip: auto-save {task_id} on supersede")
+        if commit.returncode != 0:
+            print(f"[WIP AUTOSAVE WARN] {task_id}: git commit failed")
+            return False
+    except Exception as exc:
+        print(f"[WIP AUTOSAVE WARN] {task_id}: {exc}")
+        return False
+    print(f"[WIP AUTOSAVE] {task_id}: work saved on {branch}")
+    return True
