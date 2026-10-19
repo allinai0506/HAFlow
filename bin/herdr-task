@@ -647,41 +647,20 @@ def _record_router_failure_task(
 
 
 def _frozen_candidate_sha(workflow_id):
-    """Latest scheduler-frozen candidate revision, or "" when none/failed.
+    from herdr.task_cli_launch_preflight import _frozen_candidate_sha as handle
 
-    A frozen candidate is a first-class identity claim produced by the
-    Critical-Path Scheduler when implementation completes. It carries no
-    verifier ids: the delivery record is written later, with real ones.
-    """
-    try:
-        from herdr import scheduler_facts as _sf
-    except ImportError:
-        return ""
-    try:
-        return str(_sf.latest_frozen_candidate_sha(workflow_id) or "").strip()
-    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error):
-        return ""
+    return handle(workflow_id)
 
 
 def _resolve_expected_candidate(workflow_id, claim):
-    """Resolve the candidate revision test/review must verify.
+    from herdr.task_cli_launch_preflight import _resolve_expected_candidate as handle
 
-    Returns (candidate_sha, source) with source in {"delivery", "frozen"}.
-    - "delivery": an explicit delivery record exists (authoritative; the
-      caller must still run select_effective_delivery for ambiguity).
-    - "frozen": no delivery record yet; the scheduler-frozen candidate is
-      accepted ONLY when the dispatch claim names exactly that revision.
-    Returns ("", "") when nothing provable exists (fail-closed).
-    """
-    claim = str(claim or "").strip()
-    frozen = _frozen_candidate_sha(workflow_id)
-    if frozen and claim and claim == frozen:
-        return frozen, "frozen"
-    return "", ""
+    return handle(workflow_id, claim)
 
 
 def _preflight_delivery_identity(workflow_id, node_id, task_id, claim=""):
     from herdr.task_cli_launch_preflight import preflight_delivery_identity
+
     return preflight_delivery_identity(
         workflow_id,
         node_id,
@@ -704,6 +683,7 @@ def _preflight_baseline_freshness(args, source_repo, base_branch):
     the fail-closed backstop for the residual check-to-checkout race.
     """
     from herdr.task_cli_launch_preflight import preflight_baseline_freshness
+
     return preflight_baseline_freshness(
         args,
         source_repo,
@@ -1803,14 +1783,8 @@ def cmd_workflow_recovery(args):
 
 
 def list_tasks(workflow_id=None):
-    data = load_tasks()
-
-    tasks = data["tasks"]
-
-    if workflow_id:
-        tasks = [task for task in tasks if task.get("workflow_id") == workflow_id]
-
-    print(json.dumps({"tasks": tasks}, ensure_ascii=False, indent=2))
+    from herdr.task_cli_tasks import list_tasks as handle
+    return handle(workflow_id, deps={"load_tasks": load_tasks})
 
 
 def _task_head_sha(task):
@@ -1914,17 +1888,8 @@ def merge_pull_request(args):
 
 
 def check_zombie_obligations(data=None):
-    if data is None:
-        data = load_tasks()
-    tasks = data.get("tasks", []) if isinstance(data, dict) else (data or [])
-    zombies = []
-    for t in tasks:
-        if isinstance(t, dict):
-            if (t.get("status") == "superseded"
-                    and t.get("replacement_pending")
-                    and not t.get("superseded_by")):
-                zombies.append(t)
-    return zombies
+    from herdr.task_cli_tasks import check_zombie_obligations as handle
+    return handle(data, deps={"load_tasks": load_tasks})
 
 
 def main():

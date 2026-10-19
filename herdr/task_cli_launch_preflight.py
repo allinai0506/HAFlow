@@ -9,7 +9,10 @@ def _frozen_candidate_sha(workflow_id):
     """Return the scheduler-frozen candidate, or empty when it cannot be proved."""
     try:
         from herdr import scheduler_facts
-        return str(scheduler_facts.latest_frozen_candidate_sha(workflow_id) or "").strip()
+
+        return str(
+            scheduler_facts.latest_frozen_candidate_sha(workflow_id) or ""
+        ).strip()
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error):
         return ""
 
@@ -22,8 +25,15 @@ def _resolve_expected_candidate(workflow_id, claim):
     return "", ""
 
 
-def preflight_delivery_identity(workflow_id, node_id, task_id, claim="", *, get_store,
-                                resolve_expected_candidate=_resolve_expected_candidate):
+def preflight_delivery_identity(
+    workflow_id,
+    node_id,
+    task_id,
+    claim="",
+    *,
+    get_store,
+    resolve_expected_candidate=_resolve_expected_candidate,
+):
     """Prove the candidate identity before launching a test or review task."""
     if node_id not in {"test", "review"}:
         return None
@@ -61,8 +71,17 @@ def preflight_delivery_identity(workflow_id, node_id, task_id, claim="", *, get_
                 task_id=task_id,
                 source="herdr-task",
             )
-        except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
-            print(f"[BASELINE EVENT WARN] rejection audit unavailable: {exc}", file=sys.stderr)
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            AttributeError,
+            sqlite3.Error,
+        ) as exc:
+            print(
+                f"[BASELINE EVENT WARN] rejection audit unavailable: {exc}",
+                file=sys.stderr,
+            )
         print(
             f"[BASELINE REJECTED] {code}: workflow={workflow_id} task={task_id}; "
             f"{detail}; launch refused (FR-6.2 fail-closed)."
@@ -102,11 +121,13 @@ def validate_supersedes_for_launch(args, node_id, store):
     if getattr(args, "supersedes", None):
         return
     node_tasks = [
-        task for task in store.list_tasks(workflow_id=args.workflow_id)
+        task
+        for task in store.list_tasks(workflow_id=args.workflow_id)
         if task.get("node") == node_id or task.get("stage") == node_id
     ]
     unreplaced = [
-        task["task_id"] for task in node_tasks
+        task["task_id"]
+        for task in node_tasks
         if task.get("status") == "superseded"
         and task.get("replacement_pending")
         and not task.get("superseded_by")
@@ -118,8 +139,9 @@ def validate_supersedes_for_launch(args, node_id, store):
         )
 
 
-def preflight_baseline_freshness(args, source_repo, base_branch, *, get_store,
-                                 record_router_failure):
+def preflight_baseline_freshness(
+    args, source_repo, base_branch, *, get_store, record_router_failure
+):
     """Fail fast on a stale claimed candidate before launch resources are created."""
     node_id = getattr(args, "node", "") or getattr(args, "stage", "")
     claim = str(getattr(args, "candidate_sha", None) or "").strip()
@@ -128,6 +150,7 @@ def preflight_baseline_freshness(args, source_repo, base_branch, *, get_store,
         return None
 
     from herdr import launch_baseline
+
     probe = launch_baseline.probe_claim_freshness(
         source_repo,
         base_branch=base_branch,
@@ -171,7 +194,9 @@ def preflight_baseline_freshness(args, source_repo, base_branch, *, get_store,
             source="herdr-task",
         )
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
-        print(f"[BASELINE EVENT WARN] rejection audit unavailable: {exc}", file=sys.stderr)
+        print(
+            f"[BASELINE EVENT WARN] rejection audit unavailable: {exc}", file=sys.stderr
+        )
 
     record_router_failure(
         args,
@@ -195,8 +220,15 @@ def _canonical_commit(sha, source_repo, *, run=subprocess.run):
         return ""
     try:
         probe = run(
-            ["git", "-C", str(source_repo), "rev-parse", "--verify", "--quiet",
-             f"{sha}^{{commit}}"],
+            [
+                "git",
+                "-C",
+                str(source_repo),
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"{sha}^{{commit}}",
+            ],
             text=True,
             capture_output=True,
             check=False,
@@ -222,13 +254,16 @@ def same_commit(left, right, source_repo, *, run=subprocess.run):
     return bool(full_left and full_right and full_left == full_right)
 
 
-def validate_test_delivery_baseline(args, candidate_sha, baseline_commit, source_repo,
-                                    *, get_store, run=subprocess.run):
+def validate_test_delivery_baseline(
+    args, candidate_sha, baseline_commit, source_repo, *, get_store, run=subprocess.run
+):
     """Require the verifier checkout to be exactly the selected candidate."""
     candidate_sha = str(candidate_sha or "").strip()
     baseline_commit = str(baseline_commit or "").strip()
-    if candidate_sha and baseline_commit and same_commit(
-        candidate_sha, baseline_commit, source_repo, run=run
+    if (
+        candidate_sha
+        and baseline_commit
+        and same_commit(candidate_sha, baseline_commit, source_repo, run=run)
     ):
         return
     try:
@@ -248,7 +283,9 @@ def validate_test_delivery_baseline(args, candidate_sha, baseline_commit, source
             source="herdr-task",
         )
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
-        print(f"[BASELINE EVENT WARN] could not persist rejection: {exc}", file=sys.stderr)
+        print(
+            f"[BASELINE EVENT WARN] could not persist rejection: {exc}", file=sys.stderr
+        )
     print(
         f"[BASELINE REJECTED] test/review task {args.task_id} baseline "
         f"{baseline_commit} does not contain candidate {candidate_sha}; "
@@ -257,14 +294,16 @@ def validate_test_delivery_baseline(args, candidate_sha, baseline_commit, source
     raise SystemExit(2)
 
 
-def validate_selective_replacement_baseline(args, candidate_sha, baseline_commit,
-                                            source_repo, *, get_store,
-                                            run=subprocess.run):
+def validate_selective_replacement_baseline(
+    args, candidate_sha, baseline_commit, source_repo, *, get_store, run=subprocess.run
+):
     """Require replacement checkout HEAD to equal the claimed candidate."""
     candidate_sha = str(candidate_sha or "").strip()
     baseline_commit = str(baseline_commit or "").strip()
-    if candidate_sha and baseline_commit and same_commit(
-        candidate_sha, baseline_commit, source_repo, run=run
+    if (
+        candidate_sha
+        and baseline_commit
+        and same_commit(candidate_sha, baseline_commit, source_repo, run=run)
     ):
         return
     try:
@@ -285,7 +324,9 @@ def validate_selective_replacement_baseline(args, candidate_sha, baseline_commit
             source="herdr-task",
         )
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
-        print(f"[BASELINE EVENT WARN] could not persist rejection: {exc}", file=sys.stderr)
+        print(
+            f"[BASELINE EVENT WARN] could not persist rejection: {exc}", file=sys.stderr
+        )
     print(
         f"[BASELINE REJECTED] replacement task {args.task_id} baseline "
         f"{baseline_commit} != claimed candidate {candidate_sha}; "
@@ -294,9 +335,15 @@ def validate_selective_replacement_baseline(args, candidate_sha, baseline_commit
     raise SystemExit(2)
 
 
-def validate_test_review_baseline(args, baseline_commit, source_repo, *,
-                                  get_store, resolve_expected_candidate,
-                                  run=subprocess.run):
+def validate_test_review_baseline(
+    args,
+    baseline_commit,
+    source_repo,
+    *,
+    get_store,
+    resolve_expected_candidate,
+    run=subprocess.run,
+):
     from herdr import delivery_record, workflow_docs
 
     node_id = getattr(args, "node", "") or getattr(args, "stage", "")
@@ -358,23 +405,49 @@ def validate_test_review_baseline(args, baseline_commit, source_repo, *,
 
 
 def validate_allocated_launch_baselines(
-    args, node_id, baseline_commit, source_repo, onto_branch, *,
-    clone_path, pane_id, pane_source, validate_test_review,
-    validate_selective, reclaim, get_store,
+    args,
+    node_id,
+    baseline_commit,
+    source_repo,
+    onto_branch,
+    *,
+    clone_path,
+    pane_id,
+    pane_source,
+    validate_test_review,
+    validate_selective,
+    reclaim,
+    get_store,
 ):
     """Run post-worker baseline gates and reclaim unregistered resources on refusal."""
     if node_id in ("test", "review"):
         try:
             validate_test_review(args, baseline_commit, source_repo)
         except SystemExit:
-            reclaim(args, clone_path=clone_path, pane_id=pane_id,
-                    pane_source=pane_source)
+            reclaim(
+                args, clone_path=clone_path, pane_id=pane_id, pane_source=pane_source
+            )
             raise
-        except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
-                sqlite3.Error, subprocess.SubprocessError) as exc:
+        except (
+            ImportError,
+            AttributeError,
+            OSError,
+            ValueError,
+            RuntimeError,
+            sqlite3.Error,
+            subprocess.SubprocessError,
+        ) as exc:
             _reject_allocated_baseline(
-                args, node_id, "test_baseline_rejected", "test/review", exc,
-                clone_path, pane_id, pane_source, reclaim, get_store,
+                args,
+                node_id,
+                "test_baseline_rejected",
+                "test/review",
+                exc,
+                clone_path,
+                pane_id,
+                pane_source,
+                reclaim,
+                get_store,
             )
 
     claim = str(getattr(args, "candidate_sha", None) or "").strip()
@@ -382,36 +455,81 @@ def validate_allocated_launch_baselines(
         try:
             validate_selective(args, claim, baseline_commit, source_repo)
         except SystemExit:
-            reclaim(args, clone_path=clone_path, pane_id=pane_id,
-                    pane_source=pane_source)
+            reclaim(
+                args, clone_path=clone_path, pane_id=pane_id, pane_source=pane_source
+            )
             raise
-        except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
-                sqlite3.Error, subprocess.SubprocessError) as exc:
+        except (
+            ImportError,
+            AttributeError,
+            OSError,
+            ValueError,
+            RuntimeError,
+            sqlite3.Error,
+            subprocess.SubprocessError,
+        ) as exc:
             _reject_allocated_baseline(
-                args, node_id, "selective_baseline_rejected", "replacement", exc,
-                clone_path, pane_id, pane_source, reclaim, get_store,
+                args,
+                node_id,
+                "selective_baseline_rejected",
+                "replacement",
+                exc,
+                clone_path,
+                pane_id,
+                pane_source,
+                reclaim,
+                get_store,
             )
 
 
-def _reject_allocated_baseline(args, node_id, event_type, label, error,
-                               clone_path, pane_id, pane_source, reclaim, get_store):
+def _reject_allocated_baseline(
+    args,
+    node_id,
+    event_type,
+    label,
+    error,
+    clone_path,
+    pane_id,
+    pane_source,
+    reclaim,
+    get_store,
+):
     reclaim(args, clone_path=clone_path, pane_id=pane_id, pane_source=pane_source)
     try:
         get_store().record_event(
             event_type,
-            {"stage": node_id, "failure_code": "baseline_check_unavailable",
-             "detail": str(error)[:300], "actionable": True,
-             "remediation": "repair workflow delivery metadata and relaunch"},
-            workflow_id=args.workflow_id, node_id=node_id,
-            task_id=args.task_id, source="herdr-task",
+            {
+                "stage": node_id,
+                "failure_code": "baseline_check_unavailable",
+                "detail": str(error)[:300],
+                "actionable": True,
+                "remediation": "repair workflow delivery metadata and relaunch",
+            },
+            workflow_id=args.workflow_id,
+            node_id=node_id,
+            task_id=args.task_id,
+            source="herdr-task",
         )
-    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as event_exc:
-        print(f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}", file=sys.stderr)
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        AttributeError,
+        sqlite3.Error,
+    ) as event_exc:
+        print(
+            f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
+            file=sys.stderr,
+        )
     if label == "test/review":
-        message = (f"[BASELINE REJECTED] could not prove test/review baseline: {error}; "
-                   "launch refused (FR-6.2 fail-closed).")
+        message = (
+            f"[BASELINE REJECTED] could not prove test/review baseline: {error}; "
+            "launch refused (FR-6.2 fail-closed)."
+        )
     else:
-        message = (f"[BASELINE REJECTED] could not prove replacement baseline: {error}; "
-                   "launch refused (selective-replan fail-closed).")
+        message = (
+            f"[BASELINE REJECTED] could not prove replacement baseline: {error}; "
+            "launch refused (selective-replan fail-closed)."
+        )
     print(message)
     sys.exit(2)

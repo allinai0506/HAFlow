@@ -178,3 +178,29 @@ def get_task(task_id, *, deps):
         print(f"Task not found: {task_id}")
         sys.exit(1)
     print(json.dumps(task, ensure_ascii=False, indent=2))
+
+
+def list_tasks(workflow_id=None, *, deps):
+    load_tasks = deps["load_tasks"]
+    data = load_tasks()
+    tasks = data["tasks"]
+    if workflow_id:
+        tasks = [task for task in tasks if task.get("workflow_id") == workflow_id]
+    print(json.dumps({"tasks": tasks}, ensure_ascii=False, indent=2))
+
+
+def check_zombie_obligations(data=None, *, deps):
+    load_tasks = deps["load_tasks"]
+    if data is None:
+        data = load_tasks()
+    tasks = data.get("tasks", []) if isinstance(data, dict) else data or []
+    zombies = []
+    for t in tasks:
+        if isinstance(t, dict):
+            if (
+                t.get("status") == "superseded"
+                and t.get("replacement_pending")
+                and (not t.get("superseded_by"))
+            ):
+                zombies.append(t)
+    return zombies
