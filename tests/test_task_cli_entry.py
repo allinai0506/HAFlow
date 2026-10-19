@@ -42,3 +42,22 @@ def test_task_registry_handlers_bind_to_owner_module():
         handlers['get_task']('missing')
     assert error.value.code == 1
     assert handlers['get_task'].func.__module__ == 'herdr.task_cli_tasks'
+
+
+def test_registry_compatibility_helpers_remain_available_when_script_is_loaded():
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "bin" / "herdr-task"
+    name = "herdr_task_registry_compat_test"
+    spec = importlib.util.spec_from_loader(
+        name, importlib.machinery.SourceFileLoader(name, str(script))
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert callable(module.add_task)
+    assert callable(module.get_task)
+    assert callable(module.list_tasks)
+    assert callable(module.check_zombie_obligations)

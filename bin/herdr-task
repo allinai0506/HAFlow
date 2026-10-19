@@ -453,6 +453,11 @@ from herdr.task_cli_evidence_bindings import build_evidence_bindings
 globals().update(build_evidence_bindings(globals()))
 
 
+from herdr.task_cli_entry import build_task_registry_handlers
+
+globals().update(build_task_registry_handlers(globals()))
+
+
 def main():
     from herdr.task_cli_entry import main as run
 
