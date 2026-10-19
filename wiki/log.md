@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-19] fix | 区分清理意图与完成阶段、默认 CLI 返工复用清理令牌 (PR #266 Codex Review Round 5)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 commit 3dcfe69 中指出 2 项两阶段幂等与凭证恢复缺陷：
+     - [P1] `bin/herdr-task:_cleanup_gate_for_rework` 中如果进程在持久化准备标记后、执行 `_herdr("pane", "send-keys", ..., "C-c")` 之前意外崩溃，下次调用会误把该准备标记当成清理已执行的证明，从而跳过中断，导致在旧门禁 writer 仍在运行的情况下直接交付新返工 prompt，重现执行重叠与陈旧裁决竞争缺陷；必须严格区分意图（`intent`）与完成（`completed`）阶段，仅在完成阶段持久化后才允许跳过中断；
+     - [P2] 在缺省未显式传递 `--request-id` 调用 `herdr-task rework <task_id>` 时，CLI 每次调用会重新生成新的随机 `execution_token`。如果清理执行成功，但 `deliver()` 在其准备事务提交前崩溃，任务既未保留该 token 也没有 pending delivery；重试调用相同的 CLI 命令生成了新 token，无法匹配已持久化的清理记录，导致再次向工位发送 `C-c`。应在未传入 request_id 时回收未被消费的清理 operation ID，使默认 CLI 路径保持幂等。
+- 变更：
+  1. **区分清理意图与完成双阶段**：
+     - `bin/herdr-task`：在发送 `C-c` 中断前独立持久化 `gate_cleanup_intent` 事件；
+     - 执行 `C-c`（严格校验 `res.returncode == 0`）并完成裁决文件物理清理后，独立持久化 `gate_cleanup_completed` 事件；
+     - 引入 `_is_gate_cleanup_completed`：仅当 `gate_cleanup_completed` 已持久化时才跳过中断；若进程在意图持久化后崩溃，重试调用绝不跳过中断，确保旧 writer 被彻底终止。
+  2. **缺省 CLI 调用回收未消费的清理令牌**：
+     - 引入 `_recover_unconsumed_gate_cleanup_id(task, store)`：未显式传递 `--request-id` 或 `execution_token` 时，在生成全新随机 token 前，先从 `events` 检索本任务最新且未被 `rework_dispatched` 消费的 `gate_cleanup_completed` 事件；
+     - 若存在未消费的已清理令牌，则原地回收作为本次调用的 `execution_token` 与 `delivery_id`，使重试调用精准匹配已完成的清理阶段，跳过重复中断；
+     - 一旦交付成功（记录 `rework_dispatched` 或更新 `rework_delivery = 'delivered'`），该清理令牌即被消费标记作废，后续全新的返工轮次将自动生成新令牌并执行新一轮清理。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 项针对性专项测试（`test_round5_p1_crash_between_intent_and_interrupt_retries_interrupt`、`test_round5_p2_rework_without_request_id_recovers_cleanup_id_and_skips_duplicate_interrupt`），全量 26 项测试全部通过；
+  2. `tests/test_cli_receipt_delivery.py` 8 项测试全部通过；
+  3. 全量 `tests/test_issue_250_*.py` 43 项测试全部 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警通过。
+
 ## [2026-10-19] fix | 工位中断失败异常阻断与持久化可恢复清理阶段 (PR #266 Codex Review Round 4)
 
 - 背景：

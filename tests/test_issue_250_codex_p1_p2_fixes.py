@@ -1168,10 +1168,13 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         # The task must still be in 'working' status (not transitioned to rework)
         fresh = store.get_task(task_id)
         self.assertEqual(fresh["status"], "working")
-        # DEFECT-01: gate_cleanup_prepared must have been deleted so it doesn't leave false completion evidence
+        # gate_cleanup_completed must NOT have been recorded because pane interrupt failed
         events = store.list_events(task_id=task_id)
-        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_prepared"]
-        self.assertEqual(len(cleanup_events), 0)
+        cleanup_completed_events = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
+        self.assertEqual(len(cleanup_completed_events), 0)
+        # gate_cleanup_intent was recorded
+        intent_events = [e for e in events if e.get("event_type") == "gate_cleanup_intent"]
+        self.assertEqual(len(intent_events), 1)
 
         # Now simulate a subsequent retry where the pane issue is resolved
         calls = []
@@ -1191,6 +1194,10 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
         self.assertEqual(len(send_keys_calls), 1)
         self.assertFalse(verdict_file.exists())
+        # gate_cleanup_completed is now recorded
+        events = store.list_events(task_id=task_id)
+        cleanup_completed_events = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
+        self.assertEqual(len(cleanup_completed_events), 1)
 
     def test_p2_rework_persists_cleanup_phase_and_does_not_repeat_interrupt_on_retry(self):
         """P2: Recoverable cleanup phase is persisted before C-c; retry skips duplicate interrupt."""
@@ -1236,9 +1243,9 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 herdr_task.cmd_rework(args)
 
-        # Verify gate_cleanup_prepared was recorded durably in events
+        # Verify gate_cleanup_completed was recorded durably in events
         events = store.list_events(task_id=task_id)
-        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_prepared"]
+        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
         self.assertEqual(len(cleanup_events), 1)
         self.assertEqual(cleanup_events[0]["payload"].get("delivery_id"), "req-phase-1")
 
@@ -1262,6 +1269,191 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         self.assertEqual(len(send_keys_calls), 0)
         prompt_calls = [c for c in calls if len(c) >= 2 and c[0] == "agent" and c[1] == "prompt"]
         self.assertEqual(len(prompt_calls), 1)
+
+    def test_round5_p1_crash_between_intent_and_interrupt_retries_interrupt(self):
+        """Round 5 P1: Crash after gate_cleanup_intent before C-c must NOT treat intent as completed; retry runs C-c."""
+        from types import SimpleNamespace
+        import herdr.task_resources
+        herdr_task = _load_herdr_task()
+        from herdr.state_store import SQLiteStateStore
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r5-p1", "status": "running"})
+
+        task_id = "task-r5-p1-intent"
+        clone_dir = self.tmp_dir / "clone_r5_p1"
+        clone_dir.mkdir(parents=True, exist_ok=True)
+        dot_herdr = clone_dir / ".herdr"
+        dot_herdr.mkdir(parents=True, exist_ok=True)
+        verdict_file = dot_herdr / "gate-verdict.json"
+        verdict_file.write_text(json.dumps({"verdict": "fail", "note": "prior"}), encoding="utf-8")
+
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r5-p1",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "pane_id": "p-r5-p1",
+            "clone_path": str(clone_dir),
+            "completion_protocol": "receipt-v1",
+        }
+        store.save_task(task)
+
+        # Simulate crash: gate_cleanup_intent was recorded, but process died before C-c or gate_cleanup_completed
+        store.record_event(
+            "gate_cleanup_intent",
+            {"delivery_id": "deliv-intent-only", "task_id": task_id, "run_id": "r1"},
+            task_id=task_id,
+            workflow_id="wf-r5-p1",
+            run_id="r1",
+            source="herdr-task",
+        )
+
+        # Verify that _is_gate_cleanup_completed returns False when only intent exists
+        self.assertFalse(herdr_task._is_gate_cleanup_completed(task, "deliv-intent-only", store))
+
+        calls = []
+        args = SimpleNamespace(task_id=task_id, request_id="deliv-intent-only", prompt="retest", reason="test")
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None):
+            herdr_task.cmd_rework(args)
+
+        # On retry, C-c MUST be executed (not skipped!), and verdict file purged
+        send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+        self.assertEqual(len(send_keys_calls), 1)
+        self.assertFalse(verdict_file.exists())
+
+        # gate_cleanup_completed must now be recorded
+        events = store.list_events(task_id=task_id)
+        completed = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["payload"].get("delivery_id"), "deliv-intent-only")
+
+    def test_round5_p2_rework_without_request_id_recovers_cleanup_id_and_skips_duplicate_interrupt(self):
+        """Round 5 P2: Rework without --request-id recovers existing cleanup ID on retry and skips duplicate C-c."""
+        from types import SimpleNamespace
+        import herdr.task_resources
+        herdr_task = _load_herdr_task()
+        from herdr.state_store import SQLiteStateStore
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r5-p2", "status": "running"})
+
+        task_id = "task-r5-p2-noreqid"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r5-p2",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "pane_id": "p-r5-p2",
+            "clone_path": str(self.tmp_dir),
+            "completion_protocol": "receipt-v1",
+        }
+        store.save_task(task)
+
+        calls = []
+        # CLI invocation WITHOUT request_id (the default CLI path)
+        args = SimpleNamespace(task_id=task_id, request_id=None, prompt="fix without req id", reason="test")
+
+        from herdr import supervisor_delivery as delivery
+        original_deliver = delivery.deliver
+        def crashing_deliver(*a, **k):
+            raise RuntimeError("Simulated crash in deliver before prepare_task transaction commits")
+
+        # First invocation: deliver crashes before its prepare_task commits
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None), \
+             patch.object(delivery, "deliver", crashing_deliver):
+            with self.assertRaises(RuntimeError):
+                herdr_task.cmd_rework(args)
+
+        # Verify C-c was called once
+        send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+        self.assertEqual(len(send_keys_calls), 1)
+
+        # Verify gate_cleanup_completed was recorded with an auto-generated token
+        events = store.list_events(task_id=task_id)
+        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
+        self.assertEqual(len(cleanup_events), 1)
+        generated_token = cleanup_events[0]["payload"].get("delivery_id")
+        self.assertTrue(generated_token and generated_token.startswith("tok-"))
+
+        # Task was not transitioned because deliver crashed before prepare_task committed
+        fresh = store.get_task(task_id)
+        self.assertEqual(fresh["status"], "working")
+        self.assertIsNone(fresh.get("rework_delivery"))
+
+        # Second invocation: user retries the exact same command without --request-id
+        calls.clear()
+        captured_deliver_args = []
+        def capturing_deliver(t, s, action, payload, prompt, send, **kw):
+            captured_deliver_args.append(payload)
+            return original_deliver(t, s, action, payload, prompt, send, **kw)
+
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None), \
+             patch.object(delivery, "deliver", capturing_deliver):
+            herdr_task.cmd_rework(args)
+
+        # On retry without request_id, send-keys C-c MUST NOT be called again (reused cleanup ID!)
+        send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+        self.assertEqual(len(send_keys_calls), 0)
+
+        # Prompt transport MUST have been delivered
+        prompt_calls = [c for c in calls if len(c) >= 2 and c[0] == "agent" and c[1] == "prompt"]
+        self.assertEqual(len(prompt_calls), 1)
+
+        # The deliver call must have reused the EXACT generated token from attempt 1
+        self.assertEqual(len(captured_deliver_args), 1)
+        self.assertEqual(captured_deliver_args[0].get("intervention_id"), generated_token)
+
+        # Task is now marked delivered with execution_token = generated_token
+        delivered_task = store.get_task(task_id)
+        self.assertEqual(delivered_task["rework_delivery"], "delivered")
+        self.assertEqual(delivered_task["execution_token"], generated_token)
+
+        # Third invocation: a subsequent NEW rework in a later epoch generates a NEW token
+        calls.clear()
+        # Simulate new gate failure placing task into blocked
+        store.transition_task(task_id, "blocked", reason="new_gate_failure", source="test")
+        fresh_after_block = store.get_task(task_id)
+
+        captured_deliver_args.clear()
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None), \
+             patch.object(delivery, "deliver", capturing_deliver):
+            herdr_task.cmd_rework(args)
+
+        # For the new rework, C-c MUST be called again
+        send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+        self.assertEqual(len(send_keys_calls), 1)
+
+        # The new deliver call must have a NEW token, distinct from generated_token
+        self.assertEqual(len(captured_deliver_args), 1)
+        new_token = captured_deliver_args[0].get("intervention_id")
+        self.assertNotEqual(new_token, generated_token)
 
 
 if __name__ == "__main__":

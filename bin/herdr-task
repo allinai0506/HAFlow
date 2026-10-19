@@ -5491,15 +5491,15 @@ def cmd_renew_completion(args):
     return result
 
 
-def _is_gate_cleanup_recorded(task, delivery_id, store):
-    """Check if a durable gate cleanup phase was already persisted for this delivery."""
+def _is_gate_cleanup_completed(task, delivery_id, store):
+    """Check if a durable gate cleanup completion phase was already persisted for this delivery."""
     if not delivery_id or not store:
         return False
     from herdr import state_db
     conn = state_db.get_db_connection(store.db_path)
     try:
         row = conn.execute(
-            "SELECT 1 FROM events WHERE task_id=? AND event_type='gate_cleanup_prepared' AND json_extract(payload_json, '$.delivery_id')=? LIMIT 1",
+            "SELECT 1 FROM events WHERE task_id=? AND event_type='gate_cleanup_completed' AND json_extract(payload_json, '$.delivery_id')=? LIMIT 1",
             (task["task_id"], delivery_id),
         ).fetchone()
         return bool(row)
@@ -5507,54 +5507,86 @@ def _is_gate_cleanup_recorded(task, delivery_id, store):
         conn.close()
 
 
+def _recover_unconsumed_gate_cleanup_id(task, store):
+    """Recover existing gate cleanup operation ID when retrying a rework before delivery committed."""
+    if not task or not store or not _is_gate_task(task):
+        return None
+    from herdr import state_db
+    conn = state_db.get_db_connection(store.db_path)
+    try:
+        meta_id = task.get("rework_cleanup_id")
+        if meta_id:
+            dispatched = conn.execute(
+                """
+                SELECT 1 FROM events
+                WHERE task_id=? AND json_extract(payload_json, '$.intervention_id')=? AND event_type IN ('rework_dispatched', 'rework_dispatch_prepared')
+                LIMIT 1
+                """,
+                (task["task_id"], meta_id),
+            ).fetchone()
+            if not dispatched and not (task.get("rework_delivery") == "delivered" and task.get("execution_token") == meta_id):
+                return meta_id
+
+        row = conn.execute(
+            """
+            SELECT json_extract(payload_json, '$.delivery_id') AS delivery_id
+            FROM events
+            WHERE task_id=? AND (run_id=? OR ? IS NULL) AND event_type='gate_cleanup_completed'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (task["task_id"], task.get("run_id"), task.get("run_id")),
+        ).fetchone()
+        if not row or not row["delivery_id"]:
+            return None
+        candidate_id = row["delivery_id"]
+
+        dispatched = conn.execute(
+            """
+            SELECT 1 FROM events
+            WHERE task_id=? AND json_extract(payload_json, '$.intervention_id')=? AND event_type IN ('rework_dispatched', 'rework_dispatch_prepared')
+            LIMIT 1
+            """,
+            (task["task_id"], candidate_id),
+        ).fetchone()
+        if dispatched:
+            return None
+
+        if task.get("rework_delivery") == "delivered" and (task.get("rework_request_id") == candidate_id or task.get("execution_token") == candidate_id):
+            return None
+
+        return candidate_id
+    finally:
+        conn.close()
+
+
 def _cleanup_gate_for_rework(task, delivery_id=None, store=None):
-    """PR #250 & Codex review: Stop old writer and purge prior verdicts for gate tasks in a recoverable cleanup phase."""
+    """PR #250 & Codex review: Stop old writer and purge prior verdicts for gate tasks in a two-phase recoverable cleanup."""
     if not _is_gate_task(task):
         return
     # If this delivery is already pending retry, skip interrupt side-effect
     if task.get("status") == "rework" and task.get("rework_delivery") == "pending" and not task.get("_force_cleanup"):
         return
-    if store and delivery_id and _is_gate_cleanup_recorded(task, delivery_id, store):
-        # P2: Recoverable cleanup phase was already persisted and executed for this delivery attempt.
+    if not task.get("_force_cleanup") and store and delivery_id and _is_gate_cleanup_completed(task, delivery_id, store):
+        # P1/P2: Completed cleanup phase was already persisted and executed for this delivery attempt.
         # Do not repeat C-c to avoid terminating work started after the first interruption.
         return
-    # P2: Persist cleanup phase before issuing the pane interrupt side effect
-    recorded_cleanup_event = False
+    # P1: Persist cleanup intent before issuing the pane interrupt side effect
     if store and delivery_id:
         store.record_event(
-            "gate_cleanup_prepared",
+            "gate_cleanup_intent",
             {"delivery_id": delivery_id, "task_id": task["task_id"], "run_id": task.get("run_id")},
             task_id=task["task_id"],
             workflow_id=task.get("workflow_id"),
             run_id=task.get("run_id"),
             source="herdr-task",
         )
-        recorded_cleanup_event = True
     from herdr.node_capacity import pane_reference
     pane_ref = pane_reference(task)
     if pane_ref:
-        try:
-            res = _herdr("pane", "send-keys", str(pane_ref), "C-c")
-            # P1: Check returncode; abort rework if the pane interrupt fails so we never continue with an old writer running
-            if res.returncode != 0:
-                raise RuntimeError(f"Failed to interrupt gate pane {pane_ref} (exit {res.returncode}): {res.stderr or res.stdout}")
-        except Exception:
-            # DEFECT-01: If pane interrupt failed, rollback the recorded gate_cleanup_prepared event
-            # so that subsequent retries will re-attempt the required pane interrupt and cleanup.
-            if recorded_cleanup_event and store and delivery_id:
-                from herdr import state_db
-                conn = state_db.get_db_connection(store.db_path)
-                try:
-                    conn.execute(
-                        "DELETE FROM events WHERE task_id=? AND event_type='gate_cleanup_prepared' AND json_extract(payload_json, '$.delivery_id')=?",
-                        (task["task_id"], delivery_id),
-                    )
-                    conn.commit()
-                except Exception:
-                    pass
-                finally:
-                    conn.close()
-            raise
+        res = _herdr("pane", "send-keys", str(pane_ref), "C-c")
+        # P1: Check returncode; abort rework if the pane interrupt fails so we never continue with an old writer running
+        if res.returncode != 0:
+            raise RuntimeError(f"Failed to interrupt gate pane {pane_ref} (exit {res.returncode}): {res.stderr or res.stdout}")
     for cand in [
         str((Path.home() / ".herdr-controller" / "gate-verdicts" / f"{task['task_id']}.json")),
         os.path.join(task.get("clone_path", ""), ".herdr", "gate-verdict.json") if task.get("clone_path") else None,
@@ -5564,6 +5596,16 @@ def _cleanup_gate_for_rework(task, delivery_id=None, store=None):
                 os.remove(cand)
             except OSError:
                 pass
+    # P1: Persist cleanup completion phase only after interrupt and purge succeed
+    if store and delivery_id:
+        store.record_event(
+            "gate_cleanup_completed",
+            {"delivery_id": delivery_id, "task_id": task["task_id"], "run_id": task.get("run_id")},
+            task_id=task["task_id"],
+            workflow_id=task.get("workflow_id"),
+            run_id=task.get("run_id"),
+            source="herdr-task",
+        )
 
 
 def cmd_rework(args):
@@ -5592,6 +5634,8 @@ def cmd_rework(args):
         execution_token = (
             getattr(args, "execution_token", None)
             or getattr(args, "request_id", None)
+            or (task.get("rework_request_id") if task.get("rework_delivery") == "pending" else None)
+            or _recover_unconsumed_gate_cleanup_id(task, store)
             or f"tok-{uuid.uuid4().hex[:12]}"
         )
         prompt = args.prompt or task.get("rework_prompt") or "继续当前任务，就地修复评审问题并重新自测，不新建 Task。"
@@ -5605,7 +5649,7 @@ def cmd_rework(args):
         if task.get('completion_protocol') == 'receipt-v1':
             from herdr.supervisor_delivery import deliver
             from herdr import state_db
-            delivery_id = request_id or (task.get('rework_request_id') if task.get('rework_delivery') == 'pending' else None) or execution_token
+            delivery_id = execution_token
             _cleanup_gate_for_rework(task, delivery_id, store)
             def prepare_task(conn):
                 current = state_db._decode_task_row(conn.execute('SELECT * FROM tasks WHERE task_id=?', (args.task_id,)).fetchone())
