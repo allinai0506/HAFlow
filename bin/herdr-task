@@ -1642,122 +1642,41 @@ def _mark_workflow_completed(workflow_id, outcome="delivered", force=False):
 
 
 def _workflow_stage_tabs(workflow_id, tasks):
-    """从项目 workflow 配置解析阶段 tab 与归属 pane 集合。
+    from herdr.task_cli_workflow_close_inventory import _workflow_stage_tabs as handle
 
-    返回 dict:tab_ids / coordinator_pane / workspace_id / owned_pane_ids。
-    """
-    empty = {
-        "tab_ids": [],
-        "coordinator_pane": None,
-        "workspace_id": None,
-        "owned_pane_ids": set(),
-    }
-    project = project_for_workflow(workflow_id) or {}
-    cfg_file = project.get("workflow_file") or next(
-        (t.get("workflow_config") for t in tasks if t.get("workflow_config")),
-        None,
+    return handle(
+        workflow_id,
+        tasks,
+        deps={"project_for_workflow": project_for_workflow, "os": os},
     )
-    if not cfg_file or not os.path.exists(cfg_file):
-        return empty
-    try:
-        with open(cfg_file, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return empty
-
-    from herdr.projects import _with_node_runtime
-
-    cfg = _with_node_runtime(cfg, project)
-
-    items = cfg.get("nodes") or cfg.get("stages", [])
-    tab_ids = sorted({item.get("tab_id") for item in items if item.get("tab_id")})
-    owned_pane_ids = {
-        item.get("anchor_pane_id") for item in items if item.get("anchor_pane_id")
-    }
-    owned_pane_ids |= {t.get("pane_id") for t in tasks if t.get("pane_id")}
-    return {
-        "tab_ids": tab_ids,
-        "coordinator_pane": (cfg.get("coordinator") or {}).get("pane_id"),
-        "workspace_id": cfg.get("workspace_id"),
-        "owned_pane_ids": owned_pane_ids,
-    }
 
 
 def _live_workspace_panes(workspace_id):
-    """返回 workspace 存活 pane 列表;不可用时返回 None(宁可保留现场)。"""
-    listing = _herdr("pane", "list", "--workspace", workspace_id)
-    if listing.returncode != 0:
-        return None
-    try:
-        result = json.loads(listing.stdout).get("result", {})
-        panes = result.get("panes", result) if isinstance(result, dict) else result
-        return panes or []
-    except (json.JSONDecodeError, TypeError):
-        return None
+    from herdr.task_cli_workflow_close_inventory import _live_workspace_panes as handle
+
+    return handle(workspace_id, deps={"herdr": _herdr})
 
 
 def _foreign_panes_in_tab(live_panes, tab_id, owned_pane_ids):
-    """筛选 tab 内不属于本 workflow 的存活 pane。
+    from herdr.task_cli_workflow_close_inventory import _foreign_panes_in_tab as handle
 
-    阶段 tab 可能被连续多个 workflow 复用;关闭 tab 会连带销毁
-    共存的其他现场,所以有外来 pane 时必须放弃关 tab。
-    """
-    return sorted(
-        pane_id
-        for pane in (live_panes or [])
-        if pane.get("tab_id") == tab_id
-        and (pane_id := pane.get("pane_id"))
-        and pane_id not in owned_pane_ids
-    )
+    return handle(live_panes, tab_id, owned_pane_ids)
 
 
 def resolve_workflow_id_for_close(input_id=None):
-    entries = load_workflows().get("workflows", {})
-    if input_id:
-        if input_id in entries:
-            return input_id
-        tasks = load_tasks().get("tasks", [])
-        if any(t.get("workflow_id") == input_id for t in tasks):
-            return input_id
+    from herdr.task_cli_workflow_close_inventory import (
+        resolve_workflow_id_for_close as handle,
+    )
 
-        # Suffix / substring match among active (non-terminal) workflows
-        non_terminal = {wid: e for wid, e in entries.items() if e.get("status") not in {"completed"}}
-        matches = [wid for wid in non_terminal if wid.endswith(input_id) or f"-{input_id}" in wid or input_id in wid]
-        if len(matches) == 1:
-            print(f"[AUTO RESOLVE] 匹配到活跃工作流: {matches[0]}")
-            return matches[0]
-        elif len(matches) > 1:
-            print(f"[AMBIGUOUS WORKFLOW ID] 输入 '{input_id}' 匹配到多个活跃工作流: {', '.join(matches)}")
-            sys.exit(1)
-
-        all_matches = [wid for wid in entries if wid.endswith(input_id) or f"-{input_id}" in wid or input_id in wid]
-        if len(all_matches) == 1:
-            print(f"[AUTO RESOLVE] 匹配到工作流: {all_matches[0]}")
-            return all_matches[0]
-        elif len(all_matches) > 1:
-            print(f"[AMBIGUOUS WORKFLOW ID] 输入 '{input_id}' 匹配到多个工作流: {', '.join(all_matches)}")
-            sys.exit(1)
-
-        return input_id
-
-    # If input_id is not provided, detect from current git workspace
-    try:
-        root = detect_git_root()
-        proj = project_by_root(root)
-        if proj:
-            pid = proj.get("project_id")
-            active = [wid for wid, e in entries.items() if e.get("project_id") == pid and e.get("status") not in {"completed"}]
-            if len(active) == 1:
-                print(f"[AUTO DETECT] 检测到当前项目 {proj.get('project_name')} 唯一活跃工作流: {active[0]}")
-                return active[0]
-            elif len(active) > 1:
-                print(f"当前项目存在多个活跃工作流，请显式指定 workflow_id:\n  " + "\n  ".join(active))
-                sys.exit(1)
-    except Exception:
-        pass
-
-    print("请指定 workflow_id，例如: herdr-task close-workflow <workflow_id>")
-    sys.exit(1)
+    return handle(
+        input_id,
+        deps={
+            "load_workflows": load_workflows,
+            "load_tasks": load_tasks,
+            "detect_git_root": detect_git_root,
+            "project_by_root": project_by_root,
+        },
+    )
 
 
 def close_workflow(
@@ -1771,24 +1690,39 @@ def close_workflow(
     confirm_force=None,
 ):
     from herdr.workflow_close import workflow_close_claim
+
     if not abandon:
         from herdr.business_gate import business_gate_blockers
+
         store = _get_store()
         if store.get_workflow(workflow_id):
             authority, config, owned_tasks = store.read_workflow_snapshot(workflow_id)
             from herdr.workflow import validate_delivery_inventory
+
             try:
                 validate_delivery_inventory(authority, config, owned_tasks)
             except ValueError as exc:
-                print(f'[CLOSE ABORT] {exc}')
+                print(f"[CLOSE ABORT] {exc}")
                 sys.exit(2)
-            missing_business = business_gate_blockers(store, authority, config, owned_tasks)
+            missing_business = business_gate_blockers(
+                store, authority, config, owned_tasks
+            )
             if missing_business:
-                print('[CLOSE ABORT] business acceptance unavailable: ' + ', '.join(missing_business))
+                print(
+                    "[CLOSE ABORT] business acceptance unavailable: "
+                    + ", ".join(missing_business)
+                )
                 sys.exit(2)
-    options = dict(include_coordinator=include_coordinator, purge_clones=purge_clones,
-                   abandon=abandon, force=force, accept_escalated=accept_escalated)
-    with workflow_close_claim(_get_store(), workflow_id, dry_run=dry_run, options=options) as claim:
+    options = dict(
+        include_coordinator=include_coordinator,
+        purge_clones=purge_clones,
+        abandon=abandon,
+        force=force,
+        accept_escalated=accept_escalated,
+    )
+    with workflow_close_claim(
+        _get_store(), workflow_id, dry_run=dry_run, options=options
+    ) as claim:
         if claim.state == "completed":
             print(json.dumps(claim.receipt, ensure_ascii=False))
             return claim.receipt
@@ -1797,11 +1731,19 @@ def close_workflow(
             print(json.dumps(report))
             return report
         report = _close_workflow_owned(
-            workflow_id, include_coordinator, purge_clones, dry_run, abandon,
-            force, accept_escalated, confirm_force, close_claim=claim if not dry_run else None,
+            workflow_id,
+            include_coordinator,
+            purge_clones,
+            dry_run,
+            abandon,
+            force,
+            accept_escalated,
+            confirm_force,
+            close_claim=claim if not dry_run else None,
         )
         from herdr.delivery_report import build_delivery_report
         import hashlib
+
         facts = build_delivery_report(workflow_id, _get_store())
         report["delivery_report"] = facts
         report["delivery_report_sha256"] = hashlib.sha256(
@@ -1812,17 +1754,35 @@ def close_workflow(
 
 
 def _close_workflow_owned(
-    workflow_id, include_coordinator=False, purge_clones=False, dry_run=False,
-    abandon=False, force=False, accept_escalated=False, confirm_force=None,
+    workflow_id,
+    include_coordinator=False,
+    purge_clones=False,
+    dry_run=False,
+    abandon=False,
+    force=False,
+    accept_escalated=False,
+    confirm_force=None,
     close_claim=None,
 ):
     from herdr.task_cli_workflow_close import close_workflow_owned
+
     return close_workflow_owned(
-        workflow_id, include_coordinator, purge_clones, dry_run, abandon,
-        force, accept_escalated, confirm_force, close_claim,
-        load_tasks=load_tasks, load_workflow_entry=_load_workflow_entry,
-        get_store=_get_store, finalize_one=_finalize_one, close_pane=close_pane,
-        stage_reset=stage_reset, mark_workflow_completed=_mark_workflow_completed,
+        workflow_id,
+        include_coordinator,
+        purge_clones,
+        dry_run,
+        abandon,
+        force,
+        accept_escalated,
+        confirm_force,
+        close_claim,
+        load_tasks=load_tasks,
+        load_workflow_entry=_load_workflow_entry,
+        get_store=_get_store,
+        finalize_one=_finalize_one,
+        close_pane=close_pane,
+        stage_reset=stage_reset,
+        mark_workflow_completed=_mark_workflow_completed,
         workflow_stage_tabs=_workflow_stage_tabs,
         live_workspace_panes=_live_workspace_panes,
         foreign_panes_in_tab=_foreign_panes_in_tab,
@@ -1836,8 +1796,12 @@ def _close_workflow_owned(
 
 def node_status(workflow_id, node_key):
     from herdr.task_cli_workflow import node_status as handle_node_status
+
     return handle_node_status(
-        workflow_id, node_key, resolve_node=resolve_node, load_tasks=load_tasks,
+        workflow_id,
+        node_key,
+        resolve_node=resolve_node,
+        load_tasks=load_tasks,
         safe_workflow=_safe_workflow,
         normalize_workflow_nodes=_normalize_workflow_nodes,
         node_delivery_complete=_node_delivery_complete,
