@@ -71,6 +71,18 @@ GET /api/run/status?id=<job_id>
 
 新需求启动采用异步 Job：Console 不会让浏览器请求同步等待 Deep Preflight 和总指挥派发；后台命令允许最多运行 600 秒。启动成功后关闭弹窗并提示 Workflow ID；失败时保留表单、恢复按钮，并展示后端返回的具体错误。
 
+## 本机调用约定
+
+控制台只接受本机页面的请求：`Host` 必须是 `127.0.0.1:<端口>` 或 `localhost:<端口>`，否则返回 403（防 DNS rebinding）。所有 POST 必须带 `X-HAFlow-Console-Request: 1`，否则返回 403；带 `Origin` 的请求必须来自本机控制台（防跨站网页触发写操作）。脚本调用示例：
+
+```text
+curl -X POST http://127.0.0.1:8765/api/workflow/rename \
+  -H 'Content-Type: application/json' -H 'X-HAFlow-Console-Request: 1' \
+  -d '{"workflow_id":"<id>","title":"新标题"}'
+```
+
+这道防护挡住的是浏览器侧的跨站请求；它不能阻止能任意构造请求头的本机进程。后者需要凭证分发等第二阶段方案，当前尚未实现。
+
 ## 工作流模板库 API
 
 Console 通过 `sys.path` 直接复用 `herdr.workflow` 的模板引擎（`list_templates` / `load_template` / `validate_workflow_dag`）：

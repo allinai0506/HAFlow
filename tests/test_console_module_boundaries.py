@@ -17,7 +17,7 @@ from console import herdr_factory_console as console
 from herdr import state_db
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE_SHA256 = '3cd0257a6d22ab4037870991a88abe64122a20794318f1465ce481df87064214'
+TEMPLATE_SHA256 = 'd993b30b154a72eb1a6a0839553469bd119852f8cb2a3644c0550773d670a994'  # console.html api() now sends X-HAFlow-Console-Request (CSRF guard)
 
 
 def test_page_template_is_byte_identical_to_pre_split_baseline():
@@ -54,7 +54,7 @@ def test_http_rename_persists_and_public_read_returns_it(server):
     request = urllib.request.Request(
         base + '/api/workflow/rename',
         data=json.dumps({'workflow_id': 'owned', 'title': '拆分验收'}).encode(),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', 'X-HAFlow-Console-Request': '1'},
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         assert response.status == 200

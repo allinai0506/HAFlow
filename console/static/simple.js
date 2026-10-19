@@ -6,7 +6,7 @@ const model = {projects:[], projectId:query.get('project_id') || '', workflowId:
 const labels = {pending:'待开始',running:'执行中',working:'执行中',dispatched:'已派发',blocked:'受阻，等待处理',failed:'执行失败',paused:'已暂停',completed:'执行完成，待收尾',delivered:'已交付',cleaned:'已完成',integrated:'已集成',committed:'已提交',superseded:'已取代',rework:'返工中',unknown:'状态未知',ready:'已就绪',waiting:'等待中'};
 const label = status => labels[status] || status || '状态未知';
 async function api(url, body) {
-  const response = await fetch(url, {headers:{'Content-Type':'application/json'}, ...(body ? {method:'POST',body:JSON.stringify(body)} : {}), signal:AbortSignal.timeout(url==='/api/project/create'?150000:20000)});
+  const response = await fetch(url, {headers:{'Content-Type':'application/json','X-HAFlow-Console-Request':'1'}, ...(body ? {method:'POST',body:JSON.stringify(body)} : {}), signal:AbortSignal.timeout(url==='/api/project/create'?150000:20000)});
   const payload = await response.json();
   if (!response.ok || payload.ok === false) throw new Error(payload.error || `接口失败 (${response.status})`);
   return payload.data;

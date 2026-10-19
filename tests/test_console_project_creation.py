@@ -459,7 +459,7 @@ def test_r2_state_store_failure_prevents_project_registration(tmp_path, monkeypa
     worker = threading.Thread(target=httpd.serve_forever, daemon=True)
     worker.start()
     try:
-        request = urllib.request.Request(f'http://127.0.0.1:{httpd.server_port}/api/project/create', data=json.dumps({'project_root':str(tmp_path),'template':'business-task-v1'}).encode(), headers={'Content-Type':'application/json'})
+        request = urllib.request.Request(f'http://127.0.0.1:{httpd.server_port}/api/project/create', data=json.dumps({'project_root':str(tmp_path),'template':'business-task-v1'}).encode(), headers={'Content-Type':'application/json','X-HAFlow-Console-Request':'1'})
         try:
             urllib.request.urlopen(request)
             assert False, 'must reject failed initialization'

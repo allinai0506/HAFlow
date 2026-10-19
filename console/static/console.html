@@ -5144,7 +5144,7 @@ async function api(p,o={}){
   const started=performance.now();
   let authHeaders={};
   try{const t=sessionStorage.getItem('herdr_hub_token')||'';if(t)authHeaders={'Authorization':'Bearer '+t};}catch(e){}
-  const mergedHeaders={'Content-Type':'application/json',...authHeaders,...(o.headers||{})};
+  const mergedHeaders={'Content-Type':'application/json','X-HAFlow-Console-Request':'1',...authHeaders,...(o.headers||{})};
   const key=JSON.stringify([p,mergedHeaders]);
   const share=(o.method||'GET').toUpperCase()==='GET'&&!o.signal;
   if(share&&apiReads.has(key))return apiReads.get(key);

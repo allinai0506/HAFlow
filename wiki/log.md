@@ -3103,3 +3103,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   1. `tests/test_wrapup_review_closure.py` 专项测试 `test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head` 在真并发环境下稳定 PASS（0.88s）；
   2. `tests/test_wrapup_review_closure.py` 全量 58 项测试全部 PASS；
   3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。
+
+## [2026-10-19] fix | Console 本机请求边界：Host 白名单、POST 请求头与 Origin 校验
+
+- 背景：Console 写路由（force-pass、force-review、rollback、checkpoint restore、workflow rename 等）不校验 Host、Origin 或请求头；用户访问的任意网页都能向 127.0.0.1:8765 发 POST 并使其生效。
+- 变更：① Host 必须是 127.0.0.1 或 localhost（防 DNS rebinding）；② 所有 POST 必须带 `X-HAFlow-Console-Request: 1`，跨站浏览器无法在不经 CORS 预检的情况下发送，而控制台不响应 OPTIONS 预检；③ 带 Origin 的请求必须来自本机控制台。判定集中在 `console/common.py:console_request_rejection`，入口拦截在 `console/http_server.py:reject_untrusted`，两处前端 `api()` 统一附带该头。
+- 证据：`tests/test_console_request_guard.py`（策略单测、无头 POST、text/plain 拖拽、跨站 POST、DNS rebinding GET、本机 POST 生效）；隔离 HOME 下控制台全量 389 项通过；真实服务进程 + 临时状态库中 4 个伪造 POST 与 1 个 rebinding 请求全部 403，状态不变。
+- 残留风险：能任意构造请求头的本机进程仍可调用，GET 数据对本机客户端可读；需第二阶段凭证分发。按仓库规则未标记可合并，PR 保持 Draft。
+- 关联：PR #273；本体评审记录 B-04。
