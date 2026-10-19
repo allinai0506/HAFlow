@@ -593,90 +593,10 @@ def _launch_task(args):
     )
 
 
-def _finish_committed_recovery_launch(store, task, predecessor, reason):
-    from herdr.recovery_successor import (
-        has_confirmed_delivery,
-        link_committed_successor,
-    )
+from herdr.task_cli_dispatch_bindings import build_dispatch_bindings
 
-    if not has_confirmed_delivery(store, task):
-        print(
-            "[DISPATCH RECOVERY_REQUIRED] registered successor delivery unconfirmed; reconcile retained intent"
-        )
-        sys.exit(2)
-    if (task.get('recovery_predecessor') != predecessor['task_id']
-            or task.get('expected_predecessor_sha') != predecessor.get('commit')
-            or type(task.get('expected_predecessor_version')) is not int):
-        raise ValueError('Recovery successor lacks captured predecessor identity')
-    return link_committed_successor(store, predecessor['task_id'], task['task_id'],
-        task['expected_predecessor_version'], task['expected_predecessor_sha'], reason)
+globals().update(build_dispatch_bindings(globals()))
 
-
-def _apply_execution_identity(task, args):
-    """Persist the caller's workflow execution identity on a launched Task.
-
-    The per-task run_id stays independent; execution_id is the shared
-    proof that sibling launches belong to one workflow execution.
-    Absent flag preserves legacy tasks without execution identity.
-    """
-    execution_id = str(getattr(args, "execution_id", None) or "").strip()
-    if execution_id:
-        task["execution_id"] = execution_id
-
-
-def _compile_working_context_ref(task):
-    from herdr.task_cli_execution import compile_working_context_ref
-    return compile_working_context_ref(task, get_store=_get_store)
-
-
-def _fetch_experience_rules_block(task):
-    from herdr.task_cli_execution import fetch_experience_rules_block
-    return fetch_experience_rules_block(task, get_store=_get_store)
-
-
-def _prefetch_mandatory_rules(task):
-    """Fetch mandatory experience rules before any dispatch side effect.
-
-    Runs unconditionally for mandatory tasks: receipt-style tasks carry run_id
-    from creation, so gating on it would silently skip the check while the
-    later fetch still fail-closes. Returns the prompt suffix (may be "").
-    """
-    from herdr.task_cli_execution import prefetch_mandatory_rules
-    return prefetch_mandatory_rules(task, get_store=_get_store)
-
-
-def _mandatory_experience_gate(args, node_id):
-    """Fail closed on an unreachable Hub before any launch resource exists.
-
-    Must run before the worker allocates a clone/pane and before the task is
-    persisted: a failure after registration leaves a pending task whose retry
-    is consumed by the duplicate check, never dispatching it. The task context
-    is synthesized from validated args (the task is not registered yet, so no
-    store metadata can be written). The returned block is handed to
-    dispatch_task so the mandatory task is never queried twice — a second
-    fail-closed query after allocation would recreate the stranded task this
-    gate exists to prevent. Applied-rule metadata is recorded by the launcher
-    once the task is registered.
-    """
-    from herdr.task_cli_execution import mandatory_experience_gate
-    return mandatory_experience_gate(args, node_id)
-
-
-def dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
-                  prefetched_experience_refs=None):
-    from herdr.task_cli_execution import handle_dispatch_task
-    return handle_dispatch_task(
-        task_id,
-        prompt,
-        prefetched_experience_suffix=prefetched_experience_suffix,
-        prefetched_experience_refs=prefetched_experience_refs,
-        get_store=_get_store,
-        set_status=lambda task, status: set_status(task, status),
-        compile_context_ref=_compile_working_context_ref,
-        fetch_rules_block=_fetch_experience_rules_block,
-        prefetch_rules=_prefetch_mandatory_rules,
-        timeout=PROMPT_DELIVERY_TIMEOUT,
-    )
 
 from herdr.repo_hygiene import INTERNAL_EXACT as INTERNAL_UNTRACKED_EXACT, INTERNAL_PREFIXES as INTERNAL_UNTRACKED_PREFIXES
 
