@@ -256,96 +256,9 @@ from herdr.task_cli_launch_bindings import build_launch_bindings
 globals().update(build_launch_bindings(globals()))
 
 
-def cmd_launch_reconcile(args):
-    from herdr.task_cli_resources import handle_launch_reconcile
-    return handle_launch_reconcile(
-        args,
-        get_store=_get_store,
-        release_agent_reservation=release_agent_reservation,
-    )
+from herdr.task_cli_launch_command_bindings import build_launch_command_bindings
 
-
-def cmd_tool_run(args):
-    from herdr.task_cli_execution import handle_tool_run
-    return handle_tool_run(args, get_store=_get_store)
-
-
-def cmd_task_checkpoint(args):
-    from herdr.task_cli_execution import handle_task_checkpoint
-    return handle_task_checkpoint(args, get_store=_get_store)
-
-def _capacity_definition(project):
-    from herdr.task_cli_resources import capacity_definition
-    return capacity_definition(project)
-
-
-def _check_launch_capacity(args, project, tasks, node_id):
-    from herdr.task_cli_resources import check_launch_capacity
-    return check_launch_capacity(
-        args,
-        project,
-        tasks,
-        node_id,
-        get_store=_get_store,
-        load_capacity_definition=_capacity_definition,
-    )
-
-
-def cmd_panes(args):
-    from herdr.task_cli_resources import handle_panes
-
-    return handle_panes(
-        args, get_store=_get_store, load_capacity_definition=_capacity_definition
-    )
-
-
-def _launch_task(args):
-    from herdr.task_cli_launch_orchestrator import launch_task_orchestrated
-
-    return launch_task_orchestrated(
-        args,
-        deps={
-            "BranchOwnershipError": BranchOwnershipError,
-            "HERDR_ROOT": HERDR_ROOT,
-            "TrajectoryLedger": TrajectoryLedger,
-            "_apply_execution_identity": _apply_execution_identity,
-            "_capacity_definition": _capacity_definition,
-            "_check_launch_capacity": _check_launch_capacity,
-            "_finish_committed_recovery_launch": _finish_committed_recovery_launch,
-            "_get_store": _get_store,
-            "_init_status_history": _init_status_history,
-            "_is_gate_task": _is_gate_task,
-            "_is_isolation_rejection": _is_isolation_rejection,
-            "_mandatory_experience_gate": _mandatory_experience_gate,
-            "_now": _now,
-            "_preflight_baseline_freshness": _preflight_baseline_freshness,
-            "_preflight_delivery_identity": _preflight_delivery_identity,
-            "_reclaim_unregistered_launch_resources": _reclaim_unregistered_launch_resources,
-            "_record_router_failure_task": _record_router_failure_task,
-            "_refuse_loop_launch": _refuse_loop_launch,
-            "_validate_selective_replacement_baseline": _validate_selective_replacement_baseline,
-            "_validate_supersedes_for_launch": _validate_supersedes_for_launch,
-            "_validate_test_review_baseline": _validate_test_review_baseline,
-            "acquire_pane_for_task": acquire_pane_for_task,
-            "auto_init_task_loop": auto_init_task_loop,
-            "choose_agent": choose_agent,
-            "dispatch_task": dispatch_task,
-            "ensure_branch_available": ensure_branch_available,
-            "ensure_stage_topology": ensure_stage_topology,
-            "execution_fields_from_workflow": execution_fields_from_workflow,
-            "find_task": find_task,
-            "load_tasks": load_tasks,
-            "new_run_id": new_run_id,
-            "pinned_local_onto_matches": pinned_local_onto_matches,
-            "project_for_workflow": project_for_workflow,
-            "record_trajectory_event_best_effort": record_trajectory_event_best_effort,
-            "release_agent_reservation": release_agent_reservation,
-            "supersede_task": supersede_task,
-            "validate_integration_for_execution": validate_integration_for_execution,
-            "validate_onto_for_execution": validate_onto_for_execution,
-            "workflow_config_for": workflow_config_for,
-        },
-    )
+globals().update(build_launch_command_bindings(globals()))
 
 
 from herdr.task_cli_dispatch_bindings import build_dispatch_bindings
@@ -407,28 +320,6 @@ def _with_git_operation_lock(*, include_source_repo=False):
             "GitProcessActiveError": GitProcessActiveError,
         },
     )
-
-
-def launch_task(args):
-    from herdr.task_cli_launch import launch_task as handle_launch_task
-    from herdr.task_resources import (
-        NodeLaunchBusy,
-        record_launch_rejection,
-        workflow_launch_lock,
-    )
-
-    return handle_launch_task(args, deps={
-        "NodeLaunchBusy": NodeLaunchBusy,
-        "workflow_launch_lock": workflow_launch_lock,
-        "record_launch_rejection": record_launch_rejection,
-        "get_store": _get_store,
-        "launch": _launch_task,
-        "release_agent_reservation": release_agent_reservation,
-        "GitOperationLock": GitOperationLock,
-        "GitOperationBusyError": GitOperationBusyError,
-        "GitProcessActiveError": GitProcessActiveError,
-        "ensure_no_git_processes": ensure_no_git_processes,
-    })
 
 
 def _capture_pane_transcript(pane):
