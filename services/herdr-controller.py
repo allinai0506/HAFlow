@@ -3154,7 +3154,24 @@ def process_gate_verdict_reconciliations():
         status = task.get("status")
         workflow_id = task.get("workflow_id")
         node_id = task.get("node") or task.get("stage")
-        is_gate = bool(task.get("gate")) or (bool(workflow_id and node_id) and node_is_gate(workflow_id, node_id))
+        is_gate = False
+        if workflow_id and node_id:
+            try:
+                wf_cfg = workflow_config_for(workflow_id) or {}
+                node_match = next((n for n in wf_cfg.get("nodes", []) if n.get("id") == node_id), None)
+            except Exception:
+                node_match = None
+            if node_match:
+                if node_match.get("gate") or node_match.get("node_type") == "gate":
+                    is_gate = True
+                elif node_match.get("node_type") in ("agent", "implementation", "worker", "code") and not node_match.get("gate"):
+                    is_gate = False
+                else:
+                    is_gate = bool(task.get("gate")) or node_is_gate(workflow_id, node_id)
+            else:
+                is_gate = bool(task.get("gate")) or node_is_gate(workflow_id, node_id)
+        else:
+            is_gate = bool(task.get("gate"))
         if not is_gate:
             continue
 
@@ -8216,6 +8233,23 @@ def _gate_verdict_file_candidates(task):
 
 def _gate_verdict_file_is_fresh(path, task):
     """PR #250 & Codex P1: Check if candidate verdict file belongs to current execution epoch."""
+    expected_token = task.get("execution_token") or task.get("rework_request_id")
+    if expected_token:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                return False
+            file_token = (
+                payload.get("execution_token")
+                or payload.get("rework_request_id")
+                or payload.get("rework_token")
+            )
+            if not file_token or file_token != expected_token:
+                return False
+        except Exception:
+            return False
+
     rework_started = task.get("rework_started_at")
     if not rework_started:
         return True

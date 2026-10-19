@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -57,7 +58,7 @@ def task_hard_timeout_seconds():
         return DEFAULT_TASK_HARD_TIMEOUT_SECONDS
     try:
         val = float(raw.strip())
-        return val if val > 0 else DEFAULT_TASK_HARD_TIMEOUT_SECONDS
+        return val if val > 0 and math.isfinite(val) else DEFAULT_TASK_HARD_TIMEOUT_SECONDS
     except (ValueError, TypeError):
         return DEFAULT_TASK_HARD_TIMEOUT_SECONDS
 
@@ -71,7 +72,7 @@ def task_gate_hard_timeout_seconds(base_timeout=None):
     if raw is not None and raw.strip():
         try:
             val = float(raw.strip())
-            if val > 0:
+            if val > 0 and math.isfinite(val):
                 return val
         except (ValueError, TypeError):
             pass
@@ -112,6 +113,7 @@ def _gate_verdict_file_candidates(task):
 
 def _task_has_valid_gate_verdict(task):
     rework_started = task.get("rework_started_at")
+    expected_token = task.get("execution_token") or task.get("rework_request_id")
     for path in _gate_verdict_file_candidates(task):
         try:
             if not os.path.exists(path):
@@ -126,6 +128,10 @@ def _task_has_valid_gate_verdict(task):
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             if isinstance(payload, dict):
+                if expected_token:
+                    file_token = payload.get("execution_token") or payload.get("rework_request_id") or payload.get("rework_token")
+                    if not file_token or file_token != expected_token:
+                        continue
                 verdict = str(payload.get("verdict") or "").strip().lower()
                 if verdict in ("pass", "blocked"):
                     note = str(payload.get("note") or "").strip()
@@ -138,42 +144,49 @@ def _task_has_valid_gate_verdict(task):
 def _is_gate_task(task):
     if not task:
         return False
-    if task.get("gate"):
-        return True
-    node = str(task.get("node") or task.get("stage") or "").lower()
-    if any(k in node for k in ("cleanroom", "gate")):
-        return True
-    if node in ("test", "review", "wrapup"):
-        return True
+    if task.get("gate") is False:
+        return False
+
     workflow_id = task.get("workflow_id")
     node_id = task.get("node") or task.get("stage")
-    if workflow_id and node_id:
+
+    # Authoritative workflow configuration check FIRST
+    wf_cfg = None
+    if workflow_id:
         try:
             from herdr.projects import workflow_config_for
             wf_cfg = workflow_config_for(workflow_id) or {}
-            for n in wf_cfg.get("nodes", []):
-                if n.get("id") == node_id:
-                    if n.get("gate") or n.get("node_type") == "gate":
-                        return True
-                    break
         except Exception:
             pass
-    wf_path = task.get("workflow_config")
-    if wf_path and node_id:
+    if not wf_cfg and task.get("workflow_config") and node_id:
         try:
             import yaml
-            p = Path(wf_path).expanduser()
+            p = Path(task["workflow_config"]).expanduser()
             if p.exists():
                 with open(p, "r", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                for n in cfg.get("nodes", []):
-                    if n.get("id") == node_id:
-                        if n.get("gate") or n.get("node_type") == "gate":
-                            return True
-                        break
+                    wf_cfg = yaml.safe_load(f) or {}
         except Exception:
             pass
-    return False
+
+    if wf_cfg and isinstance(wf_cfg, dict):
+        for n in wf_cfg.get("nodes", []):
+            if n.get("id") == node_id:
+                if n.get("gate") or n.get("node_type") == "gate":
+                    return True
+                if n.get("node_type") in ("agent", "implementation", "worker", "code") and not n.get("gate"):
+                    return False
+                break
+
+    if task.get("gate") is True:
+        return True
+
+    # Legacy fallback: exact names or word-boundary tokens, NOT arbitrary substring
+    node = str(node_id or "").lower()
+    if node in ("test", "review", "wrapup", "gate", "cleanroom", "cleanroom_test", "cleanroom_review", "cleanroom_gate"):
+        return True
+    if re.search(r"(^|[_-])(gate|cleanroom)($|[_-])", node):
+        return True
+    return bool(task.get("gate"))
 
 
 def run(cmd, timeout=10):

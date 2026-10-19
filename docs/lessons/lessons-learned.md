@@ -7314,6 +7314,9 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 | 人工仲裁无标准 CLI 命令入口 | 应急运维依赖直接修改底层数据库容易破坏版本和审计一致性 | 产品化提供 `herdr-task adopt-verdict` 命令，完成证据核验、事件落盘、SQLite 更新与状态广播全链条 |
 | 门禁身份启发式判定导致自定义门禁漏判 | 仅依节点名关键字（cleanroom/gate 等）判定门禁，导致自定义命名的合法门禁（如 executive_briefing）身份丢失 | 派发时根据工作流模板（node_type: gate / gate 字段）持久化 `task["gate"]=True`，判定回退至权威工作流配置 |
 | 环境变量无限值破坏超时保护 | 环境变量接受 inf/nan 会导致宽限期永久生效，watchdog 超时被无限期抑制 | 数值解析必须严格校验 `val > 0 and math.isfinite(val)`，非法或非有限数值一律回退至安全默认值 |
+| 返工轮次未中断旧工位且仅凭 mtime 校验结论 | 旧工位在返工纪元开启后晚写入旧结论，导致新轮次直接采纳旧结果 | 发起返工（`cmd_rework`）时必须先向工位发送 `C-c` 中断旧执行，并引入 execution token（执行令牌）绑定结论与任务纪元 |
+| 节点名称子串匹配导致普通节点冒充门禁 | 普通 Agent 节点（如 `aggregate_results` 命中 "gate"）被误标为门禁，获得门禁专属超时及失败状态恢复特权 | 必须优先查询工作流配置的 `node_type`，且仅匹配精确名称或首尾词边界标识，严禁无界子串匹配 |
+| 硬超时环境变量接受 inf/nan | 硬超时被解析为无穷大导致 watchdog 永不超时，挂死工位永久失联 | 硬超时必须使用 `val > 0 and math.isfinite(val)` 校验，拦截 `inf`、`-inf` 与 `nan` |
 
 ### 操作规范
 
@@ -7323,7 +7326,9 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 4. **受控仲裁通道**：当门禁被异常置为 failed 但证据确凿时，使用 `herdr-task adopt-verdict <task_id> [--verdict blocked/pass]` 采纳，禁止直接 update 数据库；状态网关对非 watchdog 失败或非门禁任务强制拒绝。
 5. **执行纪元隔离**：裁决落盘与采纳必须校验 `mtime >= rework_started_at - 1.0`，返工启动时主动 unlink 历史裁决残留。
 6. **权威门禁身份校验**：工位派发时显式写入 `gate: True`，Sentinel、Controller 与 CLI 判定门禁身份时优先读字段并结合 `workflow_config_for` 权威定义，严禁纯依赖节点名字符串包含匹配。
-7. **宽限期有限性保障**：所有超时宽限期配置必须校验有限正浮点数（`math.isfinite`），严禁接受 `inf` 或非数导致守护机制瘫痪。
+7. **宽限期与硬超时有限性保障**：所有超时配置（宽限期、基础硬超时、门禁硬超时）必须校验有限正浮点数（`math.isfinite`），严禁接受 `inf` 或非数导致守护机制瘫痪。
+8. **执行令牌纪元绑定**：返工发起时必须为工位分配 `execution_token` 并持久化到任务元数据，前置向工位发送 `C-c` 终止旧执行；门禁结论写入必须携带匹配的 `execution_token`，否则一律拒绝采纳。
+9. **严格词边界与权威类型优先**：消除一切 `cleanroom` 或 `gate` 的无界子串匹配，优先以工作流定义（`node_type: agent` 等）作为权威标准，绝不给普通节点附加 `gate=True`。
 
 ### 验证命令 / 守护测试
 
@@ -7336,4 +7341,4 @@ pytest -q tests/test_issue_250_eval_timeout_adaptive.py \
           tests/test_issue_250_codex_p1_p2_fixes.py
 ```
 
-关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与时效拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog。
+关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与执行令牌拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog；普通 Agent 节点绝不被误判为门禁；无穷大超时配置安全回退至默认值。

@@ -767,5 +767,168 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             mock_set_status.assert_called_once_with(task, "agent_done", "gate_verdict_recovery")
 
 
+    def test_p1_rework_execution_token_binding(self):
+        """P1: Verdict freshness must be bound to rework execution token epoch."""
+        controller = _load_controller()
+        sentinel = _load_sentinel()
+        herdr_task = _load_herdr_task()
+
+        task_id = "wf-p1-epoch-gate"
+        verdict_path = self.verdicts_dir / f"{task_id}.json"
+
+        # Rework task has execution_token "tok-new-1234"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p1",
+            "node": "cleanroom_gate",
+            "stage": "cleanroom_gate",
+            "status": "rework",
+            "gate": True,
+            "execution_token": "tok-new-1234",
+            "rework_started_at": 2000.0,
+            "version": 4,
+        }
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}):
+            # Scenario A: Prior attempt writes a verdict AFTER rework_started_at, but without token
+            verdict_path.write_text(
+                json.dumps({"verdict": "pass", "note": "stale attempt 1 result"}),
+                encoding="utf-8",
+            )
+            os.utime(str(verdict_path), (2050.0, 2050.0))  # mtime is after rework_started_at!
+
+            # Controller, Sentinel, and herdr-task must all reject it
+            self.assertFalse(controller._gate_verdict_file_is_fresh(str(verdict_path), task))
+            self.assertFalse(controller._gate_verdict_is_fresh(task))
+            has_valid, _, _, _ = sentinel._task_has_valid_gate_verdict(task)
+            self.assertFalse(has_valid)
+
+            # Scenario B: Prior attempt writes a verdict with old epoch token "tok-old-9999"
+            verdict_path.write_text(
+                json.dumps({
+                    "verdict": "pass",
+                    "note": "stale attempt 1 result with old token",
+                    "execution_token": "tok-old-9999",
+                }),
+                encoding="utf-8",
+            )
+            os.utime(str(verdict_path), (2050.0, 2050.0))
+
+            self.assertFalse(controller._gate_verdict_file_is_fresh(str(verdict_path), task))
+            self.assertFalse(controller._gate_verdict_is_fresh(task))
+            has_valid, _, _, _ = sentinel._task_has_valid_gate_verdict(task)
+            self.assertFalse(has_valid)
+
+            # Scenario C: Current rework attempt writes verdict with matching execution_token
+            verdict_path.write_text(
+                json.dumps({
+                    "verdict": "pass",
+                    "note": "fresh rework attempt verdict",
+                    "execution_token": "tok-new-1234",
+                }),
+                encoding="utf-8",
+            )
+            os.utime(str(verdict_path), (2050.0, 2050.0))
+
+            self.assertTrue(controller._gate_verdict_file_is_fresh(str(verdict_path), task))
+            self.assertTrue(controller._gate_verdict_is_fresh(task))
+            has_valid, verdict, note, _ = sentinel._task_has_valid_gate_verdict(task)
+            self.assertTrue(has_valid)
+            self.assertEqual(verdict, "pass")
+            self.assertEqual(note, "fresh rework attempt verdict")
+
+    def test_p2_no_substring_gate_classification(self):
+        """P2: Ordinary agent nodes like aggregate_results must NOT be classified as gates."""
+        sentinel = _load_sentinel()
+        herdr_task = _load_herdr_task()
+        controller = _load_controller()
+
+        workflow_cfg = {
+            "nodes": [
+                {
+                    "id": "aggregate_results",
+                    "label": "汇总结果",
+                    "node_type": "agent",
+                },
+                {
+                    "id": "investigate_issue",
+                    "label": "排查问题",
+                    "node_type": "agent",
+                },
+                {
+                    "id": "executive_briefing",
+                    "label": "高管决策简报会签",
+                    "node_type": "gate",
+                },
+            ]
+        }
+
+        task_agg = {
+            "task_id": "wf-p2-agg-1",
+            "workflow_id": "wf-p2",
+            "node": "aggregate_results",
+            "stage": "aggregate_results",
+        }
+        task_inv = {
+            "task_id": "wf-p2-inv-1",
+            "workflow_id": "wf-p2",
+            "node": "investigate_issue",
+            "stage": "investigate_issue",
+        }
+        task_exec = {
+            "task_id": "wf-p2-exec-1",
+            "workflow_id": "wf-p2",
+            "node": "executive_briefing",
+            "stage": "executive_briefing",
+        }
+
+        with patch("herdr.projects.workflow_config_for", return_value=workflow_cfg), \
+             patch.object(controller, "workflow_config_for", return_value=workflow_cfg):
+            # 1. sentinel _is_gate_task
+            self.assertFalse(sentinel._is_gate_task(task_agg))
+            self.assertFalse(sentinel._is_gate_task(task_inv))
+            self.assertTrue(sentinel._is_gate_task(task_exec))
+
+            # 2. herdr-task _is_gate_task
+            self.assertFalse(herdr_task._is_gate_task(task_agg))
+            self.assertFalse(herdr_task._is_gate_task(task_inv))
+            self.assertTrue(herdr_task._is_gate_task(task_exec))
+
+            # 3. controller node_is_gate
+            self.assertFalse(controller.node_is_gate("wf-p2", "aggregate_results"))
+            self.assertFalse(controller.node_is_gate("wf-p2", "investigate_issue"))
+            self.assertTrue(controller.node_is_gate("wf-p2", "executive_briefing"))
+
+            # 4. Even without workflow config, word-boundary tokens prevent substring match
+            task_agg_nowf = {"task_id": "t1", "node": "aggregate_results"}
+            task_inv_nowf = {"task_id": "t2", "node": "investigate_issue"}
+            self.assertFalse(sentinel._is_gate_task(task_agg_nowf))
+            self.assertFalse(herdr_task._is_gate_task(task_agg_nowf))
+            self.assertFalse(sentinel._is_gate_task(task_inv_nowf))
+            self.assertFalse(herdr_task._is_gate_task(task_inv_nowf))
+
+    def test_p2_hard_timeout_rejects_inf_and_nan(self):
+        """P2: task_gate_hard_timeout_seconds and task_hard_timeout_seconds reject inf/nan."""
+        sentinel = _load_sentinel()
+
+        # Check task_hard_timeout_seconds
+        for invalid in ["inf", "+inf", "-inf", "nan", "NaN", "0", "-10", "abc"]:
+            with patch.dict(os.environ, {"HERDR_TASK_HARD_TIMEOUT": invalid}):
+                self.assertEqual(sentinel.task_hard_timeout_seconds(), sentinel.DEFAULT_TASK_HARD_TIMEOUT_SECONDS)
+
+        # Check task_gate_hard_timeout_seconds
+        for invalid in ["inf", "+inf", "-inf", "nan", "NaN", "0", "-10", "abc"]:
+            with patch.dict(os.environ, {"HERDR_GATE_TASK_HARD_TIMEOUT": invalid}):
+                # When base_timeout=3600, returns max(3600, 7200) = 7200
+                self.assertEqual(sentinel.task_gate_hard_timeout_seconds(3600.0), 7200.0)
+
+        # Finite positive value accepted
+        with patch.dict(os.environ, {"HERDR_GATE_TASK_HARD_TIMEOUT": "9000.0"}):
+            self.assertEqual(sentinel.task_gate_hard_timeout_seconds(3600.0), 9000.0)
+
+        with patch.dict(os.environ, {"HERDR_TASK_HARD_TIMEOUT": "1800.0"}):
+            self.assertEqual(sentinel.task_hard_timeout_seconds(), 1800.0)
+
+
 if __name__ == "__main__":
     unittest.main()

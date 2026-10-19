@@ -8,6 +8,29 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-19] fix | 返工执行令牌绑定、消除门禁名称子串冒用与校验有限硬超时 (PR #266 Codex Review)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 最新审查中指出 3 项边界缺陷：
+     - [P1] `services/herdr-controller.py` 与 `bin/herdr-task`：旧工位在 `rework` 发起后若仍在运行，可能在清理动作及 `rework_started_at` 之后写入旧结论；仅凭 mtime 检查会误将其作为新轮次结果采纳，且 `cmd_rework` 未向旧工位发送中断信号。需将结论时效绑定至执行令牌（execution token / epoch）；
+     - [P2] `bin/herdr-task` 与 `services/herdr-sentinel.py`：对普通 Agent 节点（如 `aggregate_results` 或 `investigate_issue`），名称中的子串 `gate` 会在查询工作流配置前直接返回 True，导致 `_launch_task` 持久化 `gate=True`，使普通节点获得门禁专属超时及失败状态恢复特权。必须优先解析权威配置的 `node_type`，且仅保留确切的词边界门禁标识；
+     - [P2] `services/herdr-sentinel.py`：`HERDR_GATE_TASK_HARD_TIMEOUT=inf` 和 `HERDR_TASK_HARD_TIMEOUT=inf` 被 `float()` 解析为无穷大后被接纳，导致 watchdog 永不超时。需像相邻的 grace parser 一样强制要求 `math.isfinite(val)`。
+- 变更：
+  1. **返工执行令牌绑定与中断前置**：
+     - `bin/herdr-task:cmd_rework` 在进入新纪元前向旧工位发送 `C-c` 中断，分配 `execution_token` 并持久化到任务元数据；若为门禁任务，在返工提示词中注入令牌契约；
+     - `services/herdr-controller.py:_gate_verdict_file_is_fresh`、`services/herdr-sentinel.py:_task_has_valid_gate_verdict` 及 `bin/herdr-task:adopt_verdict_cli` 统一校验候选结论文件中的 `execution_token` 必须与任务期望的执行令牌一致，旧轮次写入被严格拒绝；
+     - `herdr/direct_dispatch.py:gate_verdict_contract` 支持可选 `execution_token` 参数，保持无令牌时逐字节完全兼容；
+  2. **消除子串冒用与权威节点类型优先**：
+     - `services/herdr-sentinel.py:_is_gate_task` 与 `bin/herdr-task:_is_gate_task` 将工作流权威配置校验前置，若 `node_type in ('agent', 'implementation', 'worker', 'code')` 且无显式 `gate` 配置，立即返回 False；
+     - 彻底废除 `cleanroom`/`gate` 任意子串匹配，仅匹配精确名称或首尾词边界正则 `r"(^|[_-])(gate|cleanroom)($|[_-])"`；
+     - `bin/herdr-task:_launch_task` 明确判定：若节点类型为 `agent`/`worker` 等且未显式指定 gate，绝不持久化 `task["gate"] = True`；Controller 对账循环中同样优先尊重工作流权威配置；
+  3. **有限硬超时强制校验**：
+     - `services/herdr-sentinel.py` 的 `task_hard_timeout_seconds` 与 `task_gate_hard_timeout_seconds` 均增加 `math.isfinite(val)` 校验，拦截 `inf`、`-inf`、`nan` 等非法配置。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增全部 3 项缺陷的回归测试（全量 18 个测试全部通过）；
+  2. `pytest -v tests/test_issue_250_*.py tests/test_selective_replan_core.py tests/test_auto_acceptance.py tests/test_direct_stage_dispatch.py` 全量 199 个测试与 32 个 subtests 全部绿色通过；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。
+
 ## [2026-10-19] fix | 基于权威工作流配置判定门禁身份、有限宽限期与 rework 状态对账 (PR #266 Codex Review)
 
 - 背景：
