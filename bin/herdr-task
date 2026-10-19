@@ -1531,42 +1531,20 @@ def _load_workflow_entry(workflow_id):
 
 
 def _mark_workflow_completed(workflow_id, outcome="delivered", force=False):
-    store = _get_store()
-    entry, _ = _load_workflow_entry(workflow_id)
-    if entry is None:
-        print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
-        return
+    from herdr.task_cli_workflow_close import mark_workflow_completed
 
-    try:
-        from herdr import kernel
-
-        kernel.transition_workflow(
-            workflow_id=workflow_id,
-            to_status="completed",
-            reason=f"workflow_completed: {outcome}",
-            source="herdr-task",
-            metadata={"outcome": outcome, "completed_at": _now()},
-            force=force,
-            store=store,
-        )
-        try:
-            from herdr import node_dispatch_store
-
-            node_dispatch_store.reconcile_workflow(
-                store.db_path, workflow_id, discover=False
-            )
-        except Exception:
-            pass
-    except Exception as exc:
-        print(f"Error marking workflow {workflow_id} completed: {exc}", file=sys.stderr)
-        raise
-
-    wf_file = (
-        globals().get("WORKFLOWS_FILE")
-        or os.environ.get("WORKFLOWS_FILE")
-        or WORKFLOWS_FILE
+    return mark_workflow_completed(
+        workflow_id,
+        outcome,
+        force,
+        deps={
+            "get_store": _get_store,
+            "load_workflow_entry": _load_workflow_entry,
+            "now": _now,
+            "sync_workflows_projection": sync_workflows_projection,
+            "workflows_file": globals().get("WORKFLOWS_FILE") or WORKFLOWS_FILE,
+        },
     )
-    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
 
 
 def _workflow_stage_tabs(workflow_id, tasks):

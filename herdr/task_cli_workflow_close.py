@@ -8,19 +8,34 @@ from pathlib import Path
 
 
 def close_workflow_owned(
-    workflow_id, include_coordinator=False, purge_clones=False, dry_run=False,
-    abandon=False, force=False, accept_escalated=False, confirm_force=None,
-    close_claim=None, *, load_tasks, load_workflow_entry, get_store,
-    finalize_one, close_pane, stage_reset, mark_workflow_completed,
-    workflow_stage_tabs, live_workspace_panes, foreign_panes_in_tab,
-    close_owned_pane, teardown_output_guard, record_output_retention,
-    clone_root, teardown_blocking_statuses,
+    workflow_id,
+    include_coordinator=False,
+    purge_clones=False,
+    dry_run=False,
+    abandon=False,
+    force=False,
+    accept_escalated=False,
+    confirm_force=None,
+    close_claim=None,
+    *,
+    load_tasks,
+    load_workflow_entry,
+    get_store,
+    finalize_one,
+    close_pane,
+    stage_reset,
+    mark_workflow_completed,
+    workflow_stage_tabs,
+    live_workspace_panes,
+    foreign_panes_in_tab,
+    close_owned_pane,
+    teardown_output_guard,
+    record_output_retention,
+    clone_root,
+    teardown_blocking_statuses,
 ):
     data = load_tasks()
-    tasks = [
-        t for t in data["tasks"]
-        if t.get("workflow_id") == workflow_id
-    ]
+    tasks = [t for t in data["tasks"] if t.get("workflow_id") == workflow_id]
     entry, _ = load_workflow_entry(workflow_id)
     if not tasks and entry is None:
         print(f"Unknown workflow (no tasks, no record): {workflow_id}")
@@ -29,6 +44,7 @@ def close_workflow_owned(
     # 1. Preflight Gate: Validate workflow transition to 'closing' BEFORE any teardown side effects
     if entry:
         from herdr.transitions import validate_workflow_transition
+
         validate_workflow_transition(
             entry.get("status", "pending"),
             "closing",
@@ -40,7 +56,11 @@ def close_workflow_owned(
         print(f"[CLOSE REPORT] workflow={workflow_id} (no tasks)")
         if not dry_run:
             if entry.get("status") != "completed":
-                mark_workflow_completed(workflow_id, outcome="abandoned" if abandon else "delivered", force=force)
+                mark_workflow_completed(
+                    workflow_id,
+                    outcome="abandoned" if abandon else "delivered",
+                    force=force,
+                )
             stage_reset(workflow_id)
             print(f"[WORKFLOW CLOSED] {workflow_id}")
         else:
@@ -60,9 +80,9 @@ def close_workflow_owned(
     base_branch = (entry or {}).get("base_branch") or "main"
 
     blocked_verdicts = [
-        t["task_id"] for t in tasks
-        if t.get("status") != "superseded"
-        and t.get("stage_verdict") == "blocked"
+        t["task_id"]
+        for t in tasks
+        if t.get("status") != "superseded" and t.get("stage_verdict") == "blocked"
     ]
     if blocked_verdicts and not abandon:
         print(
@@ -77,18 +97,16 @@ def close_workflow_owned(
         sys.exit(2)
 
     blocking = [
-        t["task_id"] for t in tasks
-        if t.get("status") in teardown_blocking_statuses
+        t["task_id"] for t in tasks if t.get("status") in teardown_blocking_statuses
     ]
     if blocking:
-        print(
-            "[CLOSE ABORT] workflow has unsettled tasks: "
-            + ", ".join(blocking)
-        )
+        print("[CLOSE ABORT] workflow has unsettled tasks: " + ", ".join(blocking))
         for t in tasks:
             if t.get("task_id") in blocking:
-                print(f'  {t["task_id"]}({t.get("status")} @ {t.get("clone_path") or "no-clone"}): '
-                      f'wait for settle, steer, or supersede with --reason')
+                print(
+                    f'  {t["task_id"]}({t.get("status")} @ {t.get("clone_path") or "no-clone"}): '
+                    f"wait for settle, steer, or supersede with --reason"
+                )
         sys.exit(2)
 
     # completed/committed 且 git 集成的任务尚未走完 commit/integrate 管线;
@@ -96,7 +114,8 @@ def close_workflow_owned(
     # 'cleaned -> committed' 非法转移,交付分支落不进集成链路
     # (2026-09-17 wf-nexusarchive-0917-01 wrapup 实测)。
     unsettled_git = [
-        t["task_id"] for t in tasks
+        t["task_id"]
+        for t in tasks
         if t.get("status") in ("completed", "committed")
         and (t.get("integration_mode") or "none") == "git"
         and not t.get("finalize_escalated")
@@ -104,21 +123,20 @@ def close_workflow_owned(
     if unsettled_git:
         print(
             "[CLOSE ABORT] workflow has git tasks awaiting finalize "
-            "(commit/integrate not settled): "
-            + ", ".join(unsettled_git)
+            "(commit/integrate not settled): " + ", ".join(unsettled_git)
         )
         for t in tasks:
             if t.get("task_id") in unsettled_git:
-                print(f'  {t["task_id"]}(completed @ {t.get("clone_path") or "no-clone"}): '
-                      f'herdr-task commit {t["task_id"]} / herdr-task integrate {t["task_id"]}')
+                print(
+                    f'  {t["task_id"]}(completed @ {t.get("clone_path") or "no-clone"}): '
+                    f'herdr-task commit {t["task_id"]} / herdr-task integrate {t["task_id"]}'
+                )
         print(
             "  等待 Controller 终化重试收敛;或手工收口: "
             "herdr-task commit <task_id>(completed)/ "
             "herdr-task integrate <task_id>(committed);"
         )
-        print(
-            "  确要丢弃交付物时: herdr-task supersede <task_id> --reason ..."
-        )
+        print("  确要丢弃交付物时: herdr-task supersede <task_id> --reason ...")
         sys.exit(2)
 
     # H-1: machine-set finalize_escalated no longer implies closable.
@@ -131,18 +149,23 @@ def close_workflow_owned(
     # supersede permanently discards that branch commits;
     # clear-escalation revokes the flag and re-drives integrate (may re-conflict).
     escalated_git = [
-        t["task_id"] for t in tasks
+        t["task_id"]
+        for t in tasks
         if t.get("status") in ("completed", "committed")
         and (t.get("integration_mode") or "none") == "git"
         and t.get("finalize_escalated")
     ]
     # --force is the explicitly confirmed direct escape hatch.  It is the
     # historical command-line contract; no second confirmation flag is needed.
-    escalated_via = "accept-escalated" if accept_escalated else ("force" if force else ("abandon" if abandon else ""))
+    escalated_via = (
+        "accept-escalated"
+        if accept_escalated
+        else ("force" if force else ("abandon" if abandon else ""))
+    )
     close_outcome = (
-        "abandoned" if abandon else
-        "escalated_accepted" if escalated_git and accept_escalated else
-        "delivered"
+        "abandoned"
+        if abandon
+        else "escalated_accepted" if escalated_git and accept_escalated else "delivered"
     )
     if escalated_git and not (accept_escalated or force or abandon):
         print(
@@ -171,35 +194,73 @@ def close_workflow_owned(
     # Preflight is read-only: pause may still win until the atomic closing
     # transition. Escape flags authorize output handling, never archive bypass.
     from herdr.clone_archive import plan_clone, preserve_clone
+
     reclaim_plans = {}
     output_authorizations = {}
     for task in tasks:
         task_id = task["task_id"]
         output = teardown_output_guard(task)
-        explicit = ("purge-clones" if purge_clones else "force" if force else "abandon" if abandon else
-                    "accept-escalated" if accept_escalated and task_id in escalated_git else "")
+        explicit = (
+            "purge-clones"
+            if purge_clones
+            else (
+                "force"
+                if force
+                else (
+                    "abandon"
+                    if abandon
+                    else (
+                        "accept-escalated"
+                        if accept_escalated and task_id in escalated_git
+                        else ""
+                    )
+                )
+            )
+        )
         clone = task.get("clone_path")
         exists = bool(clone and os.path.lexists(os.path.expanduser(clone)))
-        deleting_archive = task.get("clone_archive") and task.get("clone_reclaim_started") == task["clone_archive"].get("manifest_sha256")
-        document_output = (output["reason"] in {"unpreserved_worktree_output", "unintegrated_commit_diverged"}
-                           and (task.get("integration_mode") or "none") == "none")
-        safe_path = exists and not os.path.islink(clone) and os.path.commonpath([clone_root, os.path.realpath(clone)]) == clone_root and os.path.realpath(clone) != clone_root
-        allowed = (not output["reason"] or explicit or task.get("status") == "failed"
-                   or safe_path and (deleting_archive or document_output))
+        deleting_archive = task.get("clone_archive") and task.get(
+            "clone_reclaim_started"
+        ) == task["clone_archive"].get("manifest_sha256")
+        document_output = (
+            output["reason"]
+            in {"unpreserved_worktree_output", "unintegrated_commit_diverged"}
+            and (task.get("integration_mode") or "none") == "none"
+        )
+        safe_path = (
+            exists
+            and not os.path.islink(clone)
+            and os.path.commonpath([clone_root, os.path.realpath(clone)]) == clone_root
+            and os.path.realpath(clone) != clone_root
+        )
+        allowed = (
+            not output["reason"]
+            or explicit
+            or task.get("status") == "failed"
+            or safe_path
+            and (deleting_archive or document_output)
+        )
         if output["reason"] and not allowed:
             if not dry_run:
                 record_output_retention(task, output)
                 shown = dict(output)
                 if shown.get("remediation_cmd") and clone:
-                    shown["remediation_cmd"] = shown["remediation_cmd"].replace("<clone>", str(clone))
-                print("[CLOSE ABORT] unpreserved task output: " + json.dumps({"task_id": task_id, **shown}, ensure_ascii=False))
+                    shown["remediation_cmd"] = shown["remediation_cmd"].replace(
+                        "<clone>", str(clone)
+                    )
+                print(
+                    "[CLOSE ABORT] unpreserved task output: "
+                    + json.dumps({"task_id": task_id, **shown}, ensure_ascii=False)
+                )
                 sys.exit(2)
             continue
         if exists:
             try:
                 reclaim_plans[task_id] = plan_clone(task, clone_root)
             except (OSError, ValueError, tarfile.TarError) as exc:
-                print(f"[CLOSE ABORT] sandbox archive planning failed: {task_id}: {exc}")
+                print(
+                    f"[CLOSE ABORT] sandbox archive planning failed: {task_id}: {exc}"
+                )
                 sys.exit(2)
         output_authorizations[task_id] = explicit
 
@@ -208,16 +269,21 @@ def close_workflow_owned(
     # a concurrent pause either wins before this point or is rejected afterwards.
     if not dry_run and entry and entry.get("status") not in {"closing", "completed"}:
         from herdr import kernel
+
         kernel.transition_workflow(
-            workflow_id=workflow_id, to_status="closing",
+            workflow_id=workflow_id,
+            to_status="closing",
             reason=f"close_workflow: {'abandoned' if abandon else 'delivered'}",
-            source="herdr-task", force=force, store=get_store(),
+            source="herdr-task",
+            force=force,
+            store=get_store(),
             expected_status=entry.get("status"),
         )
 
     archives = {}
     if not dry_run:
         from herdr import kernel
+
         for task in tasks:
             task_id = task["task_id"]
             if task_id not in reclaim_plans:
@@ -227,26 +293,39 @@ def close_workflow_owned(
                     archive = preserve_clone(task, clone_root)
                 else:
                     from herdr.deliverables import project_for_tasks
-                    catalog = project_for_tasks(workflow_id, [task], include_expectations=False)
+
+                    catalog = project_for_tasks(
+                        workflow_id, [task], include_expectations=False
+                    )
                     if catalog.get("error") or catalog.get("truncated"):
                         raise ValueError("deliverable inventory incomplete")
                     archive = preserve_clone(task, clone_root)
                     archive["deliverables"] = catalog["items"]
                 # A recovery snapshot must not grant an implicit Git-output
                 # override when output appeared during the archive operation.
-                recovering = task.get("clone_archive") and task.get("clone_reclaim_started") == task["clone_archive"].get("manifest_sha256")
-                if ((task.get("integration_mode") or "none") == "git"
-                        and task.get("status") != "failed" and not recovering
-                        and not output_authorizations.get(task_id)):
+                recovering = task.get("clone_archive") and task.get(
+                    "clone_reclaim_started"
+                ) == task["clone_archive"].get("manifest_sha256")
+                if (
+                    (task.get("integration_mode") or "none") == "git"
+                    and task.get("status") != "failed"
+                    and not recovering
+                    and not output_authorizations.get(task_id)
+                ):
                     current_output = teardown_output_guard(task)
                     if current_output["reason"]:
                         record_output_retention(task, current_output)
-                        raise ValueError("Git output changed before archive publication: " + current_output["reason"])
+                        raise ValueError(
+                            "Git output changed before archive publication: "
+                            + current_output["reason"]
+                        )
             except (OSError, ValueError, tarfile.TarError) as exc:
                 print(f"[CLOSE ABORT] sandbox archive failed: {task_id}: {exc}")
                 sys.exit(2)
             archives[task_id] = archive
-            kernel.update_task_metadata(task_id, {"clone_archive": archive}, store=get_store())
+            kernel.update_task_metadata(
+                task_id, {"clone_archive": archive}, store=get_store()
+            )
 
     if dry_run:
         print(f"[DRY RUN] close-workflow {workflow_id}")
@@ -270,14 +349,18 @@ def close_workflow_owned(
 
     for task in tasks:
         if task.get("status") == "failed" and task["task_id"] not in reclaim_plans:
-            report["tasks"].append({
-                "task_id": task.get("task_id"),
-                "status": "failed",
-                "action": "retained-failed",
-                "clone_retained_reason": "failed task kept for debugging",
-            })
+            report["tasks"].append(
+                {
+                    "task_id": task.get("task_id"),
+                    "status": "failed",
+                    "action": "retained-failed",
+                    "clone_retained_reason": "failed task kept for debugging",
+                }
+            )
             continue
-        finalize_options = dict(purge_clones=purge_clones, dry_run=dry_run, close_claim=close_claim)
+        finalize_options = dict(
+            purge_clones=purge_clones, dry_run=dry_run, close_claim=close_claim
+        )
         if dry_run and task["task_id"] in reclaim_plans:
             finalize_options["reclaim_plan"] = reclaim_plans[task["task_id"]]
         if task["task_id"] in archives:
@@ -287,13 +370,26 @@ def close_workflow_owned(
             finalize_options["output_override"] = authorization
         report["tasks"].append(finalize_one(task, **finalize_options))
 
-    if any(row.get("action") == "retained" and (row.get("output_guard") or {}).get("reason")
-           for row in report["tasks"]) and not dry_run:
-        print("[CLOSE ABORT] output changed during teardown: " + json.dumps(report, ensure_ascii=False))
+    if (
+        any(
+            row.get("action") == "retained"
+            and (row.get("output_guard") or {}).get("reason")
+            for row in report["tasks"]
+        )
+        and not dry_run
+    ):
+        print(
+            "[CLOSE ABORT] output changed during teardown: "
+            + json.dumps(report, ensure_ascii=False)
+        )
         sys.exit(2)
 
     if not dry_run:
-        from herdr.clone_archive import is_residual_clone_shell, delete_residual_clone_shell
+        from herdr.clone_archive import (
+            is_residual_clone_shell,
+            delete_residual_clone_shell,
+        )
+
         remaining = []
         for task in tasks:
             clone = task.get("clone_path")
@@ -305,30 +401,29 @@ def close_workflow_owned(
                             continue
                 remaining.append(task["task_id"])
         if remaining:
-            print("[CLOSE ABORT] sandbox reclamation incomplete: " + ", ".join(remaining))
+            print(
+                "[CLOSE ABORT] sandbox reclamation incomplete: " + ", ".join(remaining)
+            )
             sys.exit(2)
 
     topo = workflow_stage_tabs(workflow_id, tasks)
     live_panes = (
         live_workspace_panes(topo["workspace_id"])
-        if topo["workspace_id"] and not dry_run else None
+        if topo["workspace_id"] and not dry_run
+        else None
     )
     for tab_id in topo["tab_ids"]:
         if not topo["workspace_id"]:
-            report["tabs_skipped"][tab_id] = (
-                "workspace unknown; cannot verify ownership"
-            )
+            report["tabs_skipped"][
+                tab_id
+            ] = "workspace unknown; cannot verify ownership"
             continue
         if live_panes is None:
             report["tabs_skipped"][tab_id] = "pane list unavailable"
             continue
-        foreign = foreign_panes_in_tab(
-            live_panes, tab_id, topo["owned_pane_ids"]
-        )
+        foreign = foreign_panes_in_tab(live_panes, tab_id, topo["owned_pane_ids"])
         if foreign:
-            report["tabs_skipped"][tab_id] = (
-                f"shared with foreign panes: {foreign}"
-            )
+            report["tabs_skipped"][tab_id] = f"shared with foreign panes: {foreign}"
             continue
         if dry_run:
             report["tabs_skipped"][tab_id] = "tab instance ownership unknown; retained"
@@ -346,17 +441,21 @@ def close_workflow_owned(
             )
         stage_reset(workflow_id)
 
-    coordinator_pane = (
-        topo.get("coordinator_pane")
-        or (entry or {}).get("coordinator_pane_id")
+    coordinator_pane = topo.get("coordinator_pane") or (entry or {}).get(
+        "coordinator_pane_id"
     )
     if include_coordinator and not dry_run:
         coordinator = dict((entry or {}).get("coordinator_runtime") or {})
-        identity = {"pane_id": coordinator_pane, "runtime": coordinator,
-                    "agent": coordinator.get("agent")}
+        identity = {
+            "pane_id": coordinator_pane,
+            "runtime": coordinator,
+            "agent": coordinator.get("agent"),
+        }
         action = close_claim.action(
-            "coordinator:" + str(coordinator_pane), identity,
-            close_owned_pane, lambda: close_pane(coordinator_pane),
+            "coordinator:" + str(coordinator_pane),
+            identity,
+            close_owned_pane,
+            lambda: close_pane(coordinator_pane),
         )
         report["coordinator_closed"] = bool(action.get("result"))
 
@@ -375,7 +474,9 @@ def close_workflow_owned(
             line += f" pane_retained({row['pane_retained_reason']})"
         print(line)
     if report.get("escalated_accepted"):
-        print("  [ESCALATED ACCEPTED] human-claimed escalated tasks (not ordinary cleaned):")
+        print(
+            "  [ESCALATED ACCEPTED] human-claimed escalated tasks (not ordinary cleaned):"
+        )
         for item in report["escalated_accepted"]:
             print(f"    {item.get('task_id')} via={item.get('via')}")
         print(
@@ -407,3 +508,43 @@ def close_workflow_owned(
     else:
         print(f"[WORKFLOW CLOSED] {workflow_id}")
     return report
+
+
+def mark_workflow_completed(workflow_id, outcome="delivered", force=False, *, deps):
+    get_store = deps["get_store"]
+    load_workflow_entry = deps["load_workflow_entry"]
+    now = deps["now"]
+    sync_workflows_projection = deps["sync_workflows_projection"]
+    workflows_file = deps["workflows_file"]
+    store = get_store()
+    entry, _ = load_workflow_entry(workflow_id)
+    if entry is None:
+        print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
+        return
+
+    try:
+        from herdr import kernel
+
+        kernel.transition_workflow(
+            workflow_id=workflow_id,
+            to_status="completed",
+            reason=f"workflow_completed: {outcome}",
+            source="herdr-task",
+            metadata={"outcome": outcome, "completed_at": now()},
+            force=force,
+            store=store,
+        )
+        try:
+            from herdr import node_dispatch_store
+
+            node_dispatch_store.reconcile_workflow(
+                store.db_path, workflow_id, discover=False
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f"Error marking workflow {workflow_id} completed: {exc}", file=sys.stderr)
+        raise
+
+    wf_file = workflows_file
+    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
