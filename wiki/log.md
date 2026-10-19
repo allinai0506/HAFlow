@@ -3010,3 +3010,24 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   3. 门禁状态机及关联测试 148 项用例全部 PASS；
   4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。
 
+## [2026-10-19] fix | 操作员 bypass 裁决执行纪元继承与可信回执鉴权 (PR #266 Codex Review Round 7 P2)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 中指出 1 项 P2 级纪元保持缺陷（`PRRT_kwDOUYu4N86t0iUq`）：当门禁任务因前序失败或重试进入返工纪元（已分配 `execution_token` / `rework_request_id` / `rework_token`）后，若操作员使用 `bypass_task_gate` 手工放行门禁，写入的 bypass 回执与 `gate-verdict.json` 缺少 `execution_token`。控制器、Sentinel 与 CLI 在核验门禁裁决新鲜度（`_gate_verdict_file_is_fresh` 与 `_authenticate_gate_verdict_evidence`）时，由于任务带有 `execution_token` 而裁决文件缺少该字段，将合法的人工 bypass 裁决判定为纪元不匹配而拒绝采纳；
+  2. 既有 `tests/test_finding_verifier.py` 因 `bin/herdr-task` 代码行数变动导致确权行号漂移，批处理安全测试断言失败。
+- 变更：
+  1. **Bypass 裁决继承任务执行纪元**：
+     - 在 `herdr/kernel.py:bypass_task_gate` 中，若任务已分配 `execution_token`、`rework_request_id` 或 `rework_token`，自动将其写入返回的 `receipt` 与落盘的 `v_data`；
+     - 同步将带有完整纪元字段的门禁裁决写入中央目录与任务 clone 路径 `.herdr/gate-verdict.json`；
+     - 允许对状态为 `failed` 的门禁工位执行 bypass，目标状态安全转为 `completed`。
+  2. **控制器、Sentinel 与 CLI 可信 Bypass 回执鉴权**：
+     - 在 `services/herdr-controller.py:_gate_verdict_file_is_fresh`、`services/herdr-sentinel.py:_task_has_valid_gate_verdict` 与 `bin/herdr-task:_authenticate_gate_verdict_evidence` 中，增加对有效 `payload.get("bypass")` 回执的可信核验路径；
+     - 确保在面对遗留或未携带 token 的合法 bypass 裁决时，依然能准确识别操作员放行意图并放行流转。
+  3. **刷新查找校验器用例代码行锚点**：
+     - 在 `tests/test_finding_verifier.py` 中将 `args._launch_intent` 反例代码行范围更新为 `2240..2260`，保持与当前 `bin/herdr-task` 实现精确对齐。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 项 Round 7 P2 专项测试（全量 38 项全部 PASS）；
+  2. `tests/test_finding_verifier.py` 20 项测试全部 PASS；
+  3. `tests/test_task_bypass_gate.py` 5 项测试全部 PASS；
+  4. 全量 Issue #250 及关联测试 90 项用例全部 PASS；
+  5. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。

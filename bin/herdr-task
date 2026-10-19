@@ -809,8 +809,14 @@ def _authenticate_gate_verdict_evidence(task, expected_verdict=None):
                     or payload.get("rework_token")
                 )
                 if not file_token or file_token != expected_token:
-                    last_err = f"execution token mismatch in {path} ({file_token} != {expected_token})"
-                    continue
+                    # Codex Review Round 7 P2: Authenticate operator bypass receipts as a trusted path
+                    bypass = payload.get("bypass")
+                    tid = task.get("task_id") or task.get("id")
+                    if bool(tid) and isinstance(bypass, dict) and (bypass.get("task_id") == tid) and bypass.get("bypass_id"):
+                        pass
+                    else:
+                        last_err = f"execution token mismatch in {path} ({file_token} != {expected_token})"
+                        continue
             file_v = str(payload.get("verdict") or "").strip().lower()
             if file_v not in ("pass", "blocked"):
                 last_err = f"gate verdict file {path} contains invalid verdict: '{file_v}'"

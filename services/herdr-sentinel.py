@@ -144,7 +144,12 @@ def _task_has_valid_gate_verdict(task):
                 if expected_token:
                     file_token = payload.get("execution_token") or payload.get("rework_request_id") or payload.get("rework_token")
                     if not file_token or file_token != expected_token:
-                        continue
+                        bypass = payload.get("bypass")
+                        tid = task.get("task_id") or task.get("id")
+                        if bool(tid) and isinstance(bypass, dict) and (bypass.get("task_id") == tid) and bypass.get("bypass_id"):
+                            pass
+                        else:
+                            continue
                 verdict = str(payload.get("verdict") or "").strip().lower()
                 if verdict in ("pass", "blocked"):
                     note = str(payload.get("note") or "").strip()

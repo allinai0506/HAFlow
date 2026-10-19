@@ -7327,6 +7327,7 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 | 裁决文件删除失败静默吞异常误标完成 | `os.remove` 发生权限或只读异常被静默忽略，旧裁决未被物理删除即持久化 `gate_cleanup_completed`，后续重试跳过清理直接采纳残留陈旧裁决 | 物理删除失败时必须立即抛出异常阻断流转，严禁持久化完成标记，确保所有候选裁决物理清除后才记录完成 |
 | receipt-v1 返工跳过凭据校验 | `services/herdr-controller.py` 中将 `completion_protocol == "receipt-v1"` 守护置于通用返工恢复之后，导致 idle 无 done marker 的普通任务在交付物满足时直接流转为 `agent_done`，完全绕过了交付回执校验（`consume_completion_receipt`） | 必须将 receipt-v1 协议守护前置于通用返工恢复逻辑，仅对门禁裁决恢复（`gate_verdict_ready`）做受控豁免，确保普通返工任务严格受凭证契约约束 |
 | 采纳裁决无条件刷新任务版本破坏 CAS 保护 | `bin/herdr-task:set_status` 在强制流转前无条件从数据库拉取最新版本号覆盖当前 task 版本，若其他写入者将任务置为不同失败原因或派发新执行，CAS 依然匹配成功并采用陈旧裁决完成任务 | 采纳流转必须保留由完成证据写入所绑定的授权快照版本（`expected_version`），并在流转前重新完整校验持久化快照的门禁属性、failed 状态、watchdog 失败原因与执行令牌，严禁无条件覆盖版本号 |
+| 操作员 bypass 裁决未保留执行纪元与令牌 | 当门禁进入返工纪元后，操作员通过 bypass 绕过门禁，若写入的 bypass 裁决文件未携带任务当前的 execution_token，控制器与 CLI 的时效校验（`_gate_verdict_file_is_fresh` 与 `_authenticate_gate_verdict_evidence`）会因 token mismatch 拒绝采纳该合法 bypass 结论 | `bypass_task_gate` 必须继承并落盘 task 当前的 `execution_token`、`rework_request_id` 与 `rework_token`；同时控制器、Sentinel 与 CLI 的时效核验需将合法任务的 bypass 回执作为可信鉴权路径，确保人工应急放行不受返工纪元令牌阻断 |
 
 ### 操作规范
 
@@ -7350,6 +7351,7 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 18. **receipt-v1 返工流转必须严格受回执契约守护**：在控制器对账与事件处理循环中，除已验证机器可读裁决的门禁工位外，任何 `receipt-v1` 任务绝不允许通过通用交付物恢复绕过 `consume_completion_receipt`，严禁将协议守护置于通用返工恢复之后。
 19. **裁决采纳必须绑定授权快照版本与全量字段重验**：对 watchdog-failed 门禁实施异常采纳时，必须保持受检快照的版本号（CAS），并在向数据库发起状态转移前，对持久化最新记录重验其门禁身份、`status == "failed"`、`failure_reason == "hard_timeout_watchdog"` 及 `execution_token` 一致性，任何不符立即阻断并退出，严禁盲目复制并发写入者的递增版本。
 20. **采纳裁决必须绑定磁盘持久化证据快照并防范进程间改写**：当门禁工位因 watchdog 超时置 failed 后，若 worker 仍在后台运行且在 Controller 读取裁决与派发 CLI 采纳命令之间改写了裁决文件（如由 `pass` 改为 `blocked`），`set_status` 绝不能盲目信任命令行参数；在执行 CAS 流转前，必须重新读取并鉴权磁盘裁决文件，校验其时效、未来时间戳偏差、执行令牌以及具体结论与目标结论完全一致，并在元数据中绑定 `gate_verdict_evidence_mtime`；任何文件缺失或结论篡改一律以 `[VERDICT REFUSED]` 坚决拒绝，Controller 在派发前也必须二次比对裁决一致性，消除文件读取与子进程执行之间的未绑定竞态窗口。
+21. **操作员 bypass 裁决纪元继承与可信路径鉴权**：在调用 `bypass_task_gate` 绕过门禁工位时，生成的 bypass 回执与 `gate-verdict.json` 必须保留任务当前的 `execution_token`、`rework_request_id` 与 `rework_token`，并将文件同步落盘至中央目录与任务 clone 目录；同时 Controller、Sentinel 与 CLI 在核验门禁裁决文件时，除比对执行令牌一致外，将经过平台签发的合法 bypass 回执作为可信鉴权路径，杜绝在返工纪元中操作员人工放行被误判为陈旧裁决拒收。
 
 ### 验证命令 / 守护测试
 

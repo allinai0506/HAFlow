@@ -1973,5 +1973,96 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             mock_run.assert_not_called()
 
 
+    def test_round7_p2_bypass_task_gate_preserves_execution_epoch(self):
+        """Round 7 P2: kernel.bypass_task_gate must preserve execution_token in receipt and gate verdict file."""
+        from herdr import kernel
+        from herdr.state_store import SQLiteStateStore
+        from herdr import direct_dispatch
+
+        store = SQLiteStateStore(self.db_path)
+        task_id = "task-r7-bypass-epoch"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r7",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "execution_token": "token-epoch-rework-42",
+            "rework_request_id": "req-epoch-42",
+            "rework_started_at": 1000.0,
+        }
+        store.save_task(task)
+
+        with patch.object(direct_dispatch, "gate_verdict_path", lambda tid: str(self.verdicts_dir / f"{tid}.json")):
+            res = kernel.bypass_task_gate(task_id, reason="Manual operator override during rework", operator="admin", store=store)
+
+        self.assertEqual(res["status"], "working")
+        self.assertEqual(res["stage_verdict"], "pass")
+        receipt = res.get("receipt", {})
+        self.assertEqual(receipt.get("execution_token"), "token-epoch-rework-42")
+        self.assertEqual(receipt.get("rework_request_id"), "req-epoch-42")
+
+        # Verify durable gate verdict file contains execution_token
+        v_path = self.verdicts_dir / f"{task_id}.json"
+        self.assertTrue(v_path.exists())
+        payload = json.loads(v_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload.get("execution_token"), "token-epoch-rework-42")
+        self.assertEqual(payload.get("rework_request_id"), "req-epoch-42")
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}):
+            # Verify controller recognizes it as fresh
+            controller = _load_controller()
+            reloaded = store.get_task(task_id)
+            is_fresh = controller._gate_verdict_file_is_fresh(str(v_path), reloaded)
+            self.assertTrue(is_fresh)
+
+            # Verify Sentinel recognizes it as valid
+            sentinel = _load_sentinel()
+            has_verdict, v, note, mtime = sentinel._task_has_valid_gate_verdict(reloaded)
+            self.assertTrue(has_verdict)
+            self.assertEqual(v, "pass")
+
+            # Verify task CLI authentication recognizes it
+            herdr_task = _load_herdr_task()
+            ok, auth = herdr_task._authenticate_gate_verdict_evidence(reloaded, expected_verdict="pass")
+            self.assertTrue(ok)
+            self.assertEqual(auth[0], "pass")
+
+    def test_round7_p2_controller_and_cli_authenticate_legacy_bypass_receipt_fallback(self):
+        """Round 7 P2: When execution_token is missing but authentic bypass receipt is present, authenticate as trusted."""
+        controller = _load_controller()
+        herdr_task = _load_herdr_task()
+
+        task_id = "task-r7-bypass-fallback"
+        task = {
+            "task_id": task_id,
+            "id": task_id,
+            "workflow_id": "wf-r7",
+            "node": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "execution_token": "token-current",
+        }
+
+        v_path = self.verdicts_dir / f"{task_id}.json"
+        v_path.write_text(
+            json.dumps({
+                "verdict": "pass",
+                "note": "Operator bypass",
+                "bypass": {"bypass_id": "b-1", "task_id": task_id, "operator": "lead"},
+            }),
+            encoding="utf-8",
+        )
+
+        is_fresh = controller._gate_verdict_file_is_fresh(str(v_path), task)
+        self.assertTrue(is_fresh)
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}):
+            ok, auth = herdr_task._authenticate_gate_verdict_evidence(task, expected_verdict="pass")
+            self.assertTrue(ok)
+            self.assertEqual(auth[0], "pass")
+
+
 if __name__ == "__main__":
     unittest.main()

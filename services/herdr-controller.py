@@ -8265,7 +8265,13 @@ def _gate_verdict_file_is_fresh(path, task):
                 or payload.get("rework_token")
             )
             if not file_token or file_token != expected_token:
-                return False
+                # Codex Review Round 7: Authenticate operator bypass receipts as a trusted path
+                bypass = payload.get("bypass")
+                tid = task.get("task_id") or task.get("id")
+                if bool(tid) and isinstance(bypass, dict) and (bypass.get("task_id") == tid) and bypass.get("bypass_id"):
+                    pass
+                else:
+                    return False
         except Exception:
             return False
 
