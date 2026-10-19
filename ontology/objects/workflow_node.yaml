@@ -23,7 +23,7 @@ properties:
   name: 节点类型
   type: enum
   required: false
-  notes: agent|human|tool|gate，默认 agent
+  notes: 文档枚举 agent|human|tool|gate；代码未做枚举校验（workflow.py L341），仅观测到 agent 与 gate（join 节点，controller L4108-4116）
 - id: depends_on
   name: 前置依赖
   type: list[string]
@@ -41,7 +41,7 @@ properties:
   name: 默认任务类型
   type: enum
   required: false
-  notes: explore|plan|code|test|review|docs
+  notes: 文档枚举 explore|plan|code|test|review|docs；与 launch --task-type（fix|feat|...）及 domain 注册表词表不一致（SC-013）
 - id: default_integration_mode
   name: 默认交付模式
   type: enum

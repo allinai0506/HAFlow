@@ -1,0 +1,17 @@
+id: task_teardown_allowed
+name: 物理拆除前任务状态允许
+description: purge 与 finalize 的物理拆除（关窗格、删克隆）前，任务状态不得属于 ACTIVE 或 pending（TEARDOWN_BLOCKING_STATUSES）。
+lifecycle: experimental
+inputs:
+- task
+returns: boolean
+logic_ref: bin/herdr-task:purge_task
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: TEARDOWN_BLOCKING_STATUSES L190
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: purge_task 状态门禁 L6560-6575
+  confidence: high

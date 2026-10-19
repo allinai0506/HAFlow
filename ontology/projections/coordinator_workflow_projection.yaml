@@ -1,9 +1,10 @@
 id: coordinator_workflow_projection
 name: 协调器工作流上下文投影
-description: 面向项目协调器 Agent 的最小工作流视图：足以推进节点与派发任务，不暴露用户令牌与原始证据。
+description: 面向项目协调器 Agent 的最小工作流视图。r1：不授予任何写动作；协调器权限边界未证实（unknown）。
 lifecycle: experimental
 consumers:
 - role: coordinator_agent
+  role_implemented: false
 objects:
   workflow_instance:
     properties:
@@ -44,13 +45,8 @@ rules:
 - task_transition_allowed
 - gate_verdict_valid
 - required_task_ids_satisfied
-actions:
-- launch_task
-- transition_task
-- close_workflow
-policies:
-- operator_cli_policy
-- controller_service_policy
+actions: []
+policies: []
 exclude_by_default: true
 evidence:
 - kind: intended
@@ -59,5 +55,5 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/context_compiler.py
-  locator: WorkingContext 编译入口
+  locator: WorkingContext 编译入口（未逐行复核）
   confidence: high

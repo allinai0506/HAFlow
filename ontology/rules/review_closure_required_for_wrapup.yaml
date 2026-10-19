@@ -1,0 +1,21 @@
+id: review_closure_required_for_wrapup
+name: wrapup 完成需审查闭环
+description: wrapup 节点的任务进入 completed 前必须具备审查闭环回执（review closure）；kernel 与 CLI 均强制该检查。
+lifecycle: experimental
+inputs:
+- task
+returns: boolean
+logic_ref: herdr/review_closure.py:check_completion_allowed
+evidence:
+- kind: implemented
+  source: herdr/review_closure.py
+  locator: check_completion_allowed L693-720
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: transition_task wrapup 闭环闸门 L156-161
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: set 对 wrapup 的闭环校验 L2469-2475
+  confidence: high

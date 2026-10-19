@@ -1,11 +1,41 @@
-# 0004 Modeling Decisions — 为什么这样建模
+# ADR-0004：候选本体的建模决策
 
-1. **候选（全部 experimental）**：首轮面向评审，不把任何定义标为 active；active 需要评审 + 测试 + Merge。
-2. **对象选择**：只建模真实业务闭环所需的最小集合（12 个对象）。Trajectory/Observation/Finding/ContextPack 是重要语义层，但属于下一批切片候选，本轮不纳入以免范围失控。
-3. **数据库不是业务对象**：`tasks` 表一个对象承载了 canonical 列 + payload 扩展；本体按业务含义拆成 `task` 的 properties，而不是按表 1:1 建对象。
-4. **workflow_definition 双载体**：模板与 Run 冻结快照在业务上都是“定义”；用一个对象 + identity 表达，避免把同一语义拆成两套事实源。
-5. **artifact 是投影不是实体**：`deliverables.py` 明确其不构成已验证事实；因此 relation `task_produces_artifact` 标记 object_backed=false，并在描述中保留“不保证已验证”。
-6. **event/checkpoint 建模为对象**：虽然偏基础设施，但它们是业务追溯与恢复的持久事实，先以 experimental 纳入，允许后续降为 Coupling。
-7. **关系最小化**：只建 12 条有业务含义的关系；`workflow_id` 直连与 `node` 路径并存，因为恢复扫描依赖直连（FK），DAG 语义依赖节点路径。
-8. **动作全部有 binding**：按技能要求，写操作必须给出 target/inputs/preconditions/authorization/effects/side_effects/idempotency/transaction/audit/failure_behavior/bindings/verification；未接线项在 open questions 中明示。
-9. **权限策略保守**：`task_agent_scope_policy` 明确禁止 Agent 自我扩权；`gate_bypass_policy` 记录“无二次审批”为已知缺口而非隐藏假设。
+## 背景
+
+Brownfield Discovery 第一切片需要把项目、工作流、节点、任务、预占、门禁、交付物、事件、检查点的语义显式化。建模时需要在“覆盖真实行为”与“避免表结构机械映射”之间取舍。
+
+## Evidence
+
+- 证据与冲突：`decisions/0002-evidence-inventory.md`、`decisions/0003-semantic-conflicts.md`。
+- 评审中的建模问题：`proposals/OEP-0001-review-r1.md` 的 B-01、B-05、M-01、M-06、M-07、M-08。
+
+## 决策
+
+1. **全部候选为 experimental。** 首轮面向评审，不把任何定义标记为 active。Active 需要评审、测试与合并。
+2. **对象只覆盖最小闭环。** 12 个对象覆盖项目、工作流、节点、任务、Agent、池、预占、门禁、产物、事件、检查点。Trajectory、Observation、Finding、ContextPack 留给后续切片。
+3. **数据库表不等于业务对象。** `tasks` 表是一个对象，其业务属性按语义拆入 properties（如 payload.branch、payload.clone_path）。不做表到对象的 1:1 映射。
+4. **状态机之外的写入路径显式建模。** 每个绕过矩阵的写入路径记录在 `out_of_matrix_writers` 中，附证据。这样状态机不会在视觉上显得完整。收敛与否交由人工决策（D1）。
+5. **授权是唯一来源。** 动作的 `authorization.policies` 为唯一来源，策略的 `allowed_actions` 由其派生。避免双向不一致（评审 B-05）。
+6. **投影只读。** 没有写动作的投影才能称为只读。控制台写路由的缺口记录在投影描述与评审中，不伪装成已受控（评审 B-04）。
+7. **artifact 是投影，不是存储实体。** `deliverables.py` 明确其不构成已验证事实，因此 `task_produces_artifact` 标记为 `object_backed: false`，描述中保留“不保证已验证”。
+8. **event 与 checkpoint 暂列为对象。** 它们偏基础设施，但承载业务追溯与恢复事实。是否长期保留为对象交由人工决策（D9）。
+9. **关系最小化。** 只建有业务含义的关系。`workflow_id` 直连与节点路径并存：前者表达容器归属，后者表达 DAG 归属。
+10. **门禁先保留合并模型，并标注冲突。** 门禁配置（节点）与结论（任务）在本轮合并为一个对象，描述中注明，待 D2 决策后再拆分。
+
+## 被拒绝方案
+
+- **从 SQLite schema 自动生成对象。** 会把 payload 与 canonical 列混为一谈，且丢失语义（ADR-0004 决策 3）。
+- **把 bypass 建模为普通迁移。** 代码是直接写入，不经网关；把它当普通迁移会隐藏绕过路径（评审 B-01）。
+- **把角色（roles）当作已实现的权限。** 代码中不存在这些角色；它们只能标注为 `roles_implemented: false` 的候选（评审 M-12 相关）。
+- **以 Prompt 文本代替策略执行点。** 任务 Agent 的业务范围目前没有执行点，只能记录为未强制的设计意图。
+
+## 影响
+
+- 候选本体是可 diff 的治理载体，但不改变任何运行时行为。
+- 状态机完整性在 D1 决策前不成立；依赖状态机的消费者必须等待。
+- 授权模型在 D6 决策前仍是候选。
+
+## 兼容性
+
+- 纯新增目录，无迁移。
+- 内部分类键与预占状态名称的调整无外部消费者，不构成破坏性变更。

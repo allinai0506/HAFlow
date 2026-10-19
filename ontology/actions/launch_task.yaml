@@ -7,7 +7,7 @@ inputs:
 - task_id
 - workflow_id
 - node
-- agent|auto
+- agent
 - task_type
 - integration_mode
 - dispatch_role
@@ -22,28 +22,27 @@ effects:
   creates:
   - task
   - agent_reservation
-  - artifact
   state_transition:
     state_machine: task_lifecycle
-    from: null
+    from: pending
     to: dispatched
+    note: launch 先登记 pending，再由 dispatch 迁移到 dispatched（bin/herdr-task L4197, L4244, L4446）
 side_effects:
-- 创建克隆目录与分支
+- 创建 CoW 克隆与分支（services/herdr-worker.py）
 - 占用窗格
 - 写基线指纹与 launch intent
 idempotency:
   strategy: intent_guard
-  key: task_id + launch_intent
+  key: task_id + launch_intent（幂等细节 UNVERIFIED）
 transaction:
-  mode: two_phase
+  mode: two_phase_intent
   owner: bin/herdr-task launch
 audit:
   required: true
   event: launch_intent / task_transition
 failure_behavior:
-  retry: safe_only
-  budget: launch intent 有界重试
-  compensation: release_reservation + reclaim
+  retry: bounded_by_launch_intent
+  compensation: release_agent_reservation；失败时迁移 failed（L4685）
 bindings:
 - connector: herdr_task_cli
   operation: launch
@@ -55,13 +54,13 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: launch 流程 L3533-3540, L4183-4191, L4263-4265, L4446-4562
+  locator: launch 子命令 L8807-8836（--task-type choices L8823-8835）
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: launch 流程 L4183-4191, L4197, L4244, L4263-4265, L4446, L4560-4562, L4685
   confidence: high
 - kind: implemented
   source: services/herdr-worker.py
-  locator: 克隆/分支/基线 L132-170, L262-330, L1089-1143
-  confidence: high
-- kind: implemented
-  source: herdr/node_capacity.py
-  locator: 容量校验 L22-81
+  locator: create_clone L132-170 / build_baseline_fingerprint L580-605
   confidence: high

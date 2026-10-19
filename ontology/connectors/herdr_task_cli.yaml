@@ -5,26 +5,34 @@ lifecycle: experimental
 type: cli
 entrypoint: bin/herdr-task
 operations:
-- add
-- launch
-- set
-- verify-baseline
-- rework
-- commit
-- integrate
-- finalize
-- cleanup
-- close-workflow
-- pause
-- resume
-- bypass-gate
-- supersede
+- id: bypass-gate
+  kind: subcommand
+- id: cleanup
+  kind: subcommand
+- id: close-workflow
+  kind: subcommand
+- id: commit
+  kind: subcommand
+- id: finalize
+  kind: subcommand
+- id: integrate
+  kind: subcommand
+- id: launch
+  kind: subcommand
+- id: purge
+  kind: subcommand
+- id: set
+  kind: subcommand
+- id: supersede
+  kind: subcommand
+- id: verify-baseline
+  kind: subcommand
+timeout_ms: null
+retry:
+  mode: unknown
+  note: 未在候选中核对超时与重试配置
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: add/launch/set/verify-baseline/commit/integrate/finalize/cleanup/close-workflow/rework/supersede
-  confidence: high
-- kind: intended
-  source: docs/references/cli-reference.md
-  locator: 命令面
+  locator: argparse 子命令 add_parser L8741-9568
   confidence: high

@@ -8,7 +8,6 @@ inputs:
 - onto
 preconditions:
 - task_transition_allowed
-- workflow_transition_allowed
 authorization:
   policies:
   - operator_cli_policy
@@ -19,16 +18,16 @@ effects:
     to: integrated
 side_effects:
 - 目标分支更新
-- 记录 integrated_commit
+- 记录 integrated 引用
 idempotency:
   strategy: business_key
   key: task_id + integrated sha
 transaction:
-  mode: git_atomic
+  mode: git_then_store
   owner: bin/herdr-task integrate
 audit:
   required: true
-  event: task_transition / pull_request_merged
+  event: task_transition
 failure_behavior:
   retry: safe_only
   compensation: none
@@ -37,9 +36,9 @@ bindings:
   operation: integrate
 verification:
   strategy: reread_target
-  target: git target branch + tasks.status
+  target: git 目标分支 + tasks.status
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: L6461-6515
+  locator: integrate 实现 L6461-6515
   confidence: high

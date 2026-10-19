@@ -4,8 +4,7 @@ description: 每个 Task 对应唯一 clone_path；克隆目录已存在即拒�
 lifecycle: experimental
 inputs:
 - task
-returns:
-  isolated: bool
+returns: boolean
 logic_ref: services/herdr-worker.py:create_clone
 evidence:
 - kind: implemented
@@ -16,3 +15,5 @@ evidence:
   source: wiki/domain-model.md
   locator: 不变量 2
   confidence: high
+outputs:
+- isolated

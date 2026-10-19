@@ -1,6 +1,6 @@
 id: commit_task
 name: 提交任务分支
-description: 将克隆内产出提交到任务独占分支（或采纳候选提交），推进 completed -> committed。
+description: 将克隆内产出提交到任务独占分支，推进 completed -> committed。
 lifecycle: experimental
 target: task
 inputs:
@@ -17,17 +17,16 @@ effects:
     from: completed
     to: committed
 side_effects:
-- git commit/branch ref 写入
-- 可能采用候选 SHA
+- git commit 与分支 ref 写入
 idempotency:
   strategy: business_key
   key: task_id + commit sha
 transaction:
-  mode: git_atomic
+  mode: git_then_store
   owner: bin/herdr-task commit
 audit:
   required: true
-  event: task_transition / delivery_checked
+  event: task_transition
 failure_behavior:
   retry: safe_only
   compensation: none
@@ -40,5 +39,5 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: L5693-5700, L6025-6032
+  locator: commit 迁移 L5693-5700, L6025-6032
   confidence: high

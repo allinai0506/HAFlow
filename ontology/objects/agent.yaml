@@ -39,7 +39,7 @@ properties:
   name: 支持断点续跑
   type: bool
   required: false
-- id: capabilities.prompt_injection
+- id: capabilities.supports_prompt_injection
   name: 支持 Prompt 注入
   type: bool
   required: false
@@ -47,7 +47,7 @@ properties:
   name: 健康状态
   type: enum
   required: false
-  notes: preflight/deep preflight 快照；硬不健康永久排除
+  notes: preflight / deep preflight 快照；硬不健康状态（TOKEN_EXHAUSTED、AUTH_REQUIRED 等）在路由中被排除，直到后续快照覆盖（agent_router.py HARD_UNHEALTHY_STATUSES）
 evidence:
 - kind: implemented
   source: herdr/agent_binary.py
@@ -59,8 +59,9 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/agent_adapter.py
-  locator: AgentAdapterCapability L46-67 / 能力矩阵 L159-207
+  locator: AgentCapability L47-67 / 能力矩阵 L159-207
   confidence: high
+  notes: 类名为 AgentCapability（r1 修正：原文误写 AgentAdapterCapability）
 - kind: implemented
   source: herdr/deep_preflight.py
   locator: 健康快照持久化 L594-621

@@ -1,13 +1,15 @@
 id: reservation_expired_reclaimed
-name: 超时预占被回收
+name: 超时未注册预占被清理（记录移除）
 facts:
   agent_reservation:
     task_id: T-NOT-REGISTERED
-    created_at: now-301
+    created_at: now - 301 seconds
   task_registered: false
 expected:
   rules:
     agent_reservation_ttl_bounded: true
   state:
     from: reserved
-    to: expired
+    to: removed
+  record_present_after_cleanup: false
+notes: r1 修正：原用例期望 state=expired，而 expired 不作为持久状态存储（F-19）。

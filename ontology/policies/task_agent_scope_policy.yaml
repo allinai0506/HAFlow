@@ -1,10 +1,11 @@
 id: task_agent_scope_policy
 name: Task Agent 范围权限
-description: Task Agent 范围权限（候选策略，待评审）
+description: Task Agent 范围权限（候选策略，待人工评审；allowed_actions 由 actions 的 authorization 派生）
 lifecycle: experimental
 subjects:
   roles:
   - task_agent
+  roles_implemented: false
   note: 运行在独占克隆内的执行 Agent
 resources:
   objects:
@@ -13,23 +14,17 @@ resources:
   - workflow_node
 allowed_actions: []
 conditions:
-- 仅可见自身 Task、所属节点、自身产物与受限上下文
-- 不得读取完整本体或企业经验原文；凭证经脱敏后传递
-- worker_policy.permissions 是 declared-only（生产未接线，见 open questions）
+- 设计意图：仅可见自身任务、所属节点与产物（无策略执行点，未强制）
+- 凭证应脱敏后传递（设计意图，未核对）
 agent_execution:
-  mode: deny_agent_escalation
-  inherit_user: false
-  note: 不得让 Agent 自行扩大权限（技能硬约束）
+  mode: inherit_user
+  note: 以本机用户身份运行于克隆；业务范围未强制
 evidence:
-- kind: intended
-  source: docs/product-specs/workflow-template-schema.md
-  locator: permissions 枚举 L54-55
+- kind: implemented
+  source: bin/herdr-task
+  locator: bypass-gate --operator 默认 human L9080-9086
   confidence: high
 - kind: implemented
-  source: herdr/mcp.py
-  locator: 权限矩阵 declared-only L135-205
-  confidence: high
-- kind: implemented
-  source: herdr/workflow.py
-  locator: context 引用块只给 id+路径 L286-298
+  source: herdr/kernel.py
+  locator: bypass_task_gate 原因校验 L832-857
   confidence: high

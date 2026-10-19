@@ -1,6 +1,6 @@
 id: gate_verdict_lifecycle
 name: 门禁结论生命周期
-description: 门禁结论字段从 unset 出发，随任务 completed 写入 pass/blocked；blocked 必填备注。rework/重验后的改写语义暂无直接证据，标记 unknown。
+description: 门禁结论字段（tasks.stage_verdict）从 unset 出发。结论随 completed 写入，同一任务可被再次写入；rework 与 delivery-repair 会清空结论；bypass 与 force-pass 可在任意前态写入 pass。
 lifecycle: experimental
 object: gate
 initial: unset
@@ -12,26 +12,58 @@ states:
 transitions:
 - from: unset
   to: pass
-  trigger: herdr-task set <task_id> completed --verdict pass
+  trigger: herdr-task set <task> completed --verdict pass
   guards:
   - gate_verdict_valid
 - from: unset
   to: blocked
-  trigger: herdr-task set <task_id> completed --verdict blocked --note <note>
+  trigger: herdr-task set <task> completed --verdict blocked --note <note>
   guards:
   - gate_verdict_valid
+- from: pass
+  to: blocked
+  trigger: herdr-task set（同任务再次 completed 写入结论）
+  guards:
+  - gate_verdict_valid
+- from: blocked
+  to: pass
+  trigger: herdr-task set（同任务再次 completed 写入结论）
+  guards:
+  - gate_verdict_valid
+- from: unset
+  to: pass
+  trigger: kernel.bypass_task_gate / kernel.force_pass_gate 直接写 pass
+  guards:
+  - gate_bypass_audited
+- from: blocked
+  to: pass
+  trigger: kernel.bypass_task_gate / kernel.force_pass_gate 直接写 pass
+  guards:
+  - gate_bypass_audited
+- from: pass
+  to: unset
+  trigger: rework / delivery-repair 清空结论（delivery_rework.py L108）
+  guards: []
+- from: blocked
+  to: unset
+  trigger: rework / delivery-repair 清空结论（delivery_rework.py L108）
+  guards: []
 unknowns:
-- pass/blocked 的重写与回落条件（rework 后）未在代码中找到显式状态约束
+- 结论与任务状态的一致性约束（例如 rework 后是否必须重新 completed）未在矩阵中声明
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: verdict 规则 L2402-2419
+  locator: set_status L2338-2480（verdict 规则 L2402-2419；同状态写入先于 no-op 检测 L2429-2457）
   confidence: high
 - kind: implemented
-  source: herdr/state_db.py
-  locator: tasks.stage_verdict/stage_verdict_note L392-393
+  source: herdr/delivery_rework.py
+  locator: 清空 stage_verdict L102-108
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: bypass_task_gate 写 pass L832-957
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py
-  locator: fix-loop 消费 blocked L2481-2551
+  locator: try_auto_verdict L8275-8316
   confidence: high

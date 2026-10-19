@@ -5,11 +5,12 @@ lifecycle: experimental
 inputs:
 - workflow_definition
 - workflow_node
-returns:
-  unique: bool
+returns: boolean
 logic_ref: herdr/workflow.py:validate_workflow_dag
 evidence:
 - kind: implemented
   source: herdr/workflow.py
   locator: 重复 id 抛错 L106-108
   confidence: high
+outputs:
+- unique

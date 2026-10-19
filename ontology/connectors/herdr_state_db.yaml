@@ -1,9 +1,13 @@
 id: herdr_state_db
 name: StateDB SQLite
-description: StateDB SQLite（运行时绑定目标）
+description: StateDB 数据库（权威事实源）。仅作映射来源，不是动作绑定目标。
 lifecycle: experimental
 type: database
 path: ~/.herdr-controller/state.db
+operations: []
+timeout_ms: null
+retry:
+  mode: unknown
 tables:
 - workflows
 - tasks
@@ -16,13 +20,13 @@ tables:
 - completion_observations
 - completion_receipts
 - workflow_recovery_operations
-- user_tokens
 evidence:
 - kind: implemented
   source: herdr/state_db.py
-  locator: state.db 表结构 L362-665
+  locator: 表结构 L362-665
   confidence: high
 - kind: implemented
   source: herdr/state_store.py
   locator: StateStore 抽象 L192-217
   confidence: high
+notes: r1 移除 user_tokens（凭证表，不应在本体连接器元数据中列出）。

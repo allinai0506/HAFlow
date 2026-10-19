@@ -5,9 +5,7 @@ lifecycle: experimental
 inputs:
 - workflow_node
 - task
-returns:
-  within_limit: bool
-  error: string
+returns: boolean
 logic_ref: herdr/node_capacity.py:launch_capacity_error
 evidence:
 - kind: implemented
@@ -18,3 +16,6 @@ evidence:
   source: bin/herdr-task
   locator: launch 调用 L3332-3348
   confidence: high
+outputs:
+- within_limit
+- error

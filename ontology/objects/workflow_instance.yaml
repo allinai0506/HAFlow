@@ -32,7 +32,7 @@ properties:
   name: 当前阶段
   type: string
   required: false
-  notes: legacy；未发现生产写入方（unknown）
+  notes: legacy；writer 未找到（unknown）。save_workflow 在字段存在时持久化（state_db.py L1495-1513）
 - id: metadata.project_id
   name: 所属项目
   type: string

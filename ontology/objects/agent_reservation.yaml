@@ -1,6 +1,6 @@
 id: agent_reservation
 name: Agent 预占锁
-description: 选人后、任务正式注册前的跨进程预占记录，关闭路由竞争窗口；TTL 300 秒，注册后显式释放。
+description: 选人后、任务正式注册前的跨进程预占记录，关闭路由竞争窗口。记录在三种情况下被移除：显式 release、任务已注册后的交接清理、未注册且超过 TTL 300 秒的超时清理；磁盘上不存在持久化的 expired 状态。
 lifecycle: experimental
 identity:
   primary_key: task_id

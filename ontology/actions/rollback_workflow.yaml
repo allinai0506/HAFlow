@@ -1,0 +1,54 @@
+id: rollback_workflow
+name: 回溯工作流
+description: 回溯到指定历史节点，把受影响下游节点的任务批量强制作废（superseded）。
+lifecycle: experimental
+target: workflow_instance
+inputs:
+- workflow_id
+- target_node
+- reason
+preconditions:
+- workflow_dag_acyclic
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: 下游节点任务（任意非 superseded 状态）
+    to: superseded
+    forced: true
+side_effects:
+- 清理阶段推进锁与 stage-state.json
+- 逐任务 transition_task（跨任务非原子）
+idempotency:
+  strategy: skip_already_superseded
+  key: task_id
+transaction:
+  mode: per_task_forced_transition
+  owner: herdr.kernel.rollback_workflow
+  note: 跨任务非原子：中途失败留下部分 superseded
+audit:
+  required: true
+  event: task_transition（forced=true）
+failure_behavior:
+  retry: unknown
+  compensation: none
+bindings:
+- connector: herdr_factory_cli
+  operation: rollback
+- connector: herdr_core_lib
+  operation: herdr.kernel.rollback_workflow
+verification:
+  strategy: reread_target
+  target: tasks.status
+evidence:
+- kind: implemented
+  source: herdr/kernel.py
+  locator: rollback_workflow L526-575（force=True 循环 L553-571）
+  confidence: high
+- kind: implemented
+  source: bin/herdr-factory
+  locator: rollback 子命令 L861-863
+  confidence: high
+notes: r1 新增：原模型缺失回溯路径，且其 force 写入是状态机外的跳转（F-04）。高风险，需人工评审。

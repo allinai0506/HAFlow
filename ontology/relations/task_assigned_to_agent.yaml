@@ -9,7 +9,7 @@ object_backed: false
 evidence:
 - kind: implemented
   source: herdr/agent_router.py
-  locator: choose_agent L521-584
+  locator: _choose_agent_locked L430 / 候选过滤 L634-637 / 公开入口 choose_agent L1063
   confidence: high
 - kind: implemented
   source: herdr/state_db.py

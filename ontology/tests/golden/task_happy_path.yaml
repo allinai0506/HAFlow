@@ -14,5 +14,3 @@ expected:
     task_transition_allowed: true
   allowed_actions:
   - launch_task
-  - provision_project
-  - start_workflow

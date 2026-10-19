@@ -1,13 +1,11 @@
 id: workflow_dag_acyclic
 name: 工作流 DAG 无环且依赖合法
-description: 节点 id 唯一；depends_on 必须引用已声明节点；Kahn 算法检测环；gate retry_target 与 inputs 节点引用必须存在。
+description: 工作流 DAG 合法性：节点 id 唯一、depends_on 引用已存在节点、gate.retry_target 与 inputs 引用存在、无环（Kahn）。本规则一次覆盖 5 类检查，与“一规则一问题”不符，拆分待评审（OEP-0001 Open Questions）。
 lifecycle: experimental
 inputs:
 - workflow_definition
 - workflow_node
-returns:
-  valid: bool
-  error: string
+returns: boolean
 logic_ref: herdr/workflow.py:validate_workflow_dag
 evidence:
 - kind: implemented
@@ -18,3 +16,6 @@ evidence:
   source: tests/test_workflow_engine.py
   locator: 环检测 L115-123 / 未知依赖 L125-140
   confidence: high
+outputs:
+- valid
+- error

@@ -14,37 +14,37 @@ authorization:
 effects:
   creates:
   - project
-  - workflow_definition
-  state_transition: null
+  - workflow_definition（共享模板文件）
 side_effects:
-- 创建 Herdr Workspace/Tab/Pane
-- 写 projects.json 与 projects/<project_id>/workflow.json
+- 创建 Herdr Workspace/Tab/Pane（现场）
+- 写 projects/<project_id>/workflow.json 后再写 projects.json
 idempotency:
   strategy: business_key
-  key: project_root (canonical path)
+  key: project_root（canonical path）
 transaction:
-  mode: file_atomic
-  owner: herdr.projects.provision_project
+  mode: file_then_registry
+  owner: herdr.projects.ensure_project -> provision_project
+  note: 非单事务：工作流文件先写，projects.json 后写
 audit:
   required: false
-  notes: 未发现专门的注册审计事件；后续以 workflow 注册/迁移事件追踪
+  notes: 未发现专门的注册事件（审计缺口，SKILL §10 要求）
 failure_behavior:
-  retry: safe_only
+  retry: unknown
   compensation: none
 bindings:
 - connector: herdr_factory_cli
-  operation: provision
+  operation: project
 - connector: herdr_core_lib
-  operation: herdr.projects.provision_project
+  operation: herdr.projects.ensure_project
 verification:
   strategy: reread_target
   target: projects.json[project_root]
 evidence:
 - kind: implemented
-  source: herdr/projects.py
-  locator: provision_project L877-949 / L1011-1028
+  source: bin/herdr-factory
+  locator: project 子命令 L809-812 / project_command L159-166
   confidence: high
 - kind: implemented
-  source: bin/herdr-factory
-  locator: provision 入口
+  source: herdr/projects.py
+  locator: ensure_project L1302 / provision_project L877-949 / 写入 L1011-1028
   confidence: high

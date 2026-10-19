@@ -1,57 +1,58 @@
 id: record_gate_verdict
 name: 记录门禁结论
-description: 随任务 completed 写入 pass/blocked 结论与备注；blocked 触发下游阻断与 fix-loop。
+description: 随任务 completed 写入 pass 或 blocked 结论与备注；blocked 触发下游阻断与 fix-loop。
 lifecycle: experimental
-target: gate
+target: task
 inputs:
 - task_id
 - verdict
 - note
-- affected_task_ids?
+- affected_task_ids（可选）
 preconditions:
 - gate_verdict_valid
 - task_transition_allowed
 authorization:
   policies:
+  - controller_service_policy
   - operator_cli_policy
 effects:
-  state_transition:
-    state_machine: gate_verdict_lifecycle
-    from: unset
-    to: pass|blocked
+  sets:
+    stage_verdict: pass | blocked
+  state_transition: null
 side_effects:
-- 写 gate-verdict JSON
-- blocked 时 Controller 作废下游并排 fix 任务
+- 写 gate-verdict 文件（direct_dispatch 协议）
+- blocked 时 Controller 触发 fix-loop（handle_fix_loop L2481）
 idempotency:
   strategy: business_key
-  key: task_id
+  key: task_id（同状态改写允许）
 transaction:
-  mode: atomic_with_transition
-  owner: bin/herdr-task set
+  mode: same_call_as_completed
+  owner: bin/herdr-task set -> set_status
 audit:
   required: true
-  event: task_transition (+gate verdict payload)
+  event: task_transition（verdict 载荷 UNVERIFIED）
 failure_behavior:
   retry: safe_only
   compensation: none
 bindings:
 - connector: herdr_task_cli
-  operation: set --verdict
+  operation: set
 - connector: herdr_controller_service
-  operation: handle_fix_loop
+  operation: try_auto_verdict
 verification:
   strategy: reread_target
-  target: tasks.stage_verdict
+  target: tasks[task_id].stage_verdict
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: L2402-2419, L2429-2457
+  locator: set_status L2338-2480（verdict 规则 L2402-2419）
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: try_auto_verdict L8275-8316
   confidence: high
 - kind: implemented
   source: herdr/direct_dispatch.py
   locator: verdict 文件协议 L135-158
   confidence: high
-- kind: implemented
-  source: services/herdr-controller.py
-  locator: fix-loop L2481-2551
-  confidence: high
+notes: r1 修正：目标由 gate 改为 task（写入的是 tasks.stage_verdict，F-10/M8）。controller 亦为执行者（try_auto_verdict）。

@@ -1,38 +1,41 @@
 id: close_workflow
 name: 关闭工作流
-description: 工作流收尾：原子进入 closing 闩，逐任务 finalize，条件满足后 completed；失败按状态机回退。
+description: 工作流收尾：原子进入 closing 闩，逐任务 finalize，条件满足后 completed；pending、paused、failed 仅可经 --force。
 lifecycle: experimental
 target: workflow_instance
 inputs:
 - workflow_id
-- force?
+- force
+- abandon
+- dry_run
 preconditions:
 - workflow_transition_allowed
 authorization:
   policies:
-  - operator_cli_policy
   - controller_service_policy
+  - operator_cli_policy
 effects:
   state_transition:
     state_machine: workflow_lifecycle
-    from: running|pending
-    to: closing->completed
+    from: running|in_progress
+    to: closing -> completed
+    out_of_matrix: pending|paused|failed 仅经 --force（见 workflow_lifecycle.out_of_matrix_writers）
 side_effects:
-- 逐任务最终化
-- 清理/保留资源决策
-- 写 outcome
+- 逐任务 finalize（_finalize_one）
+- 关闭协调器窗格（报告字段 coordinator_closed）
+- stage_reset
 idempotency:
-  strategy: business_key
-  key: workflow_id + closing latch
+  strategy: closing_latch
+  key: workflow_id
 transaction:
-  mode: atomic_latch
+  mode: atomic_latch_then_per_task
   owner: bin/herdr-task close-workflow
 audit:
   required: true
   event: workflow_transition
 failure_behavior:
   retry: safe_only
-  compensation: closing 失败保持 closing 供人工处理
+  compensation: closing 保留，供人工处理
 bindings:
 - connector: herdr_task_cli
   operation: close-workflow
@@ -44,9 +47,9 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: L7273-7292, L7415-7460, L7532, L7583-7590
+  locator: close-workflow preflight L7273-7287 / closing L7450-7460 / completed L7583-7590
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py
-  locator: auto-close 触发 L844-905
+  locator: maybe_close_completed_workflow L844-905（dispatch L901）
   confidence: high

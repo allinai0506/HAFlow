@@ -1,0 +1,59 @@
+id: force_pass_gate
+name: 强制放行门禁节点（节点级）
+description: 节点级人工强制放行：把门禁节点（未 superseded 的任务）的结论置为 pass。
+lifecycle: experimental
+target: gate
+inputs:
+- workflow_id
+- gate_node_id
+- note
+- operator
+- expected_version（可选）
+preconditions:
+- gate_bypass_audited
+authorization:
+  policies:
+  - gate_bypass_policy
+  - operator_cli_policy
+effects:
+  sets:
+    verdict: pass
+  scope: gate 节点下未 superseded 的任务（fallback 路径；存储层实现未读，UNVERIFIED）
+side_effects:
+- 写审计注释（note）
+idempotency:
+  strategy: unknown
+transaction:
+  mode: store_defined
+  owner: herdr.kernel.force_pass_gate -> store.force_pass_gate（UNVERIFIED）
+audit:
+  required: unknown
+failure_behavior:
+  retry: unknown
+  compensation: none
+bindings:
+- connector: herdr_factory_cli
+  operation: force-pass
+- connector: herdr_core_lib
+  operation: herdr.kernel.force_pass_gate
+verification:
+  strategy: reread_target
+  target: gate 节点任务 stage_verdict
+evidence:
+- kind: implemented
+  source: herdr/kernel.py
+  locator: force_pass_gate L392-422
+  confidence: high
+- kind: implemented
+  source: bin/herdr-factory
+  locator: force-pass 子命令 L866 / force_pass_command L652-656
+  confidence: high
+- kind: implemented
+  source: console/control_api.py
+  locator: api_kernel_force_pass L35-66
+  confidence: high
+- kind: implemented
+  source: console/http_server.py
+  locator: POST 路由 /api/kernel/force-pass L290（无鉴权）
+  confidence: high
+notes: r1 新增：原模型缺失节点级放行路径。控制台路径带 expected_version 守卫，CLI 路径不带（SC-015）。高风险，需人工评审。

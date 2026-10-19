@@ -14,8 +14,8 @@ fields:
   verdict_note: note
   affected_task_ids: affected_task_ids
 authority:
-  read: herdr.direct_dispatch / controller
-  write: herdr-task set --verdict / direct_dispatch verdict 文件
+  read: tasks.stage_verdict（任务行）与 verdict 文件；controller 要求二者一致
+  write: herdr-task set --verdict；direct_dispatch 写 verdict 文件；bypass_task_gate 同时直写二者
 evidence:
 - kind: implemented
   source: herdr/direct_dispatch.py
@@ -25,3 +25,4 @@ evidence:
   source: services/herdr-controller.py
   locator: verdict 通道与别名 L8101-8157
   confidence: high
+notes: 双重权威：违反常驻约束 1（单一事实源）。SC-012 待人工决策。

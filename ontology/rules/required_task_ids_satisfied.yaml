@@ -5,9 +5,7 @@ lifecycle: experimental
 inputs:
 - workflow_node
 - task
-returns:
-  satisfied: bool
-  blockers: list[string]
+returns: boolean
 logic_ref: herdr/scheduler.py:node_is_complete
 evidence:
 - kind: implemented
@@ -18,3 +16,6 @@ evidence:
   source: services/herdr-controller.py
   locator: completion 判定 L3303-3345
   confidence: high
+outputs:
+- satisfied
+- blockers

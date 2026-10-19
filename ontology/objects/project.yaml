@@ -62,7 +62,7 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/projects.py
-  locator: _register_project_workflow L1011-1023
+  locator: _register_project_workflow L967-1028
   confidence: high
 - kind: implemented
   source: herdr/projects.py

@@ -1,9 +1,10 @@
 id: console_operator_projection
 name: 运维控制台只读投影
-description: 面向人类操作者的驾驶舱视图：项目、工作流、节点、任务、事件、检查点与交付物的只读聚合。
+description: 面向人类操作者的只读聚合视图。r1：移除原有写动作（transition_task、close_workflow、bypass_gate）。控制台写路由（/api/kernel/force-pass、/api/task/force-review 等）未建模且未鉴权，见评审 F-07、F-22。
 lifecycle: experimental
 consumers:
 - role: human_operator_console
+  role_implemented: false
 objects:
   project:
     properties:
@@ -56,20 +57,15 @@ relations:
 rules:
 - task_transition_allowed
 - workflow_transition_allowed
-actions:
-- transition_task
-- close_workflow
-- bypass_gate
-policies:
-- operator_cli_policy
-- gate_bypass_policy
+actions: []
+policies: []
 exclude_by_default: true
 evidence:
 - kind: implemented
   source: herdr/projection.py
-  locator: 白盒遥测投影 L57-64
+  locator: project_task L270（4D 白盒遥测投影，r1 修正原 L57-64）
   confidence: high
-- kind: intended
-  source: console/herdr_factory_console.py
-  locator: Console 运营视图
+- kind: implemented
+  source: console/http_server.py
+  locator: POST 路由 L244-304（无鉴权）
   confidence: high

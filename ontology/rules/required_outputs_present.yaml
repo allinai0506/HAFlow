@@ -6,12 +6,13 @@ inputs:
 - workflow_node
 - task
 - artifact
-returns:
-  present: bool
-  missing: list[string]
+returns: boolean
 logic_ref: services/herdr-controller.py:check_task_deliverables_ready
 evidence:
 - kind: implemented
   source: services/herdr-controller.py
   locator: L8377-8432
   confidence: high
+outputs:
+- present
+- missing

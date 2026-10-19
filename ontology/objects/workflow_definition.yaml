@@ -60,7 +60,7 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/projects.py
-  locator: freeze_run_definition / _snapshot_workflow_definition L472-577
+  locator: _snapshot_workflow_definition L472-508 / freeze_run_definition L510-577
   confidence: high
 - kind: intended
   source: docs/product-specs/workflow-template-schema.md

@@ -1,0 +1,56 @@
+id: supersede_task
+name: 替代或放弃任务
+description: 把任务标记为 superseded；默认登记 replacement_pending 替代义务，--abandon 显式放弃义务。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+- by（替代任务）| abandon
+- reason
+preconditions:
+- task_transition_allowed
+authorization:
+  policies:
+  - controller_service_policy
+  - operator_cli_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: 非 superseded 状态
+    to: superseded
+  sets:
+    replacement_pending: true，除非 --abandon
+side_effects:
+- 登记替代义务（state_db.py L6741-6744）
+idempotency:
+  strategy: business_key
+  key: task_id
+transaction:
+  mode: gateway
+  owner: herdr.state_db.transition_task（经 CLI supersede）
+audit:
+  required: true
+  event: task_transition
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+- connector: herdr_task_cli
+  operation: supersede
+verification:
+  strategy: reread_target
+  target: tasks[task_id].superseded_by / replacement_pending
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: supersede 子命令 L9106-9110
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: transition_task replacement_pending L6741-6744
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: recover_router_isolation_tasks L1651-1680（调用 supersede --allow-pending）
+  confidence: high
+notes: r1 新增：原模型缺失 supersede 写路径（F-08 与控制器调用）。

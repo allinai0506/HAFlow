@@ -9,5 +9,5 @@ object_backed: false
 evidence:
 - kind: implemented
   source: herdr/agent_router.py
-  locator: 默认池 L181-187 / candidate order L320-336 / 健康门禁 L628-643
+  locator: 默认池 L181-187 / candidate order L320-336 / 候选过滤 allowed·disabled L634-637 / 健康门禁 L628-643
   confidence: high

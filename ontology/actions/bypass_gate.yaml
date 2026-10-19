@@ -1,41 +1,46 @@
 id: bypass_gate
-name: 豁免门禁
-description: 人工例外通道：提供原因后强制完成被阻断任务并置 verdict=pass，签发 bypass_id 回执并写审计。
+name: 豁免门禁（人工例外）
+description: 人工例外通道：提供原因后把被阻断的任务强制推进为 completed（或 paused 转 working），置 verdict=pass，签发 bypass 回执并写审计。
 lifecycle: experimental
-target: gate
+target: task
 inputs:
 - task_id
 - reason
 - operator
-- note?
+- note（可选）
 preconditions:
 - gate_bypass_audited
+- review_closure_required_for_wrapup
 authorization:
   policies:
   - gate_bypass_policy
+  - operator_cli_policy
 effects:
   state_transition:
     state_machine: task_lifecycle
-    from: blocked|paused
-    to: completed|working
+    from: blocked（代码另有 suspended，矩阵中不存在）| paused
+    to: completed（来自 blocked）| working（来自 paused）
+    out_of_matrix: true
   sets:
     stage_verdict: pass
+    blocker: null
 side_effects:
-- 写 gate_bypass 回执
-- 写 gate-verdict JSON
-- 轨迹事件 gate_bypassed
-- 清 blocker
+- 写 bypass 回执（bypass_id）
+- 写 gate-verdict 文件（best-effort）
+- 轨迹事件 gate_bypassed（best-effort）
+- 工作流笔记（best-effort）
 idempotency:
-  strategy: business_key
-  key: task_id + bypass_id
+  strategy: none
+  note: 每次调用生成新 bypass_id；重复调用覆盖回执（F-02）
 transaction:
-  mode: atomic
+  mode: non_atomic
   owner: herdr.kernel.bypass_task_gate
+  note: 先直写任务行（不经网关），其后的文件、事件、笔记写入吞掉异常
 audit:
   required: true
-  event: gate_bypassed
+  event: gate_bypassed（best-effort，可能缺失）
 failure_behavior:
-  retry: safe_only
+  retry: no_retry_after_completion
   compensation: none
 bindings:
 - connector: herdr_task_cli
@@ -44,13 +49,14 @@ bindings:
   operation: herdr.kernel.bypass_task_gate
 verification:
   strategy: reread_target
-  target: tasks.status + bypass receipt
+  target: tasks[task_id] 与 bypass 回执
 evidence:
 - kind: implemented
   source: herdr/kernel.py
-  locator: L832-957
+  locator: bypass_task_gate L832-957（直写 save_task；吞异常的后置写入）
   confidence: high
 - kind: implemented
-  source: tests/test_task_bypass_gate.py
-  locator: 审计与版本断言 L60-90
+  source: bin/herdr-task
+  locator: bypass-gate 子命令 L9080-9086（--operator 默认 human）
   confidence: high
+notes: r1 修正：目标由 gate 改为 task；transaction 由 atomic 改为 non_atomic（F-01、F-02）。高风险，需人工评审。

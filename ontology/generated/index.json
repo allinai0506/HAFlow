@@ -152,7 +152,7 @@
     "states": [
       {
         "id": "agent_reservation_lifecycle",
-        "name": "Agent 预占锁生命周期",
+        "name": "Agent 预占记录生命周期",
         "lifecycle": "experimental",
         "path": "states/agent_reservation_lifecycle.yaml"
       },
@@ -219,10 +219,22 @@
         "path": "rules/required_task_ids_satisfied.yaml"
       },
       {
+        "id": "review_closure_required_for_wrapup",
+        "name": "wrapup 完成需审查闭环",
+        "lifecycle": "experimental",
+        "path": "rules/review_closure_required_for_wrapup.yaml"
+      },
+      {
         "id": "task_has_isolated_clone",
         "name": "任务独占 CoW 克隆",
         "lifecycle": "experimental",
         "path": "rules/task_has_isolated_clone.yaml"
+      },
+      {
+        "id": "task_teardown_allowed",
+        "name": "物理拆除前任务状态允许",
+        "lifecycle": "experimental",
+        "path": "rules/task_teardown_allowed.yaml"
       },
       {
         "id": "task_transition_allowed",
@@ -252,13 +264,13 @@
     "actions": [
       {
         "id": "bypass_gate",
-        "name": "豁免门禁",
+        "name": "豁免门禁（人工例外）",
         "lifecycle": "experimental",
         "path": "actions/bypass_gate.yaml"
       },
       {
         "id": "cleanup_task",
-        "name": "清理任务资源",
+        "name": "逻辑清理任务",
         "lifecycle": "experimental",
         "path": "actions/cleanup_task.yaml"
       },
@@ -281,6 +293,12 @@
         "path": "actions/finalize_task.yaml"
       },
       {
+        "id": "force_pass_gate",
+        "name": "强制放行门禁节点（节点级）",
+        "lifecycle": "experimental",
+        "path": "actions/force_pass_gate.yaml"
+      },
+      {
         "id": "integrate_task",
         "name": "集成任务成果",
         "lifecycle": "experimental",
@@ -297,6 +315,12 @@
         "name": "供给项目空间",
         "lifecycle": "experimental",
         "path": "actions/provision_project.yaml"
+      },
+      {
+        "id": "purge_task",
+        "name": "物理清理任务资源",
+        "lifecycle": "experimental",
+        "path": "actions/purge_task.yaml"
       },
       {
         "id": "record_gate_verdict",
@@ -317,10 +341,22 @@
         "path": "actions/reserve_agent.yaml"
       },
       {
+        "id": "rollback_workflow",
+        "name": "回溯工作流",
+        "lifecycle": "experimental",
+        "path": "actions/rollback_workflow.yaml"
+      },
+      {
         "id": "start_workflow",
         "name": "启动工作流 Run",
         "lifecycle": "experimental",
         "path": "actions/start_workflow.yaml"
+      },
+      {
+        "id": "supersede_task",
+        "name": "替代或放弃任务",
+        "lifecycle": "experimental",
+        "path": "actions/supersede_task.yaml"
       },
       {
         "id": "transition_task",

@@ -30,7 +30,7 @@ properties:
   name: 类型
   type: enum
   required: true
-  notes: file|git_commit|git_pr|observation_ref 等
+  notes: expected | git_commit | git_pr | git_diff；文件类 kind 为 spreadsheet | pdf | image | code | document | file（deliverables.py _classify L740-752）
 - id: rel_path
   name: 相对路径
   type: path
@@ -61,5 +61,5 @@ evidence:
   confidence: high
 - kind: implemented
   source: services/herdr-worker.py
-  locator: baseline_fingerprint L580-605
+  locator: build_baseline_fingerprint L580-605
   confidence: high

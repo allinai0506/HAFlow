@@ -1,0 +1,55 @@
+id: purge_task
+name: 物理清理任务资源
+description: 关闭任务窗格并删除克隆目录（受 CLONE_ROOT 与符号链接防护约束）；不推进状态。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+preconditions:
+- task_teardown_allowed
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  state_transition: null
+  metadata:
+    resource_retention: purged
+    pane_retained: false
+    clone_retained: false
+side_effects:
+- herdr pane close（关闭窗格）
+- delete_clone_safely 删除克隆目录
+idempotency:
+  strategy: unknown
+  note: 重复执行结果未验证
+transaction:
+  mode: none
+  owner: bin/herdr-task purge_task
+  note: 先外部副作用后写元数据，无原子保证；不检查集成状态
+audit:
+  required: false
+  notes: 仅元数据更新，无 task_transition 事件（审计缺口）
+failure_behavior:
+  retry: unknown
+  compensation: none
+  exit_codes: 2 活跃或待派发；3 不安全克隆路径
+bindings:
+- connector: herdr_task_cli
+  operation: purge
+verification:
+  strategy: reread_target
+  target: tasks[task_id].resource_retention（窗格与克隆存在性未回读）
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: purge_task L6560-6604
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: delete_clone_safely L6630
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: purge 子命令 L8955-8957
+  confidence: high
+notes: r1 新增：原模型缺失物理删除路径（F-13）。高风险，按 references/05 需人工评审。

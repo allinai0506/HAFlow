@@ -1,14 +1,12 @@
 id: cleanup_task
-name: 清理任务资源
-description: 仅在 cleanup_ready 允许，物理清理窗格与克隆目录（受 CLONE_ROOT 与 symlink/inode 防护约束），推进 cleaned。
+name: 逻辑清理任务
+description: 仅在 cleanup_ready 状态允许；只写保留元数据并推进到 cleaned，不关闭窗格、不删除克隆（逻辑清理）。
 lifecycle: experimental
 target: task
 inputs:
 - task_id
-- force?
 preconditions:
 - task_transition_allowed
-- anchor_pane_never_assigned
 authorization:
   policies:
   - operator_cli_policy
@@ -18,33 +16,27 @@ effects:
     from: cleanup_ready
     to: cleaned
 side_effects:
-- 关闭窗格
-- 删除 clone（delete_clone_safely，限制在 CLONE_ROOT）
+- 写 resource_retention=persistent、pane_retained=true、clone_retained=true
 idempotency:
   strategy: business_key
   key: task_id
 transaction:
-  mode: best_effort
-  owner: bin/herdr-task cleanup
+  mode: store_update
+  owner: bin/herdr-task cleanup -> set_status
 audit:
   required: true
   event: task_transition
 failure_behavior:
   retry: safe_only
   compensation: none
-  note: failed 状态需 --force 才可清理
 bindings:
 - connector: herdr_task_cli
   operation: cleanup
 verification:
   strategy: reread_target
-  target: 文件系统 + tasks.status
+  target: tasks.status
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: L6534-6553, L6591-6644, L6933-6979
-  confidence: high
-- kind: intended
-  source: wiki/task-lifecycle.md
-  locator: 收尾闸门语义 L363-367
+  locator: cleanup_task L6526-6557（logical cleanup only）
   confidence: high

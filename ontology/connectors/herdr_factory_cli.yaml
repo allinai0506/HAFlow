@@ -5,12 +5,20 @@ lifecycle: experimental
 type: cli
 entrypoint: bin/herdr-factory
 operations:
-- run
-- provision
-- pause
-- resume
+- id: force-pass
+  kind: subcommand
+- id: project
+  kind: subcommand
+- id: rollback
+  kind: subcommand
+- id: run
+  kind: subcommand
+timeout_ms: null
+retry:
+  mode: unknown
+  note: 未在候选中核对超时与重试配置
 evidence:
 - kind: implemented
   source: bin/herdr-factory
-  locator: run/provision/start_workflow/pause/resume L403-623
+  locator: argparse 子命令 add_parser L805-886
   confidence: high

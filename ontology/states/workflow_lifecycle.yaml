@@ -1,9 +1,9 @@
 id: workflow_lifecycle
 name: 工作流生命周期状态机
-description: 7 状态工作流状态机；closing 是物理清理前闩，一旦进入拒绝 pause/续跑；completed 可 reopen 回 in_progress。
+description: 7 状态工作流状态机，边集与 WORKFLOW_TRANSITIONS 逐边一致。注册时直接写入 running（不经 pending 迁移，SC-011）；closing 为物理清理前的闩；completed 可经 reopen-workflow 回到 in_progress。
 lifecycle: experimental
 object: workflow_instance
-initial: pending
+initial: running
 terminal: []
 states:
 - pending
@@ -20,7 +20,7 @@ classification:
   - in_progress
   - paused
   - closing
-  terminal:
+  lane_closed:
   - completed
 transitions:
 - from: pending
@@ -100,7 +100,7 @@ transitions:
   - workflow_transition_allowed
 - from: paused
   to: in_progress
-  trigger: kernel.resume_workflow
+  trigger: 无观测触发方（kernel.resume_workflow 只写 running；仅矩阵声明）
   guards:
   - workflow_transition_allowed
 - from: paused
@@ -120,7 +120,7 @@ transitions:
   - workflow_transition_allowed
 - from: completed
   to: in_progress
-  trigger: herdr-task reopen
+  trigger: herdr-task reopen-workflow
   guards:
   - workflow_transition_allowed
 - from: completed
@@ -160,3 +160,26 @@ evidence:
   source: bin/herdr-task
   locator: close-workflow closing 闩 L7415-7460
   confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: transition_workflow L7108-7227（workflow_transition 事件 L7197）
+  confidence: high
+initial_declared_in_matrix: pending
+initial_note: 矩阵声明 pending 为起点，但 projects.register_workflow 直接写 status=running（projects.py L593）；占位工作流 save_task 以 pending 创建（state_db.py L1617）。
+out_of_matrix_writers:
+- from: pending|paused|failed
+  to: closing（force）
+  writer: herdr-task close-workflow --force：validate_workflow_transition(force=True) 跳过边合法性
+  evidence:
+  - kind: implemented
+    source: bin/herdr-task
+    locator: close-workflow preflight L7273-7287
+    confidence: high
+- from: （无）
+  to: running
+  writer: projects.register_workflow 直接写 status（无迁移记录）
+  evidence:
+  - kind: implemented
+    source: herdr/projects.py
+    locator: register_workflow wf_entry L578-603
+    confidence: high

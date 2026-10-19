@@ -3,25 +3,38 @@ name: herdr 核心库
 description: herdr 核心库（运行时绑定目标）
 lifecycle: experimental
 type: python_library
-module: herdr
+entrypoint: herdr
 operations:
-- herdr.projects.provision_project
-- herdr.projects.register_workflow
-- herdr.kernel.transition_task
-- herdr.kernel.transition_workflow
-- herdr.kernel.bypass_task_gate
-- herdr.agent_router.choose_agent
-- herdr.agent_router.release_agent_reservation
+- id: herdr.agent_router.choose_agent
+  kind: function
+- id: herdr.agent_router.release_agent_reservation
+  kind: function
+- id: herdr.kernel.bypass_task_gate
+  kind: function
+- id: herdr.kernel.force_pass_gate
+  kind: function
+- id: herdr.kernel.rollback_workflow
+  kind: function
+- id: herdr.kernel.transition_task
+  kind: function
+- id: herdr.projects.ensure_project
+  kind: function
+- id: herdr.projects.register_workflow
+  kind: function
+timeout_ms: null
+retry:
+  mode: unknown
+  note: 未在候选中核对超时与重试配置
 evidence:
 - kind: implemented
-  source: herdr/projects.py
-  locator: provision_project/register_workflow
-  confidence: high
-- kind: implemented
   source: herdr/kernel.py
-  locator: transition_task/transition_workflow/bypass_task_gate
+  locator: transition_task L133 / bypass_task_gate L832 / force_pass_gate L392 / rollback_workflow L526
   confidence: high
 - kind: implemented
   source: herdr/agent_router.py
-  locator: choose_agent/release_agent_reservation
+  locator: choose_agent L1063 / release_agent_reservation L283
+  confidence: high
+- kind: implemented
+  source: herdr/projects.py
+  locator: ensure_project L1302 / register_workflow L551
   confidence: high

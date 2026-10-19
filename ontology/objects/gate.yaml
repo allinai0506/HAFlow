@@ -1,6 +1,6 @@
 id: gate
 name: 节点门禁
-description: 节点级质量/合规门禁契约与运行结论；GATE_DEFAULTS 将 test/review/wrapup 视为门禁，结论 pass/blocked 驱动阶段推进或 fix-loop。
+description: 节点级质量/合规门禁契约与运行结论；GATE_DEFAULTS 将 test/review/wrapup 视为门禁，结论 pass/blocked 驱动阶段推进或 fix-loop。 注意：门禁配置按节点（workflow_id:node_id），结论按任务（tasks.stage_verdict）；本对象合并了二者，见 SC-012（待人工决策）。
 lifecycle: experimental
 identity:
   primary_key: gate_ref
@@ -61,7 +61,7 @@ properties:
 evidence:
 - kind: intended
   source: docs/product-specs/workflow-template-schema.md
-  locator: GateSpec L91-96
+  locator: GateSpec L89-96
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py

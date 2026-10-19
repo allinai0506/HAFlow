@@ -1,26 +1,32 @@
 id: blocked_gate_fix_loop
 name: 门禁阻断修复循环
-description: 门禁 verdict=blocked 时原子作废门禁节点及下游、补齐修复任务并重流的过程；超过循环预算升级人工。
+description: 门禁 verdict=blocked 时，作废门禁节点及下游、补齐修复任务并重流；超过循环预算升级人工。
 lifecycle: experimental
-trigger: Controller 检测依赖门禁 verdict=blocked
+trigger:
+  type: event
+  event: Controller 检测到依赖门禁 verdict=blocked
 steps:
-- type: action
+- id: s1
+  type: action
   ref: record_gate_verdict
-- type: rule
+- id: s2
+  type: rule
   ref: gate_verdict_valid
-- type: action
-  ref: transition_task
-  notes: invalidate 为 superseded 并保留替代链
-- type: action
+- id: s3
+  type: action
+  ref: supersede_task
+  notes: invalidate 以 superseded 表达（未逐行复核）
+- id: s4
+  type: action
   ref: launch_task
   notes: fix 任务重派
-- type: rule
+- id: s5
+  type: rule
   ref: required_task_ids_satisfied
-  notes: 修复后重新满足门禁依赖
 evidence:
 - kind: implemented
   source: services/herdr-controller.py
-  locator: handle_fix_loop L2481-2551 / invalidate L1224-1259 / 耗尽升级 L2352-2374, L2599-2648
+  locator: handle_fix_loop L2481-2551 / invalidate_for_fix_loop L1224-1259 / 耗尽升级 L2352-2374
   confidence: high
 - kind: implemented
   source: herdr/fix_loop.py

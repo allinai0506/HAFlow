@@ -5,8 +5,7 @@ lifecycle: experimental
 inputs:
 - workflow_node
 - task
-returns:
-  assignable: bool
+returns: boolean
 logic_ref: herdr/pane_pool.py:list_slots_for_project
 evidence:
 - kind: implemented
@@ -21,3 +20,5 @@ evidence:
   source: wiki/domain-model.md
   locator: 不变量 1
   confidence: high
+outputs:
+- assignable

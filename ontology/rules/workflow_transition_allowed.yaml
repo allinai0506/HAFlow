@@ -4,9 +4,7 @@ description: 给定当前状态与目标状态，判定边是否在 WORKFLOW_TRA
 lifecycle: experimental
 inputs:
 - workflow_instance
-returns:
-  allowed: bool
-  reason: string
+returns: boolean
 logic_ref: herdr/transitions.py:validate_workflow_transition
 evidence:
 - kind: implemented
@@ -17,3 +15,6 @@ evidence:
   source: herdr/state_db.py
   locator: CAS 前校验 L7135-7148
   confidence: high
+outputs:
+- allowed
+- reason

@@ -1,6 +1,6 @@
 version: 0.1.0
 name: haflow-domain-ontology
-description: HAFlow 项目->工作流->节点->任务编排闭环候选本体（Brownfield Discovery，第一切片，全部 experimental）
+description: HAFlow 项目->工作流->节点->任务编排闭环候选本体（Brownfield Discovery，第一切片；全部 experimental；R1 修订版）
 default_language: zh-CN
 lifecycle_values:
 - experimental
@@ -22,3 +22,23 @@ roots:
   golden_tests: tests/golden
   decisions: decisions
   proposals: proposals
+review:
+  round: R1
+  reviewed_commit: 1b2fe9a
+  verdict_on_reviewed_commit: REQUEST_CHANGES
+  r1_status: 修正已应用；待独立复审与人工批准（本体技能禁止 Agent 自批）
+  findings: ontology/proposals/OEP-0001-review-r1.md
+golden_status: not_executed（声明式用例，无 runner）
+vocabulary_status: transaction.mode / idempotency.strategy / failure_behavior.retry 为本候选的描述性词表；references/04 未给出枚举（非规范）
+counts:
+  objects: 12
+  relations: 12
+  states: 4
+  rules: 14
+  actions: 18
+  policies: 4
+  workflows: 3
+  connectors: 5
+  mappings: 10
+  projections: 3
+  golden_cases: 7
