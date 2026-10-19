@@ -590,7 +590,7 @@ def _enforce_wrapup_review_closure(task_id, task, *, skip, note, operator=None,
         print(f"[REVIEW CLOSURE SKIPPED] {task_id}: completion allowed with audited bypass")
         return
 
-    ok, why = review_closure.check_completion_allowed(store, task)
+    ok, why = review_closure.check_completion_allowed(store, task, bind_guard=False)
     if ok:
         print(f"[REVIEW CLOSURE RECEIPT] {task_id}: receipt present")
         return

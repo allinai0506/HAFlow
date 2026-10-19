@@ -893,15 +893,6 @@ def bypass_task_gate(
     elif previous_status == "paused":
         new_status = "working"
 
-    # This bypass persists the status directly (no StateStore transition
-    # gateway), so the shared review-closure invariant must be enforced here
-    # explicitly (Codex review P1, wf-haflow-1015-01).
-    if new_status == "completed" and (task.get("node") or task.get("stage")) == "wrapup":
-        from . import review_closure
-        closure_ok, closure_why = review_closure.check_completion_allowed(s, task)
-        if not closure_ok:
-            raise ValueError(f"[REVIEW CLOSURE REQUIRED] task={task_id}: {closure_why}")
-
     verdict_note = f"[GATE BYPASS by {operator}] {cleaned_reason}"
     if note:
         verdict_note += f" ({note})"
@@ -917,7 +908,19 @@ def bypass_task_gate(
     task["updated_at"] = now
     task["version"] = (task.get("version") or 0) + 1
 
-    s.save_task(task)
+    # This bypass persists the status directly (no StateStore transition
+    # gateway), so the shared review-closure invariant must be enforced here
+    # explicitly under the clone lock (Codex review P1, wf-haflow-1015-01 & PR #270).
+    if new_status == "completed" and (task.get("node") or task.get("stage")) == "wrapup":
+        from . import review_closure
+        c_path = task.get("clone_path")
+        with review_closure.clone_lock(c_path):
+            closure_ok, closure_why = review_closure.check_completion_allowed(s, task)
+            if not closure_ok:
+                raise ValueError(f"[REVIEW CLOSURE REQUIRED] task={task_id}: {closure_why}")
+            s.save_task(task)
+    else:
+        s.save_task(task)
     sync_tasks_projection(store=s)
 
     # Write gate verdict file so external watchers immediately see the pass

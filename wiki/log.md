@@ -3041,3 +3041,65 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   2. `wiki/task-lifecycle.md` 新增 §1.1.1 评审闭环操作员旁路认证契约（含 R1 决策留痕与 Evidence 锚点）。
 - 残留 R1（非阻塞）：同 UID worker 可读服务端凭据库凑齐 presented==registered，属部署边界，须在登记任何应急操作员前由负责人决策。
 - 交付：本 wrapup 单工位创建交付 PR（base=main，head=本收尾分支），严禁自动合并，由控制器统一收编。
+
+## [2026-10-19] fix | 评审闭环并发 HEAD Guard 生命周期保持与 Bypass-Gate 直写克隆锁守护 (PR #270 Codex Review P1)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #270 commit ffdb901 中指出 2 项 P1 级并发与直写校验缺陷：
+     - [P1] `herdr/review_closure.py:890`：在获取 `clone_lock` 之前提前 `pop` 了共享的 `_ACTIVE_HEAD_GUARDS` 记录，导致同一任务的并发第二个完成请求误判为无 guard，未经任何 HEAD 核验或锁保护直接裸奔调用底层流转方法。若协调的 Git 操作在此时推进 HEAD，第二个请求将基于陈旧回执完成任务；必须按 attempt 独立存储 guard（`HeadGuard`），并仅在受保护的状态流转彻底完成后在 `finally:` 中安全移除。
+     - [P1] `herdr/review_closure.py:1068` & `herdr/kernel.py:899`：当 `kernel.bypass_task_gate` 放行已失败或阻塞的 wrapup 门禁时，虽然成功注册了 atomic head guard，但随后直接调用 `s.save_task(task)` 绕过了受补丁保护的三大状态流转网关，导致 guard 泄漏且未能在同一克隆锁下原子核验 HEAD 与持久化完成状态；必须将 `save_task` 纳入 store 补丁代理，并在 `bypass_task_gate` 中将 `check_completion_allowed` 与 `save_task` 置于同一可重入 `clone_lock` 下原子执行。
+- 变更：
+  1. **Thread-reentrant CloneLock**：
+     - 在 `herdr/review_closure.py` 中为 `CloneLock` 引入 `threading.local()` 重入计数器，支持同一线程在多层克隆锁调用中安全重入，彻底消除嵌套锁死锁风险。
+  2. **按 Attempt 独立存储 HeadGuard 并在流转完成后清理**：
+     - 引入 `HeadGuard` 结构，`_ACTIVE_HEAD_GUARDS` 按 `task_id` 维护活跃 guard 列表；
+     - 统一抽取 `_execute_with_head_guard` 逻辑：先在 `_HEAD_GUARDS_LOCK` 保护下安全认领 guard（不提前从列表移除），进入 `with clone_lock(c_path):` 完成原子 HEAD 一致性比对与底层方法调用，并在 `finally:` 中安全移除该 attempt 对应的 guard，确保并发请求无法绕开守卫。
+  3. **补丁代理 save_task 与 bypass_task_gate 克隆锁原子化**：
+     - 在 `_patch_store_class` 中增加对 `save_task` 的补丁代理，对 `status == "completed"` 且存在活跃 head guard 的任务自动激活原子 HEAD 核验与 guard 消费；
+     - 在 `herdr/kernel.py:bypass_task_gate` 中，将 wrapup 门禁完成时的 `check_completion_allowed`、字段设置与 `s.save_task(task)` 完整置于 `with review_closure.clone_lock(c_path):` 下原子执行，杜绝校验后、落盘前的 HEAD 漂移竞态。
+- 证据：
+  1. `tests/test_wrapup_review_closure.py` 新增 2 项专项测试（`test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head` 与 `test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_advanced_head`）；
+  2. `tests/test_wrapup_review_closure.py` 全量 56 项测试全部 PASS（耗时 53.66s）；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。
+
+## [2026-10-19] fix | 评审闭环 Head Guard 绑定 Attempt 避免双重预检残留 & 保留 StateStore 抽象接口契约 (PR #271 Codex Review P2)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #271 中指出 2 项 P2 级设计与接口约束缺陷：
+     - [P2] `herdr/review_closure.py:890`（Thread `PRRT_kwDOUYu4N86t6GBi`）："Pair each head guard with its completion attempt"。CLI 前置预检与内核流转双重注册 guard 导致孤儿残留，并在返工推进 HEAD 后误拒合法完成。
+     - [P2] `herdr/review_closure.py:1005`（Thread `PRRT_kwDOUYu4N86t6tHd`）："Preserve the abstract save_task contract"。`_patch_store_classes` 给基类 `StateStore` 动态挂载非抽象包装函数，导致后定义的缺少 `save_task` 的子类绕过 ABC 检查被错误实例化，调用回退到 `pass` 静默丢弃写入。
+- 变更：
+  1. **HeadGuard 显式绑定 attempt_id / 线程标识与同 attempt 幂等去重**：
+     - `HeadGuard` 增加 `attempt_id` 属性，默认为 `threading.get_ident()`；
+     - `_execute_with_head_guard` 优先匹配当前线程/attempt 未认领的 guard；
+     - `bind_atomic_head_guard` 检查同 attempt 未认领 guard，直接就地更新 `clone_path` 与 `expected_head`；增加 `release_atomic_head_guard` 显式解绑能力。
+  2. **预检与流转解耦**：
+     - `check_completion_allowed` 增加 `bind_guard: bool = True` 参数；
+     - 在 `bin/herdr-task` 的 `_enforce_wrapup_review_closure` CLI 预检中显式传入 `bind_guard=False`，仅校验不绑 guard。
+  3. **严守 StateStore 抽象契约与跳过抽象基类**：
+     - `_patch_store_classes` 仅修补具象存储类（`SQLiteStateStore`），严禁修改抽象基类 `StateStore`；
+     - `_patch_store_class` 前置增加 `inspect.isabstract(cls)` 短路返回；
+     - 包装函数统一引入 `@functools.wraps` 并保留 `__isabstractmethod__`，确保任何新定义的未完整实现子类严格抛出 `TypeError`。
+- 证据：
+  1. `tests/test_wrapup_review_closure.py` 新增 `test_double_validation_cli_precheck_and_kernel_transition_leaves_no_lingering_guard` 与 `test_patch_store_classes_preserves_abstract_state_store_contract`；
+  2. `tests/test_wrapup_review_closure.py` 全量 58 项测试全部 PASS；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。
+
+## [2026-10-19] test | 严守并发测试规范：以真多线程与独立连接重构 HEAD Guard 并发竞争测试 (PR #271 Codex Review P1)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #271 中指出 1 项 P1 级并发测试规范缺陷（Thread `PRRT_kwDOUYu4N86t7HBu`，引用 `AGENTS.md:L91-L95`）：
+     - "Exercise the guard with real concurrent workers"。原测试 `test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head` 在单线程单连接内顺序调用两次，从未构造一个工位持有 `clone_lock` 时另一个工位尝试认领/执行 guard 的真实交叠，无法证明并发安全。
+- 变更：
+  1. **真多线程与独立 StateStore 连接**：
+     - 重构 `test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head`；
+     - 分别建立 `store1` 和 `store2` 两个独立的 `SQLiteStateStore` 数据库连接，由 `worker_1` 和 `worker_2` 两个独立线程并发执行。
+  2. **受控交错与屏障同步**：
+     - 使用 `threading.Event` 精确控制时序：`worker_1` 获取 `clone_lock` 并在 `clone_head_sha` 内部等待；
+     - 触发 `worker_2` 并发调用 `compare_and_set_task_transition`，使其因排斥等待 `clone_lock`；
+     - 在锁持有与竞争的关键边界推进克隆仓库 HEAD；
+     - 放行 `worker_1` 与 `worker_2`，断言两者均 fail-closed 抛出 `clone HEAD advanced before completion CAS`，且最终零孤儿 guard 残留。
+- 证据：
+  1. `tests/test_wrapup_review_closure.py` 专项测试 `test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head` 在真并发环境下稳定 PASS（0.88s）；
+  2. `tests/test_wrapup_review_closure.py` 全量 58 项测试全部 PASS；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。

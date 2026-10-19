@@ -1311,3 +1311,231 @@ def test_adversarial_b1_operator_token_positive_and_negative_matching(scene):
     ok, why = review_closure.authenticate_operator(scene.store, task, "qodercli", token="lead_token_secret")
     assert not ok
     assert "must be independent" in why
+
+
+def test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head(scene, monkeypatch):
+    """PR #270 Codex P1 & PR #271 Codex P1: Exercise the guard with real concurrent workers.
+
+    Verifies AGENTS.md invariant (S6 concurrent test rules):
+    - Independent store connections across threads
+    - Controlled interleaving using threading.Event barriers: Worker 1 holds clone_lock
+      while Worker 2 attempts to claim and execute its guard under contention.
+    - HEAD is advanced while Worker 1 is inside clone_lock and Worker 2 is queued.
+    - Both attempts must fail closed on advanced HEAD; neither bypasses the guard or lock.
+    - Guards are safely cleaned up in finally: with zero lingering guards in memory.
+    """
+    import threading
+    import time
+    from herdr import review_closure, state_store
+
+    task_id = "wrapup-task"
+    c_path = scene.clone
+    orig_head = scene.head
+
+    # Open two independent store connections
+    store1 = state_store.SQLiteStateStore(scene.store.db_path)
+    store2 = state_store.SQLiteStateStore(scene.store.db_path)
+
+    inside_lock_w1 = threading.Event()
+    proceed_w1 = threading.Event()
+    w2_started = threading.Event()
+
+    orig_clone_head_sha = review_closure.clone_head_sha
+
+    def synchronized_clone_head_sha(path):
+        current_thread_name = threading.current_thread().name
+        if current_thread_name == "worker_1" and not inside_lock_w1.is_set():
+            inside_lock_w1.set()
+            # Wait until main thread signals to proceed (after advancing HEAD and starting worker 2)
+            proceed_w1.wait(timeout=5.0)
+        return orig_clone_head_sha(path)
+
+    monkeypatch.setattr(review_closure, "clone_head_sha", synchronized_clone_head_sha)
+
+    errors = []
+
+    def worker_1_target():
+        try:
+            # Bind guard for attempt 1 on thread 1
+            review_closure.bind_atomic_head_guard(store1, task_id, c_path, orig_head, attempt_id="attempt_1")
+            store1.transition_task(task_id, "completed")
+        except Exception as e:
+            errors.append(("worker_1", e))
+
+    def worker_2_target():
+        try:
+            w2_started.set()
+            # Bind guard for attempt 2 on thread 2
+            review_closure.bind_atomic_head_guard(store2, task_id, c_path, orig_head, attempt_id="attempt_2")
+            store2.compare_and_set_task_transition(task_id=task_id, to_status="completed")
+        except Exception as e:
+            errors.append(("worker_2", e))
+
+    t1 = threading.Thread(target=worker_1_target, name="worker_1")
+    t2 = threading.Thread(target=worker_2_target, name="worker_2")
+
+    # Start Worker 1; it will acquire clone_lock and pause inside clone_head_sha
+    t1.start()
+    assert inside_lock_w1.wait(timeout=5.0), "Worker 1 did not enter clone_lock in time"
+
+    # Worker 1 is now actively holding clone_lock!
+    # Start Worker 2 concurrently; Worker 2 will attempt to acquire clone_lock and block
+    t2.start()
+    assert w2_started.wait(timeout=5.0), "Worker 2 did not start in time"
+
+    # Give Worker 2 a moment to enter compare_and_set_task_transition and wait on clone_lock
+    time.sleep(0.1)
+
+    # Advance HEAD at the contested boundary while Worker 1 is holding clone_lock and Worker 2 is queued
+    commit_more(scene.clone, "advanced content concurrent real workers\n")
+    new_head = orig_clone_head_sha(scene.clone)
+    assert new_head != orig_head
+
+    # Now unblock Worker 1 to evaluate HEAD
+    proceed_w1.set()
+
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
+
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+
+    # Both workers must have failed closed with the expected error
+    assert len(errors) == 2, f"Expected 2 errors, got: {errors}"
+    err1 = next(e for w, e in errors if w == "worker_1")
+    err2 = next(e for w, e in errors if w == "worker_2")
+    assert "clone HEAD advanced before completion CAS" in str(err1)
+    assert "clone HEAD advanced before completion CAS" in str(err2)
+
+    # Both guards must be cleanly removed with zero lingering guards in memory
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+
+
+def test_double_validation_cli_precheck_and_kernel_transition_leaves_no_lingering_guard(scene, monkeypatch):
+    """PR #271 Codex P2: Pair each head guard with its completion attempt.
+
+    1. Ordinary double-validation (CLI precheck then kernel transition) must deduplicate
+       within the same attempt and leave no lingering guard in _ACTIVE_HEAD_GUARDS.
+    2. Reworking after a CLI precheck correctly updates the guard without stale refusal.
+    3. check_completion_allowed(..., bind_guard=False) validates without binding a guard.
+    """
+    from herdr import review_closure
+
+    monkeypatch.setenv("PATH", f"{scene.fakebin}:{os.environ.get('PATH', '')}")
+
+    task_id = "wrapup-task"
+    c_path = scene.clone
+    orig_head = scene.head
+
+    # Record valid receipt for orig_head
+    record_valid(scene.store, orig_head)
+
+    # Step 1: verify bind_guard=False validates without binding
+    task = scene.store.get_task(task_id)
+    ok, why = review_closure.check_completion_allowed(scene.store, task, bind_guard=False)
+    assert ok, why
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+    # Step 2: verify deduplication in same attempt
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+    # Deduplicated to 1 guard
+    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 1
+
+    # Step 3: verify transition completes and cleans up guard completely
+    scene.store.transition_task(task_id, "completed", "test")
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+    # Step 4: verify rework after precheck updates guard without stale refusal
+    task["status"] = "agent_done"
+    scene.store.save_task(task)
+    # Precheck binds guard on orig_head
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 1
+
+    # Task reworked, commit advanced
+    commit_more(scene.clone, "rework content\n")
+    new_head = clone_head(scene.clone)
+    assert new_head != orig_head
+    set_fake_head(scene, new_head)
+    record_valid(scene.store, new_head)
+
+    # Fresh validation binds guard on new_head for same attempt
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, new_head)
+    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 1
+    assert review_closure._ACTIVE_HEAD_GUARDS[task_id][0].expected_head == new_head
+
+    # Completion succeeds against new_head and leaves no guard behind
+    scene.store.transition_task(task_id, "completed", "test")
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+
+def test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_advanced_head(scene):
+    """PR #270 Codex P1: bypass_task_gate completing a wrapup task must guard the direct save under clone lock."""
+    from herdr import kernel, review_closure, state_db
+
+    task_id = "wrapup-task"
+    task = scene.store.get_task(task_id)
+    task["status"] = "blocked"
+    scene.store.save_task(task)
+
+    # Register an independent operator
+    state_db.save_user_token("lead-op", "operator", "token-lead-secret", db_path=scene.store.db_path)
+
+    # 1. Advance HEAD so that check_completion_allowed or save fails closed
+    commit_more(scene.clone, "advanced before bypass\n")
+    advanced_head = clone_head(scene.clone)
+    assert advanced_head != scene.head
+
+    # Negative: bypass must fail closed when receipt was bound to earlier head
+    with pytest.raises(ValueError, match=r"\[REVIEW CLOSURE REQUIRED\]"):
+        kernel.bypass_task_gate(task_id, reason="Emergency bypass", operator="lead-op", store=scene.store)
+
+    # Status must still be blocked, not marked completed!
+    assert scene.store.get_task(task_id)["status"] == "blocked"
+
+    # 2. Positive path: record a valid bypass skip on the current advanced head
+    scene.store.record_event(
+        "review_closure_skipped",
+        {"task_id": task_id, "reason": "audited bypass for head", "head_sha": advanced_head, "operator": "lead-op"},
+        task_id=task_id,
+        workflow_id=task.get("workflow_id"),
+        node_id=task.get("node") or task.get("stage"),
+        source="herdr-task",
+    )
+
+    # Now bypass_task_gate must succeed, update under the clone lock, and consume the atomic head guard
+    res = kernel.bypass_task_gate(task_id, reason="Legitimate bypass on matching head", operator="lead-op", store=scene.store)
+    assert res["status"] == "completed"
+    assert scene.store.get_task(task_id)["status"] == "completed"
+
+    # Verify head guard was cleanly consumed and not leaked in memory
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+
+def test_patch_store_classes_preserves_abstract_state_store_contract():
+    """PR #271 Codex P2: Preserve the abstract save_task contract on StateStore.
+
+    When review_closure is imported, StateStore (and its abstract methods including save_task)
+    must remain abstract. A new subclass of StateStore that omits save_task must raise
+    TypeError at instantiation instead of silently inheriting a non-abstract pass wrapper.
+    """
+    import inspect
+    from herdr import review_closure, state_store
+
+    assert inspect.isabstract(state_store.StateStore)
+    assert getattr(state_store.StateStore.save_task, "__isabstractmethod__", False)
+    assert getattr(state_store.StateStore.transition_task, "__isabstractmethod__", False)
+
+    class IncompleteStore(state_store.StateStore):
+        # Deliberately omits save_task and other abstract methods
+        pass
+
+    with pytest.raises(TypeError, match="abstract method"):
+        IncompleteStore()
+
+    # Also verify that calling _patch_store_class on an abstract class is a no-op
+    review_closure._patch_store_class(state_store.StateStore)
+    assert inspect.isabstract(state_store.StateStore)
+    assert getattr(state_store.StateStore.save_task, "__isabstractmethod__", False)
