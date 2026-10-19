@@ -356,52 +356,9 @@ globals().update(build_dispatch_bindings(globals()))
 from herdr.repo_hygiene import INTERNAL_EXACT as INTERNAL_UNTRACKED_EXACT, INTERNAL_PREFIXES as INTERNAL_UNTRACKED_PREFIXES
 
 
-def _is_internal_untracked(path):
-    from herdr.workspace_fingerprint import is_internal_untracked
-    return is_internal_untracked(path, INTERNAL_UNTRACKED_EXACT,
-                                 INTERNAL_UNTRACKED_PREFIXES)
+from herdr.task_cli_verification_bindings import build_verification_bindings
 
-
-def fingerprint_file(repo, relpath):
-    from herdr.workspace_fingerprint import fingerprint_file as fingerprint
-    return fingerprint(repo, relpath)
-
-
-def current_workspace_fingerprint(repo):
-    from herdr.workspace_fingerprint import current_workspace_fingerprint as fingerprint
-    return fingerprint(repo, is_internal_untracked=_is_internal_untracked,
-                       fingerprint_file=fingerprint_file)
-
-
-def execution_fields_from_workflow(workflow_record):
-    from herdr.workspace_fingerprint import execution_fields_from_workflow as fields
-    return fields(workflow_record, execution_mode=execution_mode)
-
-
-def context_workspace_fingerprint(repo):
-    from herdr.workspace_fingerprint import context_workspace_fingerprint as fingerprint
-    return fingerprint(repo, is_internal_untracked=_is_internal_untracked,
-                       fingerprint_file=fingerprint_file)
-
-
-def verify_baseline(task_id):
-    from herdr.task_cli_verification import verify_baseline as verify
-    return verify(task_id, load_tasks=load_tasks, find_task=find_task,
-                  _git_head_sha=_git_head_sha,
-                  _git_interval_commits=_git_interval_commits,
-                  context_workspace_fingerprint=context_workspace_fingerprint,
-                  current_workspace_fingerprint=current_workspace_fingerprint)
-
-
-def verify_metrics(task_id, min_score=99.9, if_present=False):
-    from herdr.task_cli_verification import verify_metrics as verify
-    return verify(task_id, min_score, if_present,
-                  load_tasks=load_tasks, find_task=find_task)
-
-
-def differential_test(args):
-    from herdr.task_cli_verification import differential_test as handle
-    return handle(args)
+globals().update(build_verification_bindings(globals()))
 
 
 def bypass_gate_cli(task_id, reason, operator="human", note=None, as_json=False):
