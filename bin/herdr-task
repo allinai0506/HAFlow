@@ -1440,46 +1440,14 @@ def cmd_panes(args):
 
 
 def _launch_task(args):
-    agent_policy = None
-    raw_policy = getattr(args, "agent_policy", None)
-    if raw_policy:
-        try:
-            agent_policy = json.loads(raw_policy)
-        except ValueError as exc:
-            print(f"Invalid --agent-policy JSON: {exc}")
-            sys.exit(2)
-        if agent_policy is not None and not isinstance(agent_policy, dict):
-            print("--agent-policy must be a JSON object")
-            sys.exit(2)
-
-    data = load_tasks()
-
-    node_id = getattr(args, "node", None) or getattr(args, "stage", None)
-    if not node_id:
-        print("Error: either --node or --stage is required")
-        sys.exit(1)
-    run_id = getattr(args, "run_id", None) or new_run_id()
-    args.run_id = run_id
-
-    # Project/workflow identity is read before routing.  Pane topology is
-    # intentionally deferred until the router has accepted the task, so an
-    # empty review pool cannot create a Pane as a side effect.
-    project = project_for_workflow(args.workflow_id)
-    if not project:
-        print(f"[WORKFLOW NOT FOUND] {args.workflow_id}; refusing launch")
-        sys.exit(2)
-
-    # New/migrated workflows own the execution identity. A manual Task launch
-    # inherits it just like scheduler dispatch, and cannot override it.
-    execution_id = project.get('execution_id')
-    if execution_id:
-        requested_execution = getattr(args, 'execution_id', None)
-        if requested_execution and requested_execution != execution_id:
-            print('[EXECUTION IDENTITY REJECTED] workflow generation mismatch', file=sys.stderr)
-            sys.exit(2)
-        args.execution_id = execution_id
-
-    exec_fields = execution_fields_from_workflow(project)
+    from herdr.task_cli_launch import prepare_launch_context
+    data, node_id, run_id, project, raw_policy, agent_policy, exec_fields = prepare_launch_context(
+        args,
+        load_tasks=load_tasks,
+        project_for_workflow=project_for_workflow,
+        execution_fields_from_workflow=execution_fields_from_workflow,
+        new_run_id=new_run_id,
+    )
     try:
         from herdr.workflow import validate_artifact_contract
         from herdr.task_resources import find_dispatch_task, begin_launch_intent
@@ -1683,139 +1651,15 @@ def _launch_task(args):
                 )
                 sys.exit(2)
 
-    requested_agent = args.agent if args.agent else "auto"
-
-    # FR-6.1 opt-out via launch flags (R9: reason required, no approval).
-    # Injected into the workflow node_policy for this routing decision only.
-    _opt_out_active = bool(getattr(args, "allow_reuse", False))
-    _opt_reason = str(getattr(args, "reuse_reason", "") or "").strip()
-    if _opt_out_active and not _opt_reason:
-        print(
-            "Isolation opt-out requires --reuse-reason "
-            "(R9: reason field mandatory, no approval needed)"
-        )
-        sys.exit(2)
-    if _opt_out_active:
-        _orig_wcf = workflow_config_for
-
-        def _patched_wcf(wid, _orig=_orig_wcf, _node=node_id,
-                         _reason=_opt_reason):
-            cfg = _orig(wid)
-            if not cfg or wid != args.workflow_id:
-                return cfg
-            try:
-                import copy as _copy
-
-                cfg = _copy.deepcopy(cfg)
-                for _n in cfg.get("nodes", []):
-                    if _n.get("id") == _node:
-                        _pol = dict(_n.get("agent_policy") or {})
-                        _pol["allow_reuse_implementation_agents"] = True
-                        _pol["reuse_reason"] = _reason
-                        _n["agent_policy"] = _pol
-            except (TypeError, AttributeError, ValueError):
-                pass
-            return cfg
-
-        import herdr.agent_router as _router
-
-        _orig_router_wcf = _router.workflow_config_for
-        _router.workflow_config_for = _patched_wcf
-        try:
-            from herdr import projects as _projects
-
-            _orig_proj_wcf = _projects.workflow_config_for
-            _projects.workflow_config_for = _patched_wcf
-            try:
-                try:
-                    resolved_agent = choose_agent(
-                        args.workflow_id,
-                        node_id,
-                        args.task_type,
-                        requested_agent,
-                        reservation_key=args.task_id,
-                        run_id=getattr(args, "run_id", None),
-                        dispatch_role=args.dispatch_role,
-                    )
-                except RuntimeError as exc:
-                    if _is_isolation_rejection(exc):
-                        try:
-                            _record_router_failure_task(args, node_id, exc)
-                        except RuntimeError as persist_exc:
-                            print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
-                            sys.exit(2)
-                        print(f"[ROUTER OPT-OUT REJECTED] {exc}")
-                        sys.exit(2)
-                    else:
-                        launch_intent = getattr(args, "_launch_intent", None)
-                        if launch_intent:
-                            try:
-                                from herdr.task_resources import abort_launch_intent
-                                abort_launch_intent(store, launch_intent, reason="router_rejected")
-                            except Exception:
-                                pass
-                        try:
-                            release_agent_reservation(args.task_id)
-                        except Exception:
-                            pass
-                        print(f"[ROUTER REJECTED] {exc}")
-                        if "preflight" in str(exc).lower():
-                            print("Run './bin/herdr-deep-preflight --deep' to inspect agent connectivity and credentials.")
-                        sys.exit(2)
-            finally:
-                _projects.workflow_config_for = _orig_proj_wcf
-        finally:
-            _router.workflow_config_for = _orig_router_wcf
-        # ``choose_agent`` already persists the required audit event before
-        # returning.  Do not write a second event here: one opt-out decision
-        # has one authoritative audit row, and a failed write has already
-        # caused the branch above to fail closed.
-    else:
-        try:
-            resolved_agent = choose_agent(
-                args.workflow_id,
-                node_id,
-                args.task_type,
-                requested_agent,
-                reservation_key=args.task_id,
-                run_id=getattr(args, "run_id", None),
-                dispatch_role=args.dispatch_role,
-            )
-        except RuntimeError as exc:
-            if _is_isolation_rejection(exc):
-                # Fail-closed lifecycle: persist a task-level actionable failure;
-                # topology/Pane creation has not happened yet.
-                try:
-                    _record_router_failure_task(args, node_id, exc)
-                except RuntimeError as persist_exc:
-                    print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
-                    sys.exit(2)
-                print(f"[ROUTER REJECTED] {exc}")
-                print(
-                    "Isolation is fail-closed. Re-launch with explicit "
-                    "--allow-reuse-implementation-agents --reuse-reason '<why>' "
-                    "to opt out (the opt-out audit must persist)."
-                )
-                sys.exit(2)
-            else:
-                launch_intent = getattr(args, "_launch_intent", None)
-                if launch_intent:
-                    try:
-                        from herdr.task_resources import abort_launch_intent
-                        abort_launch_intent(store, launch_intent, reason="router_rejected")
-                    except Exception:
-                        pass
-                try:
-                    release_agent_reservation(args.task_id)
-                except Exception:
-                    pass
-                from herdr.agent_router import RouterHealthRejection, RouterPolicyRejection
-                if not isinstance(exc, (RouterHealthRejection, RouterPolicyRejection)):
-                    _record_router_failure_task(args, node_id, exc)
-                print(f"[ROUTER REJECTED] {exc}")
-                if "preflight" in str(exc).lower():
-                    print("Run './bin/herdr-deep-preflight --deep' to inspect agent connectivity and credentials.")
-                sys.exit(2)
+    from herdr.task_cli_launch import resolve_launch_agent
+    resolved_agent, requested_agent = resolve_launch_agent(
+        args, node_id, store,
+        choose_agent=choose_agent,
+        workflow_config_for=workflow_config_for,
+        is_isolation_rejection=_is_isolation_rejection,
+        record_router_failure_task=_record_router_failure_task,
+        release_agent_reservation=release_agent_reservation,
+    )
 
     args._launch_reservation_acquired = True
     # Only after routing and delivery identity checks succeed do we create

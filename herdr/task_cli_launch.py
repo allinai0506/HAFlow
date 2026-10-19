@@ -6,6 +6,164 @@ import sys
 from pathlib import Path
 
 
+def prepare_launch_context(args, *, load_tasks, project_for_workflow,
+                           execution_fields_from_workflow, new_run_id):
+    """Resolve launch identity before any resource or durable state is created."""
+    raw_policy = getattr(args, "agent_policy", None)
+    if raw_policy:
+        try:
+            policy = json.loads(raw_policy)
+        except ValueError as exc:
+            print(f"Invalid --agent-policy JSON: {exc}")
+            sys.exit(2)
+        if policy is not None and not isinstance(policy, dict):
+            print("--agent-policy must be a JSON object")
+            sys.exit(2)
+
+    data = load_tasks()
+    node_id = getattr(args, "node", None) or getattr(args, "stage", None)
+    if not node_id:
+        print("Error: either --node or --stage is required")
+        sys.exit(1)
+    run_id = getattr(args, "run_id", None) or new_run_id()
+    args.run_id = run_id
+
+    # Pane topology stays deferred until routing accepts the task.
+    project = project_for_workflow(args.workflow_id)
+    if not project:
+        print(f"[WORKFLOW NOT FOUND] {args.workflow_id}; refusing launch")
+        sys.exit(2)
+
+    execution_id = project.get('execution_id')
+    if execution_id:
+        requested_execution = getattr(args, 'execution_id', None)
+        if requested_execution and requested_execution != execution_id:
+            print('[EXECUTION IDENTITY REJECTED] workflow generation mismatch', file=sys.stderr)
+            sys.exit(2)
+        args.execution_id = execution_id
+
+    return (data, node_id, run_id, project, raw_policy,
+            policy if raw_policy else None,
+            execution_fields_from_workflow(project))
+
+
+def resolve_launch_agent(args, node_id, store, *, choose_agent, workflow_config_for,
+                         is_isolation_rejection, record_router_failure_task,
+                         release_agent_reservation):
+    """Resolve an eligible Agent and preserve launch rejection lifecycle behavior."""
+    requested_agent = getattr(args, "agent", None) or "auto"
+    opt_out = bool(getattr(args, "allow_reuse", False))
+    reason = str(getattr(args, "reuse_reason", "") or "").strip()
+    if opt_out and not reason:
+        print(
+            "Isolation opt-out requires --reuse-reason "
+            "(R9: reason field mandatory, no approval needed)"
+        )
+        sys.exit(2)
+
+    def route():
+        return choose_agent(
+            args.workflow_id,
+            node_id,
+            args.task_type,
+            requested_agent,
+            reservation_key=args.task_id,
+            run_id=getattr(args, "run_id", None),
+            dispatch_role=args.dispatch_role,
+        )
+
+    if opt_out:
+        def patched_config(workflow_id, _original=workflow_config_for,
+                           _node=node_id, _reason=reason):
+            config = _original(workflow_id)
+            if not config or workflow_id != args.workflow_id:
+                return config
+            try:
+                import copy
+                config = copy.deepcopy(config)
+                for node in config.get("nodes", []):
+                    if node.get("id") == _node:
+                        policy = dict(node.get("agent_policy") or {})
+                        policy["allow_reuse_implementation_agents"] = True
+                        policy["reuse_reason"] = _reason
+                        node["agent_policy"] = policy
+            except (TypeError, AttributeError, ValueError):
+                pass
+            return config
+
+        import herdr.agent_router as router
+        import herdr.projects as projects
+        original_router_config = router.workflow_config_for
+        original_project_config = projects.workflow_config_for
+        router.workflow_config_for = patched_config
+        projects.workflow_config_for = patched_config
+        try:
+            try:
+                resolved_agent = route()
+                return resolved_agent, requested_agent
+            except RuntimeError as exc:
+                if is_isolation_rejection(exc):
+                    try:
+                        record_router_failure_task(args, node_id, exc)
+                    except RuntimeError as persist_exc:
+                        print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
+                        sys.exit(2)
+                    print(f"[ROUTER OPT-OUT REJECTED] {exc}")
+                    sys.exit(2)
+                _release_after_router_rejection(args, node_id, store, exc,
+                                                release_agent_reservation,
+                                                record_unexpected=False,
+                                                record_router_failure_task=record_router_failure_task)
+        finally:
+            projects.workflow_config_for = original_project_config
+            router.workflow_config_for = original_router_config
+    else:
+        try:
+            resolved_agent = route()
+            return resolved_agent, requested_agent
+        except RuntimeError as exc:
+            if is_isolation_rejection(exc):
+                try:
+                    record_router_failure_task(args, node_id, exc)
+                except RuntimeError as persist_exc:
+                    print(f"[ROUTER LIFECYCLE ERROR] {persist_exc}")
+                    sys.exit(2)
+                print(f"[ROUTER REJECTED] {exc}")
+                print(
+                    "Isolation is fail-closed. Re-launch with explicit "
+                    "--allow-reuse-implementation-agents --reuse-reason '<why>' "
+                    "to opt out (the opt-out audit must persist)."
+                )
+                sys.exit(2)
+            _release_after_router_rejection(args, node_id, store, exc,
+                                            release_agent_reservation,
+                                            record_unexpected=True,
+                                            record_router_failure_task=record_router_failure_task)
+
+
+def _release_after_router_rejection(args, node_id, store, error, release_agent_reservation, *,
+                                    record_unexpected, record_router_failure_task):
+    intent = getattr(args, "_launch_intent", None)
+    if intent:
+        try:
+            from herdr.task_resources import abort_launch_intent
+            abort_launch_intent(store, intent, reason="router_rejected")
+        except Exception:
+            pass
+    try:
+        release_agent_reservation(args.task_id)
+    except Exception:
+        pass
+    if record_unexpected:
+        from herdr.agent_router import RouterHealthRejection, RouterPolicyRejection
+        if not isinstance(error, (RouterHealthRejection, RouterPolicyRejection)):
+            record_router_failure_task(args, node_id, error)
+    print(f"[ROUTER REJECTED] {error}")
+    if "preflight" in str(error).lower():
+        print("Run './bin/herdr-deep-preflight --deep' to inspect agent connectivity and credentials.")
+    sys.exit(2)
+
+
 def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None,
                         lint_cmd=None, repro_cmd=None, node=None, task_type=None):
     """Initialize the evaluator contract for a newly launched task clone."""
