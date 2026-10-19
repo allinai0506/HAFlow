@@ -8,7 +8,7 @@ nodes:
     label: 市场与竞品范围界定
     node_type: agent
     purpose: 明确分析目标领域、核心竞品标的清单与关键财务比对维度
-    default_task_type: plan
+    default_task_type: docs
     worker_policy:
       preferred: [claude, codex]
       capabilities: [research]
@@ -23,7 +23,7 @@ nodes:
     node_type: agent
     depends_on: [market_scope]
     purpose: 抽取竞品近 4 个季度的财报附注、主营业务收入结构及公开发言要点
-    default_task_type: explore
+    default_task_type: docs
     worker_policy:
       preferred: [opencode, codex]
       capabilities: [web_search, data_extraction, financial_excel_calc]
@@ -39,7 +39,7 @@ nodes:
     node_type: agent
     depends_on: [data_extraction]
     purpose: 交叉校验各家毛利异动原因、供应链成本结构及潜在竞争风险
-    default_task_type: code
+    default_task_type: docs
     worker_policy:
       preferred: [claude, codex]
       capabilities: [analysis, data_extraction, document_generation]
@@ -54,7 +54,7 @@ nodes:
     node_type: gate
     depends_on: [comparative_analysis]
     purpose: 汇总结算汇报，供人类总指挥进行战略决策与最终会签
-    default_task_type: review
+    default_task_type: test
     worker_policy:
       capabilities: [signoff, compliance]
       permissions: [require_approval]

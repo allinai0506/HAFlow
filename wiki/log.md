@@ -3111,3 +3111,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 证据：`tests/test_console_request_guard.py`（策略单测、无头 POST、text/plain 拖拽、跨站 POST、DNS rebinding GET、本机 POST 生效）；隔离 HOME 下控制台全量 389 项通过；真实服务进程 + 临时状态库中 4 个伪造 POST 与 1 个 rebinding 请求全部 403，状态不变。
 - 残留风险：能任意构造请求头的本机进程仍可调用，GET 数据对本机客户端可读；需第二阶段凭证分发。按仓库规则未标记可合并，PR 保持 Draft。
 - 关联：PR #273；本体评审记录 B-04。
+
+## [2026-10-19] fix | 派发任务类型词表校验与 paused 任务可恢复（D4、SC-016）
+
+- 背景：① controller 派发把节点 `default_task_type` 原样传给 `launch --task-type`，而 argparse 只接受 fix/feat/refactor/docs/test/chore/perf/ci；`business-research-v1.yaml` 的 plan、explore、code、review 四个值使其节点从未派发成功（argparse 在任何副作用前拒绝）。② `resume_task` 允许按历史前态恢复到 dispatched/blocked，但状态矩阵不含这两条边，任务停在 paused 只能人工 set。
+- 变更：① 派发边界统一解析任务类型（plan/explore/code→docs，review→test），未知值 fail-fast 且报错包含节点 id 与合法取值；模板同步改为合法值。② resume 的历史回退仅接受 working/rework，其余落回 working。
+- 证据：`tests/test_task_type_vocabulary.py`（choices 与 CLI 一致、未知值拒绝、旧词表映射、全部 shipped 模板词表断言）；`tests/test_resume_transition.py`（隔离状态库中真实 CLI 迁移）；目标回归 432 项通过、96 个子用例；`launch --task-type docs` 通过 argparse（修复前同类值在此被拒绝）。
+- 说明：早先口头汇报称模板非法值只有 3 个，实际是 4 个（多出 code）；初次扫描按文件名分组时折叠了每份文件的匹配。全模板断言已覆盖全部节点。完整 launch 到 dispatched 需真实 Herdr 工作区绑定，临时环境未覆盖。
+- 关联：PR #274；本体评审记录 SC-013、SC-016；教训 §176（见 PR #275）。

@@ -6225,10 +6225,18 @@ def resume_task(task_id):
         sys.exit(2)
     target = "working"
     history = task.get("status_history", [])
+    # 只看最近一次暂停事件：跳过较新的 paused 事件去挑更早的可恢复前态会把
+    # 目标选错（rework -> paused -> rework -> working -> blocked -> paused 应回
+    # working，而不是更早的 rework）。paused 的出边只有 working/rework/
+    # agent_done/failed/superseded/interrupted；dispatched、blocked 等前态不在
+    # 其中，必须落回 working，否则 set_status 会以 Illegal transition 拒绝。
+    latest_pause_from = None
     for h in reversed(history):
-        if h.get("to") == "paused" and h.get("from") in ("working", "rework", "dispatched", "blocked"):
-            target = h.get("from")
+        if h.get("to") == "paused":
+            latest_pause_from = h.get("from")
             break
+    if latest_pause_from in ("working", "rework"):
+        target = latest_pause_from
     set_status(task_id, target)
 
 
