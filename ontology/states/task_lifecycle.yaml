@@ -1,0 +1,330 @@
+id: task_lifecycle
+name: 任务生命周期状态机
+description: 15 状态任务状态机。完成泳道 completed>committed>integrated>cleanup_ready>cleaned 与失败泳道均以 superseded 为唯一吸收态；force 只跳过边合法性，跳过不了未知目标状态；completed 到 rework 需通过 delivery_rework 修复校验。
+lifecycle: experimental
+object: task
+initial: pending
+terminal:
+- superseded
+states:
+- pending
+- dispatched
+- working
+- blocked
+- paused
+- agent_done
+- rework
+- interrupted
+- completed
+- committed
+- integrated
+- cleanup_ready
+- cleaned
+- failed
+- superseded
+classification:
+  active:
+  - dispatched
+  - working
+  - blocked
+  - agent_done
+  - rework
+  - paused
+  - interrupted
+  completed:
+  - completed
+  - committed
+  - integrated
+  - cleanup_ready
+  - cleaned
+  terminal:
+  - completed
+  - committed
+  - integrated
+  - cleanup_ready
+  - cleaned
+  - failed
+  - superseded
+transitions:
+- from: pending
+  to: dispatched
+  trigger: herdr-task launch
+  guards:
+  - task_transition_allowed
+- from: pending
+  to: failed
+  trigger: herdr-task launch failure path
+  guards:
+  - task_transition_allowed
+- from: dispatched
+  to: working
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: dispatched
+  to: blocked
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: dispatched
+  to: agent_done
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: dispatched
+  to: paused
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: dispatched
+  to: failed
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: dispatched
+  to: superseded
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: dispatched
+  to: interrupted
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: working
+  to: blocked
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: working
+  to: agent_done
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: working
+  to: rework
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: working
+  to: paused
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: working
+  to: failed
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: working
+  to: superseded
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: working
+  to: interrupted
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: blocked
+  to: rework
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: blocked
+  to: working
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: blocked
+  to: agent_done
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: blocked
+  to: paused
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: blocked
+  to: failed
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: blocked
+  to: superseded
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: blocked
+  to: interrupted
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: paused
+  to: working
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: paused
+  to: rework
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: paused
+  to: agent_done
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: paused
+  to: failed
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: paused
+  to: superseded
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: paused
+  to: interrupted
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: agent_done
+  to: completed
+  trigger: controller auto-accept (verify-baseline evidence) / herdr-task set --verdict pass
+  guards:
+  - task_transition_allowed
+- from: agent_done
+  to: rework
+  trigger: herdr-task rework / supervisor RETRY
+  guards:
+  - task_transition_allowed
+- from: agent_done
+  to: failed
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: agent_done
+  to: superseded
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: agent_done
+  to: interrupted
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: rework
+  to: working
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: rework
+  to: blocked
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: rework
+  to: agent_done
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: rework
+  to: paused
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: rework
+  to: failed
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: rework
+  to: superseded
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: rework
+  to: interrupted
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: interrupted
+  to: working
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: interrupted
+  to: rework
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: interrupted
+  to: paused
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: interrupted
+  to: failed
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: interrupted
+  to: superseded
+  trigger: kernel.transition_task (herdr-task set / controller CAS)
+  guards:
+  - task_transition_allowed
+- from: completed
+  to: committed
+  trigger: herdr-task commit
+  guards:
+  - task_transition_allowed
+- from: completed
+  to: cleanup_ready
+  trigger: herdr-task finalize
+  guards:
+  - task_transition_allowed
+- from: committed
+  to: integrated
+  trigger: herdr-task integrate
+  guards:
+  - task_transition_allowed
+- from: integrated
+  to: cleanup_ready
+  trigger: herdr-task finalize
+  guards:
+  - task_transition_allowed
+- from: cleanup_ready
+  to: cleaned
+  trigger: herdr-task cleanup
+  guards:
+  - task_transition_allowed
+- from: cleaned
+  to: superseded
+  trigger: herdr-task supersede
+  guards:
+  - task_transition_allowed
+- from: failed
+  to: superseded
+  trigger: herdr-task supersede
+  guards:
+  - task_transition_allowed
+evidence:
+- kind: implemented
+  source: herdr/transitions.py
+  locator: TASK_TRANSITIONS L19-35 / validate_task_transition L62-82
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: transition_task CAS 与同事务事件 L6658-6909
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: single funnel L133-253
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: CLI 前置校验与 fallback 矩阵 L132-156, L2451-2522
+  confidence: high

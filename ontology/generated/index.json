@@ -1,0 +1,499 @@
+{
+  "ontology_root": "/Users/user/.sandboxes/ontology-brownfield-discovery-v1/ontology",
+  "items": {
+    "objects": [
+      {
+        "id": "agent",
+        "name": "执行 Agent",
+        "lifecycle": "experimental",
+        "path": "objects/agent.yaml"
+      },
+      {
+        "id": "agent_pool",
+        "name": "Agent 准入池",
+        "lifecycle": "experimental",
+        "path": "objects/agent_pool.yaml"
+      },
+      {
+        "id": "agent_reservation",
+        "name": "Agent 预占锁",
+        "lifecycle": "experimental",
+        "path": "objects/agent_reservation.yaml"
+      },
+      {
+        "id": "artifact",
+        "name": "交付产物",
+        "lifecycle": "experimental",
+        "path": "objects/artifact.yaml"
+      },
+      {
+        "id": "checkpoint",
+        "name": "检查点快照",
+        "lifecycle": "experimental",
+        "path": "objects/checkpoint.yaml"
+      },
+      {
+        "id": "event",
+        "name": "事实事件",
+        "lifecycle": "experimental",
+        "path": "objects/event.yaml"
+      },
+      {
+        "id": "gate",
+        "name": "节点门禁",
+        "lifecycle": "experimental",
+        "path": "objects/gate.yaml"
+      },
+      {
+        "id": "project",
+        "name": "项目空间",
+        "lifecycle": "experimental",
+        "path": "objects/project.yaml"
+      },
+      {
+        "id": "task",
+        "name": "任务工单",
+        "lifecycle": "experimental",
+        "path": "objects/task.yaml"
+      },
+      {
+        "id": "workflow_definition",
+        "name": "工作流定义",
+        "lifecycle": "experimental",
+        "path": "objects/workflow_definition.yaml"
+      },
+      {
+        "id": "workflow_instance",
+        "name": "工作流运行实例",
+        "lifecycle": "experimental",
+        "path": "objects/workflow_instance.yaml"
+      },
+      {
+        "id": "workflow_node",
+        "name": "工作流节点",
+        "lifecycle": "experimental",
+        "path": "objects/workflow_node.yaml"
+      }
+    ],
+    "relations": [
+      {
+        "id": "agent_pool_authorizes_agent",
+        "name": "准入池授权 Agent",
+        "lifecycle": "experimental",
+        "path": "relations/agent_pool_authorizes_agent.yaml"
+      },
+      {
+        "id": "node_dispatches_task",
+        "name": "节点派发任务",
+        "lifecycle": "experimental",
+        "path": "relations/node_dispatches_task.yaml"
+      },
+      {
+        "id": "node_specifies_gate",
+        "name": "节点声明门禁",
+        "lifecycle": "experimental",
+        "path": "relations/node_specifies_gate.yaml"
+      },
+      {
+        "id": "project_owns_workflow",
+        "name": "项目拥有工作流",
+        "lifecycle": "experimental",
+        "path": "relations/project_owns_workflow.yaml"
+      },
+      {
+        "id": "task_assigned_to_agent",
+        "name": "任务分配给 Agent",
+        "lifecycle": "experimental",
+        "path": "relations/task_assigned_to_agent.yaml"
+      },
+      {
+        "id": "task_emits_event",
+        "name": "任务产生事件",
+        "lifecycle": "experimental",
+        "path": "relations/task_emits_event.yaml"
+      },
+      {
+        "id": "task_holds_reservation",
+        "name": "任务持有预占锁",
+        "lifecycle": "experimental",
+        "path": "relations/task_holds_reservation.yaml"
+      },
+      {
+        "id": "task_produces_artifact",
+        "name": "任务产出交付物",
+        "lifecycle": "experimental",
+        "path": "relations/task_produces_artifact.yaml"
+      },
+      {
+        "id": "workflow_definition_contains_node",
+        "name": "定义包含节点",
+        "lifecycle": "experimental",
+        "path": "relations/workflow_definition_contains_node.yaml"
+      },
+      {
+        "id": "workflow_instance_groups_task",
+        "name": "工作流聚合任务",
+        "lifecycle": "experimental",
+        "path": "relations/workflow_instance_groups_task.yaml"
+      },
+      {
+        "id": "workflow_instance_has_checkpoint",
+        "name": "工作流拥有检查点",
+        "lifecycle": "experimental",
+        "path": "relations/workflow_instance_has_checkpoint.yaml"
+      },
+      {
+        "id": "workflow_instance_instantiates_definition",
+        "name": "实例实例化定义",
+        "lifecycle": "experimental",
+        "path": "relations/workflow_instance_instantiates_definition.yaml"
+      }
+    ],
+    "states": [
+      {
+        "id": "agent_reservation_lifecycle",
+        "name": "Agent 预占锁生命周期",
+        "lifecycle": "experimental",
+        "path": "states/agent_reservation_lifecycle.yaml"
+      },
+      {
+        "id": "gate_verdict_lifecycle",
+        "name": "门禁结论生命周期",
+        "lifecycle": "experimental",
+        "path": "states/gate_verdict_lifecycle.yaml"
+      },
+      {
+        "id": "task_lifecycle",
+        "name": "任务生命周期状态机",
+        "lifecycle": "experimental",
+        "path": "states/task_lifecycle.yaml"
+      },
+      {
+        "id": "workflow_lifecycle",
+        "name": "工作流生命周期状态机",
+        "lifecycle": "experimental",
+        "path": "states/workflow_lifecycle.yaml"
+      }
+    ],
+    "rules": [
+      {
+        "id": "agent_capacity_within_node_limit",
+        "name": "节点并发与累计配额内",
+        "lifecycle": "experimental",
+        "path": "rules/agent_capacity_within_node_limit.yaml"
+      },
+      {
+        "id": "agent_reservation_ttl_bounded",
+        "name": "预占锁 TTL 有界",
+        "lifecycle": "experimental",
+        "path": "rules/agent_reservation_ttl_bounded.yaml"
+      },
+      {
+        "id": "anchor_pane_never_assigned",
+        "name": "Anchor 窗格永不分配",
+        "lifecycle": "experimental",
+        "path": "rules/anchor_pane_never_assigned.yaml"
+      },
+      {
+        "id": "gate_bypass_audited",
+        "name": "门禁豁免可审计",
+        "lifecycle": "experimental",
+        "path": "rules/gate_bypass_audited.yaml"
+      },
+      {
+        "id": "gate_verdict_valid",
+        "name": "门禁结论合法",
+        "lifecycle": "experimental",
+        "path": "rules/gate_verdict_valid.yaml"
+      },
+      {
+        "id": "required_outputs_present",
+        "name": "必备产出存在",
+        "lifecycle": "experimental",
+        "path": "rules/required_outputs_present.yaml"
+      },
+      {
+        "id": "required_task_ids_satisfied",
+        "name": "必备任务清单满足",
+        "lifecycle": "experimental",
+        "path": "rules/required_task_ids_satisfied.yaml"
+      },
+      {
+        "id": "task_has_isolated_clone",
+        "name": "任务独占 CoW 克隆",
+        "lifecycle": "experimental",
+        "path": "rules/task_has_isolated_clone.yaml"
+      },
+      {
+        "id": "task_transition_allowed",
+        "name": "任务状态迁移合法",
+        "lifecycle": "experimental",
+        "path": "rules/task_transition_allowed.yaml"
+      },
+      {
+        "id": "workflow_dag_acyclic",
+        "name": "工作流 DAG 无环且依赖合法",
+        "lifecycle": "experimental",
+        "path": "rules/workflow_dag_acyclic.yaml"
+      },
+      {
+        "id": "workflow_node_ids_unique",
+        "name": "节点 ID 唯一",
+        "lifecycle": "experimental",
+        "path": "rules/workflow_node_ids_unique.yaml"
+      },
+      {
+        "id": "workflow_transition_allowed",
+        "name": "工作流状态迁移合法",
+        "lifecycle": "experimental",
+        "path": "rules/workflow_transition_allowed.yaml"
+      }
+    ],
+    "actions": [
+      {
+        "id": "bypass_gate",
+        "name": "豁免门禁",
+        "lifecycle": "experimental",
+        "path": "actions/bypass_gate.yaml"
+      },
+      {
+        "id": "cleanup_task",
+        "name": "清理任务资源",
+        "lifecycle": "experimental",
+        "path": "actions/cleanup_task.yaml"
+      },
+      {
+        "id": "close_workflow",
+        "name": "关闭工作流",
+        "lifecycle": "experimental",
+        "path": "actions/close_workflow.yaml"
+      },
+      {
+        "id": "commit_task",
+        "name": "提交任务分支",
+        "lifecycle": "experimental",
+        "path": "actions/commit_task.yaml"
+      },
+      {
+        "id": "finalize_task",
+        "name": "规范化任务收尾",
+        "lifecycle": "experimental",
+        "path": "actions/finalize_task.yaml"
+      },
+      {
+        "id": "integrate_task",
+        "name": "集成任务成果",
+        "lifecycle": "experimental",
+        "path": "actions/integrate_task.yaml"
+      },
+      {
+        "id": "launch_task",
+        "name": "派发任务工单",
+        "lifecycle": "experimental",
+        "path": "actions/launch_task.yaml"
+      },
+      {
+        "id": "provision_project",
+        "name": "供给项目空间",
+        "lifecycle": "experimental",
+        "path": "actions/provision_project.yaml"
+      },
+      {
+        "id": "record_gate_verdict",
+        "name": "记录门禁结论",
+        "lifecycle": "experimental",
+        "path": "actions/record_gate_verdict.yaml"
+      },
+      {
+        "id": "release_agent_reservation",
+        "name": "释放 Agent 预占",
+        "lifecycle": "experimental",
+        "path": "actions/release_agent_reservation.yaml"
+      },
+      {
+        "id": "reserve_agent",
+        "name": "预占执行 Agent",
+        "lifecycle": "experimental",
+        "path": "actions/reserve_agent.yaml"
+      },
+      {
+        "id": "start_workflow",
+        "name": "启动工作流 Run",
+        "lifecycle": "experimental",
+        "path": "actions/start_workflow.yaml"
+      },
+      {
+        "id": "transition_task",
+        "name": "迁移任务状态",
+        "lifecycle": "experimental",
+        "path": "actions/transition_task.yaml"
+      },
+      {
+        "id": "verify_task_baseline",
+        "name": "校验任务基线",
+        "lifecycle": "experimental",
+        "path": "actions/verify_task_baseline.yaml"
+      }
+    ],
+    "policies": [
+      {
+        "id": "controller_service_policy",
+        "name": "Controller 服务权限",
+        "lifecycle": "experimental",
+        "path": "policies/controller_service_policy.yaml"
+      },
+      {
+        "id": "gate_bypass_policy",
+        "name": "门禁豁免权限",
+        "lifecycle": "experimental",
+        "path": "policies/gate_bypass_policy.yaml"
+      },
+      {
+        "id": "operator_cli_policy",
+        "name": "操作者 CLI 权限",
+        "lifecycle": "experimental",
+        "path": "policies/operator_cli_policy.yaml"
+      },
+      {
+        "id": "task_agent_scope_policy",
+        "name": "Task Agent 范围权限",
+        "lifecycle": "experimental",
+        "path": "policies/task_agent_scope_policy.yaml"
+      }
+    ],
+    "workflows": [
+      {
+        "id": "blocked_gate_fix_loop",
+        "name": "门禁阻断修复循环",
+        "lifecycle": "experimental",
+        "path": "workflows/blocked_gate_fix_loop.yaml"
+      },
+      {
+        "id": "reservation_handoff",
+        "name": "选人与预占交接",
+        "lifecycle": "experimental",
+        "path": "workflows/reservation_handoff.yaml"
+      },
+      {
+        "id": "task_delivery_workflow",
+        "name": "任务交付闭环",
+        "lifecycle": "experimental",
+        "path": "workflows/task_delivery_workflow.yaml"
+      }
+    ],
+    "connectors": [
+      {
+        "id": "herdr_controller_service",
+        "name": "herdr-controller 守护进程",
+        "lifecycle": "experimental",
+        "path": "connectors/herdr_controller_service.yaml"
+      },
+      {
+        "id": "herdr_core_lib",
+        "name": "herdr 核心库",
+        "lifecycle": "experimental",
+        "path": "connectors/herdr_core_lib.yaml"
+      },
+      {
+        "id": "herdr_factory_cli",
+        "name": "herdr-factory CLI",
+        "lifecycle": "experimental",
+        "path": "connectors/herdr_factory_cli.yaml"
+      },
+      {
+        "id": "herdr_state_db",
+        "name": "StateDB SQLite",
+        "lifecycle": "experimental",
+        "path": "connectors/herdr_state_db.yaml"
+      },
+      {
+        "id": "herdr_task_cli",
+        "name": "herdr-task CLI",
+        "lifecycle": "experimental",
+        "path": "connectors/herdr_task_cli.yaml"
+      }
+    ],
+    "mappings": [
+      {
+        "id": "agent_pool_file_mapping",
+        "name": "Agent 池文件映射",
+        "lifecycle": "experimental",
+        "path": "mappings/agent_pool_file_mapping.yaml"
+      },
+      {
+        "id": "agent_reservation_file_mapping",
+        "name": "预占锁文件映射",
+        "lifecycle": "experimental",
+        "path": "mappings/agent_reservation_file_mapping.yaml"
+      },
+      {
+        "id": "artifact_projection_mapping",
+        "name": "交付产物投影映射",
+        "lifecycle": "experimental",
+        "path": "mappings/artifact_projection_mapping.yaml"
+      },
+      {
+        "id": "checkpoint_db_mapping",
+        "name": "检查点数据库映射",
+        "lifecycle": "experimental",
+        "path": "mappings/checkpoint_db_mapping.yaml"
+      },
+      {
+        "id": "event_ledger_db_mapping",
+        "name": "事件账本数据库映射",
+        "lifecycle": "experimental",
+        "path": "mappings/event_ledger_db_mapping.yaml"
+      },
+      {
+        "id": "gate_verdict_file_mapping",
+        "name": "门禁结论文件映射",
+        "lifecycle": "experimental",
+        "path": "mappings/gate_verdict_file_mapping.yaml"
+      },
+      {
+        "id": "project_registry_mapping",
+        "name": "项目注册表文件映射",
+        "lifecycle": "experimental",
+        "path": "mappings/project_registry_mapping.yaml"
+      },
+      {
+        "id": "task_db_mapping",
+        "name": "任务数据库映射",
+        "lifecycle": "experimental",
+        "path": "mappings/task_db_mapping.yaml"
+      },
+      {
+        "id": "workflow_definition_snapshot_mapping",
+        "name": "工作流定义文件映射",
+        "lifecycle": "experimental",
+        "path": "mappings/workflow_definition_snapshot_mapping.yaml"
+      },
+      {
+        "id": "workflow_instance_db_mapping",
+        "name": "工作流实例数据库映射",
+        "lifecycle": "experimental",
+        "path": "mappings/workflow_instance_db_mapping.yaml"
+      }
+    ],
+    "projections": [
+      {
+        "id": "console_operator_projection",
+        "name": "运维控制台只读投影",
+        "lifecycle": "experimental",
+        "path": "projections/console_operator_projection.yaml"
+      },
+      {
+        "id": "coordinator_workflow_projection",
+        "name": "协调器工作流上下文投影",
+        "lifecycle": "experimental",
+        "path": "projections/coordinator_workflow_projection.yaml"
+      },
+      {
+        "id": "task_executor_projection",
+        "name": "Task Agent 执行上下文投影",
+        "lifecycle": "experimental",
+        "path": "projections/task_executor_projection.yaml"
+      }
+    ]
+  }
+}

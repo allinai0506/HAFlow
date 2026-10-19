@@ -1,0 +1,27 @@
+id: gate_verdict_file_mapping
+name: 门禁结论文件映射
+description: 门禁结论文件映射（事实来源映射）
+lifecycle: experimental
+object: gate
+source:
+  type: file
+  paths:
+  - ~/.herdr-controller/gate-verdicts/<task_id>.json
+  - .herdr/gate-verdict.json (fallback)
+  - tasks.stage_verdict / tasks.stage_verdict_note (canonical)
+fields:
+  verdict: verdict
+  verdict_note: note
+  affected_task_ids: affected_task_ids
+authority:
+  read: herdr.direct_dispatch / controller
+  write: herdr-task set --verdict / direct_dispatch verdict 文件
+evidence:
+- kind: implemented
+  source: herdr/direct_dispatch.py
+  locator: L135-158
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: verdict 通道与别名 L8101-8157
+  confidence: high

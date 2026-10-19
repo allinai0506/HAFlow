@@ -1,0 +1,36 @@
+id: agent_reservation_lifecycle
+name: Agent 预占锁生命周期
+description: 预占记录从 reserved 出发，注册任务后显式 release 为 released；任务始终未注册且超过 TTL 300 秒则由清理逻辑置为 expired。
+lifecycle: experimental
+object: agent_reservation
+initial: reserved
+terminal:
+- released
+- expired
+states:
+- reserved
+- released
+- expired
+transitions:
+- from: reserved
+  to: released
+  trigger: herdr.agent_router.release_agent_reservation
+  guards: []
+- from: reserved
+  to: expired
+  trigger: herdr.agent_router._clean_reservations (TTL 300s)
+  guards:
+  - agent_reservation_ttl_bounded
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: _clean_reservations L260-280
+  confidence: high
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: release_agent_reservation L283-297
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: L4263-4265
+  confidence: high

@@ -1,0 +1,23 @@
+id: reservation_handoff
+name: 选人与预占交接
+description: 选人 -> 写预占锁 -> 启动任务 -> 注册后释放预占（或失败/TTL 回收），关闭路由竞争窗口。
+lifecycle: experimental
+trigger: herdr-task launch
+steps:
+- type: action
+  ref: reserve_agent
+- type: action
+  ref: launch_task
+- type: action
+  ref: release_agent_reservation
+- type: rule
+  ref: agent_reservation_ttl_bounded
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: L260-297, L809-819
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: L3697-3749, L4263-4265
+  confidence: high

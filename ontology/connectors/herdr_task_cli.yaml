@@ -1,0 +1,30 @@
+id: herdr_task_cli
+name: herdr-task CLI
+description: herdr-task CLI（运行时绑定目标）
+lifecycle: experimental
+type: cli
+entrypoint: bin/herdr-task
+operations:
+- add
+- launch
+- set
+- verify-baseline
+- rework
+- commit
+- integrate
+- finalize
+- cleanup
+- close-workflow
+- pause
+- resume
+- bypass-gate
+- supersede
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: add/launch/set/verify-baseline/commit/integrate/finalize/cleanup/close-workflow/rework/supersede
+  confidence: high
+- kind: intended
+  source: docs/references/cli-reference.md
+  locator: 命令面
+  confidence: high

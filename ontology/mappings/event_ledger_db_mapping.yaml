@@ -1,0 +1,30 @@
+id: event_ledger_db_mapping
+name: 事件账本数据库映射
+description: 事件账本数据库映射（事实来源映射）
+lifecycle: experimental
+object: event
+source:
+  type: database
+  path: ~/.herdr-controller/state.db
+  table: events
+fields:
+  id: id
+  workflow_id: workflow_id
+  node_id: node_id
+  task_id: task_id
+  agent_id: agent_id
+  event_type: event_type
+  payload: payload_json
+  timestamp: timestamp
+  source: source
+  run_id: run_id
+  sequence: sequence
+authority:
+  read: database
+  write: herdr.state_db.record_event / trajectory append
+notes: append-only 为约定+事务去重，存在 replay cleanup / 迁移重写两类例外
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: DDL L443-456 / record L3205-3234 / trajectory L3384-3458
+  confidence: high

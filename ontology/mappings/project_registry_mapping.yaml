@@ -1,0 +1,24 @@
+id: project_registry_mapping
+name: 项目注册表文件映射
+description: 项目注册表文件映射（事实来源映射）
+lifecycle: experimental
+object: project
+source:
+  type: file
+  path: ~/.herdr-controller/projects.json
+fields:
+  project_id: projects[<project_root>].project_id
+  project_name: projects[<root>].project_name
+  project_root: key
+  base_branch: projects[<root>].base_branch
+  workspace_id: projects[<root>].workspace_id
+  coordinator_pane_id: projects[<root>].coordinator_pane_id
+  workflow_file: projects[<root>].workflow_file
+authority:
+  read: file
+  write: herdr.projects.save_projects (flock + atomic)
+evidence:
+- kind: implemented
+  source: herdr/projects.py
+  locator: PROJECTS_FILE L17 / load/save L148-153 / 写入 L1011-1028
+  confidence: high

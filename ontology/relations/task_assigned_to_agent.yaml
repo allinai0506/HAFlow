@@ -1,0 +1,17 @@
+id: task_assigned_to_agent
+name: 任务分配给 Agent
+description: 每个 Task 恰好绑定一个执行 Agent；选人由路由算法或显式指定决定。
+lifecycle: experimental
+from: task
+to: agent
+cardinality: many_to_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: choose_agent L521-584
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: tasks.agent 列 L385-402
+  confidence: high

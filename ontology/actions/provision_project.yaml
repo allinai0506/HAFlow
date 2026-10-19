@@ -1,0 +1,50 @@
+id: provision_project
+name: 供给项目空间
+description: 注册项目并创建 Herdr Workspace/节点 Tab 现场与共享工作流定义文件。
+lifecycle: experimental
+target: project
+inputs:
+- project_root
+- template_name
+- project_name
+preconditions: []
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  creates:
+  - project
+  - workflow_definition
+  state_transition: null
+side_effects:
+- 创建 Herdr Workspace/Tab/Pane
+- 写 projects.json 与 projects/<project_id>/workflow.json
+idempotency:
+  strategy: business_key
+  key: project_root (canonical path)
+transaction:
+  mode: file_atomic
+  owner: herdr.projects.provision_project
+audit:
+  required: false
+  notes: 未发现专门的注册审计事件；后续以 workflow 注册/迁移事件追踪
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+- connector: herdr_factory_cli
+  operation: provision
+- connector: herdr_core_lib
+  operation: herdr.projects.provision_project
+verification:
+  strategy: reread_target
+  target: projects.json[project_root]
+evidence:
+- kind: implemented
+  source: herdr/projects.py
+  locator: provision_project L877-949 / L1011-1028
+  confidence: high
+- kind: implemented
+  source: bin/herdr-factory
+  locator: provision 入口
+  confidence: high

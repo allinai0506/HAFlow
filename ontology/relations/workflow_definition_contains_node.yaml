@@ -1,0 +1,13 @@
+id: workflow_definition_contains_node
+name: 定义包含节点
+description: 定义由节点 DAG 组成；节点 id 在定义内唯一。
+lifecycle: experimental
+from: workflow_definition
+to: workflow_node
+cardinality: one_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/workflow.py
+  locator: normalize_workflow / validate_workflow_dag L104-174
+  confidence: high

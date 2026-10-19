@@ -1,0 +1,16 @@
+id: herdr_controller_service
+name: herdr-controller 守护进程
+description: herdr-controller 守护进程（运行时绑定目标）
+lifecycle: experimental
+type: daemon
+entrypoint: services/herdr-controller.py
+operations:
+- step_workflow
+- try_auto_accept
+- handle_fix_loop
+- maybe_close_completed_workflow
+evidence:
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: sweep/step_workflow/completion arbitration/fix-loop L2906-2932, L4888-5119, L2481-2551
+  confidence: high

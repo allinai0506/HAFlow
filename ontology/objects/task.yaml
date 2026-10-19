@@ -1,0 +1,131 @@
+id: task
+name: 任务工单
+description: 针对某个 Node 派发的一次独立 Agent 执行单元；独占 CoW 克隆与分支，状态迁移由单一状态机强制。
+lifecycle: experimental
+identity:
+  primary_key: task_id
+  format: 调用方提供；调度器默认为 {workflow_id}-{node_id}-auto[-N]
+aliases:
+- Task
+- 工单
+properties:
+- id: task_id
+  name: 工单标识
+  type: string
+  required: true
+- id: workflow_id
+  name: 所属工作流
+  type: string
+  required: true
+  notes: FK workflows ON DELETE CASCADE
+- id: node
+  name: 所属节点
+  type: string
+  required: true
+- id: stage
+  name: 所属阶段
+  type: string
+  required: false
+  notes: legacy 别名，save_task 默认 node=stage
+- id: agent
+  name: 执行 Agent
+  type: string
+  required: true
+  notes: 默认 auto
+- id: status
+  name: 任务状态
+  type: enum
+  required: true
+  notes: 15 状态机，见 states/task_lifecycle.yaml
+- id: stage_verdict
+  name: 门禁结论
+  type: enum
+  required: false
+  notes: pass|blocked|null
+- id: stage_verdict_note
+  name: 门禁备注
+  type: string
+  required: false
+  notes: blocked 必填
+- id: pane_id
+  name: 执行窗格
+  type: string
+  required: false
+  notes: 易失运行现场
+- id: goal
+  name: 任务目标
+  type: string
+  required: false
+- id: blocker
+  name: 阻塞原因
+  type: string
+  required: false
+- id: version
+  name: 乐观锁版本
+  type: int
+  required: true
+  notes: 插入=1，每次写入 +1；CAS 使用
+- id: payload.task_type
+  name: 任务类型
+  type: enum
+  required: false
+  notes: fix|feat|refactor|docs|test|chore|perf|ci
+- id: payload.branch
+  name: 独占分支
+  type: string
+  required: false
+  notes: agent/{agent}/{task_type}-{slug}
+- id: payload.clone_path
+  name: CoW 克隆目录
+  type: path
+  required: false
+  notes: ~/.herdr-controller/clones/<task_id>
+- id: payload.integration_mode
+  name: 交付模式
+  type: enum
+  required: false
+  notes: none|git
+- id: payload.baseline_fingerprint
+  name: 基线指纹
+  type: object
+  required: false
+  notes: '{tracked:{path:sha256}, untracked:{path:sha256}}'
+- id: payload.superseded_by
+  name: 替代任务
+  type: string
+  required: false
+  notes: supersede 链，防僵尸义务
+- id: payload.status_history
+  name: 状态历史
+  type: list
+  required: false
+  notes: 每次真实迁移追加
+- id: created_at
+  name: 创建时间
+  type: float
+  required: true
+- id: updated_at
+  name: 更新时间
+  type: float
+  required: true
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: tasks DDL L385-402 / version 迁移 L1118-1132
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: save_task 默认与 payload 规则 L1591-1607 / 读取重建 L1761-1780
+  confidence: high
+- kind: implemented
+  source: herdr/transitions.py
+  locator: TASK_TRANSITIONS L19-35
+  confidence: high
+- kind: implemented
+  source: services/herdr-worker.py
+  locator: clone/branch/baseline L580-605, L1089-1143, L1247-1251
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: launch 字段落库 L4183-4191 / supersede L7849-7853
+  confidence: high

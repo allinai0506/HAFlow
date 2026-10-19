@@ -1,0 +1,27 @@
+id: herdr_core_lib
+name: herdr 核心库
+description: herdr 核心库（运行时绑定目标）
+lifecycle: experimental
+type: python_library
+module: herdr
+operations:
+- herdr.projects.provision_project
+- herdr.projects.register_workflow
+- herdr.kernel.transition_task
+- herdr.kernel.transition_workflow
+- herdr.kernel.bypass_task_gate
+- herdr.agent_router.choose_agent
+- herdr.agent_router.release_agent_reservation
+evidence:
+- kind: implemented
+  source: herdr/projects.py
+  locator: provision_project/register_workflow
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: transition_task/transition_workflow/bypass_task_gate
+  confidence: high
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: choose_agent/release_agent_reservation
+  confidence: high

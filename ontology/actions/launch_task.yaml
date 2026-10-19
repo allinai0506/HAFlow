@@ -1,0 +1,67 @@
+id: launch_task
+name: 派发任务工单
+description: 为节点创建任务、选人、预占、建 CoW 克隆与分支、采样基线并派发到窗格。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+- workflow_id
+- node
+- agent|auto
+- task_type
+- integration_mode
+- dispatch_role
+preconditions:
+- task_transition_allowed
+- agent_capacity_within_node_limit
+- anchor_pane_never_assigned
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  creates:
+  - task
+  - agent_reservation
+  - artifact
+  state_transition:
+    state_machine: task_lifecycle
+    from: null
+    to: dispatched
+side_effects:
+- 创建克隆目录与分支
+- 占用窗格
+- 写基线指纹与 launch intent
+idempotency:
+  strategy: intent_guard
+  key: task_id + launch_intent
+transaction:
+  mode: two_phase
+  owner: bin/herdr-task launch
+audit:
+  required: true
+  event: launch_intent / task_transition
+failure_behavior:
+  retry: safe_only
+  budget: launch intent 有界重试
+  compensation: release_reservation + reclaim
+bindings:
+- connector: herdr_task_cli
+  operation: launch
+- connector: herdr_core_lib
+  operation: herdr.agent_router.choose_agent
+verification:
+  strategy: reread_target
+  target: state.db tasks[task_id].status
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: launch 流程 L3533-3540, L4183-4191, L4263-4265, L4446-4562
+  confidence: high
+- kind: implemented
+  source: services/herdr-worker.py
+  locator: 克隆/分支/基线 L132-170, L262-330, L1089-1143
+  confidence: high
+- kind: implemented
+  source: herdr/node_capacity.py
+  locator: 容量校验 L22-81
+  confidence: high

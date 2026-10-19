@@ -1,0 +1,15 @@
+id: agent_reservation_ttl_bounded
+name: 预占锁 TTL 有界
+description: 未注册任务的预占记录超过 300 秒即被清理；已注册任务由显式 release 释放。
+lifecycle: experimental
+inputs:
+- agent_reservation
+returns:
+  bounded: bool
+  ttl_seconds: int
+logic_ref: herdr/agent_router.py:_clean_reservations
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: L260-280 / release L283-297
+  confidence: high

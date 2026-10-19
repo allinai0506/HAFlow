@@ -1,0 +1,35 @@
+id: controller_service_policy
+name: Controller 服务权限
+description: Controller 服务权限（候选策略，待评审）
+lifecycle: experimental
+subjects:
+  roles:
+  - controller_service
+  note: 常驻调度器，完成仲裁的唯一所有者
+resources:
+  objects:
+  - workflow_instance
+  - task
+  - gate
+  - agent_reservation
+allowed_actions:
+- transition_task
+- close_workflow
+- reserve_agent
+- release_agent_reservation
+conditions:
+- 状态仲裁必须带 expected_status/version 做 CAS（state_db.py L6689-6733）
+- 自动验收仅限非门禁节点（controller L8004-8094）
+agent_execution:
+  mode: service_account
+  independent: true
+  note: 本地受信守护进程；不继承用户权限
+evidence:
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: sole owner L2906-2911
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: CAS L6689-6733
+  confidence: high

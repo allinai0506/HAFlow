@@ -1,0 +1,52 @@
+id: close_workflow
+name: 关闭工作流
+description: 工作流收尾：原子进入 closing 闩，逐任务 finalize，条件满足后 completed；失败按状态机回退。
+lifecycle: experimental
+target: workflow_instance
+inputs:
+- workflow_id
+- force?
+preconditions:
+- workflow_transition_allowed
+authorization:
+  policies:
+  - operator_cli_policy
+  - controller_service_policy
+effects:
+  state_transition:
+    state_machine: workflow_lifecycle
+    from: running|pending
+    to: closing->completed
+side_effects:
+- 逐任务最终化
+- 清理/保留资源决策
+- 写 outcome
+idempotency:
+  strategy: business_key
+  key: workflow_id + closing latch
+transaction:
+  mode: atomic_latch
+  owner: bin/herdr-task close-workflow
+audit:
+  required: true
+  event: workflow_transition
+failure_behavior:
+  retry: safe_only
+  compensation: closing 失败保持 closing 供人工处理
+bindings:
+- connector: herdr_task_cli
+  operation: close-workflow
+- connector: herdr_controller_service
+  operation: maybe_close_completed_workflow
+verification:
+  strategy: reread_target
+  target: state.db workflows.status
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: L7273-7292, L7415-7460, L7532, L7583-7590
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: auto-close 触发 L844-905
+  confidence: high

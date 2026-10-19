@@ -1,0 +1,63 @@
+id: coordinator_workflow_projection
+name: 协调器工作流上下文投影
+description: 面向项目协调器 Agent 的最小工作流视图：足以推进节点与派发任务，不暴露用户令牌与原始证据。
+lifecycle: experimental
+consumers:
+- role: coordinator_agent
+objects:
+  workflow_instance:
+    properties:
+    - workflow_id
+    - title
+    - status
+    - metadata.project_id
+  workflow_node:
+    properties:
+    - id
+    - label
+    - node_type
+    - depends_on
+    - required_outputs
+  task:
+    properties:
+    - task_id
+    - node
+    - status
+    - agent
+    - stage_verdict
+    - blocker
+  gate:
+    properties:
+    - verdict
+    - verdict_note
+    - retry_node
+  artifact:
+    properties:
+    - rel_path
+    - status
+relations:
+- workflow_definition_contains_node
+- node_dispatches_task
+- node_specifies_gate
+rules:
+- workflow_dag_acyclic
+- task_transition_allowed
+- gate_verdict_valid
+- required_task_ids_satisfied
+actions:
+- launch_task
+- transition_task
+- close_workflow
+policies:
+- operator_cli_policy
+- controller_service_policy
+exclude_by_default: true
+evidence:
+- kind: intended
+  source: wiki/semantic-context-compact.md
+  locator: Context Compiler 按角色编译 L1-5
+  confidence: high
+- kind: implemented
+  source: herdr/context_compiler.py
+  locator: WorkingContext 编译入口
+  confidence: high

@@ -1,0 +1,37 @@
+id: gate_verdict_lifecycle
+name: 门禁结论生命周期
+description: 门禁结论字段从 unset 出发，随任务 completed 写入 pass/blocked；blocked 必填备注。rework/重验后的改写语义暂无直接证据，标记 unknown。
+lifecycle: experimental
+object: gate
+initial: unset
+terminal: []
+states:
+- unset
+- pass
+- blocked
+transitions:
+- from: unset
+  to: pass
+  trigger: herdr-task set <task_id> completed --verdict pass
+  guards:
+  - gate_verdict_valid
+- from: unset
+  to: blocked
+  trigger: herdr-task set <task_id> completed --verdict blocked --note <note>
+  guards:
+  - gate_verdict_valid
+unknowns:
+- pass/blocked 的重写与回落条件（rework 后）未在代码中找到显式状态约束
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: verdict 规则 L2402-2419
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: tasks.stage_verdict/stage_verdict_note L392-393
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: fix-loop 消费 blocked L2481-2551
+  confidence: high

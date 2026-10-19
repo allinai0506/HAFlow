@@ -1,0 +1,20 @@
+id: required_task_ids_satisfied
+name: 必备任务清单满足
+description: 节点声明的 required_task_ids 必须全部完成；替代项仅沿已登记 superseded_by 链解析，缺失、跨工作流/节点、环或僵尸义务都阻止节点完成。
+lifecycle: experimental
+inputs:
+- workflow_node
+- task
+returns:
+  satisfied: bool
+  blockers: list[string]
+logic_ref: herdr/scheduler.py:node_is_complete
+evidence:
+- kind: implemented
+  source: herdr/scheduler.py
+  locator: L128-168, L171-219
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: completion 判定 L3303-3345
+  confidence: high

@@ -1,0 +1,47 @@
+id: reserve_agent
+name: 预占执行 Agent
+description: 选人并写跨进程预占锁，关闭路由到任务注册之间的并发竞争窗口。
+lifecycle: experimental
+target: agent_reservation
+inputs:
+- task_id
+- project_id
+- stage
+- task_type
+- node_policy
+preconditions:
+- agent_capacity_within_node_limit
+- agent_reservation_ttl_bounded
+authorization:
+  policies:
+  - controller_service_policy
+  - operator_cli_policy
+effects:
+  creates:
+  - agent_reservation
+side_effects:
+- 按负载+健康信号排序选人
+- flock 写 agent-reservations.json
+idempotency:
+  strategy: business_key
+  key: task_id
+transaction:
+  mode: file_locked
+  owner: herdr.agent_router.choose_agent
+audit:
+  required: false
+  notes: 路由决策可观测于 route_decision 事件（存在时）
+failure_behavior:
+  retry: safe_only
+  compensation: TTL 过期回收
+bindings:
+- connector: herdr_core_lib
+  operation: herdr.agent_router.choose_agent
+verification:
+  strategy: reread_target
+  target: agent-reservations.json[task_id]
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: L521-584, L809-819
+  confidence: high

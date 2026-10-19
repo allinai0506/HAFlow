@@ -1,0 +1,13 @@
+id: agent_pool_authorizes_agent
+name: 准入池授权 Agent
+description: 池的 allowed_agents 定义候选集合，disabled_agents 排除；preferred 只影响顺序不影响准入门槛。
+lifecycle: experimental
+from: agent_pool
+to: agent
+cardinality: many_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: 默认池 L181-187 / candidate order L320-336 / 健康门禁 L628-643
+  confidence: high

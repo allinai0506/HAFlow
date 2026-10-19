@@ -1,0 +1,23 @@
+id: anchor_pane_never_assigned
+name: Anchor 窗格永不分配
+description: 节点 Anchor 母体与项目协调器窗格不进入可分配池；回收流程也拒绝 anchor_or_coordinator_pane。
+lifecycle: experimental
+inputs:
+- workflow_node
+- task
+returns:
+  assignable: bool
+logic_ref: herdr/pane_pool.py:list_slots_for_project
+evidence:
+- kind: implemented
+  source: herdr/pane_pool.py
+  locator: 过滤 anchor/coordinator L101-116
+  confidence: high
+- kind: implemented
+  source: herdr/task_resources.py
+  locator: 回收拒绝 L145-150
+  confidence: high
+- kind: intended
+  source: wiki/domain-model.md
+  locator: 不变量 1
+  confidence: high

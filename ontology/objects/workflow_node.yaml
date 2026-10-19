@@ -1,0 +1,105 @@
+id: workflow_node
+name: 工作流节点
+description: 工作流定义中的拓扑单元；Agent/Human/Tool/Gate 四类，产生执行工单（Task），运行期携带 tab/anchor 现场映射。
+lifecycle: experimental
+identity:
+  primary_key: node_id
+  scoped_by: workflow_id
+aliases:
+- Node
+- Stage (legacy)
+- 节点
+properties:
+- id: id
+  name: 节点标识
+  type: string
+  required: true
+  notes: 工作流内唯一
+- id: label
+  name: 展示名
+  type: string
+  required: false
+- id: node_type
+  name: 节点类型
+  type: enum
+  required: false
+  notes: agent|human|tool|gate，默认 agent
+- id: depends_on
+  name: 前置依赖
+  type: list[string]
+  required: false
+  notes: DAG 边；必须无环
+- id: parallel
+  name: 并行派发
+  type: bool
+  required: false
+- id: purpose
+  name: 执行目的
+  type: string
+  required: false
+- id: default_task_type
+  name: 默认任务类型
+  type: enum
+  required: false
+  notes: explore|plan|code|test|review|docs
+- id: default_integration_mode
+  name: 默认交付模式
+  type: enum
+  required: false
+  notes: none|git
+- id: agent_policy
+  name: Agent 策略
+  type: object
+  required: false
+  notes: fixed|preferred|exclude|parallel|roles
+- id: worker_policy
+  name: 执行者能力与权限
+  type: object
+  required: false
+  notes: capabilities|permissions(read_only/read_write/require_approval/admin)
+- id: gate
+  name: 门禁契约
+  type: object
+  required: false
+  notes: type|auto_criteria|requires_human_approval|retry_node|max_loops
+- id: required_task_ids
+  name: 必备任务清单
+  type: list[string]
+  required: false
+  notes: 未完成则节点不可完成；沿 superseded_by 链解析替代项
+- id: required_outputs
+  name: 必备产出
+  type: list[string]
+  required: false
+  notes: 非 gate 节点为文件路径；gate 节点为人工契约标签
+- id: rules
+  name: 节点规则
+  type: list[string]
+  required: false
+- id: tab_id
+  name: 运行现场 Tab
+  type: string
+  required: false
+  notes: 运行期动态映射，非静态属性
+- id: anchor_pane_id
+  name: Anchor 窗格
+  type: string
+  required: false
+  notes: 只读母体，永不分配给 Task
+evidence:
+- kind: implemented
+  source: herdr/workflow.py
+  locator: 节点归一化 L341-364 / tab_id 透传 L398-401
+  confidence: high
+- kind: implemented
+  source: herdr/workflow.py
+  locator: validate_workflow_dag L104-174
+  confidence: high
+- kind: intended
+  source: docs/product-specs/workflow-template-schema.md
+  locator: 2. Node Schema L47-71
+  confidence: high
+- kind: implemented
+  source: herdr/node_capacity.py
+  locator: launch_capacity_error 并发/累计配额 L22-81
+  confidence: high

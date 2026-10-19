@@ -1,0 +1,14 @@
+id: gate_blocked_requires_note
+name: blocked 结论必须有备注
+facts:
+  task:
+    task_id: T-GATE
+    node: review
+  proposed_verdict:
+    verdict: blocked
+    note: ''
+expected:
+  rules:
+    gate_verdict_valid: false
+  disallowed_actions:
+  - record_gate_verdict

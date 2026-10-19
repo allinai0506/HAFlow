@@ -1,0 +1,41 @@
+id: agent_pool
+name: Agent 准入池
+description: 按 project_id 隔离的 Agent 准入与偏好配置；决定项目允许/禁用的 Agent 与节点/任务类型偏好顺序。
+lifecycle: experimental
+identity:
+  primary_key: project_id
+aliases:
+- AgentPool
+properties:
+- id: allowed_agents
+  name: 允许列表
+  type: list[string]
+  required: true
+- id: disabled_agents
+  name: 禁用列表
+  type: list[string]
+  required: false
+  notes: preflight/deep preflight 可写
+- id: stage_preferences
+  name: 阶段偏好
+  type: object
+  required: false
+  notes: requirements|plan|implementation|test|review|wrapup -> 有序候选
+- id: task_type_preferences
+  name: 任务类型偏好
+  type: object
+  required: false
+  notes: feat|fix|refactor|docs|test|chore|perf|ci -> 有序候选
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: POOLS_FILE L12 / 默认池结构 L181-187 / ensure_pool_for_project L195-201
+  confidence: high
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: 默认优先级 L49-67
+  confidence: high
+- kind: implemented
+  source: herdr/preflight.py
+  locator: update_disabled L145-160
+  confidence: high

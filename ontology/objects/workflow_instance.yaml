@@ -1,0 +1,79 @@
+id: workflow_instance
+name: 工作流运行实例
+description: 实际启动并执行某次需求变更的运行时记录；权威存储为 StateDB workflows 表，workflows.json 仅为 JSON 投影。
+lifecycle: experimental
+identity:
+  primary_key: workflow_id
+  format: wf-{project_slug}-{MMDD}-{seq:02d}
+aliases:
+- Workflow Run
+- 工作流实例
+- Workflow
+properties:
+- id: workflow_id
+  name: 实例标识
+  type: string
+  required: true
+- id: title
+  name: 任务名称
+  type: string
+  required: false
+  notes: 用户输入，业务一等公民
+- id: status
+  name: 运行状态
+  type: enum
+  required: true
+  notes: pending|running|in_progress|paused|closing|completed|failed
+- id: template_name
+  name: 来源模板
+  type: string
+  required: false
+- id: current_stage
+  name: 当前阶段
+  type: string
+  required: false
+  notes: legacy；未发现生产写入方（unknown）
+- id: metadata.project_id
+  name: 所属项目
+  type: string
+  required: true
+  notes: metadata_json.project_id，建索引 json_extract
+- id: metadata.workflow_file
+  name: Run 定义快照路径
+  type: path
+  required: false
+- id: metadata.node_runtime
+  name: 节点运行现场映射
+  type: object
+  required: false
+  notes: tab_id / anchor_pane_id，可变，读取时覆盖冻结定义
+- id: metadata.context
+  name: 上下文绑定
+  type: object
+  required: false
+- id: created_at
+  name: 创建时间
+  type: float
+  required: true
+- id: updated_at
+  name: 更新时间
+  type: float
+  required: true
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: workflows DDL L368-377 / save_workflow L1491-1517
+  confidence: high
+- kind: implemented
+  source: herdr/projects.py
+  locator: register_workflow L551-603 / generate_workflow_id L395-424
+  confidence: high
+- kind: implemented
+  source: herdr/transitions.py
+  locator: WORKFLOW_TRANSITIONS L89-97
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: idx_workflows_project L679
+  confidence: high
+  notes: metadata_json->$.project_id 索引

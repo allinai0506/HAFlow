@@ -1,0 +1,13 @@
+id: node_specifies_gate
+name: 节点声明门禁
+description: 节点可选声明门禁契约；test/review/wrapup 默认视为门禁。
+lifecycle: experimental
+from: workflow_node
+to: gate
+cardinality: one_to_zero_or_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: resolve_gate_config L946-973 / GATE_DEFAULTS L938-944
+  confidence: high

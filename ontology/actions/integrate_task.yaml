@@ -1,0 +1,45 @@
+id: integrate_task
+name: 集成任务成果
+description: 将任务分支成果集成到目标分支并记录集成引用，推进 committed -> integrated。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+- onto
+preconditions:
+- task_transition_allowed
+- workflow_transition_allowed
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: committed
+    to: integrated
+side_effects:
+- 目标分支更新
+- 记录 integrated_commit
+idempotency:
+  strategy: business_key
+  key: task_id + integrated sha
+transaction:
+  mode: git_atomic
+  owner: bin/herdr-task integrate
+audit:
+  required: true
+  event: task_transition / pull_request_merged
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+- connector: herdr_task_cli
+  operation: integrate
+verification:
+  strategy: reread_target
+  target: git target branch + tasks.status
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: L6461-6515
+  confidence: high

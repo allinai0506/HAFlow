@@ -1,0 +1,24 @@
+version: 0.1.0
+name: haflow-domain-ontology
+description: HAFlow 项目->工作流->节点->任务编排闭环候选本体（Brownfield Discovery，第一切片，全部 experimental）
+default_language: zh-CN
+lifecycle_values:
+- experimental
+- active
+- deprecated
+source_revision: origin/main @ 6b4d48b
+discovery_mode: BROWNFIELD_DISCOVERY_READ_ONLY
+roots:
+  objects: objects
+  relations: relations
+  states: states
+  rules: rules
+  actions: actions
+  policies: policies
+  workflows: workflows
+  connectors: connectors
+  mappings: mappings
+  projections: projections
+  golden_tests: tests/golden
+  decisions: decisions
+  proposals: proposals

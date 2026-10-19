@@ -1,0 +1,68 @@
+id: agent
+name: 执行 Agent
+description: 本机 CLI 形态的 AI 执行单元（claude/codex/opencode 等），由路由器选择并绑定到 Task；能力矩阵用于打断/续跑等适配。
+lifecycle: experimental
+identity:
+  primary_key: agent_id
+  examples:
+  - claude
+  - codex
+  - opencode
+  - qodercli
+  - agy
+  - pi
+  - grok
+  - kimi
+aliases:
+- Executor
+- Agent 执行者
+properties:
+- id: agent_id
+  name: Agent 标识
+  type: string
+  required: true
+- id: binary
+  name: 解析后的可执行文件
+  type: path
+  required: false
+  notes: resolve_agent_binary：内部 id -> binary（如 qodercli -> qodercn）
+- id: capabilities.supports_interrupt
+  name: 支持硬打断
+  type: bool
+  required: false
+  notes: AgentAdapterCapability，默认 false
+- id: capabilities.supports_soft_steer
+  name: 支持软插话
+  type: bool
+  required: false
+- id: capabilities.supports_resume
+  name: 支持断点续跑
+  type: bool
+  required: false
+- id: capabilities.prompt_injection
+  name: 支持 Prompt 注入
+  type: bool
+  required: false
+- id: health_status
+  name: 健康状态
+  type: enum
+  required: false
+  notes: preflight/deep preflight 快照；硬不健康永久排除
+evidence:
+- kind: implemented
+  source: herdr/agent_binary.py
+  locator: 内部 id -> binary 映射与解析 L19-50, L101-116
+  confidence: high
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: DEFAULT_ALLOWED L47 / HARD_UNHEALTHY_STATUSES L75-87
+  confidence: high
+- kind: implemented
+  source: herdr/agent_adapter.py
+  locator: AgentAdapterCapability L46-67 / 能力矩阵 L159-207
+  confidence: high
+- kind: implemented
+  source: herdr/deep_preflight.py
+  locator: 健康快照持久化 L594-621
+  confidence: high
+  notes: 权威健康信号；浅探针不能判定 token 耗尽

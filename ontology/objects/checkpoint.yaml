@@ -1,0 +1,58 @@
+id: checkpoint
+name: 检查点快照
+description: Workflow 级状态快照与父子链；由控制面显式创建，可用于恢复或分叉，restore 会删除该 workflow 现有任务后重建。
+lifecycle: experimental
+identity:
+  primary_key: checkpoint_id
+  format: cp_<workflow_id>_<ts>_<uuid6>
+aliases:
+- Checkpoint
+properties:
+- id: checkpoint_id
+  name: 检查点标识
+  type: string
+  required: true
+- id: workflow_id
+  name: 所属工作流
+  type: string
+  required: true
+- id: tag
+  name: 标签
+  type: string
+  required: false
+  notes: 自由文本，如 golden_state
+- id: parent_checkpoint_id
+  name: 父检查点
+  type: string
+  required: false
+  notes: 构成检查点 DAG
+- id: workflow_status
+  name: 快照时工作流状态
+  type: string
+  required: false
+- id: task_count
+  name: 快照任务数
+  type: int
+  required: false
+- id: snapshot_json
+  name: 快照内容
+  type: object
+  required: false
+  notes: workflow+config+tasks+metadata
+- id: created_at
+  name: 创建时间
+  type: float
+  required: true
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: checkpoints DDL L428-440 / create L7579-7646
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: restore L7719-7765 / fork L7768-7837
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: 控制面入口 L730-760
+  confidence: high

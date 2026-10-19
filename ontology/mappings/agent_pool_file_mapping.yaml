@@ -1,0 +1,21 @@
+id: agent_pool_file_mapping
+name: Agent 池文件映射
+description: Agent 池文件映射（事实来源映射）
+lifecycle: experimental
+object: agent_pool
+source:
+  type: file
+  path: ~/.herdr-controller/agent-pools.json
+fields:
+  allowed_agents: projects[<project_id>].allowed_agents
+  disabled_agents: projects[<project_id>].disabled_agents
+  stage_preferences: projects[<project_id>].stage_preferences
+  task_type_preferences: projects[<project_id>].task_type_preferences
+authority:
+  read: file
+  write: herdr.agent_router.ensure_pool_for_project / preflight 写 disabled_agents
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: L12, L181-201
+  confidence: high

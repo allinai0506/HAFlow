@@ -1,0 +1,57 @@
+id: record_gate_verdict
+name: 记录门禁结论
+description: 随任务 completed 写入 pass/blocked 结论与备注；blocked 触发下游阻断与 fix-loop。
+lifecycle: experimental
+target: gate
+inputs:
+- task_id
+- verdict
+- note
+- affected_task_ids?
+preconditions:
+- gate_verdict_valid
+- task_transition_allowed
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  state_transition:
+    state_machine: gate_verdict_lifecycle
+    from: unset
+    to: pass|blocked
+side_effects:
+- 写 gate-verdict JSON
+- blocked 时 Controller 作废下游并排 fix 任务
+idempotency:
+  strategy: business_key
+  key: task_id
+transaction:
+  mode: atomic_with_transition
+  owner: bin/herdr-task set
+audit:
+  required: true
+  event: task_transition (+gate verdict payload)
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+- connector: herdr_task_cli
+  operation: set --verdict
+- connector: herdr_controller_service
+  operation: handle_fix_loop
+verification:
+  strategy: reread_target
+  target: tasks.stage_verdict
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: L2402-2419, L2429-2457
+  confidence: high
+- kind: implemented
+  source: herdr/direct_dispatch.py
+  locator: verdict 文件协议 L135-158
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: fix-loop L2481-2551
+  confidence: high

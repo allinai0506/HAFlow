@@ -1,0 +1,28 @@
+id: herdr_state_db
+name: StateDB SQLite
+description: StateDB SQLite（运行时绑定目标）
+lifecycle: experimental
+type: database
+path: ~/.herdr-controller/state.db
+tables:
+- workflows
+- tasks
+- events
+- checkpoints
+- observations
+- trajectory_findings
+- context_packs
+- working_contexts
+- completion_observations
+- completion_receipts
+- workflow_recovery_operations
+- user_tokens
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: state.db 表结构 L362-665
+  confidence: high
+- kind: implemented
+  source: herdr/state_store.py
+  locator: StateStore 抽象 L192-217
+  confidence: high

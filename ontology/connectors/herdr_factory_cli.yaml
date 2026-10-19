@@ -1,0 +1,16 @@
+id: herdr_factory_cli
+name: herdr-factory CLI
+description: herdr-factory CLI（运行时绑定目标）
+lifecycle: experimental
+type: cli
+entrypoint: bin/herdr-factory
+operations:
+- run
+- provision
+- pause
+- resume
+evidence:
+- kind: implemented
+  source: bin/herdr-factory
+  locator: run/provision/start_workflow/pause/resume L403-623
+  confidence: high

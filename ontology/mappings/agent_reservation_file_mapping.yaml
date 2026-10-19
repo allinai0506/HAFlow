@@ -1,0 +1,24 @@
+id: agent_reservation_file_mapping
+name: 预占锁文件映射
+description: 预占锁文件映射（事实来源映射）
+lifecycle: experimental
+object: agent_reservation
+source:
+  type: file
+  path: ~/.herdr-controller/agent-reservations.json
+fields:
+  task_id: reservations[<task_id>].task_id
+  agent: reservations[<task_id>].agent
+  project_id: reservations[<task_id>].project_id
+  workflow_id: reservations[<task_id>].workflow_id
+  created_at: reservations[<task_id>].created_at
+  dispatch_role: reservations[<task_id>].dispatch_role
+authority:
+  read: file
+  write: herdr.agent_router.choose_agent / release_agent_reservation
+notes: 文档中出现的 router-reservations.json 为过期命名（冲突 SC-009）
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: L16, L810-819, L283-297
+  confidence: high

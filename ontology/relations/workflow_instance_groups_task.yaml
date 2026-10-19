@@ -1,0 +1,14 @@
+id: workflow_instance_groups_task
+name: 工作流聚合任务
+description: 任务直接通过 workflow_id 外键归属工作流（与节点路径并存，恢复查询依赖该直连）。
+lifecycle: experimental
+from: workflow_instance
+to: task
+cardinality: one_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: FK workflows ON DELETE CASCADE L401
+  confidence: high
+notes: 与 node_dispatches_task 语义重叠：节点表达 DAG 归属，workflow_id 表达容器归属，二者都保留

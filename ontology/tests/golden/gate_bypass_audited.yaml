@@ -1,0 +1,18 @@
+id: gate_bypass_audited
+name: 豁免必须留审计回执
+facts:
+  task:
+    task_id: T-BYPASS
+    status: blocked
+    node: wrapup
+  bypass_request:
+    reason: 业务方确认可先行交付
+    operator: human
+expected:
+  rules:
+    gate_bypass_audited: true
+  allowed_actions:
+  - bypass_gate
+  side_effects:
+  - gate_bypassed event
+  - bypass_<uuid> receipt

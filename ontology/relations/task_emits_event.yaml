@@ -1,0 +1,17 @@
+id: task_emits_event
+name: 任务产生事件
+description: 状态迁移在 StateDB 事务内写规范事件；轨迹事件为 best-effort 历史。
+lifecycle: experimental
+from: task
+to: event
+cardinality: one_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: L6820-6833
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: L203-222
+  confidence: high

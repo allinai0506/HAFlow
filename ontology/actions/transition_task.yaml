@@ -1,0 +1,61 @@
+id: transition_task
+name: 迁移任务状态
+description: 受控任务状态迁移的通用动作；所有调用收敛到 kernel.transition_task 单一漏斗并做 CAS。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+- to_status
+- reason
+- expected_status
+- expected_version
+preconditions:
+- task_transition_allowed
+authorization:
+  policies:
+  - operator_cli_policy
+  - controller_service_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: <current>
+    to: <target>
+side_effects:
+- 同一事务写 task_transition 事件
+- best-effort 追加轨迹事件
+- 版本 +1
+idempotency:
+  strategy: cas_exactly_once
+  key: task_id + expected_status/version
+transaction:
+  mode: atomic
+  owner: herdr.state_db.transition_task
+audit:
+  required: true
+  event: task_transition
+failure_behavior:
+  retry: safe_on_cas_mismatch
+  compensation: reread_and_redecide
+bindings:
+- connector: herdr_task_cli
+  operation: set
+- connector: herdr_core_lib
+  operation: herdr.kernel.transition_task
+- connector: herdr_controller_service
+  operation: CAS arbitration
+verification:
+  strategy: reread_target
+  target: state.db tasks[task_id].status
+evidence:
+- kind: implemented
+  source: herdr/kernel.py
+  locator: L133-253
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: L6658-6909
+  confidence: high
+- kind: implemented
+  source: tests/test_state_transition_gateway.py
+  locator: CAS/审计断言 L97-142, L207-235
+  confidence: high

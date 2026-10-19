@@ -1,0 +1,21 @@
+id: gate_bypass_audited
+name: 门禁豁免可审计
+description: 豁免必须提供非空 reason，签发唯一 bypass_id 回执并写 gate_bypassed 事件；当前代码不强制第二人审批（已知缺口）。
+lifecycle: experimental
+inputs:
+- gate
+- task
+returns:
+  audited: bool
+  bypass_id: string
+logic_ref: herdr/kernel.py:bypass_task_gate
+evidence:
+- kind: implemented
+  source: herdr/kernel.py
+  locator: L832-957
+  confidence: high
+- kind: intended
+  source: wiki/domain-model.md
+  locator: 不变量 5
+  confidence: high
+notes: 权限缺口记录于 decisions/0003-semantic-conflicts.md（无鉴权/无二次审批）

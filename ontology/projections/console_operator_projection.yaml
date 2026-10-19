@@ -1,0 +1,75 @@
+id: console_operator_projection
+name: 运维控制台只读投影
+description: 面向人类操作者的驾驶舱视图：项目、工作流、节点、任务、事件、检查点与交付物的只读聚合。
+lifecycle: experimental
+consumers:
+- role: human_operator_console
+objects:
+  project:
+    properties:
+    - project_id
+    - project_name
+    - project_root
+    - base_branch
+    - workspace_id
+  workflow_instance:
+    properties:
+    - workflow_id
+    - title
+    - status
+    - created_at
+    - updated_at
+  workflow_node:
+    properties:
+    - id
+    - label
+    - node_type
+    - depends_on
+  task:
+    properties:
+    - task_id
+    - node
+    - status
+    - agent
+    - version
+    - stage_verdict
+  event:
+    properties:
+    - event_type
+    - task_id
+    - timestamp
+    - source
+  checkpoint:
+    properties:
+    - checkpoint_id
+    - tag
+    - created_at
+  artifact:
+    properties:
+    - rel_path
+    - status
+    - kind
+relations:
+- project_owns_workflow
+- workflow_instance_groups_task
+- task_produces_artifact
+rules:
+- task_transition_allowed
+- workflow_transition_allowed
+actions:
+- transition_task
+- close_workflow
+- bypass_gate
+policies:
+- operator_cli_policy
+- gate_bypass_policy
+exclude_by_default: true
+evidence:
+- kind: implemented
+  source: herdr/projection.py
+  locator: 白盒遥测投影 L57-64
+  confidence: high
+- kind: intended
+  source: console/herdr_factory_console.py
+  locator: Console 运营视图
+  confidence: high

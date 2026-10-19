@@ -1,0 +1,13 @@
+id: reservation_expired_reclaimed
+name: 超时预占被回收
+facts:
+  agent_reservation:
+    task_id: T-NOT-REGISTERED
+    created_at: now-301
+  task_registered: false
+expected:
+  rules:
+    agent_reservation_ttl_bounded: true
+  state:
+    from: reserved
+    to: expired

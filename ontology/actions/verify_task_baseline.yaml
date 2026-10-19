@@ -1,0 +1,45 @@
+id: verify_task_baseline
+name: 校验任务基线
+description: 只读比对任务克隆与基线指纹及提交区间，输出 BASELINE_MATCH/TASK_CHANGED 证据，不写状态。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+preconditions:
+- task_has_isolated_clone
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  state_transition: null
+  outputs:
+  - baseline evidence (stdout protocol)
+side_effects:
+- 无状态副作用；可能枚举 git 区间
+idempotency:
+  strategy: pure_read
+  key: task_id
+transaction:
+  mode: none
+  owner: bin/herdr-task
+audit:
+  required: false
+  notes: stdout 协议 + 后续轨迹/自动验收消费
+failure_behavior:
+  retry: always_safe
+  compensation: none
+bindings:
+- connector: herdr_task_cli
+  operation: verify-baseline
+verification:
+  strategy: reread_target
+  target: clone 文件指纹
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: L4831-5026
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: auto-accept 消费 L8004-8094
+  confidence: high

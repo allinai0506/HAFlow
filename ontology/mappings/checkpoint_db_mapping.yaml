@@ -1,0 +1,25 @@
+id: checkpoint_db_mapping
+name: 检查点数据库映射
+description: 检查点数据库映射（事实来源映射）
+lifecycle: experimental
+object: checkpoint
+source:
+  type: database
+  path: ~/.herdr-controller/state.db
+  table: checkpoints
+fields:
+  checkpoint_id: checkpoint_id
+  workflow_id: workflow_id
+  tag: tag
+  parent_checkpoint_id: parent_checkpoint_id
+  workflow_status: workflow_status
+  task_count: task_count
+  snapshot_json: snapshot_json
+authority:
+  read: database
+  write: herdr.kernel checkpoint API / console control API
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: DDL L428-440 / create L7579-7646
+  confidence: high

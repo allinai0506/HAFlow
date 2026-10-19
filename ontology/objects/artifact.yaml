@@ -1,0 +1,65 @@
+id: artifact
+name: 交付产物
+description: Task 产出的文件/提交/PR 等交付物的读取期投影；不是独立存储表，身份由 task_id+kind+key 的 sha256 派生。
+lifecycle: experimental
+identity:
+  primary_key: artifact_id
+  format: sha256(task_id\nkind\nkey)[:20]
+aliases:
+- Deliverable
+- required_outputs
+- 产物
+properties:
+- id: task_id
+  name: 来源任务
+  type: string
+  required: true
+- id: workflow_id
+  name: 来源工作流
+  type: string
+  required: false
+- id: node_id
+  name: 来源节点
+  type: string
+  required: false
+- id: agent
+  name: 产出 Agent
+  type: string
+  required: false
+- id: kind
+  name: 类型
+  type: enum
+  required: true
+  notes: file|git_commit|git_pr|observation_ref 等
+- id: rel_path
+  name: 相对路径
+  type: path
+  required: false
+- id: status
+  name: 状态
+  type: enum
+  required: false
+  notes: present|workspace|historical|missing|unavailable|unconfirmed
+- id: git_commit.sha
+  name: 提交 SHA
+  type: string
+  required: false
+  notes: 记录值优先，工作区 HEAD 兜底，绝不使用 baseline_commit
+- id: integration_mode
+  name: 交付模式
+  type: enum
+  required: false
+  notes: none|git
+evidence:
+- kind: implemented
+  source: herdr/deliverables.py
+  locator: project_for_tasks L76-114 / item 字段 L341-357 / git_commit 选择 L777-821
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: check_task_deliverables_ready L8377-8414 / gate 标签语义 L8417-8432
+  confidence: high
+- kind: implemented
+  source: services/herdr-worker.py
+  locator: baseline_fingerprint L580-605
+  confidence: high

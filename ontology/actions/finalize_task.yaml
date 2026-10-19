@@ -1,0 +1,44 @@
+id: finalize_task
+name: 规范化任务收尾
+description: 按 FINALIZE_ADVANCE 将完成泳道任务规范化为 cleanup_ready / cleaned，并生成收尾证据。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+preconditions:
+- task_transition_allowed
+authorization:
+  policies:
+  - operator_cli_policy
+  - controller_service_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: completed|integrated
+    to: cleanup_ready|cleaned
+side_effects:
+- 写最终证据
+- 可能关窗格但保留克隆（逻辑清理）
+idempotency:
+  strategy: business_key
+  key: task_id
+transaction:
+  mode: atomic
+  owner: bin/herdr-task finalize
+audit:
+  required: true
+  event: task_transition
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+- connector: herdr_task_cli
+  operation: finalize
+verification:
+  strategy: reread_target
+  target: tasks.status
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: FINALIZE_ADVANCE L193-197 / L6787-6796, L6984-6985
+  confidence: high

@@ -1,0 +1,31 @@
+id: gate_bypass_policy
+name: 门禁豁免权限
+description: 门禁豁免权限（候选策略，待评审）
+lifecycle: experimental
+subjects:
+  roles:
+  - human_operator
+  note: 当前实现中操作者字符串可自由填写，无强验证
+resources:
+  objects:
+  - gate
+  - task
+allowed_actions:
+- bypass_gate
+conditions:
+- reason 必填
+- 必须签发 bypass_id 回执并写审计事件
+- 当前无二次审批/第二人复核（gap）
+agent_execution:
+  mode: require_human
+  inherit_user: false
+  note: 设计意图是人工例外通道；实现未强制人工身份证明，见冲突 SC-007 同类缺口
+evidence:
+- kind: implemented
+  source: herdr/kernel.py
+  locator: bypass_task_gate L832-957
+  confidence: high
+- kind: implemented
+  source: tests/test_task_bypass_gate.py
+  locator: 审计断言 L60-90
+  confidence: high

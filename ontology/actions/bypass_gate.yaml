@@ -1,0 +1,56 @@
+id: bypass_gate
+name: 豁免门禁
+description: 人工例外通道：提供原因后强制完成被阻断任务并置 verdict=pass，签发 bypass_id 回执并写审计。
+lifecycle: experimental
+target: gate
+inputs:
+- task_id
+- reason
+- operator
+- note?
+preconditions:
+- gate_bypass_audited
+authorization:
+  policies:
+  - gate_bypass_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: blocked|paused
+    to: completed|working
+  sets:
+    stage_verdict: pass
+side_effects:
+- 写 gate_bypass 回执
+- 写 gate-verdict JSON
+- 轨迹事件 gate_bypassed
+- 清 blocker
+idempotency:
+  strategy: business_key
+  key: task_id + bypass_id
+transaction:
+  mode: atomic
+  owner: herdr.kernel.bypass_task_gate
+audit:
+  required: true
+  event: gate_bypassed
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+- connector: herdr_task_cli
+  operation: bypass-gate
+- connector: herdr_core_lib
+  operation: herdr.kernel.bypass_task_gate
+verification:
+  strategy: reread_target
+  target: tasks.status + bypass receipt
+evidence:
+- kind: implemented
+  source: herdr/kernel.py
+  locator: L832-957
+  confidence: high
+- kind: implemented
+  source: tests/test_task_bypass_gate.py
+  locator: 审计与版本断言 L60-90
+  confidence: high
