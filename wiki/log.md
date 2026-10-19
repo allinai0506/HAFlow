@@ -8,6 +8,25 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-19] fix | 工位中断失败异常阻断与持久化可恢复清理阶段 (PR #266 Codex Review Round 4)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 最新一轮审查中指出 2 项异常传播与副作用持久化边界缺陷：
+     - [P1] `bin/herdr-task:_cleanup_gate_for_rework` 中调用 `_herdr("pane", "send-keys", str(pane_ref), "C-c")`；当子进程退出码非零（失败）时，`_herdr` 仅返回 CompletedProcess 对象而不抛出异常。原实现吞掉返回值导致静默继续执行，在旧门禁工位未成功停机的情况下清除裁决并持久化新返工纪元派发新 prompt，可能导致旧尝试继续运行造成工位竞争或卡死；
+     - [P2] 若在准备事务执行期间（如状态转移、写入 prepared 事件或凭证生成）发生异常导致 `conn.rollback()`，数据库内所有阶段标记被回滚，但已发送的 `C-c` 无法回滚；重试时由于缺乏已清理的持久化凭据，会再次向工位发送中断，可能误杀首次中断后新启动的工作。需在执行外部副作用前持久化可恢复的清理阶段。
+- 变更：
+  1. **严格校验中断退出码并阻断返工**：
+     - `bin/herdr-task:_cleanup_gate_for_rework`：检查 `res.returncode != 0`，非零退出立即抛出 `RuntimeError`，严格阻断 `cmd_rework` 继续执行，绝不在旧任务未停机时推进状态；
+  2. **前置持久化可恢复清理阶段**：
+     - 引入 `_is_gate_cleanup_recorded` 与独立持久化事件 `gate_cleanup_prepared`（携带 `delivery_id`）；
+     - 在发送 `C-c` 外部副作用前，先在 SQLite 数据库中独立持久化提交 `gate_cleanup_prepared` 事件；
+     - 后续准备事务即便崩溃回滚，重试调用时通过 `_is_gate_cleanup_recorded` 感知已完成清理，跳过重复发送 `C-c`，防止二次中断误杀；
+     - 保持与 `tests/test_cli_receipt_delivery.py` 的 4 项返工崩溃恢复契约（`before_prompt` / `after_prompt` 零额外副作用）完全兼容。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 个专项回归测试（`test_p1_rework_aborts_when_pane_interrupt_fails`、`test_p2_rework_persists_cleanup_phase_and_does_not_repeat_interrupt_on_retry`），全量 24 个测试全部通过；
+  2. `tests/test_cli_receipt_delivery.py` 8 个测试全部通过；
+  3. 全量 `tests/test_issue_250_*.py` 49 项用例全部 PASS；`compileall` 与 `git diff --check` 零告警。
+
 ## [2026-10-19] fix | 恢复前置校验凭证交付状态、拒绝未来时间戳异常延期 (PR #266 Codex Review Round 3)
 
 - 背景：

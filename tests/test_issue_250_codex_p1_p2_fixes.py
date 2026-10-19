@@ -1115,6 +1115,154 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
             self.assertEqual(len(send_keys_calls), 0)
 
+    def test_p1_rework_aborts_when_pane_interrupt_fails(self):
+        """P1: cmd_rework aborts with RuntimeError when pane send-keys exits nonzero."""
+        from types import SimpleNamespace
+        import herdr.task_resources
+        herdr_task = _load_herdr_task()
+        from herdr.state_store import SQLiteStateStore
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-p1-abort-interrupt", "status": "running"})
+
+        task_id = "task-gate-abort-interrupt"
+        clone_dir = self.tmp_dir / "clone_abort"
+        clone_dir.mkdir(exist_ok=True)
+        (clone_dir / ".herdr").mkdir(exist_ok=True)
+        verdict_file = clone_dir / ".herdr" / "gate-verdict.json"
+        verdict_file.write_text(json.dumps({"verdict": "pass"}), encoding="utf-8")
+
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p1-abort-interrupt",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "pane_id": "p-abort-gate",
+            "clone_path": str(clone_dir),
+            "completion_protocol": "receipt-v1",
+        }
+        store.save_task(task)
+
+        # Simulate send-keys C-c failing with exit code 1
+        def mock_herdr(*a, **k):
+            if len(a) >= 2 and a[0] == "pane" and a[1] == "send-keys":
+                return SimpleNamespace(returncode=1, stdout="", stderr="tmux: pane not found")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        args = SimpleNamespace(task_id=task_id, request_id="req-abort", prompt="retest", reason="test")
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", mock_herdr), \
+             patch.object(herdr_task.time, "sleep", lambda s: None):
+            with self.assertRaises(RuntimeError) as ctx:
+                herdr_task.cmd_rework(args)
+            self.assertIn("Failed to interrupt gate pane", str(ctx.exception))
+
+        # The verdict file must NOT have been purged
+        self.assertTrue(verdict_file.exists())
+        # The task must still be in 'working' status (not transitioned to rework)
+        fresh = store.get_task(task_id)
+        self.assertEqual(fresh["status"], "working")
+        # DEFECT-01: gate_cleanup_prepared must have been deleted so it doesn't leave false completion evidence
+        events = store.list_events(task_id=task_id)
+        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_prepared"]
+        self.assertEqual(len(cleanup_events), 0)
+
+        # Now simulate a subsequent retry where the pane issue is resolved
+        calls = []
+        def mock_herdr_success(*a, **k):
+            calls.append(a)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", mock_herdr_success), \
+             patch.object(herdr_task.time, "sleep", lambda s: None):
+            herdr_task.cmd_rework(args)
+
+        # On retry, pane send-keys C-c MUST be called (not skipped!), and verdict purged
+        send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+        self.assertEqual(len(send_keys_calls), 1)
+        self.assertFalse(verdict_file.exists())
+
+    def test_p2_rework_persists_cleanup_phase_and_does_not_repeat_interrupt_on_retry(self):
+        """P2: Recoverable cleanup phase is persisted before C-c; retry skips duplicate interrupt."""
+        from types import SimpleNamespace
+        import herdr.task_resources
+        herdr_task = _load_herdr_task()
+        from herdr.state_store import SQLiteStateStore
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-p2-cleanup-phase", "status": "running"})
+
+        task_id = "task-gate-cleanup-phase"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p2-cleanup-phase",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "pane_id": "p-cleanup-gate",
+            "clone_path": str(self.tmp_dir),
+            "completion_protocol": "receipt-v1",
+        }
+        store.save_task(task)
+
+        calls = []
+        args = SimpleNamespace(task_id=task_id, request_id="req-phase-1", prompt="fix", reason="test")
+
+        # Simulate first invocation where deliver crashes during prepare
+        from herdr import supervisor_delivery as delivery
+        original_deliver = delivery.deliver
+        def crashing_deliver(*a, **k):
+            raise RuntimeError("Simulated DB crash during delivery prepare")
+
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None), \
+             patch.object(delivery, "deliver", crashing_deliver):
+            with self.assertRaises(RuntimeError):
+                herdr_task.cmd_rework(args)
+
+        # Verify gate_cleanup_prepared was recorded durably in events
+        events = store.list_events(task_id=task_id)
+        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_prepared"]
+        self.assertEqual(len(cleanup_events), 1)
+        self.assertEqual(cleanup_events[0]["payload"].get("delivery_id"), "req-phase-1")
+
+        # 1 send-keys C-c was called in the first attempt
+        send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+        self.assertEqual(len(send_keys_calls), 1)
+
+        # Second invocation (retry): deliver is restored, cmd_rework retried with same request_id
+        calls.clear()
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None), \
+             patch.object(delivery, "deliver", original_deliver):
+            herdr_task.cmd_rework(args)
+
+        # On retry, send-keys C-c must NOT have been called again!
+        send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+        self.assertEqual(len(send_keys_calls), 0)
+        prompt_calls = [c for c in calls if len(c) >= 2 and c[0] == "agent" and c[1] == "prompt"]
+        self.assertEqual(len(prompt_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
