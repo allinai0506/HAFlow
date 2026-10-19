@@ -1526,242 +1526,133 @@ def cleanup_task(task_id):
 def purge_task(task_id):
     from herdr.task_cli_delivery import purge_task as handle_purge
     return handle_purge(
-        task_id, load_tasks=load_tasks, find_task=find_task, get_store=_get_store,
+        task_id,
+        load_tasks=load_tasks,
+        find_task=find_task,
+        get_store=_get_store,
         teardown_blocking_statuses=TEARDOWN_BLOCKING_STATUSES,
-        delete_clone_safely=delete_clone_safely, run_command=subprocess.run,
+        delete_clone_safely=delete_clone_safely,
+        run_command=subprocess.run,
         path_exists=os.path.exists,
     )
 
+
 def _herdr(*args):
-    """调用 herdr CLI;显式解析绝对路径以兼容 LaunchAgent 精简 PATH。"""
-    binary = resolve_binary("herdr") or "herdr"
-    return subprocess.run(
-        [binary, *args],
-        text=True,
-        capture_output=True,
-        timeout=20,
+    from herdr.task_cli_teardown import herdr_command
+
+    return herdr_command(
+        *args, deps={"resolve_binary": resolve_binary, "run_command": subprocess.run}
     )
 
 
 def delete_clone_safely(clone_path):
-    """删除 CoW clone;仅允许 ~/.herdr-controller/clones 下的路径。"""
-    if not clone_path:
-        return False
-    clone_real = os.path.realpath(os.path.expanduser(clone_path))
-    try:
-        common = os.path.commonpath([CLONE_ROOT, clone_real])
-    except ValueError:
-        return False
-    if common != CLONE_ROOT or clone_real == CLONE_ROOT:
-        return False
-    if not os.path.exists(clone_real):
-        return False
-    shutil.rmtree(clone_real)
-    return True
+    from herdr.task_cli_teardown import delete_clone_safely
+
+    return delete_clone_safely(clone_path, deps={"clone_root": CLONE_ROOT})
 
 
 def _teardown_output_guard(task):
-    """Bounded read-only output gate before closing a Pane or deleting its clone."""
-    from herdr.repo_hygiene import teardown_output_diagnosis
-    from herdr.bounded_tools import run_bounded
-    clone = task.get("clone_path")
-    if clone and os.path.lexists(os.path.expanduser(clone)):
-        path = Path(clone).expanduser()
-        if path.is_symlink():
-            return {"reason": "clone_identity_unknown"}
-        from herdr.clone_archive import is_residual_clone_shell
-        if task.get("clone_archive") and is_residual_clone_shell(path):
-            return {"reason": ""}
-        tag = path / ".herdr-launch-identity.json"
-        if tag.exists():
-            try:
-                identity = json.loads(tag.read_text()) if not tag.is_symlink() and tag.stat().st_size <= 8192 else {}
-            except (OSError, ValueError):
-                identity = {}
-            if identity.get("task_id") != task.get("task_id") or (task.get("run_id") and identity.get("run_id") != task.get("run_id")):
-                return {"reason": "clone_identity_changed"}
-        # Context workspaces are plain directories. Their artifacts remain in
-        # place; Git metadata, when present, must still pass the Git output gate.
-        if (task.get("execution_mode") == "context" and (task.get("integration_mode") or "none") == "none"
-                and path.is_dir() and not os.path.lexists(path / ".git")):
-            return {"reason": ""}
-        try:
-            root = run_bounded(["git", "-C", str(path), "rev-parse", "--show-toplevel"], timeout=5, output_limit=8192)
-            if root["status"] != "completed" or root["exit_code"] or Path(root["stdout"].strip()).resolve() != path.resolve():
-                return {"reason": "clone_git_inventory_unknown"}
-            # Collapse untracked directories before the output cap. Internal evidence
-            # is already excluded by diagnosis; tracked files remain individually
-            # visible, including tracked changes under an internal directory.
-            result = run_bounded(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=normal"], timeout=5, output_limit=65536)
-            expected_commit = task.get("integrated_commit") or task.get("commit")
-            head_sha = ""
-            head_out = run_bounded(["git", "-C", str(path), "rev-parse", "HEAD"], timeout=5, output_limit=8192)
-            if head_out["status"] != "completed":
-                return {"reason": "clone_git_inventory_unknown"}
-            if head_out["exit_code"] == 0:
-                head_sha = head_out["stdout"].strip()
-            elif expected_commit:
-                return {"reason": "clone_git_inventory_unknown"}
-        except (OSError, ValueError):
-            return {"reason": "clone_git_inventory_unknown"}
-        diagnosis = teardown_output_diagnosis(result["stdout"], task_id=task.get("task_id", ""))
-        if diagnosis["reason"]:
-            if (task.get("integration_mode") or "none") == "none":
-                diagnosis["remediation_cmd"] = f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
-            return diagnosis
-        if expected_commit and head_sha and head_sha != expected_commit:
-            cmd = (
-                f"git -C <clone> status; herdr-task commit {task.get('task_id', '')}"
-                if (task.get("integration_mode") or "none") == "none"
-                else f"git -C <clone> log; herdr-task integrate {task.get('task_id', '')}"
-            )
-            return {
-                "reason": "unintegrated_commit_diverged",
-                "remediation_cmd": cmd,
-            }
-    if (task.get("integration_mode") == "git" and task.get("status") in {"completed", "committed"}):
-        return {"reason": "git_finalize_pending", "remediation_cmd": "herdr-task commit " + str(task.get("task_id")) + "; herdr-task integrate " + str(task.get("task_id"))}
-    return {"reason": ""}
+    from herdr.task_cli_teardown import _teardown_output_guard
+
+    return _teardown_output_guard(task)
 
 
 def _record_output_retention(task, diagnosis, *, authorized_via=""):
-    store = _get_store()
-    if store.get_task(task.get("task_id")):
-        from herdr import kernel
-        kernel.update_task_metadata(task["task_id"], {"resource_retention": "retained", "output_retention": diagnosis}, store=store)
-        store.record_event("teardown_output_retained" if not authorized_via else "teardown_output_override", {**diagnosis, "authorized_via": authorized_via},
-                           task_id=task["task_id"], workflow_id=task.get("workflow_id"), source="herdr-task")
+    from herdr.task_cli_teardown import _record_output_retention
+
+    return _record_output_retention(
+        task, diagnosis, authorized_via=authorized_via, deps={"get_store": _get_store}
+    )
 
 
 def clone_deletable(task):
-    """clone 承载的成果是否已安全沉淀。
+    from herdr.task_cli_teardown import clone_deletable
 
-    integration_ref/branch 存在说明 Controller 已完成 integrate;
-    superseded 任务从未交付,由替代任务负责成果。其余情况
-    (如 mode=none 的 docs 任务)成果只存在于 clone 与终端转写中,
-    默认保留 clone,由 --purge-clones 显式授权删除。
-    """
-    output = _teardown_output_guard(task)
-    if output["reason"]:
-        return False, output["reason"]
-    if task.get("execution_mode") == "context" and (task.get("integration_mode") or "none") == "none":
-        return False, "context artifacts retained; explicit purge required"
-    if task.get("integration_ref") or task.get("integration_branch"):
-        return True, "integrated"
-    if task.get("status") == "superseded":
-        return True, "superseded"
-    if task.get("status") == "committed":
-        return False, "committed but not integrated — run herdr-task integrate first"
-    return False, "no integration evidence"
+    return clone_deletable(task, deps={"teardown_output_guard": _teardown_output_guard})
 
 
 def dump_transcript(task):
-    """把 pane 终端转写落盘为验收证据;尽力而为,失败不阻塞。"""
-    pane_id = task.get("pane_id")
-    if not pane_id:
-        return None
-    read = _herdr(
-        "pane", "read", pane_id,
-        "--source", "recent-unwrapped",
-        "--lines", "20000",
+    from herdr.task_cli_teardown import dump_transcript
+
+    return dump_transcript(
+        task, deps={"herdr": _herdr, "now": _now, "evidence_root": EVIDENCE_ROOT}
     )
-    if read.returncode != 0 or not read.stdout.strip():
-        return None
-
-    task_dir = os.path.join(EVIDENCE_ROOT, task.get("task_id", "unknown"))
-    os.makedirs(task_dir, exist_ok=True)
-    path = os.path.join(task_dir, "terminal.log")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(read.stdout)
-
-    meta = {
-        "task_id": task.get("task_id"),
-        "pane_id": pane_id,
-        "agent": task.get("agent"),
-        "dumped_at": _now(),
-        "agent_session": None,
-    }
-    info = _herdr("pane", "get", pane_id)
-    try:
-        pane = json.loads(info.stdout)["result"]["pane"]
-        meta["agent_session"] = pane.get("agent_session")
-    except Exception:
-        pass
-    with open(os.path.join(task_dir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    return path
 
 
 def close_pane(pane_id):
-    if not pane_id:
-        return False
-    from herdr.task_resources import workflow_launch_lock
-    with workflow_launch_lock(_get_store().db_path, 'managed-dynamic-pane-lifecycle'):
-        return _herdr("pane", "close", pane_id).returncode == 0
+    from herdr.task_cli_teardown import close_pane
+
+    return close_pane(pane_id, deps={"get_store": _get_store, "herdr": _herdr})
 
 
 def _advance_to_cleaned(task_id, status):
-    """按 FINALIZE_ADVANCE 链把已验收任务推进到 cleaned。"""
-    while status in FINALIZE_ADVANCE:
-        nxt = FINALIZE_ADVANCE[status]
-        try:
-            set_status(task_id, nxt)
-        except SystemExit:
-            break
-        status = nxt
-    return status
+    from herdr.task_cli_teardown import _advance_to_cleaned
+
+    return _advance_to_cleaned(
+        task_id,
+        status,
+        deps={"finalize_advance": FINALIZE_ADVANCE, "set_status": set_status},
+    )
 
 
 def _close_task_identity(task):
-    return {key: task.get(key) for key in (
-        "task_id", "workflow_id", "run_id", "pane_id", "agent", "agent_session_id",
-        "agent_name", "runtime",
-    )}
+    from herdr.task_cli_teardown import _close_task_identity
+
+    return _close_task_identity(task)
 
 
 def _close_owned_pane(identity):
-    from herdr.task_resources import owned_live_pane
-    from herdr.observer.live import probe_live_runtime
+    from herdr.task_cli_teardown import _close_owned_pane
 
-    def runner(argv, timeout):
-        result = _herdr(*argv[1:])
-        return result.returncode, result.stdout, result.stderr
-
-    current = _get_store().get_task(identity.get("task_id")) if identity.get("task_id") else None
-    if identity.get("task_id") and current is None:
-        return False
-    if current and _close_task_identity(current) != identity:
-        return False
-    proven, _ = owned_live_pane(
-        identity, probe=lambda task: probe_live_runtime(task, runner=runner),
-    )
-    return proven
+    return _close_owned_pane(identity, deps={"get_store": _get_store, "herdr": _herdr})
 
 
-def _finalize_one(task, purge_clones=False, dry_run=False, close_claim=None, output_override="", reclaim_archive=None, reclaim_plan=None):
+def _finalize_one(
+    task,
+    purge_clones=False,
+    dry_run=False,
+    close_claim=None,
+    output_override="",
+    reclaim_archive=None,
+    reclaim_plan=None,
+):
     from herdr.task_cli_teardown import finalize_one
+
     return finalize_one(
-        task, purge_clones=purge_clones, dry_run=dry_run, close_claim=close_claim,
-        output_override=output_override, reclaim_archive=reclaim_archive,
-        reclaim_plan=reclaim_plan, deps={
-            "clone_root": CLONE_ROOT, "finalize_advance": FINALIZE_ADVANCE,
+        task,
+        purge_clones=purge_clones,
+        dry_run=dry_run,
+        close_claim=close_claim,
+        output_override=output_override,
+        reclaim_archive=reclaim_archive,
+        reclaim_plan=reclaim_plan,
+        deps={
+            "clone_root": CLONE_ROOT,
+            "finalize_advance": FINALIZE_ADVANCE,
             "advance_to_cleaned": _advance_to_cleaned,
             "close_owned_pane": _close_owned_pane,
-            "close_task_identity": _close_task_identity, "get_store": _get_store,
+            "close_task_identity": _close_task_identity,
+            "get_store": _get_store,
             "record_output_retention": _record_output_retention,
             "teardown_output_guard": _teardown_output_guard,
-            "clone_deletable": clone_deletable, "close_pane": close_pane,
+            "clone_deletable": clone_deletable,
+            "close_pane": close_pane,
             "delete_clone_safely": delete_clone_safely,
-            "dump_transcript": dump_transcript, "set_status": set_status,
+            "dump_transcript": dump_transcript,
+            "set_status": set_status,
         },
     )
 
 
 def finalize_task(task_id, force=False, purge_clones=False):
     from herdr.task_cli_delivery import finalize_task as handle_finalize
+
     return handle_finalize(
-        task_id, force=force, purge_clones=purge_clones,
-        load_tasks=load_tasks, find_task=find_task,
+        task_id,
+        force=force,
+        purge_clones=purge_clones,
+        load_tasks=load_tasks,
+        find_task=find_task,
         teardown_blocking_statuses=TEARDOWN_BLOCKING_STATUSES,
         finalize_one=_finalize_one,
     )
@@ -1770,7 +1661,9 @@ def finalize_task(task_id, force=False, purge_clones=False):
 def _load_workflow_entry(workflow_id):
     store = _get_store()
     wf = store.get_workflow(workflow_id)
-    all_wfs = {w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")}
+    all_wfs = {
+        w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")
+    }
     return wf, all_wfs
 
 
@@ -1783,6 +1676,7 @@ def _mark_workflow_completed(workflow_id, outcome="delivered", force=False):
 
     try:
         from herdr import kernel
+
         kernel.transition_workflow(
             workflow_id=workflow_id,
             to_status="completed",
@@ -1794,14 +1688,21 @@ def _mark_workflow_completed(workflow_id, outcome="delivered", force=False):
         )
         try:
             from herdr import node_dispatch_store
-            node_dispatch_store.reconcile_workflow(store.db_path, workflow_id, discover=False)
+
+            node_dispatch_store.reconcile_workflow(
+                store.db_path, workflow_id, discover=False
+            )
         except Exception:
             pass
     except Exception as exc:
         print(f"Error marking workflow {workflow_id} completed: {exc}", file=sys.stderr)
         raise
 
-    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
+    wf_file = (
+        globals().get("WORKFLOWS_FILE")
+        or os.environ.get("WORKFLOWS_FILE")
+        or WORKFLOWS_FILE
+    )
     sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
 
 
@@ -1817,12 +1718,9 @@ def _workflow_stage_tabs(workflow_id, tasks):
         "owned_pane_ids": set(),
     }
     project = project_for_workflow(workflow_id) or {}
-    cfg_file = (
-        project.get("workflow_file")
-        or next(
-            (t.get("workflow_config") for t in tasks if t.get("workflow_config")),
-            None,
-        )
+    cfg_file = project.get("workflow_file") or next(
+        (t.get("workflow_config") for t in tasks if t.get("workflow_config")),
+        None,
     )
     if not cfg_file or not os.path.exists(cfg_file):
         return empty
@@ -1833,20 +1731,15 @@ def _workflow_stage_tabs(workflow_id, tasks):
         return empty
 
     from herdr.projects import _with_node_runtime
+
     cfg = _with_node_runtime(cfg, project)
 
     items = cfg.get("nodes") or cfg.get("stages", [])
-    tab_ids = sorted({
-        item.get("tab_id") for item in items if item.get("tab_id")
-    })
+    tab_ids = sorted({item.get("tab_id") for item in items if item.get("tab_id")})
     owned_pane_ids = {
-        item.get("anchor_pane_id")
-        for item in items
-        if item.get("anchor_pane_id")
+        item.get("anchor_pane_id") for item in items if item.get("anchor_pane_id")
     }
-    owned_pane_ids |= {
-        t.get("pane_id") for t in tasks if t.get("pane_id")
-    }
+    owned_pane_ids |= {t.get("pane_id") for t in tasks if t.get("pane_id")}
     return {
         "tab_ids": tab_ids,
         "coordinator_pane": (cfg.get("coordinator") or {}).get("pane_id"),
