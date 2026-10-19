@@ -638,7 +638,7 @@ def test_fr6_opt_out_audit_failure_is_fail_closed_before_topology(tmp_path, monk
     )
     args = _launch_args(tmp_path, "task-audit-failure")
 
-    with patch.object(module.inventory, "project_for_workflow", return_value=project), patch.object(
+    with patch.object(module, "project_for_workflow", return_value=project), patch.object(
         module, "ensure_stage_topology", side_effect=AssertionError("topology called")
     ), patch.object(module, "acquire_pane_for_task", side_effect=AssertionError("pane called")), patch.object(
         module, "release_agent_reservation"
@@ -664,7 +664,7 @@ def test_fr6_empty_review_pool_has_real_cli_to_store_lifecycle(tmp_path, monkeyp
     project, pool, config, _ = _empty_review_launch_context(tmp_path, module, store)
     args = _launch_args(tmp_path, "task-empty-review")
 
-    with patch.object(module.inventory, "project_for_workflow", return_value=project), patch.object(
+    with patch.object(module, "project_for_workflow", return_value=project), patch.object(
         module, "ensure_stage_topology", side_effect=AssertionError("topology called")
     ), patch.object(module, "acquire_pane_for_task", side_effect=AssertionError("pane called")), patch.object(
         module, "release_agent_reservation"

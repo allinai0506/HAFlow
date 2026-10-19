@@ -139,7 +139,7 @@ def load_cli(monkeypatch, store, clone):
     monkeypatch.setattr(module, "_get_store", lambda: store)
     monkeypatch.setattr(module, "load_tasks", lambda: {"tasks": store.list_tasks()})
     monkeypatch.setattr(module, "CLONE_ROOT", str(clone.parent.resolve()))
-    monkeypatch.setattr(module.inventory, "project_for_workflow", lambda _: None)
+    monkeypatch.setattr(module, "project_for_workflow", lambda _: None)
     monkeypatch.setattr(module, "stage_reset", lambda _: None)
     return module
 
