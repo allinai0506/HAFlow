@@ -8485,6 +8485,16 @@ def try_auto_verdict(task_id):
     if verdict == "blocked" and not note:
         note = f"gate verdict blocked (auto-verdict via {source or 'signal'})"
 
+    if status == "failed":
+        # Issue #250 & Codex review: Verify gate verdict is unchanged immediately before spawning adoption CLI
+        latest_verdict, _, _ = read_gate_verdict(task)
+        if latest_verdict != verdict:
+            print(
+                f"[AUTO VERDICT ABORT] task={task_id}: gate verdict changed from {verdict} to {latest_verdict} before adoption",
+                file=sys.stderr,
+            )
+            return False
+
     set_cmd = [
         TASK_MANAGER, "set", task_id, "completed",
         "--verdict", verdict, "--note", note,

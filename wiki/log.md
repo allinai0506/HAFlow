@@ -2982,3 +2982,23 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 双门禁汇聚：test-auto-r6 与 review-auto-r2 verdict=pass 均绑定 ce5875b（验收回执事件 95059/95099）；回归 103 passed+13 subtests，真实 CLI probe 9/9 场景 + Console 浏览器证据。
 - 沉淀教训 `docs/lessons/lessons-learned.md` §173（缺派承诺、candidate_mismatch 登记伪影、隔离绕池 opt-out 审计、漂移旋转第二次命中、--allow-pending 义务死端、D3 契约-能力裁决）；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-02-wrapup.md`。
 - 本记录描述本地沙盒源码；交付 PR 保持 OPEN，未合并、未部署、未重启服务。
+
+## [2026-10-19] fix | 门禁裁决采纳绑定磁盘持久化证据快照与非交互评测超时修复 (PR #266 Codex Review Round 7)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 指出 1 项 P1 级竞态缺陷：当 watchdog 超时导致门禁工位置 failed 后，后台存活的 worker 若在 Controller `read_gate_verdict` 读取裁决与派发 CLI `herdr-task set <task_id> completed --verdict <v>` 命令之间改写了裁决文件（如由 `pass` 改为 `blocked`），CLI 仅根据传入参数提交状态变更，未重读鉴权磁盘证据文件，导致陈旧/错误的裁决被采纳并提交；
+  2. CI 测试套件在并发高负载下，`tests/test_task_loop_noninteractive.py` npm 启动开销超过写死的 3s timeout，导致偶发超时 flake。
+- 变更：
+  1. **采纳前强制鉴权并绑定持久化证据快照**：
+     - 在 `bin/herdr-task` 中实现 `_authenticate_gate_verdict_evidence`，统一解析并鉴权候选门禁裁决文件（`gate_verdict_path` 及 clone 内 `.herdr/gate-verdict.json`）；
+     - 严格校验文件存在性、时效（`mtime >= rework_started_at - 1.0`）、最大时钟偏差（<= 5.0s）、执行令牌纪元匹配以及具体裁决一致性；
+     - `set_status` 在执行 watchdog-failed 门禁强制流转前，强制重读鉴权磁盘裁决，不符时以 `[VERDICT REFUSED]`（退出码 2）严格阻断，并在任务元数据中固化持久证据时间戳 `gate_verdict_evidence_mtime`；
+     - `adopt_verdict_cli` 复用该鉴权逻辑，确保命令行显式传参或自动采纳均严格受控；
+     - `services/herdr-controller.py:try_auto_verdict` 在派发子进程命令前对 `failed` 任务二次比对裁决一致性，消除未绑定竞态窗口。
+  2. **非交互测试评测超时加固**：
+     - 将 `tests/test_task_loop_noninteractive.py` 内部模拟超时间隔由 3s 提升至 15s，睡眠时间相应调整，消除 CI 并发环境抖动造成的非预期超时。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 6 项 Round 7 专项测试（全量 36 项测试全部通过）；
+  2. 全量 63 项 Issue #250 及交付回执回归测试全部 PASS；
+  3. 门禁状态机及关联测试 148 项用例全部 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。

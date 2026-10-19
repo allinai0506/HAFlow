@@ -7349,6 +7349,7 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 17. **裁决物理清除失败坚决阻断**：清理旧裁决时遇到除不存在外的任何错误（如权限不足或文件未被真正解挂），必须中断执行且绝对扣留 `gate_cleanup_completed` 事件，严禁静默忽略导致误采纳残留旧结论。
 18. **receipt-v1 返工流转必须严格受回执契约守护**：在控制器对账与事件处理循环中，除已验证机器可读裁决的门禁工位外，任何 `receipt-v1` 任务绝不允许通过通用交付物恢复绕过 `consume_completion_receipt`，严禁将协议守护置于通用返工恢复之后。
 19. **裁决采纳必须绑定授权快照版本与全量字段重验**：对 watchdog-failed 门禁实施异常采纳时，必须保持受检快照的版本号（CAS），并在向数据库发起状态转移前，对持久化最新记录重验其门禁身份、`status == "failed"`、`failure_reason == "hard_timeout_watchdog"` 及 `execution_token` 一致性，任何不符立即阻断并退出，严禁盲目复制并发写入者的递增版本。
+20. **采纳裁决必须绑定磁盘持久化证据快照并防范进程间改写**：当门禁工位因 watchdog 超时置 failed 后，若 worker 仍在后台运行且在 Controller 读取裁决与派发 CLI 采纳命令之间改写了裁决文件（如由 `pass` 改为 `blocked`），`set_status` 绝不能盲目信任命令行参数；在执行 CAS 流转前，必须重新读取并鉴权磁盘裁决文件，校验其时效、未来时间戳偏差、执行令牌以及具体结论与目标结论完全一致，并在元数据中绑定 `gate_verdict_evidence_mtime`；任何文件缺失或结论篡改一律以 `[VERDICT REFUSED]` 坚决拒绝，Controller 在派发前也必须二次比对裁决一致性，消除文件读取与子进程执行之间的未绑定竞态窗口。
 
 ### 验证命令 / 守护测试
 
@@ -7359,6 +7360,7 @@ pytest -q tests/test_issue_250_eval_timeout_adaptive.py \
           tests/test_issue_250_adopt_verdict_cli.py \
           tests/test_issue_250_cleanroom_gate_e2e.py \
           tests/test_issue_250_codex_p1_p2_fixes.py \
-          tests/test_cli_receipt_delivery.py
+          tests/test_cli_receipt_delivery.py \
+          tests/test_task_loop_noninteractive.py
 ```
-关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与执行令牌拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog；普通 Agent 节点绝不被误判为门禁；无穷大超时配置安全回退至默认值；receipt-v1 返工重试保持零额外副作用；超前未来时间戳被拒绝延期；工位中断失败立即阻断返工；清理阶段前置持久化防止重试重复发送中断；清理意图与完成两阶段彻底杜绝进程意外退出留存旧 writer；CLI 无 request_id 缺省调用全链路幂等恢复；清理过程遵守配置的裁决目录；裁决物理删除失败立即阻断并扣留完成事件；receipt-v1 普通返工任务绝不绕过交付回执验证；裁决采纳严格保留授权版本号并全量重验快照一致性杜绝采纳竞争。
+关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与执行令牌拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog；普通 Agent 节点绝不被误判为门禁；无穷大超时配置安全回退至默认值；receipt-v1 返工重试保持零额外副作用；超前未来时间戳被拒绝延期；工位中断失败立即阻断返工；清理阶段前置持久化防止重试重复发送中断；清理意图与完成两阶段彻底杜绝进程意外退出留存旧 writer；CLI 无 request_id 缺省调用全链路幂等恢复；清理过程遵守配置的裁决目录；裁决物理删除失败立即阻断并扣留完成事件；receipt-v1 普通返工任务绝不绕过交付回执验证；裁决采纳严格保留授权版本号并全量重验快照一致性杜绝采纳竞争；采纳裁决必须在提交前重读鉴权磁盘证据快照并绑定 evidence_mtime，杜绝多进程改写导致的陈旧/篡改结论被采纳；非交互评测超时适配规避 CI 负载下假死。

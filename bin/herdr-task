@@ -2384,6 +2384,134 @@ def _is_gate_task(t):
     return bool(t.get("gate"))
 
 
+def _gate_verdict_file_candidates(task):
+    """PR #250 & Codex review: Return ordered list of candidate gate-verdict file paths."""
+    candidates = []
+    task_id = task.get("task_id") or task.get("id")
+    if task_id:
+        try:
+            from herdr.direct_dispatch import gate_verdict_path
+            candidates.append(gate_verdict_path(task_id))
+        except Exception:
+            pass
+        override = os.environ.get("HERDR_GATE_VERDICT_DIR")
+        vdir = Path(override).expanduser() if override else (Path.home() / ".herdr-controller" / "gate-verdicts")
+        candidates.append(str(vdir / f"{task_id}.json"))
+
+    clone_path = task.get("clone_path")
+    if clone_path:
+        candidates.append(os.path.join(clone_path, ".herdr/gate-verdict.json"))
+        candidates.append(os.path.join(clone_path, ".herdr", "gate-verdict.json"))
+
+    seen = set()
+    result = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
+
+
+def _authenticate_gate_verdict_evidence(task, expected_verdict=None):
+    """Authenticate durable gate verdict evidence from disk for task.
+
+    Verifies that a valid gate verdict file exists for the task, belongs to
+    the current execution epoch, has a fresh mtime (not older than rework_started_at,
+    and not in the future beyond clock skew allowance), and matches expected_verdict.
+
+    Returns (True, (verdict, note, affected_ids, st_mtime)) if valid and matches expected_verdict.
+    Returns (False, err_msg) if missing, stale, invalid, or mismatched.
+    """
+    candidates = _gate_verdict_file_candidates(task)
+    rework_started = task.get("rework_started_at")
+    expected_token = task.get("execution_token") or task.get("rework_request_id")
+    skew_limit = 5.0
+    try:
+        raw_skew = os.environ.get("HERDR_MAX_CLOCK_SKEW_SECONDS")
+        if raw_skew is not None and raw_skew.strip():
+            skew_limit = float(raw_skew.strip())
+    except Exception:
+        skew_limit = 5.0
+
+    now = time.time()
+    found_any = False
+    last_err = "no durable gate verdict file found"
+
+    for path in candidates:
+        try:
+            if not os.path.exists(path):
+                continue
+            found_any = True
+            st = os.stat(path)
+            if rework_started and st.st_mtime < (rework_started - 1.0):
+                last_err = f"gate verdict file {path} is stale (mtime {st.st_mtime} < rework_started {rework_started})"
+                continue
+            if (st.st_mtime - now) > skew_limit:
+                last_err = f"gate verdict file {path} has future timestamp exceeding clock skew allowance ({st.st_mtime - now:.1f}s > {skew_limit}s)"
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                last_err = f"gate verdict file {path} is not a valid JSON dictionary"
+                continue
+            if expected_token:
+                file_token = (
+                    payload.get("execution_token")
+                    or payload.get("rework_request_id")
+                    or payload.get("rework_token")
+                )
+                if not file_token or file_token != expected_token:
+                    last_err = f"execution token mismatch in {path} ({file_token} != {expected_token})"
+                    continue
+            file_v = str(payload.get("verdict") or "").strip().lower()
+            if file_v not in ("pass", "blocked"):
+                last_err = f"gate verdict file {path} contains invalid verdict: '{file_v}'"
+                continue
+            if expected_verdict:
+                norm_exp = str(expected_verdict).strip().lower()
+                if file_v != norm_exp:
+                    return False, f"durable gate verdict on disk changed to '{file_v}' (expected '{norm_exp}')"
+            note = str(payload.get("note") or "").strip()
+            affected_ids = []
+            if file_v == "blocked":
+                raw_aff = payload.get("affected_task_ids")
+                if raw_aff is not None:
+                    if not isinstance(raw_aff, list):
+                        print(
+                            f"[ADOPT VERDICT WARN] Malformed affected_task_ids in {path}: "
+                            f"expected list, got {type(raw_aff).__name__}; rejecting attribution",
+                            file=sys.stderr,
+                        )
+                        affected_ids = []
+                    else:
+                        valid = True
+                        ids = []
+                        for item in raw_aff:
+                            text = str(item).strip() if isinstance(item, str) else ""
+                            if not text:
+                                valid = False
+                                break
+                            if text not in ids:
+                                ids.append(text)
+                        if valid:
+                            affected_ids = ids
+                        else:
+                            print(
+                                f"[ADOPT VERDICT WARN] Malformed affected_task_ids in {path}: "
+                                f"contains non-string or blank item; rejecting attribution",
+                                file=sys.stderr,
+                            )
+                            affected_ids = []
+            return True, (file_v, note, affected_ids, st.st_mtime)
+        except Exception as exc:
+            last_err = f"error inspecting gate verdict candidate {path}: {exc}"
+            continue
+
+    if not found_any:
+        return False, "no durable gate verdict file found"
+    return False, last_err
+
+
 def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=None,
                skip_review_closure=False, skip_operator=None):
     data = load_tasks()
@@ -2579,6 +2707,22 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
             sys.exit(2)
         elif task.get("version") is None:
             task["version"] = fresh.get("version")
+
+        # Codex Review P1 (Round 7): Re-read and authenticate durable gate verdict evidence from disk
+        # before committing transition, binding the adopted verdict to the durable evidence snapshot.
+        ok, res_or_err = _authenticate_gate_verdict_evidence(fresh, expected_verdict=verdict)
+        if not ok:
+            print(
+                f"[VERDICT REFUSED] task {task_id}: {res_or_err}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        file_v, file_note, file_aff, file_mtime = res_or_err
+        metadata["gate_verdict_evidence_mtime"] = file_mtime
+        if not note and file_note:
+            metadata["stage_verdict_note"] = file_note
+        if file_v == "blocked" and file_aff and not affected_ids:
+            metadata["stage_verdict_affected_task_ids"] = file_aff
     expected_version = task.get("version") if force_transition else None
     try:
         from herdr import kernel
@@ -5276,80 +5420,22 @@ def adopt_verdict_cli(task_id, verdict=None, note=None, operator="human", as_jso
         sys.exit(2)
 
     affected_ids = []
-    # If verdict is not explicitly given, read from gate-verdict file
     if not verdict:
-        candidates = []
-        try:
-            from herdr.direct_dispatch import gate_verdict_path
-            candidates.append(gate_verdict_path(task_id))
-        except Exception:
-            override = os.environ.get("HERDR_GATE_VERDICT_DIR")
-            vdir = Path(override).expanduser() if override else (Path.home() / ".herdr-controller" / "gate-verdicts")
-            candidates.append(str(vdir / f"{task_id}.json"))
-
-        clone_path = task.get("clone_path")
-        if clone_path:
-            candidates.append(os.path.join(clone_path, ".herdr/gate-verdict.json"))
-
-        rework_started = task.get("rework_started_at")
-        expected_token = task.get("execution_token") or task.get("rework_request_id")
-        for path in candidates:
-            try:
-                if not os.path.exists(path):
-                    continue
-                if rework_started:
-                    try:
-                        if os.stat(path).st_mtime < (rework_started - 1.0):
-                            continue
-                    except OSError:
-                        continue
-                with open(path, "r", encoding="utf-8") as f:
-                    payload = json.load(f)
-                if isinstance(payload, dict):
-                    if expected_token:
-                        file_token = (
-                            payload.get("execution_token")
-                            or payload.get("rework_request_id")
-                            or payload.get("rework_token")
-                        )
-                        if not file_token or file_token != expected_token:
-                            continue
-                    raw_v = str(payload.get("verdict") or "").strip().lower()
-                    if raw_v in ("pass", "blocked"):
-                        verdict = raw_v
-                        note = note or str(payload.get("note") or "").strip()
-                        if verdict == "blocked":
-                            raw_aff = payload.get("affected_task_ids")
-                            if raw_aff is not None:
-                                if not isinstance(raw_aff, list):
-                                    print(
-                                        f"[ADOPT VERDICT WARN] Malformed affected_task_ids in {path}: "
-                                        f"expected list, got {type(raw_aff).__name__}; rejecting attribution",
-                                        file=sys.stderr,
-                                    )
-                                    affected_ids = []
-                                else:
-                                    valid = True
-                                    ids = []
-                                    for item in raw_aff:
-                                        text = str(item).strip() if isinstance(item, str) else ""
-                                        if not text:
-                                            valid = False
-                                            break
-                                        if text not in ids:
-                                            ids.append(text)
-                                    if valid:
-                                        affected_ids = ids
-                                    else:
-                                        print(
-                                            f"[ADOPT VERDICT WARN] Malformed affected_task_ids in {path}: "
-                                            f"contains non-string or blank item; rejecting attribution",
-                                            file=sys.stderr,
-                                        )
-                                        affected_ids = []
-                        break
-            except Exception:
-                continue
+        ok, res_or_err = _authenticate_gate_verdict_evidence(task)
+        if not ok:
+            print(f"No valid gate verdict found for task {task_id}", file=sys.stderr)
+            sys.exit(2)
+        verdict, file_note, affected_ids, _ = res_or_err
+        note = note or file_note
+    else:
+        ok, res_or_err = _authenticate_gate_verdict_evidence(task, expected_verdict=verdict)
+        if not ok:
+            print(f"[ADOPT VERDICT REFUSED] task {task_id}: {res_or_err}", file=sys.stderr)
+            sys.exit(2)
+        _, file_note, file_aff, _ = res_or_err
+        note = note or file_note
+        if verdict == "blocked" and file_aff and not affected_ids:
+            affected_ids = file_aff
 
     if not verdict or verdict not in ("pass", "blocked"):
         print(f"No valid gate verdict found for task {task_id}", file=sys.stderr)
@@ -5615,19 +5701,7 @@ def _cleanup_gate_for_rework(task, delivery_id=None, store=None):
         # P1: Check returncode; abort rework if the pane interrupt fails so we never continue with an old writer running
         if res.returncode != 0:
             raise RuntimeError(f"Failed to interrupt gate pane {pane_ref} (exit {res.returncode}): {res.stderr or res.stdout}")
-    candidates = []
-    task_id = task.get("task_id")
-    if task_id:
-        try:
-            from herdr.direct_dispatch import gate_verdict_path
-            candidates.append(gate_verdict_path(task_id))
-        except Exception:
-            override = os.environ.get("HERDR_GATE_VERDICT_DIR")
-            vdir = Path(override).expanduser() if override else (Path.home() / ".herdr-controller" / "gate-verdicts")
-            candidates.append(str(vdir / f"{task_id}.json"))
-    clone_path = task.get("clone_path")
-    if clone_path:
-        candidates.append(os.path.join(clone_path, ".herdr", "gate-verdict.json"))
+    candidates = _gate_verdict_file_candidates(task)
 
     for cand in candidates:
         if cand and os.path.exists(cand):

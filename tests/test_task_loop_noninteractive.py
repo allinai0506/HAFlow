@@ -28,7 +28,7 @@ def test_default_npm_evaluation_finishes_without_watch(tmp_path, monkeypatch):
     test.write_text("import os,time\nfrom pathlib import Path\n"
                     "Path('test-started').touch()\n"
                     "print('5 passed in 0.1s', flush=True)\n"
-                    "if not os.environ.get('CI'): time.sleep(10)\n")
+                    "if not os.environ.get('CI'): time.sleep(30)\n")
     command = shlex.quote(sys.executable) + ' ' + shlex.quote(str(test))
     (tmp_path / 'package.json').write_text(json.dumps({'scripts': {'test': command}}))
     task = load_cli('task_loop_noninteractive', 'herdr-task')
@@ -36,7 +36,7 @@ def test_default_npm_evaluation_finishes_without_watch(tmp_path, monkeypatch):
     original = subprocess.Popen.communicate
     def bounded(process, *args, **kwargs):
         if kwargs.get('timeout') == 300:
-            kwargs['timeout'] = 3
+            kwargs['timeout'] = 15
         return original(process, *args, **kwargs)
     monkeypatch.setattr(subprocess.Popen, 'communicate', bounded)
     metrics, converged, _ = load_cli('loop_noninteractive', 'herdr-loop').run_evaluation(tmp_path)

@@ -184,6 +184,7 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             "TASKS_FILE": str(self.tasks_file),
             "HERDR_STATE_DB": str(self.db_path),
             "HERDR_STATE_BACKEND": "sqlite",
+            "HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir),
         }
 
         # Case A: Non-gate task failed by watchdog -> must fail
@@ -231,7 +232,7 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         self.assertEqual(res2.returncode, 2, f"Expected non-watchdog failure to fail transition: {res2.stderr}")
         self.assertIn("Illegal transition", res2.stdout + res2.stderr)
 
-        # Case C: Gate task failed by hard_timeout_watchdog -> allowed!
+        # Case C: Gate task failed by hard_timeout_watchdog -> allowed when evidence matches!
         t3_id = "wf-gate-watchdog"
         t3 = {
             "task_id": t3_id,
@@ -244,6 +245,12 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             "version": 1,
         }
         store.save_task(t3)
+
+        # Provide matching gate verdict file
+        (self.verdicts_dir / f"{t3_id}.json").write_text(
+            json.dumps({"verdict": "pass", "note": "passed gate"}),
+            encoding="utf-8",
+        )
 
         res3 = subprocess.run(
             [sys.executable, str(herdr_task_bin), "set", t3_id, "completed", "--verdict", "pass"],
@@ -427,6 +434,13 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             "version": 2,
         }
         store.save_task(task)
+
+        # Provide matching gate verdict file in clone
+        (repo_dir / ".herdr").mkdir(parents=True, exist_ok=True)
+        (repo_dir / ".herdr" / "gate-verdict.json").write_text(
+            json.dumps({"verdict": "pass", "note": "passed gate"}),
+            encoding="utf-8",
+        )
 
         env = {
             **os.environ,
@@ -1699,8 +1713,13 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 2)
             self.assertIn("was modified by another writer", err.getvalue())
 
-        # Case D: Consistent authorized snapshot succeeds and updates task to completed
-        with patch.object(herdr_task, "_get_store", lambda: store), \
+        # Case D: Consistent authorized snapshot with matching evidence succeeds and updates task to completed
+        (self.verdicts_dir / f"{task_id}.json").write_text(
+            json.dumps({"verdict": "pass", "note": "verified", "execution_token": "token-r6"}),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(herdr_task, "_get_store", lambda: store), \
              patch.object(herdr_task, "load_tasks", lambda: {"tasks": [store.get_task(task_id)]}), \
              patch.object(herdr_task, "_capture_verified_candidate", lambda t: None):
             herdr_task.set_status(task_id, "completed", verdict="pass", note="verified")
@@ -1708,6 +1727,250 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         adopted = store.get_task(task_id)
         self.assertEqual(adopted["status"], "completed")
         self.assertEqual(adopted["stage_verdict"], "pass")
+
+    def test_round7_set_status_refuses_when_verdict_file_rewritten_to_blocked(self):
+        """Round 7: If a watchdog-failed gate worker rewrote its verdict to blocked, set_status must refuse adopting pass."""
+        import io
+        from herdr.state_store import SQLiteStateStore
+        herdr_task = _load_herdr_task()
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r7", "status": "running"})
+
+        task_id = "task-r7-rewrite-race"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r7",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "execution_token": "token-r7",
+            "version": 1,
+        }
+        store.save_task(task)
+
+        # Durable verdict file has 'blocked', but caller attempts to adopt 'pass'
+        (self.verdicts_dir / f"{task_id}.json").write_text(
+            json.dumps({"verdict": "blocked", "note": "gate failed in rerun", "execution_token": "token-r7"}),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [store.get_task(task_id)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None):
+            with self.assertRaises(SystemExit) as ctx, patch("sys.stderr", new_callable=io.StringIO) as err:
+                herdr_task.set_status(task_id, "completed", verdict="pass")
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("durable gate verdict on disk changed to 'blocked' (expected 'pass')", err.getvalue())
+
+        # Task remains in failed state
+        reloaded = store.get_task(task_id)
+        self.assertEqual(reloaded["status"], "failed")
+
+    def test_round7_set_status_refuses_when_verdict_file_missing(self):
+        """Round 7: If durable verdict file does not exist, set_status must refuse adoption."""
+        import io
+        from herdr.state_store import SQLiteStateStore
+        herdr_task = _load_herdr_task()
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r7", "status": "running"})
+
+        task_id = "task-r7-no-file"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r7",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "version": 1,
+        }
+        store.save_task(task)
+
+        # Ensure no verdict file exists
+        vfile = self.verdicts_dir / f"{task_id}.json"
+        if vfile.exists():
+            vfile.unlink()
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [store.get_task(task_id)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None):
+            with self.assertRaises(SystemExit) as ctx, patch("sys.stderr", new_callable=io.StringIO) as err:
+                herdr_task.set_status(task_id, "completed", verdict="pass")
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("no durable gate verdict file found", err.getvalue())
+
+        reloaded = store.get_task(task_id)
+        self.assertEqual(reloaded["status"], "failed")
+
+    def test_round7_set_status_refuses_when_verdict_file_has_future_timestamp(self):
+        """Round 7: If durable verdict file has a future timestamp beyond clock skew, reject adoption."""
+        import io
+        from herdr.state_store import SQLiteStateStore
+        herdr_task = _load_herdr_task()
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r7", "status": "running"})
+
+        task_id = "task-r7-future-ts"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r7",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "version": 1,
+        }
+        store.save_task(task)
+
+        vfile = self.verdicts_dir / f"{task_id}.json"
+        vfile.write_text(json.dumps({"verdict": "pass", "note": "future"}), encoding="utf-8")
+        # Set mtime to 100s in the future
+        future_time = time.time() + 100.0
+        os.utime(str(vfile), (future_time, future_time))
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [store.get_task(task_id)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None):
+            with self.assertRaises(SystemExit) as ctx, patch("sys.stderr", new_callable=io.StringIO) as err:
+                herdr_task.set_status(task_id, "completed", verdict="pass")
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("has future timestamp exceeding clock skew allowance", err.getvalue())
+
+        reloaded = store.get_task(task_id)
+        self.assertEqual(reloaded["status"], "failed")
+
+    def test_round7_set_status_refuses_when_verdict_file_token_mismatched(self):
+        """Round 7: If durable verdict file belongs to a previous execution token, reject adoption."""
+        import io
+        from herdr.state_store import SQLiteStateStore
+        herdr_task = _load_herdr_task()
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r7", "status": "running"})
+
+        task_id = "task-r7-old-token"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r7",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "execution_token": "token-epoch-current",
+            "version": 1,
+        }
+        store.save_task(task)
+
+        vfile = self.verdicts_dir / f"{task_id}.json"
+        vfile.write_text(
+            json.dumps({"verdict": "pass", "execution_token": "token-epoch-old"}),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [store.get_task(task_id)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None):
+            with self.assertRaises(SystemExit) as ctx, patch("sys.stderr", new_callable=io.StringIO) as err:
+                herdr_task.set_status(task_id, "completed", verdict="pass")
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("execution token mismatch", err.getvalue())
+
+        reloaded = store.get_task(task_id)
+        self.assertEqual(reloaded["status"], "failed")
+
+    def test_round7_set_status_succeeds_and_binds_evidence_mtime(self):
+        """Round 7: When evidence matches, set_status succeeds and records gate_verdict_evidence_mtime."""
+        from herdr.state_store import SQLiteStateStore
+        herdr_task = _load_herdr_task()
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r7", "status": "running"})
+
+        task_id = "task-r7-valid-adoption"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r7",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "execution_token": "token-r7-valid",
+            "version": 1,
+        }
+        store.save_task(task)
+
+        vfile = self.verdicts_dir / f"{task_id}.json"
+        vfile.write_text(
+            json.dumps({"verdict": "pass", "note": "verified passed", "execution_token": "token-r7-valid"}),
+            encoding="utf-8",
+        )
+        file_mtime = os.stat(str(vfile)).st_mtime
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [store.get_task(task_id)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None):
+            herdr_task.set_status(task_id, "completed", verdict="pass", note="verified passed")
+
+        reloaded = store.get_task(task_id)
+        self.assertEqual(reloaded["status"], "completed")
+        self.assertEqual(reloaded["stage_verdict"], "pass")
+        self.assertEqual(reloaded["stage_verdict_note"], "verified passed")
+        self.assertAlmostEqual(reloaded.get("gate_verdict_evidence_mtime"), file_mtime, places=2)
+
+    def test_round7_try_auto_verdict_aborts_when_worker_rewrote_verdict(self):
+        """Round 7: Controller try_auto_verdict detects if gate verdict changed before adoption spawn."""
+        controller = _load_controller()
+        task_id = "wf-r7-auto-race"
+        task = {
+            "id": task_id,
+            "task_id": task_id,
+            "workflow_id": "wf-r7",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+        }
+
+        # Step 1: read_gate_verdict returns pass
+        # Step 2: worker changes it, so second read_gate_verdict returns blocked
+        call_count = 0
+        def mock_read(t):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return "pass", "passed first check", "file"
+            return "blocked", "changed to blocked by worker", "file"
+
+        with patch.object(controller, "auto_verdict_enabled", lambda: True), \
+             patch.object(controller, "get_task", lambda tid: task), \
+             patch.object(controller, "_gate_verdict_is_fresh", lambda t: True), \
+             patch.object(controller, "node_is_gate", lambda w, n: True), \
+             patch.object(controller, "read_gate_verdict", mock_read), \
+             patch("subprocess.run") as mock_run:
+            res = controller.try_auto_verdict(task_id)
+            self.assertFalse(res)
+            # subprocess.run must NOT be invoked when verdict changed
+            mock_run.assert_not_called()
 
 
 if __name__ == "__main__":

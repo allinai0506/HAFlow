@@ -98,6 +98,11 @@ class AdoptVerdictCliTest(unittest.TestCase):
         store.save_task(task)
 
         herdr_task_bin = HERDR_ROOT / "bin" / "herdr-task"
+        verdict_file = self.verdicts_dir / f"{task_id}.json"
+        verdict_file.write_text(
+            json.dumps({"verdict": "blocked", "note": "F-1 review blocker"}),
+            encoding="utf-8",
+        )
         env = {
             **os.environ,
             "TASKS_FILE": str(self.tasks_file),
