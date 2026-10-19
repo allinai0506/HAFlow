@@ -5587,15 +5587,30 @@ def _cleanup_gate_for_rework(task, delivery_id=None, store=None):
         # P1: Check returncode; abort rework if the pane interrupt fails so we never continue with an old writer running
         if res.returncode != 0:
             raise RuntimeError(f"Failed to interrupt gate pane {pane_ref} (exit {res.returncode}): {res.stderr or res.stdout}")
-    for cand in [
-        str((Path.home() / ".herdr-controller" / "gate-verdicts" / f"{task['task_id']}.json")),
-        os.path.join(task.get("clone_path", ""), ".herdr", "gate-verdict.json") if task.get("clone_path") else None,
-    ]:
+    candidates = []
+    task_id = task.get("task_id")
+    if task_id:
+        try:
+            from herdr.direct_dispatch import gate_verdict_path
+            candidates.append(gate_verdict_path(task_id))
+        except Exception:
+            override = os.environ.get("HERDR_GATE_VERDICT_DIR")
+            vdir = Path(override).expanduser() if override else (Path.home() / ".herdr-controller" / "gate-verdicts")
+            candidates.append(str(vdir / f"{task_id}.json"))
+    clone_path = task.get("clone_path")
+    if clone_path:
+        candidates.append(os.path.join(clone_path, ".herdr", "gate-verdict.json"))
+
+    for cand in candidates:
         if cand and os.path.exists(cand):
             try:
                 os.remove(cand)
-            except OSError:
+            except FileNotFoundError:
                 pass
+            except OSError as exc:
+                raise RuntimeError(f"Failed to purge gate verdict file {cand}: {exc}") from exc
+            if os.path.exists(cand):
+                raise RuntimeError(f"Gate verdict file still exists after removal attempt: {cand}")
     # P1: Persist cleanup completion phase only after interrupt and purge succeed
     if store and delivery_id:
         store.record_event(

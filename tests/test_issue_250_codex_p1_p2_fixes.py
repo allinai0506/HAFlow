@@ -1455,6 +1455,128 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         new_token = captured_deliver_args[0].get("intervention_id")
         self.assertNotEqual(new_token, generated_token)
 
+    def test_round5_honor_configured_gate_verdict_dir_during_cleanup(self):
+        """Round 5: HERDR_GATE_VERDICT_DIR must be honored during gate cleanup purge."""
+        from types import SimpleNamespace
+        import herdr.task_resources
+        herdr_task = _load_herdr_task()
+        from herdr.state_store import SQLiteStateStore
+
+        custom_vdir = self.tmp_dir / "custom_verdicts"
+        custom_vdir.mkdir(parents=True, exist_ok=True)
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-custom-vdir", "status": "running"})
+
+        task_id = "task-custom-vdir-gate"
+        verdict_file = custom_vdir / f"{task_id}.json"
+        verdict_file.write_text(json.dumps({"verdict": "fail", "note": "custom prior"}), encoding="utf-8")
+
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-custom-vdir",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "pane_id": "p-custom-vdir",
+            "clone_path": str(self.tmp_dir),
+            "completion_protocol": "receipt-v1",
+        }
+        store.save_task(task)
+
+        args = SimpleNamespace(task_id=task_id, request_id="req-custom-vdir", prompt="fix", reason="test")
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(custom_vdir)}), \
+             patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None):
+            herdr_task.cmd_rework(args)
+
+        # The verdict file in custom_vdir MUST be purged
+        self.assertFalse(verdict_file.exists())
+        # gate_cleanup_completed must be recorded
+        events = store.list_events(task_id=task_id)
+        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
+        self.assertEqual(len(cleanup_events), 1)
+
+    def test_round5_abort_cleanup_when_verdict_cannot_be_removed(self):
+        """Round 5: When verdict file cannot be unlinked, abort cleanup and withhold gate_cleanup_completed."""
+        from types import SimpleNamespace
+        import herdr.task_resources
+        herdr_task = _load_herdr_task()
+        from herdr.state_store import SQLiteStateStore
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-unlink-fail", "status": "running"})
+
+        task_id = "task-unlink-fail-gate"
+        clone_dir = self.tmp_dir / "clone_unlink_fail"
+        clone_dir.mkdir(parents=True, exist_ok=True)
+        dot_herdr = clone_dir / ".herdr"
+        dot_herdr.mkdir(parents=True, exist_ok=True)
+        verdict_file = dot_herdr / "gate-verdict.json"
+        verdict_file.write_text(json.dumps({"verdict": "fail", "note": "unremovable"}), encoding="utf-8")
+
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-unlink-fail",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "pane_id": "p-unlink-fail",
+            "clone_path": str(clone_dir),
+            "completion_protocol": "receipt-v1",
+        }
+        store.save_task(task)
+
+        # Simulate os.remove failing with PermissionError
+        original_remove = os.remove
+        def failing_remove(path, *a, **k):
+            if str(path) == str(verdict_file):
+                raise PermissionError(f"[Errno 13] Permission denied: '{path}'")
+            return original_remove(path, *a, **k)
+
+        args = SimpleNamespace(task_id=task_id, request_id="req-unlink-fail", prompt="fix", reason="test")
+        with patch("os.remove", failing_remove), \
+             patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None):
+            with self.assertRaises(RuntimeError) as ctx:
+                herdr_task.cmd_rework(args)
+            self.assertIn("Failed to purge gate verdict file", str(ctx.exception))
+
+        # The verdict file is still there
+        self.assertTrue(verdict_file.exists())
+        # gate_cleanup_completed must NOT have been recorded
+        events = store.list_events(task_id=task_id)
+        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
+        self.assertEqual(len(cleanup_events), 0)
+        # _is_gate_cleanup_completed returns False
+        self.assertFalse(herdr_task._is_gate_cleanup_completed(task, "req-unlink-fail", store))
+
+        # Subsequent retry when remove works succeeds and records gate_cleanup_completed
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None):
+            herdr_task.cmd_rework(args)
+
+        self.assertFalse(verdict_file.exists())
+        events = store.list_events(task_id=task_id)
+        cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
+        self.assertEqual(len(cleanup_events), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

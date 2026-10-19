@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-19] fix | 遵循裁决配置目录解析与裁决删除失败强行阻断 (PR #266 Codex Review Round 5 Follow-up)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 commit 000277c 中针对门禁返工清理逻辑指出 2 项路径解析与错误处理边界缺陷：
+     - [P1] `bin/herdr-task:_cleanup_gate_for_rework` 中候选裁决路径硬编码 `Path.home() / ".herdr-controller" / "gate-verdicts"`，忽略了 `HERDR_GATE_VERDICT_DIR` 环境变量配置。当测试或自定义部署指定了非默认裁决目录时，返工清理无法命中真实的历史裁决文件，留下陈旧裁决却仍持久化记录了 `gate_cleanup_completed`。后续一旦流程在更新 execution_token 前中断，Controller 极易重新采纳旧裁决造成返工误判；必须统一使用规范助手 `gate_verdict_path(task_id)` 解析候选路径；
+     - [P1] `_cleanup_gate_for_rework` 中清理旧裁决文件时使用 `try ... except OSError: pass` 静默吞掉错误，若由于权限不足、只读挂载或瞬时文件系统故障导致文件未能被真正解除链接，系统依然向后执行并持久化 `gate_cleanup_completed`，导致重试误判清理完成并不再尝试删除，遗留的旧裁决可能在后续流程中被误采纳。除文件本身不存在外，任何物理删除失败必须立即抛出异常并扣留完成事件。
+- 变更：
+  1. **遵循配置规范解析裁决候选路径**：
+     - `bin/herdr-task:_cleanup_gate_for_rework`：调用 `herdr.direct_dispatch.gate_verdict_path(task_id)` 动态计算状态目录下的裁决文件路径（自动读取 `HERDR_GATE_VERDICT_DIR` 配置），并保留对 clone 目录 `.herdr/gate-verdict.json` 的候选清理，杜绝路径硬编码遗漏；
+  2. **删除失败强行阻断与完成事件扣留**：
+     - 裁决删除严格只忽略 `FileNotFoundError`；遇到任何其他 `OSError` 立即抛出 `RuntimeError`，并在执行 `os.remove` 后做二次 `os.path.exists` 断言；
+     - 任何候选文件清理失败时，绝不执行 `store.record_event("gate_cleanup_completed", ...)`，严格扣留完成凭证，确保重试调用继续执行清理直至彻底移除。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 项专项测试（`test_round5_honor_configured_gate_verdict_dir_during_cleanup`、`test_round5_abort_cleanup_when_verdict_cannot_be_removed`），全量 28 项测试全部通过；
+  2. `tests/test_cli_receipt_delivery.py` 8 项测试全部通过；
+  3. 全量 `tests/test_issue_250_*.py` 45 项用例全部 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警。
+
 ## [2026-10-19] fix | 区分清理意图与完成阶段、默认 CLI 返工复用清理令牌 (PR #266 Codex Review Round 5)
 
 - 背景：
