@@ -337,6 +337,7 @@ class TestSupersededStats(unittest.TestCase):
 
 class PlannedNodeStatusTest(unittest.TestCase):
     def test_cli_and_card_do_not_complete_missing_planned_tasks(self):
+        from herdr.task_cli_workflow import node_status
         tasks = [{"task_id": "t1", "workflow_id": "wf-plan", "node": "implementation", "status": "integrated", "integration_mode": "git"}]
         cfg = {"nodes": [{"id": "implementation", "required_task_ids": ["t1", "t3"]}]}
         import io
@@ -346,13 +347,19 @@ class PlannedNodeStatusTest(unittest.TestCase):
             self.assertNotEqual(cards[0]["nodes"][0]["status"], "completed")
             output = io.StringIO()
             with redirect_stdout(output):
-                _ht.node_status("wf-plan", "implementation")
+                node_status(
+                    "wf-plan", "implementation", resolve_node=_ht.resolve_node,
+                    load_tasks=_ht.load_tasks, safe_workflow=_ht._safe_workflow,
+                    normalize_workflow_nodes=_ht._normalize_workflow_nodes,
+                    node_delivery_complete=_ht._node_delivery_complete,
+                )
             self.assertFalse(json.loads(output.getvalue())["complete"])
 
 
 class PersistedWorkflowConfigTest(unittest.TestCase):
     def test_node_status_uses_recorded_config_file_with_real_store(self):
         from herdr import projects
+        from herdr.task_cli_workflow import node_status
         from herdr.state_store import SQLiteStateStore
         import io
         from contextlib import redirect_stdout
@@ -365,7 +372,12 @@ class PersistedWorkflowConfigTest(unittest.TestCase):
             with patch.object(_ht, "get_state_store", return_value=store), patch.object(projects, "_get_store", return_value=store), patch.object(_ht, "load_tasks", return_value={"tasks": store.list_tasks()}):
                 output = io.StringIO()
                 with redirect_stdout(output):
-                    _ht.node_status("wf-plan", "implementation")
+                    node_status(
+                        "wf-plan", "implementation", resolve_node=_ht.resolve_node,
+                        load_tasks=_ht.load_tasks, safe_workflow=_ht._safe_workflow,
+                        normalize_workflow_nodes=_ht._normalize_workflow_nodes,
+                        node_delivery_complete=_ht._node_delivery_complete,
+                    )
                 self.assertFalse(json.loads(output.getvalue())["complete"])
 
 

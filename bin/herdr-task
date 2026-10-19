@@ -3177,86 +3177,13 @@ def _close_workflow_owned(
 
 
 def node_status(workflow_id, node_key):
-    node = resolve_node(node_key, workflow_id)
-
-    data = load_tasks()
-
-    tasks = [
-        task
-        for task in data["tasks"]
-        if task.get("workflow_id") == workflow_id
-        and (task.get("node") == node_key or task.get("stage") == node_key)
-    ]
-
-    if not tasks:
-        result = {
-            "workflow_id": workflow_id,
-            "node_id": node_key,
-            "node": node_key,
-            "stage": node_key,
-            "node_label": node["node_label"],
-            "stage_label": node["stage_label"],
-            "status": "empty",
-            "complete": False,
-            "depends_on": node.get("depends_on", []),
-            "next_stage": node.get("next"),
-            "tasks": []
-        }
-
-        print(
-            json.dumps(
-                result,
-                ensure_ascii=False,
-                indent=2
-            )
-        )
-        return
-
-    # Superseded tasks do not block node completion — they were replaced by
-    # another task whose outcome is the authoritative result for this node.
-    active_tasks = [
-        task for task in tasks
-        if task.get("status") != "superseded" and not task.get("superseded_by")
-    ]
-
-    workflow, _ = _safe_workflow(workflow_id)
-    cfg_node = next((n for n in _normalize_workflow_nodes(workflow or {}) if n.get("id") == node_key), {})
-    complete = _node_delivery_complete(tasks, cfg_node.get("required_task_ids"))
-
-    result = {
-        "workflow_id": workflow_id,
-        "node_id": node_key,
-        "node": node_key,
-        "stage": node_key,
-        "node_label": node["node_label"],
-        "stage_label": node["stage_label"],
-        "status": (
-            "completed"
-            if complete
-            else "in_progress"
-        ),
-        "complete": complete,
-        "depends_on": node.get("depends_on", []),
-        "next_stage": node.get("next"),
-        "tasks": [
-            {
-                "task_id": task["task_id"],
-                "status": task["status"]
-            }
-            for task in tasks
-        ]
-    }
-
-    print(
-        json.dumps(
-            result,
-            ensure_ascii=False,
-            indent=2
-        )
+    from herdr.task_cli_workflow import node_status as handle_node_status
+    return handle_node_status(
+        workflow_id, node_key, resolve_node=resolve_node, load_tasks=load_tasks,
+        safe_workflow=_safe_workflow,
+        normalize_workflow_nodes=_normalize_workflow_nodes,
+        node_delivery_complete=_node_delivery_complete,
     )
-
-
-stage_status = node_status
 
 
 def _autosave_clone_wip(task):
