@@ -1451,3 +1451,30 @@ def test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_ad
 
     # Verify head guard was cleanly consumed and not leaked in memory
     assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+
+def test_patch_store_classes_preserves_abstract_state_store_contract():
+    """PR #271 Codex P2: Preserve the abstract save_task contract on StateStore.
+
+    When review_closure is imported, StateStore (and its abstract methods including save_task)
+    must remain abstract. A new subclass of StateStore that omits save_task must raise
+    TypeError at instantiation instead of silently inheriting a non-abstract pass wrapper.
+    """
+    import inspect
+    from herdr import review_closure, state_store
+
+    assert inspect.isabstract(state_store.StateStore)
+    assert getattr(state_store.StateStore.save_task, "__isabstractmethod__", False)
+    assert getattr(state_store.StateStore.transition_task, "__isabstractmethod__", False)
+
+    class IncompleteStore(state_store.StateStore):
+        # Deliberately omits save_task and other abstract methods
+        pass
+
+    with pytest.raises(TypeError, match="abstract method"):
+        IncompleteStore()
+
+    # Also verify that calling _patch_store_class on an abstract class is a no-op
+    review_closure._patch_store_class(state_store.StateStore)
+    assert inspect.isabstract(state_store.StateStore)
+    assert getattr(state_store.StateStore.save_task, "__isabstractmethod__", False)

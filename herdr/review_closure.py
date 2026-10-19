@@ -36,8 +36,10 @@ keeps the previous completion path.
 """
 
 import fcntl
+import functools
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import re
@@ -952,7 +954,7 @@ def _execute_with_head_guard(tid: str, orig_fn, self, *args, **kwargs):
 
 
 def _patch_store_class(cls: Any) -> None:
-    if "_atomic_head_guard_patched" in cls.__dict__:
+    if inspect.isabstract(cls) or "_atomic_head_guard_patched" in cls.__dict__:
         return
     cls._atomic_head_guard_patched = True
 
@@ -963,44 +965,56 @@ def _patch_store_class(cls: Any) -> None:
 
     if orig_transition:
         def _make_wrapped_transition(orig_fn):
+            @functools.wraps(orig_fn)
             def wrapped_transition(self, *args, **kwargs):
                 tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
                 to_st = kwargs.get("to_status") if "to_status" in kwargs else (args[1] if len(args) > 1 else "")
                 if to_st == "completed" and tid in _ACTIVE_HEAD_GUARDS:
                     return _execute_with_head_guard(tid, orig_fn, self, *args, **kwargs)
                 return orig_fn(self, *args, **kwargs)
+            if getattr(orig_fn, "__isabstractmethod__", False):
+                wrapped_transition.__isabstractmethod__ = True
             return wrapped_transition
         cls.transition_task = _make_wrapped_transition(orig_transition)
 
     if orig_cas:
         def _make_wrapped_cas(orig_fn):
+            @functools.wraps(orig_fn)
             def wrapped_cas(self, *args, **kwargs):
                 tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
                 to_st = kwargs.get("to_status") if "to_status" in kwargs else (args[1] if len(args) > 1 else "")
                 if to_st == "completed" and tid in _ACTIVE_HEAD_GUARDS:
                     return _execute_with_head_guard(tid, orig_fn, self, *args, **kwargs)
                 return orig_fn(self, *args, **kwargs)
+            if getattr(orig_fn, "__isabstractmethod__", False):
+                wrapped_cas.__isabstractmethod__ = True
             return wrapped_cas
         cls.compare_and_set_task_transition = _make_wrapped_cas(orig_cas)
 
     if orig_completion_cas:
         def _make_wrapped_completion_cas(orig_fn):
+            @functools.wraps(orig_fn)
             def wrapped_completion_cas(self, *args, **kwargs):
                 tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
                 if tid in _ACTIVE_HEAD_GUARDS:
                     return _execute_with_head_guard(tid, orig_fn, self, *args, **kwargs)
                 return orig_fn(self, *args, **kwargs)
+            if getattr(orig_fn, "__isabstractmethod__", False):
+                wrapped_completion_cas.__isabstractmethod__ = True
             return wrapped_completion_cas
         cls.compare_and_set_completion_transition = _make_wrapped_completion_cas(orig_completion_cas)
 
     if orig_save:
         def _make_wrapped_save(orig_fn):
+            @functools.wraps(orig_fn)
             def wrapped_save(self, task, *args, **kwargs):
                 tid = task.get("task_id") if isinstance(task, dict) else ""
                 to_st = task.get("status") if isinstance(task, dict) else ""
                 if to_st == "completed" and tid in _ACTIVE_HEAD_GUARDS:
                     return _execute_with_head_guard(tid, orig_fn, self, task, *args, **kwargs)
                 return orig_fn(self, task, *args, **kwargs)
+            if getattr(orig_fn, "__isabstractmethod__", False):
+                wrapped_save.__isabstractmethod__ = True
             return wrapped_save
         cls.save_task = _make_wrapped_save(orig_save)
 
@@ -1008,9 +1022,9 @@ def _patch_store_class(cls: Any) -> None:
 def _patch_store_classes() -> None:
     try:
         from . import state_store
-        for name in ("StateStore", "SQLiteStateStore"):
+        for name in ("SQLiteStateStore",):
             c = getattr(state_store, name, None)
-            if c is not None:
+            if c is not None and not inspect.isabstract(c):
                 _patch_store_class(c)
     except (ImportError, AttributeError):
         pass

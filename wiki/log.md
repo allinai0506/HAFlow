@@ -3062,24 +3062,25 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   2. `tests/test_wrapup_review_closure.py` 全量 56 项测试全部 PASS（耗时 53.66s）；
   3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。
 
-## [2026-10-19] fix | 评审闭环 Head Guard 绑定完成 Attempt 避免双重预检残留与返工陈旧误拒 (PR #271 Codex Review P2)
+## [2026-10-19] fix | 评审闭环 Head Guard 绑定 Attempt 避免双重预检残留 & 保留 StateStore 抽象接口契约 (PR #271 Codex Review P2)
 
 - 背景：
-  1. GitHub Codex 自动化评审在 PR #271 中指出 1 项 P2 级生命周期泄漏与误拒风险：
-     - [P2] `herdr/review_closure.py:890`（Thread `PRRT_kwDOUYu4N86t6GBi`）："Pair each head guard with its completion attempt"。
-     - 当通过 CLI `set_status(..., "completed")` 完成任务时，CLI 前置预检 `_enforce_wrapup_review_closure` 调用 `check_completion_allowed` 注册了一枚 guard。紧接着 `kernel.transition_task` 再次调用 `check_completion_allowed` 注册了第二枚 guard。
-     - 随后的 store 流转只发生一次，仅消费其中一枚 guard，导致另一枚孤儿 guard 残留在 `_ACTIVE_HEAD_GUARDS` 中。若该任务后续进入返工并推进 HEAD，残存的陈旧 guard 会导致未来的完成尝试被错误拒绝。
+  1. GitHub Codex 自动化评审在 PR #271 中指出 2 项 P2 级设计与接口约束缺陷：
+     - [P2] `herdr/review_closure.py:890`（Thread `PRRT_kwDOUYu4N86t6GBi`）："Pair each head guard with its completion attempt"。CLI 前置预检与内核流转双重注册 guard 导致孤儿残留，并在返工推进 HEAD 后误拒合法完成。
+     - [P2] `herdr/review_closure.py:1005`（Thread `PRRT_kwDOUYu4N86t6tHd`）："Preserve the abstract save_task contract"。`_patch_store_classes` 给基类 `StateStore` 动态挂载非抽象包装函数，导致后定义的缺少 `save_task` 的子类绕过 ABC 检查被错误实例化，调用回退到 `pass` 静默丢弃写入。
 - 变更：
-  1. **HeadGuard 显式绑定 attempt_id / 线程标识**：
-     - `HeadGuard` 增加 `attempt_id` 属性，默认为 `threading.get_ident()`。
-     - `_execute_with_head_guard` 优先匹配当前线程/attempt 未认领的 guard。
-  2. **同 attempt 幂等去重与陈旧更新**：
-     - `bind_atomic_head_guard` 检查当前 task 中是否存在同一 `attempt_id` 且未认领的 guard。若存在，直接就地更新 `clone_path` 与 `expected_head`，不再追加多余条目；若不存在才新增。
-     - 增加 `release_atomic_head_guard` 支持显式释放特定任务和 attempt 的守卫。
-  3. **预检与流转解耦**：
+  1. **HeadGuard 显式绑定 attempt_id / 线程标识与同 attempt 幂等去重**：
+     - `HeadGuard` 增加 `attempt_id` 属性，默认为 `threading.get_ident()`；
+     - `_execute_with_head_guard` 优先匹配当前线程/attempt 未认领的 guard；
+     - `bind_atomic_head_guard` 检查同 attempt 未认领 guard，直接就地更新 `clone_path` 与 `expected_head`；增加 `release_atomic_head_guard` 显式解绑能力。
+  2. **预检与流转解耦**：
      - `check_completion_allowed` 增加 `bind_guard: bool = True` 参数；
-     - 在 `bin/herdr-task` 的 `_enforce_wrapup_review_closure` CLI 预检中显式传入 `bind_guard=False`，仅校验不绑 guard，真正流转时由 kernel 统一绑定。
+     - 在 `bin/herdr-task` 的 `_enforce_wrapup_review_closure` CLI 预检中显式传入 `bind_guard=False`，仅校验不绑 guard。
+  3. **严守 StateStore 抽象契约与跳过抽象基类**：
+     - `_patch_store_classes` 仅修补具象存储类（`SQLiteStateStore`），严禁修改抽象基类 `StateStore`；
+     - `_patch_store_class` 前置增加 `inspect.isabstract(cls)` 短路返回；
+     - 包装函数统一引入 `@functools.wraps` 并保留 `__isabstractmethod__`，确保任何新定义的未完整实现子类严格抛出 `TypeError`。
 - 证据：
-  1. `tests/test_wrapup_review_closure.py` 新增 `test_double_validation_cli_precheck_and_kernel_transition_leaves_no_lingering_guard`，验证 CLI 预检与 kernel 双重校验后无残留 guard、返工推进 HEAD 后自动就地更新并顺利完成；
-  2. `tests/test_wrapup_review_closure.py` 全量 57 项测试全部 PASS（耗时 145.05s）；
+  1. `tests/test_wrapup_review_closure.py` 新增 `test_double_validation_cli_precheck_and_kernel_transition_leaves_no_lingering_guard` 与 `test_patch_store_classes_preserves_abstract_state_store_contract`；
+  2. `tests/test_wrapup_review_closure.py` 全量 58 项测试全部 PASS；
   3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。

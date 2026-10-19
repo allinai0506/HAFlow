@@ -7384,6 +7384,7 @@ issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候
 | 并发 HEAD Guard 提前释放致并发请求穿透检查 | 在获取 clone_lock 之前提前 pop 共享 guard，导致并发同一任务的第二个请求误判为无 guard 而直接调用 orig_fn 绕过 HEAD 校验与锁 | 必须按 attempt 独立存储 guard（`HeadGuard`），并仅在受保护的状态流转彻底完成后在 `finally:` 中安全移除；执行期间 guard 持续保留阻止并发请求绕行 |
 | bypass_task_gate 直写绕过状态流转网关致 HEAD Guard 泄露且未受并发写保护 | `bypass_task_gate` 直接使用 `s.save_task(task)` 绕过了被补丁保护的流转方法，导致绑定的 atomic head guard 无法被消费，且在校验与落盘之间存在 HEAD 推进的竞态窗口 | `save_task` 必须一并纳入 store 补丁代理；`bypass_task_gate` 中将校验与直写置于同一 `clone_lock` 下原子执行，同时 `CloneLock` 必须具备线程级可重入性（thread-reentrant） |
 | 普通双重校验路径导致 HEAD Guard 堆积泄漏与返工后陈旧拒绝 | CLI 预检（`_enforce_wrapup_review_closure`）与内核网关（`kernel.transition_task`）对同一任务连续执行校验，导致重复追加多个 guard 而单次流转仅消费一个；在长生命周期调用方中残留的旧 guard 会在任务返工推进 HEAD 后成为队首阻碍合法完成 | 将 Guard 与特定 attempt/thread 显式关联；`bind_atomic_head_guard` 在同 attempt 内更新去重而不盲目追加；CLI 预检通过 `bind_guard=False` 仅验证不占位；提供 `release_atomic_head_guard` 显式解绑能力；守护测试验证普通双重校验后活跃 guard 零残留 |
+| 动态补丁包装抽象方法导致缺少实现的子类静默绕过 ABC 门禁 | `_patch_store_classes` 包装 `StateStore.save_task` 等抽象方法时，若未保留 `__isabstractmethod__` 或直接修改抽象基类，会导致后定义的子类即使遗漏 `save_task` 也会被 Python ABC 误判为具象类，实例化不报错且调用静默丢弃写入 | `_patch_store_classes` 坚决跳过所有抽象基类（`inspect.isabstract(cls)`），仅对具象存储类（如 `SQLiteStateStore`）打补丁；`_patch_store_class` 中所有动态包装函数使用 `@functools.wraps` 并显式保留 `__isabstractmethod__`，守护抽象接口校验契约 |
 
 ### 已知边界（残留 R1，非阻塞，负责人决策项）
 
