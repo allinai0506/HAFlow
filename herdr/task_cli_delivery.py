@@ -387,3 +387,44 @@ def purge_task(task_id, *, load_tasks, find_task, get_store, teardown_blocking_s
     }, store=get_store())
 
     print(f"[PURGED] {task_id}")
+
+
+def finalize_task(task_id, force=False, purge_clones=False, *, load_tasks,
+                  find_task, teardown_blocking_statuses, finalize_one):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    status = task.get("status")
+    blocked = status in teardown_blocking_statuses
+    if blocked or (status == "failed" and not force):
+        print(
+            f"Task cannot finalize while {status}; "
+            "only settled tasks can be torn down "
+            "(use --force for failed tasks)."
+        )
+        sys.exit(2)
+
+    row = finalize_one(task, purge_clones=purge_clones)
+
+    if row.get("action") == "retained":
+        print("[FINALIZE ABORT] " + json.dumps(row, ensure_ascii=False))
+        sys.exit(2)
+
+    print(f"[FINALIZE] {task_id} status={row['status']} "
+          f"pane_closed={row['pane_closed']}")
+    if row["evidence"]:
+        print(f"[EVIDENCE] {row['evidence']}")
+    if row["clone_deleted"]:
+        print(f"[CLONE PURGED] {task.get('clone_path')}")
+    elif row["clone_retained_reason"]:
+        print(
+            f"[CLONE RETAINED] {task.get('clone_path')} "
+            f"({row['clone_retained_reason']}; "
+            "use --purge-clones to force)"
+        )
+    print(f"[FINALIZED] {task_id}")
+    return row

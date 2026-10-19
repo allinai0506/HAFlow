@@ -1,6 +1,6 @@
 import pytest
 
-from herdr.task_cli_delivery import cleanup_task, commit_task, purge_task
+from herdr.task_cli_delivery import cleanup_task, commit_task, finalize_task, purge_task
 
 
 def test_commit_task_missing_task_exits_without_git_calls():
@@ -39,5 +39,18 @@ def test_resource_cleanup_missing_task_exits_without_mutation(handler):
         )
     with pytest.raises(SystemExit) as error:
         handler('missing', **dependencies)
+    assert error.value.code == 1
+    assert calls == []
+
+
+def test_finalize_missing_task_exits_before_teardown():
+    calls = []
+    with pytest.raises(SystemExit) as error:
+        finalize_task(
+            'missing', load_tasks=lambda: {'tasks': []},
+            find_task=lambda data, task_id: None,
+            teardown_blocking_statuses=set(),
+            finalize_one=lambda *a, **k: calls.append('finalize'),
+        )
     assert error.value.code == 1
     assert calls == []
