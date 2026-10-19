@@ -70,7 +70,7 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/transitions.py
-  locator: WORKFLOW_TRANSITIONS L125-133
+  locator: WORKFLOW_TRANSITIONS L134-142
   confidence: high
 - kind: implemented
   source: herdr/state_db.py

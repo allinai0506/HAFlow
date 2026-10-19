@@ -70,8 +70,15 @@ PRIVILEGED_TASK_TRANSITIONS: Dict[str, Set[tuple[str, str]]] = {
         ("failed", "completed"),
         ("paused", "working"),
     },
-    "rollback": {(s, "superseded") for s in TASK_TRANSITIONS if s != "superseded"},
-    "console-force-review": {(s, "agent_done") for s in TASK_TRANSITIONS if s not in TERMINAL_TASK_STATUSES},
+    "rollback": {
+        *((s, "superseded") for s in TASK_TRANSITIONS if s != "superseded"),
+        ("active", "superseded"),
+        ("suspended", "superseded"),
+    },
+    "console-force-review": {
+        *((s, "agent_done") for s in TASK_TRANSITIONS if s not in TERMINAL_TASK_STATUSES),
+        ("active", "agent_done"),
+    },
 }
 
 
@@ -101,6 +108,8 @@ def validate_task_transition(
             raise InvalidTransitionError(f"Unknown privileged transition intent: '{intent}'")
         allowed_pairs = PRIVILEGED_TASK_TRANSITIONS[intent]
         if (old_status, new_status) in allowed_pairs:
+            return True
+        if intent == "rollback" and new_status == "superseded":
             return True
         raise InvalidTransitionError(
             f"Illegal privileged transition for intent '{intent}': '{old_status}' -> '{new_status}'"
