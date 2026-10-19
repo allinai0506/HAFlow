@@ -137,29 +137,34 @@ def gate_verdict_path(task_id) -> str:
     return str(gate_verdict_dir() / f"{task_id}.json")
 
 
-def gate_verdict_contract(task_id, inventory_block=None) -> str:
+def gate_verdict_contract(task_id, inventory_block=None, execution_token=None) -> str:
     """门禁结论契约文本(含本任务的结论文件绝对路径)。
 
     ``inventory_block``(PR #110,可选):workflow 显式开启 selective_replan
     时由控制面注入的可归因实现 Task 清单;提供后契约追加结构化
     ``affected_task_ids`` 条款。未提供时契约文本与历史逐字节一致。
+    ``execution_token``(可选):当前执行纪元令牌;提供后契约要求结论携带该令牌。
     """
     path = gate_verdict_path(task_id)
+    tok_clause = f', "execution_token": "{execution_token}"' if execution_token else ""
     base = f"""\
 【门禁结论契约（必须遵守，结论将被机器直接采纳）】
 1. 验证完成后，写入门禁结论文件：{path}
    内容二选一：
-   {{"verdict": "pass", "note": "一句话结论"}}
-   {{"verdict": "blocked", "note": "阻塞原因清单"}}
+   {{"verdict": "pass", "note": "一句话结论"{tok_clause}}}
+   {{"verdict": "blocked", "note": "阻塞原因清单"{tok_clause}}}
    （若你的写权限不允许写该路径，可退回写入当前工作目录下 .herdr/gate-verdict.json，内容格式相同）
 2. 同时在终端单独输出一行，便于人工对照：
    HERDR_GATE_VERDICT: <pass|blocked>
 3. verdict 只能二选一：pass = 未发现必须返工的阻塞缺陷；blocked = 存在必须返工的阻塞缺陷，且必须在 note 中列出。
 4. 结论一经写入即作为门禁裁决生效：pass 自动推进下一节点；blocked 自动触发回流返工。"""
+    if execution_token:
+        base += f"\n5. 本次门禁执行令牌为：{execution_token}，结论文件必须携带 execution_token 字段以防旧轮次未决写入被误采纳。"
     if not inventory_block:
         return base
+    item_num = 6 if execution_token else 5
     return base + f"""
-5. 本工作流已启用选择性返工(Selective Replan):blocked 时如能明确归因,
+{item_num}. 本工作流已启用选择性返工(Selective Replan):blocked 时如能明确归因,
    请在结论 JSON 中追加结构化字段 affected_task_ids(见下方清单),
    系统将只返工被点名的实现任务;归因不明时保持缺省即整体返工。
 

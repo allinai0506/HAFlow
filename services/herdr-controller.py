@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import math
 import re
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -961,11 +962,17 @@ FIX_LOOP_SUPERSEDEABLE = {
 def resolve_gate_config(node, node_id):
     gate = (node or {}).get("gate") or get_stage_policy(node_id).get("gate")
 
+    if gate is None and (node or {}).get("node_type") == "gate":
+        gate = {}
+
     if gate is None:
         gate = GATE_DEFAULTS.get(node_id)
 
-    if not gate:
+    if not gate and (node or {}).get("node_type") != "gate":
         return None
+
+    if not isinstance(gate, dict):
+        gate = {}
 
     return {
         "retry_node": gate.get("retry_node", "implementation"),
@@ -3117,6 +3124,107 @@ def process_blocked_observations():
         fresh = result.get("task") or task
         enqueue_coordinator_event(fresh, "inner_loop_exhausted")
     return processed
+
+
+DEFAULT_GATE_HANDOFF_GRACE_SECONDS = 300.0
+DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5.0
+
+
+def max_clock_skew_seconds():
+    raw = os.environ.get("HERDR_MAX_CLOCK_SKEW_SECONDS")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val >= 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_MAX_CLOCK_SKEW_SECONDS
+
+
+def task_gate_handoff_grace_seconds():
+    raw = os.environ.get("HERDR_GATE_HANDOFF_GRACE_SECONDS")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val > 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_GATE_HANDOFF_GRACE_SECONDS
+
+
+def process_gate_verdict_reconciliations():
+    """PR #250 & Codex P1: Reconcile gate tasks that have written a valid verdict.
+
+    Covers two failure modes:
+    1. A working gate task where gate_verdict_ready is True is transitioned to agent_done.
+       Requires verdict freshness for current execution epoch AND agent runtime settled (idle/done).
+    2. A gate task failed by watchdog where a valid gate verdict file exists is auto-adopted.
+    """
+    processed = 0
+    for task in load_tasks():
+        status = task.get("status")
+        workflow_id = task.get("workflow_id")
+        node_id = task.get("node") or task.get("stage")
+        is_gate = False
+        if workflow_id and node_id:
+            try:
+                wf_cfg = workflow_config_for(workflow_id) or {}
+                node_match = next((n for n in wf_cfg.get("nodes", []) if n.get("id") == node_id), None)
+            except Exception:
+                node_match = None
+            if node_match:
+                if node_match.get("gate") or node_match.get("node_type") == "gate":
+                    is_gate = True
+                elif node_match.get("node_type") in ("agent", "implementation", "worker", "code") and not node_match.get("gate"):
+                    is_gate = False
+                else:
+                    is_gate = bool(task.get("gate")) or node_is_gate(workflow_id, node_id)
+            else:
+                is_gate = bool(task.get("gate")) or node_is_gate(workflow_id, node_id)
+        else:
+            is_gate = bool(task.get("gate"))
+        if not is_gate:
+            continue
+
+        task_id = task.get("task_id")
+        if status in {"working", "dispatched", "rework"}:
+            if not _gate_verdict_is_fresh(task):
+                continue
+            pane_id = task.get("pane_id")
+            runtime_settled = True
+            if pane_id:
+                try:
+                    runtime = get_agent_runtime_status(pane_id)
+                    runtime_settled = (runtime in ("idle", "done"))
+                except Exception:
+                    runtime_settled = False
+            if not runtime_settled:
+                # Issue #250 & Codex review: If runtime is not settled, allow adoption after bounded handoff grace.
+                # Timestamps beyond clock skew allowance are rejected from extending grace.
+                verdict_mtime = _gate_verdict_file_mtime(task)
+                grace = task_gate_handoff_grace_seconds()
+                skew_limit = max_clock_skew_seconds()
+                now = time.time()
+                is_future = verdict_mtime is not None and (verdict_mtime - now) > skew_limit
+                if not verdict_mtime:
+                    continue
+                if not is_future and (now - verdict_mtime) < grace:
+                    continue
+            if gate_verdict_ready(task):
+                if _set_observed_status(task, "agent_done", "gate_verdict_recovery"):
+                    emit_done_if_allowed(get_task(task_id))
+                    processed += 1
+        elif status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog":
+            if not _gate_verdict_is_fresh(task):
+                continue
+            verdict, _, _ = read_gate_verdict(task)
+            if verdict in ("pass", "blocked"):
+                if try_auto_verdict(task_id):
+                    processed += 1
+    return processed
+
 
 
 # ============================================================
@@ -8142,9 +8250,82 @@ def _gate_verdict_file_candidates(task):
     return candidates
 
 
+def _gate_verdict_file_is_fresh(path, task):
+    """PR #250 & Codex P1: Check if candidate verdict file belongs to current execution epoch."""
+    expected_token = task.get("execution_token") or task.get("rework_request_id")
+    if expected_token:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                return False
+            file_token = (
+                payload.get("execution_token")
+                or payload.get("rework_request_id")
+                or payload.get("rework_token")
+            )
+            if not file_token or file_token != expected_token:
+                # Codex Review Round 7: Authenticate operator bypass receipts as a trusted path
+                bypass = payload.get("bypass")
+                tid = task.get("task_id") or task.get("id")
+                if bool(tid) and isinstance(bypass, dict) and (bypass.get("task_id") == tid) and bypass.get("bypass_id"):
+                    pass
+                else:
+                    return False
+        except Exception:
+            return False
+
+    rework_started = task.get("rework_started_at")
+    if not rework_started:
+        return True
+    try:
+        st = os.stat(path)
+        return st.st_mtime >= (rework_started - 1.0)
+    except OSError:
+        return False
+
+
+def _gate_verdict_is_fresh(task):
+    """PR #250 & Codex P1: Return True if at least one candidate file is valid and fresh."""
+    for path in _gate_verdict_file_candidates(task):
+        try:
+            if not os.path.exists(path):
+                continue
+            if not _gate_verdict_file_is_fresh(path, task):
+                continue
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict) and _normalize_gate_verdict(payload.get("verdict")):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _gate_verdict_file_mtime(task):
+    """PR #250 & Codex review: Return mtime of first fresh, valid candidate verdict file, or None."""
+    for path in _gate_verdict_file_candidates(task):
+        try:
+            if not os.path.exists(path):
+                continue
+            if not _gate_verdict_file_is_fresh(path, task):
+                continue
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict) and _normalize_gate_verdict(payload.get("verdict")):
+                return os.stat(path).st_mtime
+        except Exception:
+            continue
+    return None
+
+
 def _verdict_from_file(task):
     for path in _gate_verdict_file_candidates(task):
         try:
+            if not os.path.exists(path):
+                continue
+            if not _gate_verdict_file_is_fresh(path, task):
+                continue
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         except Exception:
@@ -8167,6 +8348,10 @@ def _verdict_affected_task_ids(task):
     """
     for path in _gate_verdict_file_candidates(task):
         try:
+            if not os.path.exists(path):
+                continue
+            if not _gate_verdict_file_is_fresh(path, task):
+                continue
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         except Exception:
@@ -8282,8 +8467,15 @@ def try_auto_verdict(task_id):
         return False
 
     task = get_task(task_id)
-    if not task or task.get("status") != "agent_done":
+    if not task:
         return False
+
+    status = task.get("status")
+    if status != "agent_done":
+        # Issue #250 & Codex review: Allow adopting gate verdict if task was placed in failed
+        # (e.g. by watchdog) but produced a valid, fresh machine-readable gate verdict.
+        if not (status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog" and _gate_verdict_is_fresh(task)):
+            return False
 
     workflow_id = task.get("workflow_id")
     node_id = task.get("node") or task.get("stage")
@@ -8298,6 +8490,16 @@ def try_auto_verdict(task_id):
         return False
     if verdict == "blocked" and not note:
         note = f"gate verdict blocked (auto-verdict via {source or 'signal'})"
+
+    if status == "failed":
+        # Issue #250 & Codex review: Verify gate verdict is unchanged immediately before spawning adoption CLI
+        latest_verdict, _, _ = read_gate_verdict(task)
+        if latest_verdict != verdict:
+            print(
+                f"[AUTO VERDICT ABORT] task={task_id}: gate verdict changed from {verdict} to {latest_verdict} before adoption",
+                file=sys.stderr,
+            )
+            return False
 
     set_cmd = [
         TASK_MANAGER, "set", task_id, "completed",
@@ -9965,8 +10167,6 @@ def handle_event(task_id, agent_status):
             maybe_ack_on_working(task_id)
 
     elif agent_status in {"idle", "done"}:
-        if task.get("completion_protocol") == "receipt-v1":
-            return
         if current_status in {"dispatched", "working", "rework"}:
             has_done_marker, screen = _completion_marker_snapshot(task)
             if agent_status == "idle" and not has_done_marker:
@@ -9976,6 +10176,10 @@ def handle_event(task_id, agent_status):
                 if current_status == "working" and gate_verdict_ready(task):
                     if _set_observed_status(task, "agent_done", "gate_verdict_recovery"):
                         emit_done_if_allowed(get_task(task_id), report_text=screen)
+                    return
+                # receipt-v1 tasks must strictly go through completion receipt validation
+                # (consume_completion_receipt); only the gate-verdict recovery above is carved out.
+                if task.get("completion_protocol") == "receipt-v1":
                     return
                 # Rework recovery is allowed only after the existing
                 # verification/retry evidence gates have passed.
@@ -9988,6 +10192,8 @@ def handle_event(task_id, agent_status):
                     if _set_observed_status(task, "agent_done", "rework_recovery"):
                         emit_done_if_allowed(get_task(task_id), report_text=screen)
                     return
+            if task.get("completion_protocol") == "receipt-v1":
+                return
             # Both idle and done are settled runtime states; the durable
             # marker, sampling, elapsed-time and CAS gates still arbitrate.
             _record_completion_sample(
@@ -10025,7 +10231,8 @@ def get_agent_runtime_status(pane_id):
                 "get",
                 pane_id
             ],
-            text=True
+            text=True,
+            timeout=10,
         )
 
         data = json.loads(output)
@@ -10454,6 +10661,7 @@ def registry_watcher():
             process_structured_completions(now=now)
             process_all_completion_observations(now=now)
             process_blocked_observations()
+            process_gate_verdict_reconciliations()
             tasks = load_tasks()
             task_ids_now = set()
             _wf_closed_cache = {}

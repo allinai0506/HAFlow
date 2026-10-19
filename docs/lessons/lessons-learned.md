@@ -7286,3 +7286,83 @@ bin/herdr-task freeze-candidate <workflow_id> --candidate-sha <sha> ...
 ```
 
 证据：共享区 notes n-1792319495852-d33d（TaskB 补派承诺）、n-1792325777357-ff5d（candidate_mismatch 伪影）、n-1792331586268-4ad5（opt-out 审计 + rebase 旋转 + 重冻结）、n-1792333606916-d835（--abandon 解死端）、n-1792330151841-f810（D3 裁决）；回归测试 `tests/test_quality_assessment.py`（含 `test_historical_receipt_does_not_leak_across_runs`），候选 `ce5875b` 上 103 passed + 13 subtests。
+
+---
+
+## 174. 洁净室门禁评测自适应超时与 watchdog 结论受控采纳（2026-10-18）
+
+### 问题背景
+
+wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanroom_test` 与 `cleanroom_review`）虽已成功生成合法门禁裁决文件（`wf-haflow-1017-01-cleanroom_test-auto.json`，结论为 `verdict: "blocked"`），但被后台巡检 Sentinel 的 `hard_timeout_watchdog` 强行置为 `failed`。
+根因分析：
+1. `bin/herdr-loop` 自检评测预算写死 `timeout=300s`，而仓库全量测试套件耗时高达 ~753s，单次评测超时（exit 124）触发 3 次反复重试，空耗 900s 预算，最终总耗时突破 Sentinel 的 3600s 硬超时；
+2. Sentinel 在判定超时失效时盲目执行失败转移，未感知任务工作目录或中央落盘路径是否已有有效门禁裁决；
+3. 控制器调度链路在 `completion_protocol == "receipt-v1"` 时提前退出，阻断了 `gate_verdict_ready` 对 idle 门禁工位的自动恢复，且 `try_auto_verdict` 坚决拒绝从 `failed` 状态采纳已落盘的有效裁决；
+4. CLI 状态转移网关缺乏强制覆盖路径，运维总指挥无法通过正规命令手工收编有效门禁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 评测超时写死固定常数（300s） | 大型测试套件执行时长远超单一固定预算，固定阈值会导致持续重试雪崩 | 超时预算分层决策：支持 CLI 参数、环境变量、目标契约（GOAL.md）与按测试集规模自适应缩放（单文件 4s 弹性上浮至 1800s） |
+| 巡检哨兵无视已落盘的物理证据 | 物理结论优先于超时猜测；已有合法输出的任务被超时强杀违背了事实优先原则 | 哨兵杀死任务前必须检查合法门禁落盘候选；存在合法结论时抑制超时并放行控制器采纳，门禁超时预算单独放宽（7200s） |
+| 通讯协议检查粗暴阻断业务生命周期 | 对 receipt-v1 屏幕记号采样的隔离不应顺手剥离门禁完成事件（gate_verdict_ready） | 协议边界防御应放置在专有逻辑（如屏幕记号采样）之前，不可阻断公共的结论感知与故障恢复流程 |
+| 终态锁死导致合法结论沦为孤岛 | 状态机 fail-closed 虽好，但当 watchdog 误杀发生后，程序应具备针对已验证证据的自愈通道 | 允许 Controller 与 CLI 在核验合法 `verdict` 文件真实存在时，受控突破 `failed -> completed` 状态转移壁垒；严格限制仅对 `failure_reason == "hard_timeout_watchdog"` 的门禁工位生效 |
+| 重启/返工任务吸附陈旧裁决 | 未校验文件 mtime 与执行纪元（`rework_started_at`），历史裁决文件会导致重启中的任务在执行前被瞬间误置 `agent_done` | 裁决读取严格要求时效晚于当前纪元启动时间；返工（`cmd_rework`）前主动清理磁盘旧裁决；对账巡检仅在工位运行时确认为 `idle`/`done` 时介入 |
+| 强制流转裸奔并发竞争 | `force=True` 若未绑定当前观察到的版本号与状态快照，并发重试/流转会被强制完成直接抹掉 | 强制状态转移必须传递 `expected_status` 与 `expected_version` 执行 CAS 校验，发生并发写入时原子拒绝 |
+| 哨兵超时抑制被非门禁工位冒用 | 先查文件再判工位身份，会导致带残留同名文件的普通实现任务永久逃逸超时守护 | 哨兵必须先判定 `_is_gate_task` 门禁身份，严禁普通实现工位跳过 watchdog 守护 |
+| 人工仲裁无标准 CLI 命令入口 | 应急运维依赖直接修改底层数据库容易破坏版本和审计一致性 | 产品化提供 `herdr-task adopt-verdict` 命令，完成证据核验、事件落盘、SQLite 更新与状态广播全链条 |
+| 门禁身份启发式判定导致自定义门禁漏判 | 仅依节点名关键字（cleanroom/gate 等）判定门禁，导致自定义命名的合法门禁（如 executive_briefing）身份丢失 | 派发时根据工作流模板（node_type: gate / gate 字段）持久化 `task["gate"]=True`，判定回退至权威工作流配置 |
+| 环境变量无限值破坏超时保护 | 环境变量接受 inf/nan 会导致宽限期永久生效，watchdog 超时被无限期抑制 | 数值解析必须严格校验 `val > 0 and math.isfinite(val)`，非法或非有限数值一律回退至安全默认值 |
+| 返工轮次未中断旧工位且仅凭 mtime 校验结论 | 旧工位在返工纪元开启后晚写入旧结论，导致新轮次直接采纳旧结果 | 发起返工（`cmd_rework`）时必须先向工位发送 `C-c` 中断旧执行，并引入 execution token（执行令牌）绑定结论与任务纪元 |
+| 节点名称子串匹配导致普通节点冒充门禁 | 普通 Agent 节点（如 `aggregate_results` 命中 "gate"）被误标为门禁，获得门禁专属超时及失败状态恢复特权 | 必须优先查询工作流配置的 `node_type`，且仅匹配精确名称或首尾词边界标识，严禁无界子串匹配 |
+| 硬超时环境变量接受 inf/nan | 硬超时被解析为无穷大导致 watchdog 永不超时，挂死工位永久失联 | 硬超时必须使用 `val > 0 and math.isfinite(val)` 校验，拦截 `inf`、`-inf` 与 `nan` |
+| 无条件向工位发送中断破坏幂等恢复契约 | 在 `deliver()` 校验持久化交付阶段前无条件发送 `C-c`，导致重试恢复时杀死正在运行的 worker 并抛出 DeliveryUnknown | 中断与清理必须作为首个幂等交付阶段的一部分（如 receipt-v1 的 prepare_task），仅在首次准备时执行，重试恢复绝不制造额外副作用 |
+| 未来时间戳导致负龄无限延期 | 裁决文件 mtime 在未来时 `verdict_age < 0` 持续成立，导致 Sentinel 持续抑制 watchdog 且 Controller 持续推迟对账挂起 | 引入严格时钟偏差上限（MAX_CLOCK_SKEW_SECONDS = 5.0s），超出偏差的未来时间戳拒绝延期，Sentinel 正常放行超时失败，Controller 立即对账采纳 |
+| 工位中断失败未阻断返工推进 | 当 `pane send-keys` 退出码非零（失败）时，若忽略返回值继续执行，会导致旧工位未被停机而直接派发新轮次，造成并发冲突或卡死 | 必须严格校验 `returncode == 0`，失败时立即抛出异常阻断返工与状态流转，绝不留存旧工位继续运行 |
+| 外部副作用未前置持久化恢复阶段 | 在事务内部发送无法回滚的终端中断（`C-c`），后续事务回滚会导致重试再次发送中断误杀新工作 | 必须在执行外部副作用前持久化可恢复的清理阶段标记（`gate_cleanup_prepared`），重试时感知已清理状态跳过重复中断 |
+| 清理意图与清理完成未作区分 | 若仅持久化单个准备标记作为已清理依据，在标记持久化后、`C-c` 执行前若发生崩溃，重试将误把意图当成完成并跳过中断，导致旧 writer 与新返工重叠运行 | 严格划分意图（`gate_cleanup_intent`）与完成（`gate_cleanup_completed`）两阶段；重试仅在已完成阶段持久化时跳过中断，崩溃在中间状态时继续执行停机 |
+| 缺省 CLI 返工未复用清理令牌 | 未指定 `--request-id` 的 CLI 返工每次调用生成新随机令牌；若清理完成但 `deliver()` 准备事务提交前崩溃，重试生成新 ID 无法匹配前次清理标记，导致重复发送 `C-c` | 在未指定 request_id 时，返工前先从 events 检索尚未被交付消费的 `gate_cleanup_completed` 标识；若存在未消费的清理 ID 则原地复用，保障默认 CLI 调用全链路幂等 |
+| 清理裁决硬编码忽略环境变量配置 | 清理门禁旧裁决硬编码默认路径，忽略 `HERDR_GATE_VERDICT_DIR`，导致自定义或测试目录下旧裁决残留并被 Controller 重新采纳 | 裁决候选路径必须使用规范助手 `gate_verdict_path(task_id)` 动态解析，严格遵循环境配置目录与 clone 目录 |
+| 裁决文件删除失败静默吞异常误标完成 | `os.remove` 发生权限或只读异常被静默忽略，旧裁决未被物理删除即持久化 `gate_cleanup_completed`，后续重试跳过清理直接采纳残留陈旧裁决 | 物理删除失败时必须立即抛出异常阻断流转，严禁持久化完成标记，确保所有候选裁决物理清除后才记录完成 |
+| receipt-v1 返工跳过凭据校验 | `services/herdr-controller.py` 中将 `completion_protocol == "receipt-v1"` 守护置于通用返工恢复之后，导致 idle 无 done marker 的普通任务在交付物满足时直接流转为 `agent_done`，完全绕过了交付回执校验（`consume_completion_receipt`） | 必须将 receipt-v1 协议守护前置于通用返工恢复逻辑，仅对门禁裁决恢复（`gate_verdict_ready`）做受控豁免，确保普通返工任务严格受凭证契约约束 |
+| 采纳裁决无条件刷新任务版本破坏 CAS 保护 | `bin/herdr-task:set_status` 在强制流转前无条件从数据库拉取最新版本号覆盖当前 task 版本，若其他写入者将任务置为不同失败原因或派发新执行，CAS 依然匹配成功并采用陈旧裁决完成任务 | 采纳流转必须保留由完成证据写入所绑定的授权快照版本（`expected_version`），并在流转前重新完整校验持久化快照的门禁属性、failed 状态、watchdog 失败原因与执行令牌，严禁无条件覆盖版本号 |
+| 操作员 bypass 裁决未保留执行纪元与令牌 | 当门禁进入返工纪元后，操作员通过 bypass 绕过门禁，若写入的 bypass 裁决文件未携带任务当前的 execution_token，控制器与 CLI 的时效校验（`_gate_verdict_file_is_fresh` 与 `_authenticate_gate_verdict_evidence`）会因 token mismatch 拒绝采纳该合法 bypass 结论 | `bypass_task_gate` 必须继承并落盘 task 当前的 `execution_token`、`rework_request_id` 与 `rework_token`；同时控制器、Sentinel 与 CLI 的时效核验需将合法任务的 bypass 回执作为可信鉴权路径，确保人工应急放行不受返工纪元令牌阻断 |
+
+### 操作规范
+
+1. **评测预算管理**：所有执行评测必须经由 `herdr/evaluator.py::resolve_evaluation_timeout` 统一计算超时，不允许在调用方硬编码数字。
+2. **哨兵超时前置检查**：哨兵在标记 `hard_timeout_watchdog` 前，必须先核查目标是否为门禁工位（`_is_gate_task`）；确为门禁工位时遍历工作目录及 `~/.herdr-controller/gate-verdicts/` 核验结论文件；若存在有效结论，只警告并抑制失败流转。
+3. **门禁工位超时宽限**：门禁工位涉及编译、全量回归与大模型综合审计，基础超时默认翻倍（7200s）。
+4. **受控仲裁通道**：当门禁被异常置为 failed 但证据确凿时，使用 `herdr-task adopt-verdict <task_id> [--verdict blocked/pass]` 采纳，禁止直接 update 数据库；状态网关对非 watchdog 失败或非门禁任务强制拒绝。
+5. **执行纪元隔离**：裁决落盘与采纳必须校验 `mtime >= rework_started_at - 1.0`，返工启动时主动 unlink 历史裁决残留。
+6. **权威门禁身份校验**：工位派发时显式写入 `gate: True`，Sentinel、Controller 与 CLI 判定门禁身份时优先读字段并结合 `workflow_config_for` 权威定义，严禁纯依赖节点名字符串包含匹配。
+7. **宽限期与硬超时有限性保障**：所有超时配置（宽限期、基础硬超时、门禁硬超时）必须校验有限正浮点数（`math.isfinite`），严禁接受 `inf` 或非数导致守护机制瘫痪。
+8. **执行令牌纪元绑定**：返工发起时必须为工位分配 `execution_token` 并持久化到任务元数据，前置向工位发送 `C-c` 终止旧执行；门禁结论写入必须携带匹配的 `execution_token`，否则一律拒绝采纳。
+9. **严格词边界与权威类型优先**：消除一切 `cleanroom` 或 `gate` 的无界子串匹配，优先以工作流定义（`node_type: agent` 等）作为权威标准，绝不给普通节点附加 `gate=True`。
+10. **首个幂等阶段清理**：返工工位中断与裁决清理必须封装在首个幂等交付阶段（receipt-v1 的 `prepare_task`，非 receipt-v1 的首轮流转），严禁在顶层无条件执行，确保重试恢复零重复副作用。
+11. **时钟偏差上限与拒绝未来时间戳**：Sentinel 与 Controller 统一限制最大时钟偏差（5.0s），超前时间戳严禁延期或抑制超时，防止挂死工位永久失控。
+12. **终端中断状态严格校验**：`_herdr("pane", "send-keys", ...)` 必须校验 `returncode == 0`，任何非零退出或异常立即抛出阻断，禁止在旧任务未成功停机时推进后续状态或派发新 prompt。
+13. **前置持久化清理阶段**：执行终端中断等不可逆外部副作用前，必须先在数据库独立持久化阶段标记（`gate_cleanup_prepared`），后续重试通过检查该阶段标记跳过重复中断，避免后续事务回滚导致重试误杀新启动的工作。
+14. **区分外部副作用意图与完成状态**：对包含不可逆外部副作用（如终端停机中断）的清理操作，必须分别持久化 `intent`（意图）与 `completed`（完成）事件；重试幂等判定严格基于 `completed` 证据，杜绝因中间态崩溃导致未停机的旧任务与新工作并行执行。
+15. **未指定 request_id 的 CLI 默认调用幂等性保障**：对于未显式传递 request_id 的 CLI 命令，状态恢复时必须能通过底层事件链或持久化元数据回收未消费的操作凭据（operation ID），避免重试重新生成随机 ID 导致前期已执行的副作用被重复触发。
+16. **清理路径必须遵守裁决配置目录**：清理门禁旧裁决时，必须通过 `gate_verdict_path(task_id)` 解析路径，确保遵循 `HERDR_GATE_VERDICT_DIR`，禁止硬编码路径导致自定义目录残留。
+17. **裁决物理清除失败坚决阻断**：清理旧裁决时遇到除不存在外的任何错误（如权限不足或文件未被真正解挂），必须中断执行且绝对扣留 `gate_cleanup_completed` 事件，严禁静默忽略导致误采纳残留旧结论。
+18. **receipt-v1 返工流转必须严格受回执契约守护**：在控制器对账与事件处理循环中，除已验证机器可读裁决的门禁工位外，任何 `receipt-v1` 任务绝不允许通过通用交付物恢复绕过 `consume_completion_receipt`，严禁将协议守护置于通用返工恢复之后。
+19. **裁决采纳必须绑定授权快照版本与全量字段重验**：对 watchdog-failed 门禁实施异常采纳时，必须保持受检快照的版本号（CAS），并在向数据库发起状态转移前，对持久化最新记录重验其门禁身份、`status == "failed"`、`failure_reason == "hard_timeout_watchdog"` 及 `execution_token` 一致性，任何不符立即阻断并退出，严禁盲目复制并发写入者的递增版本。
+20. **采纳裁决必须绑定磁盘持久化证据快照并防范进程间改写**：当门禁工位因 watchdog 超时置 failed 后，若 worker 仍在后台运行且在 Controller 读取裁决与派发 CLI 采纳命令之间改写了裁决文件（如由 `pass` 改为 `blocked`），`set_status` 绝不能盲目信任命令行参数；在执行 CAS 流转前，必须重新读取并鉴权磁盘裁决文件，校验其时效、未来时间戳偏差、执行令牌以及具体结论与目标结论完全一致，并在元数据中绑定 `gate_verdict_evidence_mtime`；任何文件缺失或结论篡改一律以 `[VERDICT REFUSED]` 坚决拒绝，Controller 在派发前也必须二次比对裁决一致性，消除文件读取与子进程执行之间的未绑定竞态窗口。
+21. **操作员 bypass 裁决纪元继承与可信路径鉴权**：在调用 `bypass_task_gate` 绕过门禁工位时，生成的 bypass 回执与 `gate-verdict.json` 必须保留任务当前的 `execution_token`、`rework_request_id` 与 `rework_token`，并将文件同步落盘至中央目录与任务 clone 目录；同时 Controller、Sentinel 与 CLI 在核验门禁裁决文件时，除比对执行令牌一致外，将经过平台签发的合法 bypass 回执作为可信鉴权路径，杜绝在返工纪元中操作员人工放行被误判为陈旧裁决拒收。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_issue_250_eval_timeout_adaptive.py \
+          tests/test_issue_250_sentinel_gate_verdict_watchdog.py \
+          tests/test_issue_250_controller_gate_verdict_recovery_receipt_v1.py \
+          tests/test_issue_250_adopt_verdict_cli.py \
+          tests/test_issue_250_cleanroom_gate_e2e.py \
+          tests/test_issue_250_codex_p1_p2_fixes.py \
+          tests/test_cli_receipt_delivery.py \
+          tests/test_task_loop_noninteractive.py
+```
+关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与执行令牌拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog；普通 Agent 节点绝不被误判为门禁；无穷大超时配置安全回退至默认值；receipt-v1 返工重试保持零额外副作用；超前未来时间戳被拒绝延期；工位中断失败立即阻断返工；清理阶段前置持久化防止重试重复发送中断；清理意图与完成两阶段彻底杜绝进程意外退出留存旧 writer；CLI 无 request_id 缺省调用全链路幂等恢复；清理过程遵守配置的裁决目录；裁决物理删除失败立即阻断并扣留完成事件；receipt-v1 普通返工任务绝不绕过交付回执验证；裁决采纳严格保留授权版本号并全量重验快照一致性杜绝采纳竞争；采纳裁决必须在提交前重读鉴权磁盘证据快照并绑定 evidence_mtime，杜绝多进程改写导致的陈旧/篡改结论被采纳；非交互评测超时适配规避 CI 负载下假死。

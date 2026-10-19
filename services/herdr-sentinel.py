@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -56,9 +58,153 @@ def task_hard_timeout_seconds():
         return DEFAULT_TASK_HARD_TIMEOUT_SECONDS
     try:
         val = float(raw.strip())
-        return val if val > 0 else DEFAULT_TASK_HARD_TIMEOUT_SECONDS
+        return val if val > 0 and math.isfinite(val) else DEFAULT_TASK_HARD_TIMEOUT_SECONDS
     except (ValueError, TypeError):
         return DEFAULT_TASK_HARD_TIMEOUT_SECONDS
+
+
+DEFAULT_GATE_TASK_HARD_TIMEOUT_SECONDS = 7200.0
+
+
+def task_gate_hard_timeout_seconds(base_timeout=None):
+    base = base_timeout or task_hard_timeout_seconds()
+    raw = os.environ.get("HERDR_GATE_TASK_HARD_TIMEOUT")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val > 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return max(base * 2.0, DEFAULT_GATE_TASK_HARD_TIMEOUT_SECONDS)
+
+
+DEFAULT_GATE_HANDOFF_GRACE_SECONDS = 300.0
+DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5.0
+
+
+def max_clock_skew_seconds():
+    raw = os.environ.get("HERDR_MAX_CLOCK_SKEW_SECONDS")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val >= 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_MAX_CLOCK_SKEW_SECONDS
+
+
+def task_gate_handoff_grace_seconds():
+    raw = os.environ.get("HERDR_GATE_HANDOFF_GRACE_SECONDS")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val > 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_GATE_HANDOFF_GRACE_SECONDS
+
+
+def _gate_verdict_file_candidates(task):
+    candidates = []
+    task_id = task.get("task_id")
+    if task_id:
+        try:
+            from herdr.direct_dispatch import gate_verdict_path
+            candidates.append(gate_verdict_path(task_id))
+        except Exception:
+            override = os.environ.get("HERDR_GATE_VERDICT_DIR")
+            vdir = Path(override).expanduser() if override else (Path.home() / ".herdr-controller" / "gate-verdicts")
+            candidates.append(str(vdir / f"{task_id}.json"))
+    clone_path = task.get("clone_path")
+    if clone_path:
+        candidates.append(os.path.join(clone_path, ".herdr/gate-verdict.json"))
+    return candidates
+
+
+def _task_has_valid_gate_verdict(task):
+    rework_started = task.get("rework_started_at")
+    expected_token = task.get("execution_token") or task.get("rework_request_id")
+    for path in _gate_verdict_file_candidates(task):
+        try:
+            if not os.path.exists(path):
+                continue
+            st = os.stat(path)
+            if rework_started:
+                try:
+                    if st.st_mtime < (rework_started - 1.0):
+                        continue
+                except OSError:
+                    continue
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict):
+                if expected_token:
+                    file_token = payload.get("execution_token") or payload.get("rework_request_id") or payload.get("rework_token")
+                    if not file_token or file_token != expected_token:
+                        bypass = payload.get("bypass")
+                        tid = task.get("task_id") or task.get("id")
+                        if bool(tid) and isinstance(bypass, dict) and (bypass.get("task_id") == tid) and bypass.get("bypass_id"):
+                            pass
+                        else:
+                            continue
+                verdict = str(payload.get("verdict") or "").strip().lower()
+                if verdict in ("pass", "blocked"):
+                    note = str(payload.get("note") or "").strip()
+                    return True, verdict, note, st.st_mtime
+        except Exception:
+            continue
+    return False, None, None, None
+
+
+def _is_gate_task(task):
+    if not task:
+        return False
+    if task.get("gate") is False:
+        return False
+
+    workflow_id = task.get("workflow_id")
+    node_id = task.get("node") or task.get("stage")
+
+    # Authoritative workflow configuration check FIRST
+    wf_cfg = None
+    if workflow_id:
+        try:
+            from herdr.projects import workflow_config_for
+            wf_cfg = workflow_config_for(workflow_id) or {}
+        except Exception:
+            pass
+    if not wf_cfg and task.get("workflow_config") and node_id:
+        try:
+            import yaml
+            p = Path(task["workflow_config"]).expanduser()
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    wf_cfg = yaml.safe_load(f) or {}
+        except Exception:
+            pass
+
+    if wf_cfg and isinstance(wf_cfg, dict):
+        for n in wf_cfg.get("nodes", []):
+            if n.get("id") == node_id:
+                if n.get("gate") or n.get("node_type") == "gate":
+                    return True
+                if n.get("node_type") in ("agent", "implementation", "worker", "code") and not n.get("gate"):
+                    return False
+                break
+
+    if task.get("gate") is True:
+        return True
+
+    # Legacy fallback: exact names or word-boundary tokens, NOT arbitrary substring
+    node = str(node_id or "").lower()
+    if node in ("test", "review", "wrapup", "gate", "cleanroom", "cleanroom_test", "cleanroom_review", "cleanroom_gate"):
+        return True
+    if re.search(r"(^|[_-])(gate|cleanroom)($|[_-])", node):
+        return True
+    return bool(task.get("gate"))
 
 
 def run(cmd, timeout=10):
@@ -774,6 +920,41 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
         if idle_seconds < hard_timeout:
             timeouts.pop(tid, None)
             continue
+
+        # Issue #250 & Codex review: Check gate identity before suppressing watchdog or extending timeout
+        if _is_gate_task(task):
+            res = _task_has_valid_gate_verdict(task)
+            has_verdict, verdict_val, verdict_note = res[0], res[1], res[2]
+            verdict_mtime = res[3] if len(res) > 3 else None
+            if has_verdict:
+                grace = task_gate_handoff_grace_seconds()
+                skew_limit = max_clock_skew_seconds()
+                is_future = verdict_mtime is not None and (verdict_mtime - now) > skew_limit
+                verdict_age = (now - verdict_mtime) if verdict_mtime is not None else 0
+                if not is_future and (verdict_mtime is None or verdict_age < grace):
+                    print(
+                        f"[SENTINEL TIMEOUT SUPPRESSED] task={tid} status={status} idle={int(idle_seconds)}s — "
+                        f"gate verdict '{verdict_val}' written recently ({int(verdict_age)}s ago, grace={int(grace)}s), suppressing watchdog failure",
+                        flush=True,
+                    )
+                    timeouts.pop(tid, None)
+                    continue
+                else:
+                    reason_msg = (
+                        f"future timestamp (ahead by {int(verdict_mtime - now)}s > skew limit {int(skew_limit)}s)"
+                        if is_future
+                        else f"written {int(verdict_age)}s ago exceeded handoff grace ({int(grace)}s)"
+                    )
+                    print(
+                        f"[SENTINEL TIMEOUT HANDOFF EXPIRED] task={tid} status={status} idle={int(idle_seconds)}s — "
+                        f"gate verdict '{verdict_val}' {reason_msg}, allowing watchdog failure for recovery",
+                        flush=True,
+                    )
+
+            gate_timeout = task_gate_hard_timeout_seconds(hard_timeout)
+            if idle_seconds < gate_timeout:
+                timeouts.pop(tid, None)
+                continue
 
         existing_timeout = timeouts.get(tid)
         if existing_timeout and existing_timeout.get("updated_at") == updated_at:

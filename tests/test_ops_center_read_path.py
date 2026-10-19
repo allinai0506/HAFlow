@@ -1,9 +1,21 @@
 """Read-only ops requests must not initialize state or repeat per-card reads."""
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from herdr import state_db
+
+
+def load_cli():
+    import importlib.machinery
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "bin" / "herdr-task"
+    loader = importlib.machinery.SourceFileLoader("_test_herdr_task_ops", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def seed(path, suffix="a"):
@@ -94,13 +106,12 @@ def test_ops_required_task_out_of_scope_remains_blocked(tmp_path):
 
 def test_ops_cli_handler_uses_same_readonly_api(tmp_path, monkeypatch, capsys):
     from types import SimpleNamespace
-    from herdr.ops_center import _helpers
+    from herdr import ops_center
     db = tmp_path / "state.db"
     seed(db)
-    monkeypatch.setenv("HERDR_STATE_DB", str(db))
     with patch.object(state_db, "init_db", side_effect=AssertionError("DDL on read")), \
          patch("herdr.ops_center._default_runtime_probe", return_value="working"):
-        _helpers().ops_center(SimpleNamespace(workflow_id="wf-a-0", include_tasks=True))
+        ops_center.handle_cli(SimpleNamespace(workflow_id="wf-a-0", include_tasks=True), db_path=db)
     import json
     result = json.loads(capsys.readouterr().out)
     assert result["scope"] == "wf-a-0"
@@ -181,8 +192,7 @@ def test_ops_preserves_console_subject_label(tmp_path, metadata, expected):
 def test_cli_ops_preserves_explicit_task_database_precedence(tmp_path, monkeypatch, capsys):
     import json
     from types import SimpleNamespace
-    from herdr.ops_center import _helpers
-    cli = _helpers()
+    cli = load_cli()
     selected = tmp_path / 'selected'
     fallback = tmp_path / 'fallback'
     selected.mkdir()
@@ -210,3 +220,32 @@ def test_invalid_external_workflow_is_isolated_from_valid_cards(tmp_path):
     assert any(c['workflow_id'] == 'wf-a-1' for c in result['workflow_cards'])
     invalid = next(c for c in result['workflow_cards'] if c['workflow_id'] == 'wf-a-0')
     assert invalid['nodes'][0]['completion_issues'] == [{'task_id': None, 'reason': 'workflow_config_invalid'}]
+
+
+def test_ops_cli_handler_does_not_load_bin_cli(tmp_path, capsys):
+    from types import SimpleNamespace
+    from herdr import ops_center
+    db = tmp_path / "state.db"
+    seed(db)
+    with patch("importlib.machinery.SourceFileLoader", side_effect=AssertionError("CLI must not be loaded")), \
+         patch("herdr.ops_center._default_runtime_probe", return_value="working"):
+        ops_center.handle_cli(SimpleNamespace(workflow_id="wf-a-0", include_tasks=True), db_path=db)
+    import json
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope"] == "wf-a-0"
+    assert payload["count"] == 1
+
+
+def test_projection_fallback_loads_workflow_from_state_store(tmp_path, monkeypatch):
+    from herdr.ops_center_projection import _build_workflow_cards
+    db = tmp_path / "state.db"
+    seed(db)
+    state_db.save_workflow({"workflow_id": "wf-a-0", "title": "authoritative",
+        "config": {"nodes": [{"id": "plan", "required_task_ids": ["t-a-0"]}]}}, db_path=db)
+    state_db.save_task({"task_id": "t-a-0", "workflow_id": "wf-a-0",
+        "node": "plan", "status": "integrated", "integration_mode": "git"}, db_path=db)
+    monkeypatch.setenv("HERDR_STATE_DB", str(db))
+    tasks = state_db.list_tasks(db_path=db)
+    cards = _build_workflow_cards({"wf-a-0": [t for t in tasks if t["workflow_id"] == "wf-a-0"]}, 100)
+    assert cards[0]["workflow_label"] == "authoritative"
+    assert cards[0]["nodes"][0]["status"] == "completed"

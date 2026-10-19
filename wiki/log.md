@@ -8,6 +8,197 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-19] fix | 严格守护 receipt-v1 返工回执校验、保留采纳授权快照 CAS 版本 (PR #266 Codex Review Round 6)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 commit b31e42c 中指出 1 项 P1 与 1 项 P2 协议守护与并发采纳缺陷：
+     - [P1] `services/herdr-controller.py` 中将 `completion_protocol == "receipt-v1"` 守护置于通用返工恢复逻辑之后。当处于 `rework` 状态且无完成标记（done marker）的普通任务进入 `idle` 时，若交付物存在且重试/校验谓词通过，会直接通过通用返工恢复流转至 `agent_done`，完全绕过了交付回执校验（`consume_completion_receipt`），跳过了执行纪元、凭证签名与工件完整性核验；必须将 receipt-v1 协议守护前置于通用返工恢复之前，仅对已验证机器可读裁决的门禁工位做受控豁免；
+     - [P2] `bin/herdr-task:set_status` 在为 watchdog-failed 门禁实施异常采纳前，通过 `fresh = store.get_task(task_id)` 无条件复制 `fresh["version"]` 覆盖当前 task 的版本号。若并发写入者在授权检查后将任务更新为其他失败原因（如脚本错误）、派发了新执行令牌或重试轮次，此无条件版本刷新使得随后的 CAS 乐观锁依然能够匹配成功，从而误把陈旧裁决采纳并关闭新的失败；必须保留由候选证据写入所绑定的授权版本号，并在向数据库流转前完整重验当前持久化快照的门禁属性、failed 状态、watchdog 失败原因与执行令牌一致性。
+- 变更：
+  1. **前置 receipt-v1 协议守护**：
+     - `services/herdr-controller.py:handle_event`：在 `gate_verdict_ready` 恢复之后、通用返工恢复（`rework_recovery`）之前前置注入 `if task.get("completion_protocol") == "receipt-v1": return`；
+     - 确保普通 receipt-v1 任务即便满足交付物和重试检查，也绝不绕过 `consume_completion_receipt` 直接流转至 `agent_done`。
+  2. **保留采纳授权快照版本并全量重验快照一致性**：
+     - `bin/herdr-task:set_status`：彻底删除无条件覆盖 `task["version"] = fresh["version"]` 的逻辑；
+     - 在执行 CAS 强制状态转移前，从存储拉取最新快照，严格核验：1) 仍为门禁任务且状态仍为 `failed`；2) 失败原因仍为 `hard_timeout_watchdog`；3) 若绑定了执行令牌，最新快照令牌必须完全一致；4) 最新快照版本号必须完全匹配当前绑定的授权版本；
+     - 任何校验不一致立即报错退出（exit 2），杜绝并发写入篡改后将陈旧裁决强行应用于新执行。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 项专项测试（`test_round6_keep_receipt_v1_rework_behind_receipt_validation` 与 `test_round6_adopt_verdict_preserves_authorized_snapshot_version`），全量 30 项测试全部 PASS；
+  2. `tests/test_cli_receipt_delivery.py` 8 项测试全部 PASS；
+  3. 全量 `tests/test_issue_250_*.py` 47 项用例全部通过（总计 55 项全量通过）；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警通过。
+
+## [2026-10-19] fix | 遵循裁决配置目录解析与裁决删除失败强行阻断 (PR #266 Codex Review Round 5 Follow-up)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 commit 000277c 中针对门禁返工清理逻辑指出 2 项路径解析与错误处理边界缺陷：
+     - [P1] `bin/herdr-task:_cleanup_gate_for_rework` 中候选裁决路径硬编码 `Path.home() / ".herdr-controller" / "gate-verdicts"`，忽略了 `HERDR_GATE_VERDICT_DIR` 环境变量配置。当测试或自定义部署指定了非默认裁决目录时，返工清理无法命中真实的历史裁决文件，留下陈旧裁决却仍持久化记录了 `gate_cleanup_completed`。后续一旦流程在更新 execution_token 前中断，Controller 极易重新采纳旧裁决造成返工误判；必须统一使用规范助手 `gate_verdict_path(task_id)` 解析候选路径；
+     - [P1] `_cleanup_gate_for_rework` 中清理旧裁决文件时使用 `try ... except OSError: pass` 静默吞掉错误，若由于权限不足、只读挂载或瞬时文件系统故障导致文件未能被真正解除链接，系统依然向后执行并持久化 `gate_cleanup_completed`，导致重试误判清理完成并不再尝试删除，遗留的旧裁决可能在后续流程中被误采纳。除文件本身不存在外，任何物理删除失败必须立即抛出异常并扣留完成事件。
+- 变更：
+  1. **遵循配置规范解析裁决候选路径**：
+     - `bin/herdr-task:_cleanup_gate_for_rework`：调用 `herdr.direct_dispatch.gate_verdict_path(task_id)` 动态计算状态目录下的裁决文件路径（自动读取 `HERDR_GATE_VERDICT_DIR` 配置），并保留对 clone 目录 `.herdr/gate-verdict.json` 的候选清理，杜绝路径硬编码遗漏；
+  2. **删除失败强行阻断与完成事件扣留**：
+     - 裁决删除严格只忽略 `FileNotFoundError`；遇到任何其他 `OSError` 立即抛出 `RuntimeError`，并在执行 `os.remove` 后做二次 `os.path.exists` 断言；
+     - 任何候选文件清理失败时，绝不执行 `store.record_event("gate_cleanup_completed", ...)`，严格扣留完成凭证，确保重试调用继续执行清理直至彻底移除。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 项专项测试（`test_round5_honor_configured_gate_verdict_dir_during_cleanup`、`test_round5_abort_cleanup_when_verdict_cannot_be_removed`），全量 28 项测试全部通过；
+  2. `tests/test_cli_receipt_delivery.py` 8 项测试全部通过；
+  3. 全量 `tests/test_issue_250_*.py` 45 项用例全部 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警。
+
+## [2026-10-19] fix | 区分清理意图与完成阶段、默认 CLI 返工复用清理令牌 (PR #266 Codex Review Round 5)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 commit 3dcfe69 中指出 2 项两阶段幂等与凭证恢复缺陷：
+     - [P1] `bin/herdr-task:_cleanup_gate_for_rework` 中如果进程在持久化准备标记后、执行 `_herdr("pane", "send-keys", ..., "C-c")` 之前意外崩溃，下次调用会误把该准备标记当成清理已执行的证明，从而跳过中断，导致在旧门禁 writer 仍在运行的情况下直接交付新返工 prompt，重现执行重叠与陈旧裁决竞争缺陷；必须严格区分意图（`intent`）与完成（`completed`）阶段，仅在完成阶段持久化后才允许跳过中断；
+     - [P2] 在缺省未显式传递 `--request-id` 调用 `herdr-task rework <task_id>` 时，CLI 每次调用会重新生成新的随机 `execution_token`。如果清理执行成功，但 `deliver()` 在其准备事务提交前崩溃，任务既未保留该 token 也没有 pending delivery；重试调用相同的 CLI 命令生成了新 token，无法匹配已持久化的清理记录，导致再次向工位发送 `C-c`。应在未传入 request_id 时回收未被消费的清理 operation ID，使默认 CLI 路径保持幂等。
+- 变更：
+  1. **区分清理意图与完成双阶段**：
+     - `bin/herdr-task`：在发送 `C-c` 中断前独立持久化 `gate_cleanup_intent` 事件；
+     - 执行 `C-c`（严格校验 `res.returncode == 0`）并完成裁决文件物理清理后，独立持久化 `gate_cleanup_completed` 事件；
+     - 引入 `_is_gate_cleanup_completed`：仅当 `gate_cleanup_completed` 已持久化时才跳过中断；若进程在意图持久化后崩溃，重试调用绝不跳过中断，确保旧 writer 被彻底终止。
+  2. **缺省 CLI 调用回收未消费的清理令牌**：
+     - 引入 `_recover_unconsumed_gate_cleanup_id(task, store)`：未显式传递 `--request-id` 或 `execution_token` 时，在生成全新随机 token 前，先从 `events` 检索本任务最新且未被 `rework_dispatched` 消费的 `gate_cleanup_completed` 事件；
+     - 若存在未消费的已清理令牌，则原地回收作为本次调用的 `execution_token` 与 `delivery_id`，使重试调用精准匹配已完成的清理阶段，跳过重复中断；
+     - 一旦交付成功（记录 `rework_dispatched` 或更新 `rework_delivery = 'delivered'`），该清理令牌即被消费标记作废，后续全新的返工轮次将自动生成新令牌并执行新一轮清理。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 项针对性专项测试（`test_round5_p1_crash_between_intent_and_interrupt_retries_interrupt`、`test_round5_p2_rework_without_request_id_recovers_cleanup_id_and_skips_duplicate_interrupt`），全量 26 项测试全部通过；
+  2. `tests/test_cli_receipt_delivery.py` 8 项测试全部通过；
+  3. 全量 `tests/test_issue_250_*.py` 43 项测试全部 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警通过。
+
+## [2026-10-19] fix | 工位中断失败异常阻断与持久化可恢复清理阶段 (PR #266 Codex Review Round 4)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 最新一轮审查中指出 2 项异常传播与副作用持久化边界缺陷：
+     - [P1] `bin/herdr-task:_cleanup_gate_for_rework` 中调用 `_herdr("pane", "send-keys", str(pane_ref), "C-c")`；当子进程退出码非零（失败）时，`_herdr` 仅返回 CompletedProcess 对象而不抛出异常。原实现吞掉返回值导致静默继续执行，在旧门禁工位未成功停机的情况下清除裁决并持久化新返工纪元派发新 prompt，可能导致旧尝试继续运行造成工位竞争或卡死；
+     - [P2] 若在准备事务执行期间（如状态转移、写入 prepared 事件或凭证生成）发生异常导致 `conn.rollback()`，数据库内所有阶段标记被回滚，但已发送的 `C-c` 无法回滚；重试时由于缺乏已清理的持久化凭据，会再次向工位发送中断，可能误杀首次中断后新启动的工作。需在执行外部副作用前持久化可恢复的清理阶段。
+- 变更：
+  1. **严格校验中断退出码并阻断返工**：
+     - `bin/herdr-task:_cleanup_gate_for_rework`：检查 `res.returncode != 0`，非零退出立即抛出 `RuntimeError`，严格阻断 `cmd_rework` 继续执行，绝不在旧任务未停机时推进状态；
+  2. **前置持久化可恢复清理阶段**：
+     - 引入 `_is_gate_cleanup_recorded` 与独立持久化事件 `gate_cleanup_prepared`（携带 `delivery_id`）；
+     - 在发送 `C-c` 外部副作用前，先在 SQLite 数据库中独立持久化提交 `gate_cleanup_prepared` 事件；
+     - 后续准备事务即便崩溃回滚，重试调用时通过 `_is_gate_cleanup_recorded` 感知已完成清理，跳过重复发送 `C-c`，防止二次中断误杀；
+     - 保持与 `tests/test_cli_receipt_delivery.py` 的 4 项返工崩溃恢复契约（`before_prompt` / `after_prompt` 零额外副作用）完全兼容。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 个专项回归测试（`test_p1_rework_aborts_when_pane_interrupt_fails`、`test_p2_rework_persists_cleanup_phase_and_does_not_repeat_interrupt_on_retry`），全量 24 个测试全部通过；
+  2. `tests/test_cli_receipt_delivery.py` 8 个测试全部通过；
+  3. 全量 `tests/test_issue_250_*.py` 49 项用例全部 PASS；`compileall` 与 `git diff --check` 零告警。
+
+## [2026-10-19] fix | 恢复前置校验凭证交付状态、拒绝未来时间戳异常延期 (PR #266 Codex Review Round 3)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 最新一轮审查中指出 2 项副作用与时间戳边界缺陷：
+     - [P1] `bin/herdr-task:cmd_rework` 中无条件执行的 `pane send-keys C-c` 位于 `supervisor_delivery.deliver()` 校验持久化交付阶段之前。在 `receipt-v1` 协议下，若在 `before_prompt` 或 `after_prompt` 崩溃后重试返工，由于任务处于 `rework` 且交付为 `pending`，无条件中断会在 `deliver()` 抛出 `DeliveryUnknown` 前破坏已在运行的新执行尝试，破坏了无重复副作用恢复契约，同时导致 `tests/test_cli_receipt_delivery.py::test_real_cli_entry_crash_recovery` 的 4 个 rework 用例全部失败；
+     - [P2] `services/herdr-sentinel.py` 与 `services/herdr-controller.py`：如果裁决文件的 `mtime` 在未来（例如时钟回拨或还原保留了未来时间戳的文件），`verdict_age < 0` 会持续成立直至现实时间追平，导致 Sentinel 超出配置宽限期无限期抑制 watchdog；Controller 同样存在负龄跳过对账问题，导致挂起门禁无限期维持活动状态。必须在超出合理时钟偏差时拒绝未来时间戳延期。
+- 变更：
+  1. **门禁工位中断与裁决清理移至首个幂等交付阶段**：
+     - `bin/herdr-task`：将无条件的顶层中断与文件清理封装为 `_cleanup_gate_for_rework(task)`，且仅对门禁任务生效（`_is_gate_task(task)`）；
+     - 对于 `receipt-v1` 任务，将其移入 `prepare_task(conn)` 阶段，在 prompt 分发前且仅在首次准备时幂等执行；重试恢复触发 `DeliveryUnknown` 时绝不向 pane 发送中断；
+     - 对于非 `receipt-v1` 任务，仅在非 pending delivery 重试状态下执行清理；
+  2. **拒绝未来时间戳异常延期并限制时钟偏差**：
+     - Sentinel 与 Controller 引入 `DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5.0` 及环境变量 `HERDR_MAX_CLOCK_SKEW_SECONDS`，严格校验有限非负浮点；
+     - Sentinel 校验 `is_future = verdict_mtime is not None and (verdict_mtime - now) > skew_limit`；若为未来时间戳，绝不抑制 watchdog，超时后正常判定失败放行恢复；
+     - Controller 校验未来时间戳，当 `is_future` 为 True 时不跳过对账，立即执行裁决采纳流转 `agent_done`。
+- 证据：
+  1. `tests/test_cli_receipt_delivery.py::test_real_cli_entry_crash_recovery` 8 个测试全部通过（4 个 rework 崩溃恢复用例完全修复）；
+  2. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 4 个专项回归测试（时钟偏差配置、Sentinel 拒绝未来时间戳、Controller 拒绝未来时间戳延期、首个幂等阶段门禁清理），全量 22 个测试通过；
+  3. 全量 `test_issue_250_*.py` 39 个测试全部 PASS；`compileall` 与 `git diff --check` 零告警。
+
+## [2026-10-19] fix | 返工执行令牌绑定、消除门禁名称子串冒用与校验有限硬超时 (PR #266 Codex Review)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 最新审查中指出 3 项边界缺陷：
+     - [P1] `services/herdr-controller.py` 与 `bin/herdr-task`：旧工位在 `rework` 发起后若仍在运行，可能在清理动作及 `rework_started_at` 之后写入旧结论；仅凭 mtime 检查会误将其作为新轮次结果采纳，且 `cmd_rework` 未向旧工位发送中断信号。需将结论时效绑定至执行令牌（execution token / epoch）；
+     - [P2] `bin/herdr-task` 与 `services/herdr-sentinel.py`：对普通 Agent 节点（如 `aggregate_results` 或 `investigate_issue`），名称中的子串 `gate` 会在查询工作流配置前直接返回 True，导致 `_launch_task` 持久化 `gate=True`，使普通节点获得门禁专属超时及失败状态恢复特权。必须优先解析权威配置的 `node_type`，且仅保留确切的词边界门禁标识；
+     - [P2] `services/herdr-sentinel.py`：`HERDR_GATE_TASK_HARD_TIMEOUT=inf` 和 `HERDR_TASK_HARD_TIMEOUT=inf` 被 `float()` 解析为无穷大后被接纳，导致 watchdog 永不超时。需像相邻的 grace parser 一样强制要求 `math.isfinite(val)`。
+- 变更：
+  1. **返工执行令牌绑定与中断前置**：
+     - `bin/herdr-task:cmd_rework` 在进入新纪元前向旧工位发送 `C-c` 中断，分配 `execution_token` 并持久化到任务元数据；若为门禁任务，在返工提示词中注入令牌契约；
+     - `services/herdr-controller.py:_gate_verdict_file_is_fresh`、`services/herdr-sentinel.py:_task_has_valid_gate_verdict` 及 `bin/herdr-task:adopt_verdict_cli` 统一校验候选结论文件中的 `execution_token` 必须与任务期望的执行令牌一致，旧轮次写入被严格拒绝；
+     - `herdr/direct_dispatch.py:gate_verdict_contract` 支持可选 `execution_token` 参数，保持无令牌时逐字节完全兼容；
+  2. **消除子串冒用与权威节点类型优先**：
+     - `services/herdr-sentinel.py:_is_gate_task` 与 `bin/herdr-task:_is_gate_task` 将工作流权威配置校验前置，若 `node_type in ('agent', 'implementation', 'worker', 'code')` 且无显式 `gate` 配置，立即返回 False；
+     - 彻底废除 `cleanroom`/`gate` 任意子串匹配，仅匹配精确名称或首尾词边界正则 `r"(^|[_-])(gate|cleanroom)($|[_-])"`；
+     - `bin/herdr-task:_launch_task` 明确判定：若节点类型为 `agent`/`worker` 等且未显式指定 gate，绝不持久化 `task["gate"] = True`；Controller 对账循环中同样优先尊重工作流权威配置；
+  3. **有限硬超时强制校验**：
+     - `services/herdr-sentinel.py` 的 `task_hard_timeout_seconds` 与 `task_gate_hard_timeout_seconds` 均增加 `math.isfinite(val)` 校验，拦截 `inf`、`-inf`、`nan` 等非法配置。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增全部 3 项缺陷的回归测试（全量 18 个测试全部通过）；
+  2. `pytest -v tests/test_issue_250_*.py tests/test_selective_replan_core.py tests/test_auto_acceptance.py tests/test_direct_stage_dispatch.py` 全量 199 个测试与 32 个 subtests 全部绿色通过；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。
+
+## [2026-10-19] fix | 基于权威工作流配置判定门禁身份、有限宽限期与 rework 状态对账 (PR #266 Codex Review)
+
+- 背景：
+  1. GitHub Codex 自动化评审指出 PR #266 存在 3 项缺陷：
+     - [P1] `bin/herdr-task:_is_gate_task` 和 `services/herdr-sentinel.py:_is_gate_task` 仅依赖节点名称字符串启发式（`cleanroom`, `gate`, `test`, `review`, `wrapup`），对于命名不含上述字样的合法门禁节点（例如 `workflow_templates/business-research-v1.yaml` 中的 `executive_briefing`，其配置了 `node_type: gate`），派发时未落盘 `gate` 字段，导致判定为 False。Sentinel 判定非门禁后忽略其新鲜裁决直接超时置 failed，而 `herdr-task` 在后续尝试流转时又因非门禁身份拒绝 `failed -> completed` 强制采纳；
+     - [P2] 环境变量 `HERDR_GATE_HANDOFF_GRACE_SECONDS=inf` 会导致 Sentinel 与 Controller 将宽限期视为无穷大，永久抑制 watchdog 并防止超时流转；
+     - [P2] `services/herdr-controller.py:process_gate_verdict_reconciliations` 仅检查 `status in {"working", "dispatched"}`，漏掉了在 `rework` 状态下产出合法裁决的门禁任务（例如 Controller 重启跨生命周期场景）。
+- 变更：
+  1. **权威门禁身份判定与派发落盘**：`bin/herdr-task:_launch_task` 在派发时根据节点配置 `node.get("gate") or node.get("node_type") == "gate"` 显式持久化 `task["gate"] = True`；Sentinel 与 `herdr-task` 的 `_is_gate_task` 优先读取 `task["gate"]`，在未持久化时回退至 `herdr.projects:workflow_config_for` 权威配置及 `workflow_config` 文件解析；
+  2. **有限宽限期严格校验**：Sentinel 与 Controller 中的 `task_gate_handoff_grace_seconds()` 强制要求 `val > 0 and math.isfinite(val)`，非法或无穷大输入一律回退至默认值 `300.0`；
+  3. **扩展对账状态至 rework**：Controller `process_gate_verdict_reconciliations` 支持 `status in {"working", "dispatched", "rework"}`，并优先根据 `task.get("gate")` 校验门禁身份；Controller `resolve_gate_config` 增加对 `node_type: gate` 的支持。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 3 项专项回归测试（全量 15 个测试全部通过）；
+  2. `pytest -q tests/test_issue_250_*.py`（全量 30 项测试全部通过）；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。
+
+## [2026-10-19] fix | 门禁完成证据 CAS 版本刷新、有界 watchdog 抑制与探针超时加固 (PR #266 Codex Review)
+
+- 背景：
+  1. GitHub Codex 自动化评审指出 PR #266 存在 4 项缺陷：
+     - [P1] `bin/herdr-task:set_status` 在写入 completion evidence（`_capture_verified_candidate`）更新元数据后，SQLite 中的任务版本号自增，但后续 CAS 状态流转仍使用更新前的旧版本号，导致针对真实 Git clone 的强制流转总是被判定为并发冲突而拒绝；
+     - [P2] `bin/herdr-task:adopt_verdict_cli` 在解析裁决文件中的 `affected_task_ids` 时，仅静默丢弃非字符串元素，残留部分归因，与 Controller 拒绝全量列表的契约不一致，可能导致选择性返工遗漏故障；
+     - [P1] `services/herdr-sentinel.py` 在门禁生成结论后无条件无限期抑制 watchdog 超时，而 Controller 仅在 agent 为 `idle`/`done` 时对账，若 agent 产出结论后挂死在 `working`，任务将永久卡死；
+     - [P2] `services/herdr-controller.py:get_agent_runtime_status` 调用 `herdr agent get` 缺失超时参数，当 pane 异常阻塞时会同步冻结 Controller 主对账循环。
+- 变更：
+  1. **元数据写入后 CAS 版本同步**：在 `_capture_verified_candidate` 中完成元数据更新后同步刷新内存 task 对象的 `version`，并在 `set_status` 的 CAS 流转前从 Store 权威拉取最新版本号作为 `expected_version`；
+  2. **归因列表严格校验与 Fail-Closed**：在 `adopt_verdict_cli` 中与 Controller 保持一致，若 `affected_task_ids` 含有非字符串、空项或不是列表，立即打出告警并全量清空归因（降级为全量返工），防止残缺归因被持久化；
+  3. **Watchdog 抑制有界化与超期对账**：Sentinel 引入 `task_gate_handoff_grace_seconds`（默认 300s），仅在结论产出窗口内抑制 watchdog，超期后放行 watchdog 置 failed 以触发恢复；Controller 在 agent 未能在窗口内 settle 时直接采纳持久化裁决流转 `agent_done`；
+  4. **Runtime 状态探针增加 10s 有界超时**：`get_agent_runtime_status` 为 `check_output` 加上 `timeout=10`，异常时返回 None 并安全降级。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增全部 4 项缺陷的回归测试；
+  2. 全量 27 项 Issue #250 测试与 215 项相关门禁测试全部通过。
+
+## [2026-10-18] fix | 门禁裁决隔离强化：拒绝陈旧裁决、CAS 绑定受控采纳与工位身份校验 (PR #266)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 中指出 4 项时效与并发边界缺陷；
+  2. 重启或返工中的门禁任务可能因磁盘残留的历史裁决文件，被后台对账逻辑瞬间误判为完成而误置 `agent_done`；
+  3. `herdr-task set completed --verdict` 强制流转未限定失败原因与工位类型，且未绑定 CAS 状态与版本号快照，存在覆盖新执行的并发竞争风险；
+  4. Sentinel 误在非门禁实现任务残留同名文件时抑制了 watchdog 超时。
+- 变更：
+  1. **裁决时效与重启清理**：在 `services/herdr-controller.py` 增加 `_gate_verdict_is_fresh`，确保裁决文件 mtime 晚于 `rework_started_at`；`process_gate_verdict_reconciliations` 严格要求工位运行时为 `idle`/`done` 且裁决新鲜；`bin/herdr-task rework` 派发前清理既有历史裁决文件；
+  2. **收紧 failed 采纳范围**：`bin/herdr-task set` 严格限制仅当 `_is_gate_task(task)` 且 `failure_reason == "hard_timeout_watchdog"` 时允许带 `--verdict` 流转至 `completed`；`adopt-verdict` 增加门禁身份校验；
+  3. **强制采纳 CAS 绑定**：`kernel.transition_task` 传入 `expected_status` 与 `expected_version`，并发变更时原子拒绝；
+  4. **Sentinel 门禁身份前置**：先检查 `_is_gate_task(task)`，再进行超时抑制或预算延长。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py`（6 测试全部通过）；
+  2. `pytest -v tests/test_issue_250_*.py`（21 测试全部通过）。
+
+## [2026-10-18] fix | 洁净室门禁评测自适应超时与 watchdog 结论自动采纳 (issue #250)
+
+- 背景：
+  1. 在 `wf-haflow-1017-01` 工作流中，洁净室外环门禁工位（`cleanroom_test` / `cleanroom_review`）虽已产出合法门禁结论文件（`~/.herdr-controller/gate-verdicts/wf-haflow-1017-01-cleanroom_{test,review}-auto.json`，`verdict: "blocked"`），但被 Sentinel 的 `hard_timeout_watchdog` 提前置为 `failed`；
+  2. `bin/herdr-loop` 评测单次写死 300s 超时，而当前仓库 pytest 全量套件耗时 ~753s，导致 3 次迭代全部超时（耗时 900s 徒劳重试），叠加测试运行与浏览器人工复现，工位耗时超过 Sentinel 3600s 上限；
+  3. Sentinel 超时检测未感知任务是否已落盘合法门禁结论；
+  4. Controller 在 `completion_protocol == "receipt-v1"` 时过早 return 阻断了 `gate_verdict_ready` 恢复，且 `try_auto_verdict` 不允许从 `failed` 状态采纳已落盘结论；
+  5. 缺乏产品化的手动仲裁采纳命令（`bin/herdr-task set` 拦截 `failed -> completed` 非法状态流转）。
+- 变更：
+  1. **评分器评测自适应超时与可配预算**：在 `herdr/evaluator.py` 增加 `resolve_evaluation_timeout`，支持 `--timeout` 参数、环境变量 `HERDR_LOOP_EVAL_TIMEOUT` / `HERDR_EVAL_TIMEOUT`、`GOAL.md` 契约及按测试文件数自适应计算（单文件 4.0s，最大上限 1800s，默认 300s）；`bin/herdr-loop` 接入；
+  2. **Sentinel 门禁感知与超时抑制**：在 `services/herdr-sentinel.py` 中增加门禁结论文件检测（`_task_has_valid_gate_verdict`），已产出有效结论的门禁任务超时被抑制并打印日志；门禁工位超时预算扩展至 7200s（`task_gate_hard_timeout_seconds`）；
+  3. **Controller Receipt-v1 门禁恢复与 Watchdog 失败自动采纳**：在 `services/herdr-controller.py` 中将 `receipt-v1` 阻断移至 `gate_verdict_ready` 与 `rework_recovery` 之后；在 `try_auto_verdict` 中支持采纳 `hard_timeout_watchdog` 失败但存在合法结论的门禁任务；后台巡检增加已完成门禁对账；
+  4. **CLI 产品化门禁采纳命令**：在 `bin/herdr-task` 增加 `adopt-verdict <task_id>` 子命令，并在指定 `--verdict` 时通过 `force_transition=True` 允许由 `failed` 受控流转至 `completed`。
+- 证据：
+  1. `tests/test_issue_250_eval_timeout_adaptive.py`（8 测试通过）；
+  2. `tests/test_issue_250_sentinel_gate_verdict_watchdog.py`（2 测试通过）；
+  3. `tests/test_issue_250_controller_gate_verdict_recovery_receipt_v1.py`（2 测试通过）；
+  4. `tests/test_issue_250_adopt_verdict_cli.py`（2 测试通过）；
+  5. `tests/test_issue_250_cleanroom_gate_e2e.py`（1 测试通过）；
+  6. 门禁与全量相关测试 97 项用例全部 PASS。
+
 ## [2026-10-17] fix | 治理 PR 审核数小时死循环与 CI Runner 欠费秒挂
 
 - 背景：
@@ -2793,3 +2984,50 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 本记录描述本地沙盒源码；交付 PR 保持 OPEN，未合并、未部署、未重启服务。
 
 - 2026-10-19：将 Console 入口拆为 HTTP、查询、运行现场、Workflow、Task、控制和共享校验模块；主页面模板转为 release 快照内的 `console/static/console.html`，直接脚本入口继续提供兼容导出。Evidence: `console/herdr_factory_console.py`, `console/http_server.py`, `console/read_api.py`, `tests/test_console_module_boundaries.py`.
+
+## [2026-10-19] Refactor | 拆分 herdr-task CLI 职责
+- Updated [[task-lifecycle]]：记录 parser、Ops Center、rollout、runs、observability、execution、resources、verification、Git adoption 与 workspace fingerprint 的模块边界，并明确剩余 lifecycle/dispatch 仍在 CLI 脚本中。
+- Evidence：`herdr/task_cli_parser.py`、`herdr/ops_center.py`、`herdr/task_cli_rollout.py`、`herdr/task_cli_runs.py`、`herdr/task_cli_observability.py`、`herdr/task_cli_execution.py`、`herdr/task_cli_resources.py`、`herdr/task_cli_verification.py`、`herdr/git_adoption_probe.py`、`herdr/workspace_fingerprint.py`。
+- PR #269 基于 PR #266 源分支；本次变更待 CI 与评审，未合并或部署。
+
+## [2026-10-19] fix | 门禁裁决采纳绑定磁盘持久化证据快照与非交互评测超时修复 (PR #266 Codex Review Round 7)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 指出 1 项 P1 级竞态缺陷：当 watchdog 超时导致门禁工位置 failed 后，后台存活的 worker 若在 Controller `read_gate_verdict` 读取裁决与派发 CLI `herdr-task set <task_id> completed --verdict <v>` 命令之间改写了裁决文件（如由 `pass` 改为 `blocked`），CLI 仅根据传入参数提交状态变更，未重读鉴权磁盘证据文件，导致陈旧/错误的裁决被采纳并提交；
+  2. CI 测试套件在并发高负载下，`tests/test_task_loop_noninteractive.py` npm 启动开销超过写死的 3s timeout，导致偶发超时 flake。
+- 变更：
+  1. **采纳前强制鉴权并绑定持久化证据快照**：
+     - 在 `bin/herdr-task` 中实现 `_authenticate_gate_verdict_evidence`，统一解析并鉴权候选门禁裁决文件（`gate_verdict_path` 及 clone 内 `.herdr/gate-verdict.json`）；
+     - 严格校验文件存在性、时效（`mtime >= rework_started_at - 1.0`）、最大时钟偏差（<= 5.0s）、执行令牌纪元匹配以及具体裁决一致性；
+     - `set_status` 在执行 watchdog-failed 门禁强制流转前，强制重读鉴权磁盘裁决，不符时以 `[VERDICT REFUSED]`（退出码 2）严格阻断，并在任务元数据中固化持久证据时间戳 `gate_verdict_evidence_mtime`；
+     - `adopt_verdict_cli` 复用该鉴权逻辑，确保命令行显式传参或自动采纳均严格受控；
+     - `services/herdr-controller.py:try_auto_verdict` 在派发子进程命令前对 `failed` 任务二次比对裁决一致性，消除未绑定竞态窗口。
+  2. **非交互测试评测超时加固**：
+     - 将 `tests/test_task_loop_noninteractive.py` 内部模拟超时间隔由 3s 提升至 15s，睡眠时间相应调整，消除 CI 并发环境抖动造成的非预期超时。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 6 项 Round 7 专项测试（全量 36 项测试全部通过）；
+  2. 全量 63 项 Issue #250 及交付回执回归测试全部 PASS；
+  3. 门禁状态机及关联测试 148 项用例全部 PASS；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。
+
+## [2026-10-19] fix | 操作员 bypass 裁决执行纪元继承与可信回执鉴权 (PR #266 Codex Review Round 7 P2)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 中指出 1 项 P2 级纪元保持缺陷（`PRRT_kwDOUYu4N86t0iUq`）：当门禁任务因前序失败或重试进入返工纪元（已分配 `execution_token` / `rework_request_id` / `rework_token`）后，若操作员使用 `bypass_task_gate` 手工放行门禁，写入的 bypass 回执与 `gate-verdict.json` 缺少 `execution_token`。控制器、Sentinel 与 CLI 在核验门禁裁决新鲜度（`_gate_verdict_file_is_fresh` 与 `_authenticate_gate_verdict_evidence`）时，由于任务带有 `execution_token` 而裁决文件缺少该字段，将合法的人工 bypass 裁决判定为纪元不匹配而拒绝采纳；
+  2. 既有 `tests/test_finding_verifier.py` 因 `bin/herdr-task` 代码行数变动导致确权行号漂移，批处理安全测试断言失败。
+- 变更：
+  1. **Bypass 裁决继承任务执行纪元**：
+     - 在 `herdr/kernel.py:bypass_task_gate` 中，若任务已分配 `execution_token`、`rework_request_id` 或 `rework_token`，自动将其写入返回的 `receipt` 与落盘的 `v_data`；
+     - 同步将带有完整纪元字段的门禁裁决写入中央目录与任务 clone 路径 `.herdr/gate-verdict.json`；
+     - 允许对状态为 `failed` 的门禁工位执行 bypass，目标状态安全转为 `completed`。
+  2. **控制器、Sentinel 与 CLI 可信 Bypass 回执鉴权**：
+     - 在 `services/herdr-controller.py:_gate_verdict_file_is_fresh`、`services/herdr-sentinel.py:_task_has_valid_gate_verdict` 与 `bin/herdr-task:_authenticate_gate_verdict_evidence` 中，增加对有效 `payload.get("bypass")` 回执的可信核验路径；
+     - 确保在面对遗留或未携带 token 的合法 bypass 裁决时，依然能准确识别操作员放行意图并放行流转。
+  3. **刷新查找校验器用例代码行锚点**：
+     - 在 `tests/test_finding_verifier.py` 中将 `args._launch_intent` 反例代码行范围更新为 `2240..2260`，保持与当前 `bin/herdr-task` 实现精确对齐。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 项 Round 7 P2 专项测试（全量 38 项全部 PASS）；
+  2. `tests/test_finding_verifier.py` 20 项测试全部 PASS；
+  3. `tests/test_task_bypass_gate.py` 5 项测试全部 PASS；
+  4. 全量 Issue #250 及关联测试 90 项用例全部 PASS；
+  5. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。

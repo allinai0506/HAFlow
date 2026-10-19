@@ -32,6 +32,7 @@ from herdr.evaluator import (
     read_baseline_test,
     BASELINE_TEST_FILENAME,
     read_repro_requirement,
+    resolve_evaluation_timeout,
     run_evaluation_command,
     read_state,
     render_evaluation_markdown,
@@ -88,15 +89,15 @@ def _fresh_step_log(path: Path, before, errors: list[str], step: str) -> str:
         return ""
 
 
-def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool, str]:
+def run_evaluation(target_dir: Path, timeout: float | None = None) -> tuple[MetricVector, bool, str]:
     loop_dir = get_loop_dir(target_dir)
     if not (loop_dir / "EVALUATOR.sh").exists():
         raise FileNotFoundError(f"Evaluator script not found at {loop_dir / 'EVALUATOR.sh'}")
     with evaluation_lock(loop_dir):
-        return _run_evaluation_locked(target_dir)
+        return _run_evaluation_locked(target_dir, timeout=timeout)
 
 
-def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
+def _run_evaluation_locked(target_dir: Path, timeout: float | None = None) -> tuple[MetricVector, bool, str]:
     """Run EVALUATOR.sh, compute metrics, update all markdown & json files."""
     loop_dir = get_loop_dir(target_dir)
     evaluator_sh = loop_dir / "EVALUATOR.sh"
@@ -124,11 +125,13 @@ def _run_evaluation_locked(target_dir: Path) -> tuple[MetricVector, bool, str]:
     from herdr.evaluation_identity import capture_evaluation_identity, evaluation_binding
     execution_before = capture_evaluation_identity(target_dir)
 
+    eval_timeout = resolve_evaluation_timeout(target_dir, timeout)
+
     evaluation_exit = 127
     receipt_output = ""
     try:
         evaluation_exit, receipt_output, _stderr = run_evaluation_command(
-            [str(evaluator_sh)], target_dir, timeout=300
+            [str(evaluator_sh)], target_dir, timeout=eval_timeout
         )
     except OSError:
         evaluation_errors.append("evaluator_start_failed")
@@ -269,6 +272,7 @@ def main():
     # eval
     eval_cmd = sub.add_parser("eval", help="Run evaluation and update metrics")
     eval_cmd.add_argument("--dir", default=".", help="Target project/clone directory")
+    eval_cmd.add_argument("--timeout", type=float, default=None, help="Evaluation timeout in seconds (default: adaptive, min 300s)")
 
     # status
     status_cmd = sub.add_parser("status", help="Get current loop score and state")
@@ -291,7 +295,7 @@ def main():
         sys.exit(0)
 
     elif args.command == "eval":
-        metrics, converged, loop_status = run_evaluation(target_dir)
+        metrics, converged, loop_status = run_evaluation(target_dir, getattr(args, "timeout", None))
         print(f"[HERDR_LOOP_SCORE] {metrics.composite_score}")
         print(f"[HERDR_LOOP_CONVERGED] {converged}")
         if not converged and loop_status == "exhausted":

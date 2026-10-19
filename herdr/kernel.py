@@ -878,10 +878,16 @@ def bypass_task_gate(
         "timestamp": now,
         "bypassed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if task.get("execution_token"):
+        receipt["execution_token"] = task.get("execution_token")
+    if task.get("rework_request_id"):
+        receipt["rework_request_id"] = task.get("rework_request_id")
+    if task.get("rework_token"):
+        receipt["rework_token"] = task.get("rework_token")
 
-    # Determine status transition: unblock if blocked or paused
+    # Determine status transition: unblock if blocked or paused; complete if failed gate
     new_status = previous_status
-    if previous_status in ("blocked", "suspended"):
+    if previous_status in ("blocked", "suspended", "failed"):
         # For verification/gate nodes, completion is the target
         new_status = "completed"
     elif previous_status == "paused":
@@ -904,6 +910,8 @@ def bypass_task_gate(
     task["stage_verdict"] = "pass"
     task["stage_verdict_note"] = verdict_note
     task["blocker"] = None
+    if new_status == "completed":
+        task["failure_reason"] = None
     task["gate_bypassed"] = True
     task["gate_bypass"] = receipt
     task["updated_at"] = now
@@ -921,7 +929,21 @@ def bypass_task_gate(
             "note": verdict_note,
             "bypass": receipt,
         }
+        if task.get("execution_token"):
+            v_data["execution_token"] = task.get("execution_token")
+        if task.get("rework_request_id"):
+            v_data["rework_request_id"] = task.get("rework_request_id")
+        if task.get("rework_token"):
+            v_data["rework_token"] = task.get("rework_token")
         v_path.write_text(json.dumps(v_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        clone_path = task.get("clone_path")
+        if clone_path:
+            try:
+                c_path = Path(clone_path) / ".herdr" / "gate-verdict.json"
+                c_path.parent.mkdir(parents=True, exist_ok=True)
+                c_path.write_text(json.dumps(v_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
     except Exception:
         pass
 

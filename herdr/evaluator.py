@@ -10,6 +10,7 @@ Implements the 5-element paradigm (Goal, Metrics, Data, Markdown files, Cron):
 
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -27,6 +28,82 @@ from herdr.projection import strip_ansi_codes
 LOOP_DIR_NAME = ".herdr-loop"
 BASELINE_LINT_FILENAME = "BASELINE_LINT.json"
 BASELINE_TEST_FILENAME = "BASELINE_TEST.json"
+
+DEFAULT_EVALUATION_TIMEOUT = 300.0
+MAX_ADAPTIVE_EVALUATION_TIMEOUT = 1800.0
+
+
+def resolve_evaluation_timeout(target_dir: Path, explicit_timeout: Optional[float] = None) -> float:
+    """Resolve timeout for running EVALUATOR.sh in agentic evaluation loops.
+
+    Priority:
+    1. Explicit timeout parameter (e.g. from CLI --timeout).
+    2. Environment variable HERDR_LOOP_EVAL_TIMEOUT or HERDR_EVAL_TIMEOUT.
+    3. Loop contract in GOAL.md (<!-- HERDR_EVAL_TIMEOUT: 1200 --> or - **评估超时**: 1200).
+    4. Adaptive budget based on test suite size (large repos with >50 test files scale up to 1800s).
+    5. Default fallback to DEFAULT_EVALUATION_TIMEOUT (300.0s).
+    """
+    if explicit_timeout is not None:
+        try:
+            val = float(explicit_timeout)
+            if val > 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+
+    env_val = os.environ.get("HERDR_LOOP_EVAL_TIMEOUT") or os.environ.get("HERDR_EVAL_TIMEOUT")
+    if env_val:
+        try:
+            val = float(env_val.strip())
+            if val > 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+
+    target_dir = Path(target_dir)
+    goal_path = target_dir / LOOP_DIR_NAME / "GOAL.md"
+    if goal_path.exists():
+        try:
+            content = goal_path.read_text(encoding="utf-8")
+            m = re.search(r"<!--\s*HERDR_EVAL_TIMEOUT:\s*([0-9.]+)\s*-->", content, re.IGNORECASE)
+            if m:
+                val = float(m.group(1))
+                if val > 0 and math.isfinite(val):
+                    return val
+            m2 = re.search(r"-\s*\*\*评估超时\*\*:\s*`?([0-9.]+)`?", content)
+            if m2:
+                val = float(m2.group(1))
+                if val > 0 and math.isfinite(val):
+                    return val
+        except Exception:
+            pass
+
+    # Adaptive scale based on test suite files (Python, Jest, Vitest, etc.)
+    try:
+        test_dirs = [target_dir / "tests", target_dir / "test", target_dir / "src"]
+        test_files_count = 0
+        js_ts_suffixes = (
+            ".test.js", ".test.jsx", ".test.ts", ".test.tsx",
+            ".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx",
+        )
+        for td in test_dirs:
+            if td.is_dir():
+                for f in td.rglob("*"):
+                    if not f.is_file():
+                        continue
+                    fname = f.name.lower()
+                    if fname.endswith(".py") and (fname.startswith("test_") or fname.endswith("_test.py")):
+                        test_files_count += 1
+                    elif any(fname.endswith(sfx) for sfx in js_ts_suffixes):
+                        test_files_count += 1
+        if test_files_count > 50:
+            adaptive = test_files_count * 4.0
+            return max(DEFAULT_EVALUATION_TIMEOUT, min(MAX_ADAPTIVE_EVALUATION_TIMEOUT, adaptive))
+    except Exception:
+        pass
+
+    return DEFAULT_EVALUATION_TIMEOUT
+
 
 
 

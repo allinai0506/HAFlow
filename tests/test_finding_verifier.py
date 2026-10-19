@@ -333,8 +333,8 @@ class FindingVerifierSafetyTestCase(unittest.TestCase):
             # 1. Confirmed FP: args._launch_intent in same scope
             {
                 "file": "bin/herdr-task",
-                "start_line": 3551,
-                "end_line": 3578,
+                "start_line": 2240,
+                "end_line": 2260,
                 "message": "never setting `args._launch_intent`",
             },
             # 2. Confirmed FP: _record_router_failure_task at module level
