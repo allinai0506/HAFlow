@@ -52,6 +52,6 @@ evidence:
   locator: _clean_reservations TTL=300 L260-280 / release_agent_reservation L283-297
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: launch 传 reservation_key 与注册后释放 L3697-3749, L4263-4265
+  source: herdr/task_cli_launch.py; herdr/task_cli_launch_orchestrator.py
+  locator: launch 传 reservation_key 与注册后释放 L154-194 / L287, L536
   confidence: high

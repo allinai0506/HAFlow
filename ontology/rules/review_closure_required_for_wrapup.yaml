@@ -16,6 +16,6 @@ evidence:
   locator: transition_task wrapup 闭环闸门 L156-161
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: set 对 wrapup 的闭环校验 L2469-2475
+  source: herdr/task_cli_status.py
+  locator: set 对 wrapup 的闭环校验 L163-175
   confidence: high

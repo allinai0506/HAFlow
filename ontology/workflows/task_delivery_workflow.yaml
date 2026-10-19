@@ -53,6 +53,6 @@ evidence:
   locator: check_workflow_stage_advance L4918 / get_ready_nodes 调用 L5080
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: close-workflow L7273-7590
+  source: herdr/task_cli_workflow_close.py
+  locator: close_workflow L10-520
   confidence: high

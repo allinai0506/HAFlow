@@ -126,6 +126,6 @@ evidence:
   locator: clone/branch/baseline L580-605, L1089-1143, L1247-1251
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: launch 字段落库 L4183-4191 / supersede_task L6014-6080
+  source: herdr/task_cli_launch_registration.py; herdr/task_cli_workflow.py
+  locator: launch 字段落库 L70-145 / supersede_task L77-160
   confidence: high

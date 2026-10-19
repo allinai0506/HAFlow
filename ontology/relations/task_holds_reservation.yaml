@@ -12,6 +12,6 @@ evidence:
   locator: choose_agent 写预占 L809-819 / release L283-297
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: 注册后释放 L4263-4265
+  source: herdr/task_cli_launch_orchestrator.py
+  locator: 注册后释放 L536
   confidence: high

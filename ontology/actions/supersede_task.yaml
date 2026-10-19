@@ -42,8 +42,8 @@ verification:
   target: tasks[task_id].superseded_by / replacement_pending
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: supersede 子命令 parser 与 supersede_task L6014-6080
+  source: herdr/task_cli_parser_workflow.py; herdr/task_cli_workflow.py
+  locator: supersede 子命令 parser L113-134 与 supersede_task L77-160
   confidence: high
 - kind: implemented
   source: herdr/state_db.py

@@ -37,6 +37,6 @@ verification:
   target: tasks.status
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: cleanup_task L4750-4781（logical cleanup only）
+  source: herdr/task_cli_delivery.py
+  locator: cleanup_task L340-371（logical cleanup only）
   confidence: high

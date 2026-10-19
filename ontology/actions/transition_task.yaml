@@ -58,8 +58,8 @@ evidence:
   locator: transition_task L6658-6909（CAS L6689-6733；同事务事件 L6820-6833）
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: set_status L877 / set 子命令 parser L13
+  source: herdr/task_cli_status.py; herdr/task_cli_parser_workflow.py
+  locator: set_task_status L9-130 / set 子命令 parser L13
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py

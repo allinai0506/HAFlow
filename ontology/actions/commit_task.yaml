@@ -38,6 +38,6 @@ verification:
   target: git refs + tasks.status
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: commit 迁移 L5693-5700, L6025-6032
+  source: herdr/task_cli_delivery.py
+  locator: commit_task L10-335（迁移 L318-325）
   confidence: high

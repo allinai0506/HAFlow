@@ -9,9 +9,9 @@ logic_ref: bin/herdr-task:purge_task
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: TEARDOWN_BLOCKING_STATUSES L190
+  locator: TEARDOWN_BLOCKING_STATUSES L188
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: purge_task 状态门禁 L6560-6575
+  source: herdr/task_cli_delivery.py
+  locator: purge_task 状态门禁 L391-400
   confidence: high

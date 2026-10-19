@@ -12,6 +12,6 @@ evidence:
   locator: GATE_DEFAULTS L938-944 / resolve_gate_config L946-973
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: set_status L877-1019
+  source: herdr/task_cli_status.py
+  locator: set_task_status L9-130
   confidence: high

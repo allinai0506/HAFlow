@@ -41,15 +41,15 @@ verification:
   target: tasks[task_id].resource_retention（窗格与克隆存在性未回读）
 evidence:
 - kind: implemented
-  source: bin/herdr-task
-  locator: purge_task L4784-4828
+  source: herdr/task_cli_delivery.py
+  locator: purge_task L373-424
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: delete_clone_safely L4854
+  source: herdr/task_cli_teardown.py
+  locator: delete_clone_safely L298-330
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: purge 子命令 parser L212-215
+  source: herdr/task_cli_parser_execution.py
+  locator: purge 子命令 parser L221-223
   confidence: high
 notes: r1 新增：原模型缺失物理删除路径（F-13）。高风险，按 references/05 需人工评审。

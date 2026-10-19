@@ -43,18 +43,18 @@ verification:
   target: tasks.status 与文件系统
 evidence:
 - kind: implemented
-  source: bin/herdr-task
+  source: herdr/task_cli_parser_execution.py
   locator: finalize 子命令 parser L224-231（--force 语义 L227-230）
   confidence: high
 - kind: implemented
-  source: bin/herdr-task
-  locator: _finalize_one L5049（删除分支见 clone_deletable 调用）
+  source: herdr/task_cli_teardown.py
+  locator: finalize_one L11-200（删除分支见 clone_deletable 调用）
+  confidence: high
+- kind: implemented
+  source: herdr/task_cli_teardown.py
+  locator: clone_deletable L444-463
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: clone_deletable L4944-4963
-  confidence: high
-- kind: implemented
-  source: bin/herdr-task
-  locator: FINALIZE_ADVANCE L193-197
+  locator: FINALIZE_ADVANCE L191-195
   confidence: high
