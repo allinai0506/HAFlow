@@ -7385,6 +7385,7 @@ issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候
 | bypass_task_gate 直写绕过状态流转网关致 HEAD Guard 泄露且未受并发写保护 | `bypass_task_gate` 直接使用 `s.save_task(task)` 绕过了被补丁保护的流转方法，导致绑定的 atomic head guard 无法被消费，且在校验与落盘之间存在 HEAD 推进的竞态窗口 | `save_task` 必须一并纳入 store 补丁代理；`bypass_task_gate` 中将校验与直写置于同一 `clone_lock` 下原子执行，同时 `CloneLock` 必须具备线程级可重入性（thread-reentrant） |
 | 普通双重校验路径导致 HEAD Guard 堆积泄漏与返工后陈旧拒绝 | CLI 预检（`_enforce_wrapup_review_closure`）与内核网关（`kernel.transition_task`）对同一任务连续执行校验，导致重复追加多个 guard 而单次流转仅消费一个；在长生命周期调用方中残留的旧 guard 会在任务返工推进 HEAD 后成为队首阻碍合法完成 | 将 Guard 与特定 attempt/thread 显式关联；`bind_atomic_head_guard` 在同 attempt 内更新去重而不盲目追加；CLI 预检通过 `bind_guard=False` 仅验证不占位；提供 `release_atomic_head_guard` 显式解绑能力；守护测试验证普通双重校验后活跃 guard 零残留 |
 | 动态补丁包装抽象方法导致缺少实现的子类静默绕过 ABC 门禁 | `_patch_store_classes` 包装 `StateStore.save_task` 等抽象方法时，若未保留 `__isabstractmethod__` 或直接修改抽象基类，会导致后定义的子类即使遗漏 `save_task` 也会被 Python ABC 误判为具象类，实例化不报错且调用静默丢弃写入 | `_patch_store_classes` 坚决跳过所有抽象基类（`inspect.isabstract(cls)`），仅对具象存储类（如 `SQLiteStateStore`）打补丁；`_patch_store_class` 中所有动态包装函数使用 `@functools.wraps` 并显式保留 `__isabstractmethod__`，守护抽象接口校验契约 |
+| 单线程单连接伪造并发测试绿灯掩盖真实工位竞态 | 并发校验测试若仅在单线程内对单连接顺序调用两次，无法证明真实的线程交错与锁竞争，锁持有期间推进 HEAD 的交叠边界无法被覆盖 | 严守 `AGENTS.md` 规则，并发测试必须使用独立连接与真实多线程，通过 `threading.Event` / 屏障强制受控重叠，在锁持有与等待的边界推进 HEAD 并验证全面 fail-closed 与零残留 |
 
 ### 已知边界（残留 R1，非阻塞，负责人决策项）
 
@@ -7393,6 +7394,6 @@ issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候
 ### 验证命令 / 守护测试
 
 ```bash
-pytest -q tests/test_wrapup_review_closure.py   # 57 passed，含 B1 向量 a/b 对抗用例、B2 凭据目录零污染断言、并发 HEAD guard 保留测试、bypass-gate 直写 clone lock 守护测试及 attempt 关联去重零残留测试
+pytest -q tests/test_wrapup_review_closure.py   # 58 passed，含 B1 向量 a/b 对抗用例、B2 凭据目录零污染断言、真多线程独立连接并发 HEAD guard 竞争测试、bypass-gate 直写 clone lock 守护测试及 attempt 关联去重零残留测试
 ```
-关键回归验证：无呈现 token 即使服务端已注册也拒绝；路径遍历 operator 名拒绝；跨 operator 串用 token 拒绝；worker 自身身份冒充 operator 拒绝；正向旁路成功路径落 `review_closure_skipped` 事件并完成状态迁移；真实 `~/.herdr-controller/credentials` 在全量套件运行后零变化；并发 completion 请求在 HEAD 推进时无法绕过 lock/HEAD check；`bypass_task_gate` 直写安全受 `clone_lock` 与 `HeadGuard` 保护，HEAD 变化时坚决拒绝并不泄露 guard；双重校验路径按 attempt 去重，流转完成后活跃 guard 零残留。
+关键回归验证：无呈现 token 即使服务端已注册也拒绝；路径遍历 operator 名拒绝；跨 operator 串用 token 拒绝；worker 自身身份冒充 operator 拒绝；正向旁路成功路径落 `review_closure_skipped` 事件并完成状态迁移；真实 `~/.herdr-controller/credentials` 在全量套件运行后零变化；真多线程并发 completion 请求在持有锁交叠边界 HEAD 推进时无法绕过 lock/HEAD check；`bypass_task_gate` 直写安全受 `clone_lock` 与 `HeadGuard` 保护，HEAD 变化时坚决拒绝并不泄露 guard；双重校验路径按 attempt 去重，流转完成后活跃 guard 零残留。

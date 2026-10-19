@@ -1313,42 +1313,103 @@ def test_adversarial_b1_operator_token_positive_and_negative_matching(scene):
     assert "must be independent" in why
 
 
-def test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head(scene):
-    """PR #270 Codex P1: Multiple completion attempts must retain guards until transition finishes,
+def test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head(scene, monkeypatch):
+    """PR #270 Codex P1 & PR #271 Codex P1: Exercise the guard with real concurrent workers.
 
-    and concurrent attempts cannot bypass the lock or check when HEAD advances.
+    Verifies AGENTS.md invariant (S6 concurrent test rules):
+    - Independent store connections across threads
+    - Controlled interleaving using threading.Event barriers: Worker 1 holds clone_lock
+      while Worker 2 attempts to claim and execute its guard under contention.
+    - HEAD is advanced while Worker 1 is inside clone_lock and Worker 2 is queued.
+    - Both attempts must fail closed on advanced HEAD; neither bypasses the guard or lock.
+    - Guards are safely cleaned up in finally: with zero lingering guards in memory.
     """
-    from herdr import review_closure
+    import threading
+    import time
+    from herdr import review_closure, state_store
 
     task_id = "wrapup-task"
     c_path = scene.clone
     orig_head = scene.head
 
-    # Bind guard for two concurrent attempts
-    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head, attempt_id="attempt_1")
-    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head, attempt_id="attempt_2")
+    # Open two independent store connections
+    store1 = state_store.SQLiteStateStore(scene.store.db_path)
+    store2 = state_store.SQLiteStateStore(scene.store.db_path)
 
-    # Both guards must be registered
-    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 2
+    inside_lock_w1 = threading.Event()
+    proceed_w1 = threading.Event()
+    w2_started = threading.Event()
 
-    # Advance HEAD before transitions execute
-    commit_more(scene.clone, "advanced content concurrent test\n")
-    new_head = clone_head(scene.clone)
+    orig_clone_head_sha = review_closure.clone_head_sha
+
+    def synchronized_clone_head_sha(path):
+        current_thread_name = threading.current_thread().name
+        if current_thread_name == "worker_1" and not inside_lock_w1.is_set():
+            inside_lock_w1.set()
+            # Wait until main thread signals to proceed (after advancing HEAD and starting worker 2)
+            proceed_w1.wait(timeout=5.0)
+        return orig_clone_head_sha(path)
+
+    monkeypatch.setattr(review_closure, "clone_head_sha", synchronized_clone_head_sha)
+
+    errors = []
+
+    def worker_1_target():
+        try:
+            # Bind guard for attempt 1 on thread 1
+            review_closure.bind_atomic_head_guard(store1, task_id, c_path, orig_head, attempt_id="attempt_1")
+            store1.transition_task(task_id, "completed")
+        except Exception as e:
+            errors.append(("worker_1", e))
+
+    def worker_2_target():
+        try:
+            w2_started.set()
+            # Bind guard for attempt 2 on thread 2
+            review_closure.bind_atomic_head_guard(store2, task_id, c_path, orig_head, attempt_id="attempt_2")
+            store2.compare_and_set_task_transition(task_id=task_id, to_status="completed")
+        except Exception as e:
+            errors.append(("worker_2", e))
+
+    t1 = threading.Thread(target=worker_1_target, name="worker_1")
+    t2 = threading.Thread(target=worker_2_target, name="worker_2")
+
+    # Start Worker 1; it will acquire clone_lock and pause inside clone_head_sha
+    t1.start()
+    assert inside_lock_w1.wait(timeout=5.0), "Worker 1 did not enter clone_lock in time"
+
+    # Worker 1 is now actively holding clone_lock!
+    # Start Worker 2 concurrently; Worker 2 will attempt to acquire clone_lock and block
+    t2.start()
+    assert w2_started.wait(timeout=5.0), "Worker 2 did not start in time"
+
+    # Give Worker 2 a moment to enter compare_and_set_task_transition and wait on clone_lock
+    time.sleep(0.1)
+
+    # Advance HEAD at the contested boundary while Worker 1 is holding clone_lock and Worker 2 is queued
+    commit_more(scene.clone, "advanced content concurrent real workers\n")
+    new_head = orig_clone_head_sha(scene.clone)
     assert new_head != orig_head
 
-    # Attempt 1 must fail because HEAD advanced
-    with pytest.raises(ValueError, match="clone HEAD advanced before completion CAS"):
-        scene.store.transition_task(task_id, "completed")
+    # Now unblock Worker 1 to evaluate HEAD
+    proceed_w1.set()
 
-    # Guard 1 was cleaned up in finally, Guard 2 is still present
-    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 1
+    t1.join(timeout=5.0)
+    t2.join(timeout=5.0)
 
-    # Attempt 2 must also fail rather than bypassing the lock / HEAD check
-    with pytest.raises(ValueError, match="clone HEAD advanced before completion CAS"):
-        scene.store.compare_and_set_task_transition(task_id=task_id, to_status="completed")
+    assert not t1.is_alive()
+    assert not t2.is_alive()
 
-    # Guard 2 was cleaned up in finally, no lingering guards
+    # Both workers must have failed closed with the expected error
+    assert len(errors) == 2, f"Expected 2 errors, got: {errors}"
+    err1 = next(e for w, e in errors if w == "worker_1")
+    err2 = next(e for w, e in errors if w == "worker_2")
+    assert "clone HEAD advanced before completion CAS" in str(err1)
+    assert "clone HEAD advanced before completion CAS" in str(err2)
+
+    # Both guards must be cleanly removed with zero lingering guards in memory
     assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
 
 
 def test_double_validation_cli_precheck_and_kernel_transition_leaves_no_lingering_guard(scene, monkeypatch):

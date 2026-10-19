@@ -3084,3 +3084,22 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   1. `tests/test_wrapup_review_closure.py` 新增 `test_double_validation_cli_precheck_and_kernel_transition_leaves_no_lingering_guard` 与 `test_patch_store_classes_preserves_abstract_state_store_contract`；
   2. `tests/test_wrapup_review_closure.py` 全量 58 项测试全部 PASS；
   3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。
+
+## [2026-10-19] test | 严守并发测试规范：以真多线程与独立连接重构 HEAD Guard 并发竞争测试 (PR #271 Codex Review P1)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #271 中指出 1 项 P1 级并发测试规范缺陷（Thread `PRRT_kwDOUYu4N86t7HBu`，引用 `AGENTS.md:L91-L95`）：
+     - "Exercise the guard with real concurrent workers"。原测试 `test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head` 在单线程单连接内顺序调用两次，从未构造一个工位持有 `clone_lock` 时另一个工位尝试认领/执行 guard 的真实交叠，无法证明并发安全。
+- 变更：
+  1. **真多线程与独立 StateStore 连接**：
+     - 重构 `test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head`；
+     - 分别建立 `store1` 和 `store2` 两个独立的 `SQLiteStateStore` 数据库连接，由 `worker_1` 和 `worker_2` 两个独立线程并发执行。
+  2. **受控交错与屏障同步**：
+     - 使用 `threading.Event` 精确控制时序：`worker_1` 获取 `clone_lock` 并在 `clone_head_sha` 内部等待；
+     - 触发 `worker_2` 并发调用 `compare_and_set_task_transition`，使其因排斥等待 `clone_lock`；
+     - 在锁持有与竞争的关键边界推进克隆仓库 HEAD；
+     - 放行 `worker_1` 与 `worker_2`，断言两者均 fail-closed 抛出 `clone HEAD advanced before completion CAS`，且最终零孤儿 guard 残留。
+- 证据：
+  1. `tests/test_wrapup_review_closure.py` 专项测试 `test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head` 在真并发环境下稳定 PASS（0.88s）；
+  2. `tests/test_wrapup_review_closure.py` 全量 58 项测试全部 PASS；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。
