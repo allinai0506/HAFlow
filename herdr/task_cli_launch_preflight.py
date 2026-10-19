@@ -355,3 +355,63 @@ def validate_test_review_baseline(args, baseline_commit, source_repo, *,
         get_store=get_store,
         run=run,
     )
+
+
+def validate_allocated_launch_baselines(
+    args, node_id, baseline_commit, source_repo, onto_branch, *,
+    clone_path, pane_id, pane_source, validate_test_review,
+    validate_selective, reclaim, get_store,
+):
+    """Run post-worker baseline gates and reclaim unregistered resources on refusal."""
+    if node_id in ("test", "review"):
+        try:
+            validate_test_review(args, baseline_commit, source_repo)
+        except SystemExit:
+            reclaim(args, clone_path=clone_path, pane_id=pane_id,
+                    pane_source=pane_source)
+            raise
+        except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
+                sqlite3.Error, subprocess.SubprocessError) as exc:
+            _reject_allocated_baseline(
+                args, node_id, "test_baseline_rejected", "test/review", exc,
+                clone_path, pane_id, pane_source, reclaim, get_store,
+            )
+
+    claim = str(getattr(args, "candidate_sha", None) or "").strip()
+    if node_id not in ("test", "review") and claim and onto_branch:
+        try:
+            validate_selective(args, claim, baseline_commit, source_repo)
+        except SystemExit:
+            reclaim(args, clone_path=clone_path, pane_id=pane_id,
+                    pane_source=pane_source)
+            raise
+        except (ImportError, AttributeError, OSError, ValueError, RuntimeError,
+                sqlite3.Error, subprocess.SubprocessError) as exc:
+            _reject_allocated_baseline(
+                args, node_id, "selective_baseline_rejected", "replacement", exc,
+                clone_path, pane_id, pane_source, reclaim, get_store,
+            )
+
+
+def _reject_allocated_baseline(args, node_id, event_type, label, error,
+                               clone_path, pane_id, pane_source, reclaim, get_store):
+    reclaim(args, clone_path=clone_path, pane_id=pane_id, pane_source=pane_source)
+    try:
+        get_store().record_event(
+            event_type,
+            {"stage": node_id, "failure_code": "baseline_check_unavailable",
+             "detail": str(error)[:300], "actionable": True,
+             "remediation": "repair workflow delivery metadata and relaunch"},
+            workflow_id=args.workflow_id, node_id=node_id,
+            task_id=args.task_id, source="herdr-task",
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as event_exc:
+        print(f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}", file=sys.stderr)
+    if label == "test/review":
+        message = (f"[BASELINE REJECTED] could not prove test/review baseline: {error}; "
+                   "launch refused (FR-6.2 fail-closed).")
+    else:
+        message = (f"[BASELINE REJECTED] could not prove replacement baseline: {error}; "
+                   "launch refused (selective-replan fail-closed).")
+    print(message)
+    sys.exit(2)
