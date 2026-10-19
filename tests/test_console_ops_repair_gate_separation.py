@@ -448,7 +448,7 @@ def test_scenario_9_http_route_integration_to_sqlite(ops_test_env):
         req = urllib.request.Request(
             url,
             data=post_data,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "X-HAFlow-Console-Request": "1"},
             method="POST",
         )
 
@@ -702,7 +702,7 @@ def test_scenario_14_http_route_kernel_force_pass_integration(ops_test_env):
                 "gate_node_id": "test",
                 "note": "human forced pass",
             }).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "X-HAFlow-Console-Request": "1"},
             method="POST",
         )
         status = None
@@ -728,7 +728,7 @@ def test_scenario_14_http_route_kernel_force_pass_integration(ops_test_env):
                 "reason": "集成测试真实放行",
                 "operator": "tester",
             }).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "X-HAFlow-Console-Request": "1"},
             method="POST",
         )
         status_ver = None
@@ -751,7 +751,7 @@ def test_scenario_14_http_route_kernel_force_pass_integration(ops_test_env):
                 "reason": "集成测试真实放行",
                 "operator": "tester",
             }).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "X-HAFlow-Console-Request": "1"},
             method="POST",
         )
         with urllib.request.urlopen(good_req) as resp:

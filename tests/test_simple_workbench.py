@@ -83,7 +83,10 @@ def test_real_http_create_start_decide_and_download(tmp_path, monkeypatch):
         base = f'http://127.0.0.1:{httpd.server_port}'
         def request(path, body=None):
             data = json.dumps(body).encode() if body is not None else None
-            with urllib.request.urlopen(urllib.request.Request(base+path, data=data, headers={'Content-Type':'application/json'})) as response:
+            headers = {'Content-Type': 'application/json'}
+            if data is not None:
+                headers['X-HAFlow-Console-Request'] = '1'
+            with urllib.request.urlopen(urllib.request.Request(base+path, data=data, headers=headers)) as response:
                 raw = response.read()
                 if 'application/json' in response.headers.get('Content-Type', ''):
                     return json.loads(raw)['data']

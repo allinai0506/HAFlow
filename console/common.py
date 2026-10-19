@@ -58,6 +58,24 @@ sys.path.insert(0, str(HERDR_ROOT))
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 CONSOLE_STATIC_DIR=Path(__file__).resolve().parent/'static'
 HOST='127.0.0.1'; PORT=int(os.environ.get('HERDR_CONSOLE_PORT','8765'))
+CONSOLE_REQUEST_HEADER='X-HAFlow-Console-Request'
+def console_allowed_hosts(port):
+    port=int(port); hosts={f'127.0.0.1:{port}', f'localhost:{port}'}
+    if port==80: hosts|={'127.0.0.1','localhost'}
+    return hosts
+def console_request_rejection(method,headers,port):
+    """Return why a request is refused, or None when it comes from the local console UI.
+
+    Host blocks DNS rebinding; Origin blocks cross-site POSTs; the custom header forces
+    a browser POST through a CORS preflight, which the console never answers.
+    """
+    seen={str(k).lower():str(v).strip() for k,v in headers.items()}
+    if seen.get('host','').lower() not in console_allowed_hosts(port): return 'host_not_allowed'
+    if method=='POST':
+        if seen.get(CONSOLE_REQUEST_HEADER.lower())!='1': return 'console_request_header_required'
+        origin=seen.get('origin','').lower()
+        if origin and origin not in {f'http://{h}' for h in console_allowed_hosts(port)}: return 'origin_not_allowed'
+    return None
 PRODUCT_NAME='HAFlow'; PRODUCT_TAGLINE='让人和多个 AI Agent 一起把事情做完'
 HERDR_TASK=HERDR_ROOT/'bin'/'herdr-task'
 ACTIVE={'pending','dispatched','working','blocked','agent_done','rework','completed','committed','integrated','cleanup_ready'}

@@ -107,10 +107,17 @@ class Handler(BaseHTTPRequestHandler):
         suffix=target.suffix.lower()
         ctype='text/html; charset=utf-8' if suffix in ('.html', '.htm') else 'application/javascript; charset=utf-8' if suffix=='.js' else 'text/css; charset=utf-8' if suffix=='.css' else 'application/octet-stream'
         raw=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-cache' if target.name.startswith('simple.') or target.name=='console-tokens.css' else 'public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
+    def reject_untrusted(self,method):
+        reason=common.console_request_rejection(method,self.headers,self.server.server_port)
+        if reason:
+            self.log_message('%s %s rejected: %s',method,self.path,reason)
+            self.send_json(403,error=reason)
+        return bool(reason)
     def query(self):return urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
     def body(self):
         n=int(self.headers.get('Content-Length','0') or 0); raw=self.rfile.read(n) if n else b'{}'; return json.loads(raw.decode() or '{}')
     def do_GET(self):
+        if self.reject_untrusted('GET'):return
         p=urllib.parse.urlparse(self.path).path
         try:
             if p=='/':return self.send_html(HTML)
@@ -242,6 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             self.log_message('GET %s failed: %s', self.path, e)
             return self.send_json(500,error=e)
     def do_POST(self):
+        if self.reject_untrusted('POST'):return
         p=urllib.parse.urlparse(self.path).path
         try:
             b=self.body()

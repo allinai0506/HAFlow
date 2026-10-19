@@ -99,7 +99,7 @@ def test_console_experience_token_api_security(tmp_path, monkeypatch):
         post_req = urllib.request.Request(
             f"{base_url}/api/experience/token",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "X-HAFlow-Console-Request": "1"},
             method="POST",
         )
         with urllib.request.urlopen(post_req) as resp:
@@ -122,7 +122,7 @@ def test_console_experience_token_api_security(tmp_path, monkeypatch):
         clear_req = urllib.request.Request(
             f"{base_url}/api/experience/token",
             data=clear_body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "X-HAFlow-Console-Request": "1"},
             method="POST",
         )
         with urllib.request.urlopen(clear_req) as resp:
