@@ -141,6 +141,7 @@ def transition_task(
     expected_status: str | None = None,
     expected_version: int | None = None,
     expected_updated_at: float | None = None,
+    intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """State Transition Gateway: Atomically transition task status and append WorkflowEvent."""
     s = _get_store(store)
@@ -186,6 +187,7 @@ def transition_task(
             expected_status=expected_status,
             expected_version=expected_version,
             expected_updated_at=expected_updated_at,
+            intent=intent,
         )
     else:
         res = s.transition_task(
@@ -195,6 +197,7 @@ def transition_task(
             source=source,
             metadata=meta,
             force=force,
+            intent=intent,
         )
     if not res.get("accepted", True):
         return res
@@ -566,6 +569,7 @@ def rollback_workflow(
             source="kernel_rollback",
             metadata={"superseded_reason": f"rollback to {target_node_id}: {reason}"},
             force=True,
+            intent="rollback",
             store=store,
         )
         invalidated.append(tid)
@@ -897,19 +901,44 @@ def bypass_task_gate(
     if note:
         verdict_note += f" ({note})"
 
-    task["status"] = new_status
-    task["stage_verdict"] = "pass"
-    task["stage_verdict_note"] = verdict_note
-    task["blocker"] = None
+    metadata = {
+        "stage_verdict": "pass",
+        "stage_verdict_note": verdict_note,
+        "blocker": None,
+        "gate_bypassed": True,
+        "gate_bypass": receipt,
+    }
     if new_status == "completed":
-        task["failure_reason"] = None
-    task["gate_bypassed"] = True
-    task["gate_bypass"] = receipt
-    task["updated_at"] = now
-    task["version"] = (task.get("version") or 0) + 1
+        metadata["failure_reason"] = None
 
-    # This bypass persists the status directly (no StateStore transition
-    # gateway), so the shared review-closure invariant must be enforced here
+    def _apply_bypass():
+        if hasattr(s, "compare_and_set_task_transition"):
+            res = s.compare_and_set_task_transition(
+                task_id=task_id,
+                to_status=new_status,
+                reason=f"gate_bypassed: {cleaned_reason}",
+                source="operator-bypass",
+                metadata=metadata,
+                intent="operator-bypass",
+                expected_status=previous_status,
+                expected_version=task.get("version"),
+            )
+            if not res.get("ok", True):
+                raise ValueError(
+                    f"[GATE BYPASS CAS FAILED] task={task_id}: {res.get('reason')} "
+                    f"(expected status={previous_status}, version={task.get('version')})"
+                )
+            return res.get("task") or s.get_task(task_id)
+        else:
+            task["status"] = new_status
+            task.update(metadata)
+            task["updated_at"] = now
+            task["version"] = (task.get("version") or 0) + 1
+            s.save_task(task)
+            return task
+
+    # This bypass persists via StateStore transition gateway with privileged intent
+    # 'operator-bypass'. For wrapup node, shared review-closure invariant is enforced
     # explicitly under the clone lock (Codex review P1, wf-haflow-1015-01 & PR #270).
     if new_status == "completed" and (task.get("node") or task.get("stage")) == "wrapup":
         from . import review_closure
@@ -918,9 +947,10 @@ def bypass_task_gate(
             closure_ok, closure_why = review_closure.check_completion_allowed(s, task)
             if not closure_ok:
                 raise ValueError(f"[REVIEW CLOSURE REQUIRED] task={task_id}: {closure_why}")
-            s.save_task(task)
+            task = _apply_bypass()
     else:
-        s.save_task(task)
+        task = _apply_bypass()
+
     sync_tasks_projection(store=s)
 
     # Write gate verdict file so external watchers immediately see the pass
