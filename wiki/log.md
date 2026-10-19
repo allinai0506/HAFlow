@@ -3031,3 +3031,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   3. `tests/test_task_bypass_gate.py` 5 项测试全部 PASS；
   4. 全量 Issue #250 及关联测试 90 项用例全部 PASS；
   5. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。
+
+## [2026-10-19] Fix | issue #228 评审闭环 B1/B2 收口：双门禁 r3 汇聚于 fb392ba 与六步收尾
+
+- 范围：wrapup 紧急操作员旁路认证绕过（B1）与测试污染真实凭据目录（B2）返工闭环；冻结候选 `fb392ba680868a30fafa4bbc0634b594110cd566`。
+- 双门禁：cleanroom_test r3 pass（目标套件 54/54、全量 4977 passed / 0 failed、真实 CLI 链 13/13 对抗探针、ego-browser E2E）；cleanroom_review r3 pass（B1 四项要求复现验证、115 项门禁用例、compileall/diff-check 干净）。两结论均绑定同一 candidate_sha，verify-baseline BASELINE_MATCH。
+- 知识回填：
+  1. `docs/lessons/lessons-learned.md` 新增 §175（显式呈现原则、单权威源、路径净化、hermetic 凭据测试四条教训 + 部署边界 R1 已知边界段）；
+  2. `wiki/task-lifecycle.md` 新增 §1.1.1 评审闭环操作员旁路认证契约（含 R1 决策留痕与 Evidence 锚点）。
+- 残留 R1（非阻塞）：同 UID worker 可读服务端凭据库凑齐 presented==registered，属部署边界，须在登记任何应急操作员前由负责人决策。
+- 交付：本 wrapup 单工位创建交付 PR（base=main，head=本收尾分支），严禁自动合并，由控制器统一收编。
