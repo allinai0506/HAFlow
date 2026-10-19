@@ -1311,3 +1311,84 @@ def test_adversarial_b1_operator_token_positive_and_negative_matching(scene):
     ok, why = review_closure.authenticate_operator(scene.store, task, "qodercli", token="lead_token_secret")
     assert not ok
     assert "must be independent" in why
+
+
+def test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head(scene):
+    """PR #270 Codex P1: Multiple completion attempts must retain guards until transition finishes,
+
+    and concurrent attempts cannot bypass the lock or check when HEAD advances.
+    """
+    from herdr import review_closure
+
+    task_id = "wrapup-task"
+    c_path = scene.clone
+    orig_head = scene.head
+
+    # Bind guard for two concurrent attempts
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+
+    # Both guards must be registered
+    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 2
+
+    # Advance HEAD before transitions execute
+    commit_more(scene.clone, "advanced content concurrent test\n")
+    new_head = clone_head(scene.clone)
+    assert new_head != orig_head
+
+    # Attempt 1 must fail because HEAD advanced
+    with pytest.raises(ValueError, match="clone HEAD advanced before completion CAS"):
+        scene.store.transition_task(task_id, "completed")
+
+    # Guard 1 was cleaned up in finally, Guard 2 is still present
+    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 1
+
+    # Attempt 2 must also fail rather than bypassing the lock / HEAD check
+    with pytest.raises(ValueError, match="clone HEAD advanced before completion CAS"):
+        scene.store.compare_and_set_task_transition(task_id=task_id, to_status="completed")
+
+    # Guard 2 was cleaned up in finally, no lingering guards
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+
+def test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_advanced_head(scene):
+    """PR #270 Codex P1: bypass_task_gate completing a wrapup task must guard the direct save under clone lock."""
+    from herdr import kernel, review_closure, state_db
+
+    task_id = "wrapup-task"
+    task = scene.store.get_task(task_id)
+    task["status"] = "blocked"
+    scene.store.save_task(task)
+
+    # Register an independent operator
+    state_db.save_user_token("lead-op", "operator", "token-lead-secret", db_path=scene.store.db_path)
+
+    # 1. Advance HEAD so that check_completion_allowed or save fails closed
+    commit_more(scene.clone, "advanced before bypass\n")
+    advanced_head = clone_head(scene.clone)
+    assert advanced_head != scene.head
+
+    # Negative: bypass must fail closed when receipt was bound to earlier head
+    with pytest.raises(ValueError, match=r"\[REVIEW CLOSURE REQUIRED\]"):
+        kernel.bypass_task_gate(task_id, reason="Emergency bypass", operator="lead-op", store=scene.store)
+
+    # Status must still be blocked, not marked completed!
+    assert scene.store.get_task(task_id)["status"] == "blocked"
+
+    # 2. Positive path: record a valid bypass skip on the current advanced head
+    scene.store.record_event(
+        "review_closure_skipped",
+        {"task_id": task_id, "reason": "audited bypass for head", "head_sha": advanced_head, "operator": "lead-op"},
+        task_id=task_id,
+        workflow_id=task.get("workflow_id"),
+        node_id=task.get("node") or task.get("stage"),
+        source="herdr-task",
+    )
+
+    # Now bypass_task_gate must succeed, update under the clone lock, and consume the atomic head guard
+    res = kernel.bypass_task_gate(task_id, reason="Legitimate bypass on matching head", operator="lead-op", store=scene.store)
+    assert res["status"] == "completed"
+    assert scene.store.get_task(task_id)["status"] == "completed"
+
+    # Verify head guard was cleanly consumed and not leaked in memory
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS

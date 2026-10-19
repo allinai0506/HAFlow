@@ -3041,3 +3041,23 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   2. `wiki/task-lifecycle.md` 新增 §1.1.1 评审闭环操作员旁路认证契约（含 R1 决策留痕与 Evidence 锚点）。
 - 残留 R1（非阻塞）：同 UID worker 可读服务端凭据库凑齐 presented==registered，属部署边界，须在登记任何应急操作员前由负责人决策。
 - 交付：本 wrapup 单工位创建交付 PR（base=main，head=本收尾分支），严禁自动合并，由控制器统一收编。
+
+## [2026-10-19] fix | 评审闭环并发 HEAD Guard 生命周期保持与 Bypass-Gate 直写克隆锁守护 (PR #270 Codex Review P1)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #270 commit ffdb901 中指出 2 项 P1 级并发与直写校验缺陷：
+     - [P1] `herdr/review_closure.py:890`：在获取 `clone_lock` 之前提前 `pop` 了共享的 `_ACTIVE_HEAD_GUARDS` 记录，导致同一任务的并发第二个完成请求误判为无 guard，未经任何 HEAD 核验或锁保护直接裸奔调用底层流转方法。若协调的 Git 操作在此时推进 HEAD，第二个请求将基于陈旧回执完成任务；必须按 attempt 独立存储 guard（`HeadGuard`），并仅在受保护的状态流转彻底完成后在 `finally:` 中安全移除。
+     - [P1] `herdr/review_closure.py:1068` & `herdr/kernel.py:899`：当 `kernel.bypass_task_gate` 放行已失败或阻塞的 wrapup 门禁时，虽然成功注册了 atomic head guard，但随后直接调用 `s.save_task(task)` 绕过了受补丁保护的三大状态流转网关，导致 guard 泄漏且未能在同一克隆锁下原子核验 HEAD 与持久化完成状态；必须将 `save_task` 纳入 store 补丁代理，并在 `bypass_task_gate` 中将 `check_completion_allowed` 与 `save_task` 置于同一可重入 `clone_lock` 下原子执行。
+- 变更：
+  1. **Thread-reentrant CloneLock**：
+     - 在 `herdr/review_closure.py` 中为 `CloneLock` 引入 `threading.local()` 重入计数器，支持同一线程在多层克隆锁调用中安全重入，彻底消除嵌套锁死锁风险。
+  2. **按 Attempt 独立存储 HeadGuard 并在流转完成后清理**：
+     - 引入 `HeadGuard` 结构，`_ACTIVE_HEAD_GUARDS` 按 `task_id` 维护活跃 guard 列表；
+     - 统一抽取 `_execute_with_head_guard` 逻辑：先在 `_HEAD_GUARDS_LOCK` 保护下安全认领 guard（不提前从列表移除），进入 `with clone_lock(c_path):` 完成原子 HEAD 一致性比对与底层方法调用，并在 `finally:` 中安全移除该 attempt 对应的 guard，确保并发请求无法绕开守卫。
+  3. **补丁代理 save_task 与 bypass_task_gate 克隆锁原子化**：
+     - 在 `_patch_store_class` 中增加对 `save_task` 的补丁代理，对 `status == "completed"` 且存在活跃 head guard 的任务自动激活原子 HEAD 核验与 guard 消费；
+     - 在 `herdr/kernel.py:bypass_task_gate` 中，将 wrapup 门禁完成时的 `check_completion_allowed`、字段设置与 `s.save_task(task)` 完整置于 `with review_closure.clone_lock(c_path):` 下原子执行，杜绝校验后、落盘前的 HEAD 漂移竞态。
+- 证据：
+  1. `tests/test_wrapup_review_closure.py` 新增 2 项专项测试（`test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head` 与 `test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_advanced_head`）；
+  2. `tests/test_wrapup_review_closure.py` 全量 56 项测试全部 PASS（耗时 53.66s）；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。

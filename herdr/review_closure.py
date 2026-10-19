@@ -42,6 +42,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -823,9 +824,17 @@ def clone_head_sha(clone_path: Any) -> str:
     return (probe.stdout or "").strip().lower()
 
 
+_CLONE_LOCK_LOCAL = threading.local()
+
+
 class CloneLock:
 
-    """A cross-process lock keyed by the task clone repository path (Issue #228 Item 4)."""
+    """A cross-process lock keyed by the task clone repository path (Issue #228 Item 4).
+
+    Thread-reentrant within the same process so nested operations under the clone
+    lock (e.g. bypass_task_gate calling check_completion_allowed then save_task)
+    do not deadlock or self-block.
+    """
 
     def __init__(self, repo_path: Any):
         self.repo = str(repo_path or "").strip()
@@ -842,6 +851,16 @@ class CloneLock:
     def __enter__(self):
         if self.path is None:
             return self
+        if not hasattr(_CLONE_LOCK_LOCAL, "held"):
+            _CLONE_LOCK_LOCAL.held = {}
+
+        lock_key = str(self.path)
+        if lock_key in _CLONE_LOCK_LOCAL.held:
+            handle, count = _CLONE_LOCK_LOCAL.held[lock_key]
+            _CLONE_LOCK_LOCAL.held[lock_key] = (handle, count + 1)
+            self._handle = handle
+            return self
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+")
         try:
@@ -849,16 +868,24 @@ class CloneLock:
         except Exception:
             handle.close()
             raise
+        _CLONE_LOCK_LOCAL.held[lock_key] = (handle, 1)
         self._handle = handle
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._handle is not None:
-            try:
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-            self._handle.close()
+        if self.path is not None and hasattr(_CLONE_LOCK_LOCAL, "held"):
+            lock_key = str(self.path)
+            if lock_key in _CLONE_LOCK_LOCAL.held:
+                handle, count = _CLONE_LOCK_LOCAL.held[lock_key]
+                if count > 1:
+                    _CLONE_LOCK_LOCAL.held[lock_key] = (handle, count - 1)
+                else:
+                    del _CLONE_LOCK_LOCAL.held[lock_key]
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                    handle.close()
             self._handle = None
         return False
 
@@ -867,7 +894,53 @@ def clone_lock(clone_path: Any) -> CloneLock:
     return CloneLock(clone_path)
 
 
-_ACTIVE_HEAD_GUARDS: dict[str, tuple[str, str]] = {}
+class HeadGuard:
+    def __init__(self, task_id: str, clone_path: str, expected_head: str):
+        self.task_id = str(task_id)
+        self.clone_path = str(clone_path)
+        self.expected_head = str(expected_head).strip().lower()
+        self.claimed = False
+
+
+_HEAD_GUARDS_LOCK = threading.Lock()
+_ACTIVE_HEAD_GUARDS: dict[str, list[HeadGuard]] = {}
+
+
+def _execute_with_head_guard(tid: str, orig_fn, self, *args, **kwargs):
+    guard = None
+    with _HEAD_GUARDS_LOCK:
+        guards = _ACTIVE_HEAD_GUARDS.get(tid)
+        if guards:
+            for g in guards:
+                if not g.claimed:
+                    guard = g
+                    guard.claimed = True
+                    break
+            if guard is None:
+                guard = guards[-1]
+
+    if guard is None:
+        return orig_fn(self, *args, **kwargs)
+
+    c_path = guard.clone_path
+    exp_head = guard.expected_head
+    try:
+        with clone_lock(c_path):
+            now_head = clone_head_sha(c_path)
+            if now_head != exp_head:
+                raise ValueError(
+                    f"[REVIEW CLOSURE REQUIRED] clone HEAD advanced before completion CAS "
+                    f"(expected {exp_head[:12]}, found {(now_head or 'unavailable')[:12]}); "
+                    "re-record the receipt on the current head."
+                )
+            return orig_fn(self, *args, **kwargs)
+    finally:
+        with _HEAD_GUARDS_LOCK:
+            if tid in _ACTIVE_HEAD_GUARDS:
+                if guard in _ACTIVE_HEAD_GUARDS[tid]:
+                    _ACTIVE_HEAD_GUARDS[tid].remove(guard)
+                if not _ACTIVE_HEAD_GUARDS[tid]:
+                    del _ACTIVE_HEAD_GUARDS[tid]
 
 
 def _patch_store_class(cls: Any) -> None:
@@ -878,6 +951,7 @@ def _patch_store_class(cls: Any) -> None:
     orig_transition = getattr(cls, "transition_task", None)
     orig_cas = getattr(cls, "compare_and_set_task_transition", None)
     orig_completion_cas = getattr(cls, "compare_and_set_completion_transition", None)
+    orig_save = getattr(cls, "save_task", None)
 
     if orig_transition:
         def _make_wrapped_transition(orig_fn):
@@ -885,16 +959,7 @@ def _patch_store_class(cls: Any) -> None:
                 tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
                 to_st = kwargs.get("to_status") if "to_status" in kwargs else (args[1] if len(args) > 1 else "")
                 if to_st == "completed" and tid in _ACTIVE_HEAD_GUARDS:
-                    c_path, exp_head = _ACTIVE_HEAD_GUARDS.pop(tid)
-                    with clone_lock(c_path):
-                        now_head = clone_head_sha(c_path)
-                        if now_head != exp_head:
-                            raise ValueError(
-                                f"[REVIEW CLOSURE REQUIRED] clone HEAD advanced before completion CAS "
-                                f"(expected {exp_head[:12]}, found {(now_head or 'unavailable')[:12]}); "
-                                "re-record the receipt on the current head."
-                            )
-                        return orig_fn(self, *args, **kwargs)
+                    return _execute_with_head_guard(tid, orig_fn, self, *args, **kwargs)
                 return orig_fn(self, *args, **kwargs)
             return wrapped_transition
         cls.transition_task = _make_wrapped_transition(orig_transition)
@@ -905,16 +970,7 @@ def _patch_store_class(cls: Any) -> None:
                 tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
                 to_st = kwargs.get("to_status") if "to_status" in kwargs else (args[1] if len(args) > 1 else "")
                 if to_st == "completed" and tid in _ACTIVE_HEAD_GUARDS:
-                    c_path, exp_head = _ACTIVE_HEAD_GUARDS.pop(tid)
-                    with clone_lock(c_path):
-                        now_head = clone_head_sha(c_path)
-                        if now_head != exp_head:
-                            raise ValueError(
-                                f"[REVIEW CLOSURE REQUIRED] clone HEAD advanced before completion CAS "
-                                f"(expected {exp_head[:12]}, found {(now_head or 'unavailable')[:12]}); "
-                                "re-record the receipt on the current head."
-                            )
-                        return orig_fn(self, *args, **kwargs)
+                    return _execute_with_head_guard(tid, orig_fn, self, *args, **kwargs)
                 return orig_fn(self, *args, **kwargs)
             return wrapped_cas
         cls.compare_and_set_task_transition = _make_wrapped_cas(orig_cas)
@@ -924,19 +980,21 @@ def _patch_store_class(cls: Any) -> None:
             def wrapped_completion_cas(self, *args, **kwargs):
                 tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
                 if tid in _ACTIVE_HEAD_GUARDS:
-                    c_path, exp_head = _ACTIVE_HEAD_GUARDS.pop(tid)
-                    with clone_lock(c_path):
-                        now_head = clone_head_sha(c_path)
-                        if now_head != exp_head:
-                            raise ValueError(
-                                f"[REVIEW CLOSURE REQUIRED] clone HEAD advanced before completion CAS "
-                                f"(expected {exp_head[:12]}, found {(now_head or 'unavailable')[:12]}); "
-                                "re-record the receipt on the current head."
-                            )
-                        return orig_fn(self, *args, **kwargs)
+                    return _execute_with_head_guard(tid, orig_fn, self, *args, **kwargs)
                 return orig_fn(self, *args, **kwargs)
             return wrapped_completion_cas
         cls.compare_and_set_completion_transition = _make_wrapped_completion_cas(orig_completion_cas)
+
+    if orig_save:
+        def _make_wrapped_save(orig_fn):
+            def wrapped_save(self, task, *args, **kwargs):
+                tid = task.get("task_id") if isinstance(task, dict) else ""
+                to_st = task.get("status") if isinstance(task, dict) else ""
+                if to_st == "completed" and tid in _ACTIVE_HEAD_GUARDS:
+                    return _execute_with_head_guard(tid, orig_fn, self, task, *args, **kwargs)
+                return orig_fn(self, task, *args, **kwargs)
+            return wrapped_save
+        cls.save_task = _make_wrapped_save(orig_save)
 
 
 def _patch_store_classes() -> None:
@@ -959,7 +1017,9 @@ def bind_atomic_head_guard(store: Any, task_id: str, clone_path: Any, certified_
     """
     if not task_id or not clone_path or not certified_head:
         return
-    _ACTIVE_HEAD_GUARDS[task_id] = (str(clone_path), str(certified_head).strip().lower())
+    guard = HeadGuard(str(task_id), str(clone_path), str(certified_head).strip().lower())
+    with _HEAD_GUARDS_LOCK:
+        _ACTIVE_HEAD_GUARDS.setdefault(str(task_id), []).append(guard)
     if store is not None:
         _patch_store_class(store.__class__)
 

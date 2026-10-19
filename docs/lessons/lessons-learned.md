@@ -7381,6 +7381,8 @@ issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候
 | `operator_id` 仅 `strip()` 未过滤路径分隔符，`--operator ../clone/evil` 把服务端查找路径引向 worker 自己克隆目录中的伪造文件 | 参与文件路径拼接的外部标识符是注入面；净化必须在任何文件系统使用之前完成 | 检测 `/`、`\`、`..` 立即拒绝，并用与写入端一致的正则 `[^a-zA-Z0-9_\-]` → `_` 净化；对抗用例覆盖遍历向量 |
 | 测试调用 `save_user_token` 时 `HOME` 未隔离，真实宿主凭据目录被写出 `ops-lead_operator.token` 残留 | 凭据读写路径以 `Path.home()` 派生的测试不是 hermetic 测试；CI/本地混跑时会污染生产身份 | 凭据相关测试必须 autouse fixture 隔离 `HOME` 至临时目录并 mock `_get_credentials_dir`；测试结束断言真实凭据目录零新增、零篡改 |
 | 阻塞项 B1 由洁净室评审（独立黑盒复现攻击向量）发现，craft 自审未识别 | 认证类代码的自审不可信；绕过要靠"重放攻击向量验证闭环"来排除，而不是靠声明已修复 | 安全修复的收口标准是复现原攻击向量被拒（如 r3 的 13/13 边界探针），并保留可核查的复现证据 |
+| 并发 HEAD Guard 提前释放致并发请求穿透检查 | 在获取 clone_lock 之前提前 pop 共享 guard，导致并发同一任务的第二个请求误判为无 guard 而直接调用 orig_fn 绕过 HEAD 校验与锁 | 必须按 attempt 独立存储 guard（`HeadGuard`），并仅在受保护的状态流转彻底完成后在 `finally:` 中安全移除；执行期间 guard 持续保留阻止并发请求绕行 |
+| bypass_task_gate 直写绕过状态流转网关致 HEAD Guard 泄露且未受并发写保护 | `bypass_task_gate` 直接使用 `s.save_task(task)` 绕过了被补丁保护的流转方法，导致绑定的 atomic head guard 无法被消费，且在校验与落盘之间存在 HEAD 推进的竞态窗口 | `save_task` 必须一并纳入 store 补丁代理；`bypass_task_gate` 中将校验与直写置于同一 `clone_lock` 下原子执行，同时 `CloneLock` 必须具备线程级可重入性（thread-reentrant） |
 
 ### 已知边界（残留 R1，非阻塞，负责人决策项）
 
@@ -7389,6 +7391,6 @@ issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候
 ### 验证命令 / 守护测试
 
 ```bash
-pytest -q tests/test_wrapup_review_closure.py   # 54 passed，含 B1 向量 a/b 对抗用例与 B2 凭据目录零污染断言
+pytest -q tests/test_wrapup_review_closure.py   # 56 passed，含 B1 向量 a/b 对抗用例、B2 凭据目录零污染断言、并发 HEAD guard 保留测试及 bypass-gate 直写 clone lock 守护测试
 ```
-关键回归验证：无呈现 token 即使服务端已注册也拒绝；路径遍历 operator 名拒绝；跨 operator 串用 token 拒绝；worker 自身身份冒充 operator 拒绝；正向旁路成功路径落 `review_closure_skipped` 事件并完成状态迁移；真实 `~/.herdr-controller/credentials` 在全量套件运行后零变化。
+关键回归验证：无呈现 token 即使服务端已注册也拒绝；路径遍历 operator 名拒绝；跨 operator 串用 token 拒绝；worker 自身身份冒充 operator 拒绝；正向旁路成功路径落 `review_closure_skipped` 事件并完成状态迁移；真实 `~/.herdr-controller/credentials` 在全量套件运行后零变化；并发 completion 请求在 HEAD 推进时无法绕过 lock/HEAD check；`bypass_task_gate` 直写安全受 `clone_lock` 与 `HeadGuard` 保护，HEAD 变化时坚决拒绝并不泄露 guard。
