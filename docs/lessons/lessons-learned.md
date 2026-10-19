@@ -7383,6 +7383,7 @@ issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候
 | 阻塞项 B1 由洁净室评审（独立黑盒复现攻击向量）发现，craft 自审未识别 | 认证类代码的自审不可信；绕过要靠"重放攻击向量验证闭环"来排除，而不是靠声明已修复 | 安全修复的收口标准是复现原攻击向量被拒（如 r3 的 13/13 边界探针），并保留可核查的复现证据 |
 | 并发 HEAD Guard 提前释放致并发请求穿透检查 | 在获取 clone_lock 之前提前 pop 共享 guard，导致并发同一任务的第二个请求误判为无 guard 而直接调用 orig_fn 绕过 HEAD 校验与锁 | 必须按 attempt 独立存储 guard（`HeadGuard`），并仅在受保护的状态流转彻底完成后在 `finally:` 中安全移除；执行期间 guard 持续保留阻止并发请求绕行 |
 | bypass_task_gate 直写绕过状态流转网关致 HEAD Guard 泄露且未受并发写保护 | `bypass_task_gate` 直接使用 `s.save_task(task)` 绕过了被补丁保护的流转方法，导致绑定的 atomic head guard 无法被消费，且在校验与落盘之间存在 HEAD 推进的竞态窗口 | `save_task` 必须一并纳入 store 补丁代理；`bypass_task_gate` 中将校验与直写置于同一 `clone_lock` 下原子执行，同时 `CloneLock` 必须具备线程级可重入性（thread-reentrant） |
+| 普通双重校验路径导致 HEAD Guard 堆积泄漏与返工后陈旧拒绝 | CLI 预检（`_enforce_wrapup_review_closure`）与内核网关（`kernel.transition_task`）对同一任务连续执行校验，导致重复追加多个 guard 而单次流转仅消费一个；在长生命周期调用方中残留的旧 guard 会在任务返工推进 HEAD 后成为队首阻碍合法完成 | 将 Guard 与特定 attempt/thread 显式关联；`bind_atomic_head_guard` 在同 attempt 内更新去重而不盲目追加；CLI 预检通过 `bind_guard=False` 仅验证不占位；提供 `release_atomic_head_guard` 显式解绑能力；守护测试验证普通双重校验后活跃 guard 零残留 |
 
 ### 已知边界（残留 R1，非阻塞，负责人决策项）
 
@@ -7391,6 +7392,6 @@ issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候
 ### 验证命令 / 守护测试
 
 ```bash
-pytest -q tests/test_wrapup_review_closure.py   # 56 passed，含 B1 向量 a/b 对抗用例、B2 凭据目录零污染断言、并发 HEAD guard 保留测试及 bypass-gate 直写 clone lock 守护测试
+pytest -q tests/test_wrapup_review_closure.py   # 57 passed，含 B1 向量 a/b 对抗用例、B2 凭据目录零污染断言、并发 HEAD guard 保留测试、bypass-gate 直写 clone lock 守护测试及 attempt 关联去重零残留测试
 ```
-关键回归验证：无呈现 token 即使服务端已注册也拒绝；路径遍历 operator 名拒绝；跨 operator 串用 token 拒绝；worker 自身身份冒充 operator 拒绝；正向旁路成功路径落 `review_closure_skipped` 事件并完成状态迁移；真实 `~/.herdr-controller/credentials` 在全量套件运行后零变化；并发 completion 请求在 HEAD 推进时无法绕过 lock/HEAD check；`bypass_task_gate` 直写安全受 `clone_lock` 与 `HeadGuard` 保护，HEAD 变化时坚决拒绝并不泄露 guard。
+关键回归验证：无呈现 token 即使服务端已注册也拒绝；路径遍历 operator 名拒绝；跨 operator 串用 token 拒绝；worker 自身身份冒充 operator 拒绝；正向旁路成功路径落 `review_closure_skipped` 事件并完成状态迁移；真实 `~/.herdr-controller/credentials` 在全量套件运行后零变化；并发 completion 请求在 HEAD 推进时无法绕过 lock/HEAD check；`bypass_task_gate` 直写安全受 `clone_lock` 与 `HeadGuard` 保护，HEAD 变化时坚决拒绝并不泄露 guard；双重校验路径按 attempt 去重，流转完成后活跃 guard 零残留。

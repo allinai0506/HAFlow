@@ -3061,3 +3061,25 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   1. `tests/test_wrapup_review_closure.py` 新增 2 项专项测试（`test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_closed_on_advanced_head` 与 `test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_advanced_head`）；
   2. `tests/test_wrapup_review_closure.py` 全量 56 项测试全部 PASS（耗时 53.66s）；
   3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。
+
+## [2026-10-19] fix | 评审闭环 Head Guard 绑定完成 Attempt 避免双重预检残留与返工陈旧误拒 (PR #271 Codex Review P2)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #271 中指出 1 项 P2 级生命周期泄漏与误拒风险：
+     - [P2] `herdr/review_closure.py:890`（Thread `PRRT_kwDOUYu4N86t6GBi`）："Pair each head guard with its completion attempt"。
+     - 当通过 CLI `set_status(..., "completed")` 完成任务时，CLI 前置预检 `_enforce_wrapup_review_closure` 调用 `check_completion_allowed` 注册了一枚 guard。紧接着 `kernel.transition_task` 再次调用 `check_completion_allowed` 注册了第二枚 guard。
+     - 随后的 store 流转只发生一次，仅消费其中一枚 guard，导致另一枚孤儿 guard 残留在 `_ACTIVE_HEAD_GUARDS` 中。若该任务后续进入返工并推进 HEAD，残存的陈旧 guard 会导致未来的完成尝试被错误拒绝。
+- 变更：
+  1. **HeadGuard 显式绑定 attempt_id / 线程标识**：
+     - `HeadGuard` 增加 `attempt_id` 属性，默认为 `threading.get_ident()`。
+     - `_execute_with_head_guard` 优先匹配当前线程/attempt 未认领的 guard。
+  2. **同 attempt 幂等去重与陈旧更新**：
+     - `bind_atomic_head_guard` 检查当前 task 中是否存在同一 `attempt_id` 且未认领的 guard。若存在，直接就地更新 `clone_path` 与 `expected_head`，不再追加多余条目；若不存在才新增。
+     - 增加 `release_atomic_head_guard` 支持显式释放特定任务和 attempt 的守卫。
+  3. **预检与流转解耦**：
+     - `check_completion_allowed` 增加 `bind_guard: bool = True` 参数；
+     - 在 `bin/herdr-task` 的 `_enforce_wrapup_review_closure` CLI 预检中显式传入 `bind_guard=False`，仅校验不绑 guard，真正流转时由 kernel 统一绑定。
+- 证据：
+  1. `tests/test_wrapup_review_closure.py` 新增 `test_double_validation_cli_precheck_and_kernel_transition_leaves_no_lingering_guard`，验证 CLI 预检与 kernel 双重校验后无残留 guard、返工推进 HEAD 后自动就地更新并顺利完成；
+  2. `tests/test_wrapup_review_closure.py` 全量 57 项测试全部 PASS（耗时 145.05s）；
+  3. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 0 警告通过。

@@ -895,10 +895,11 @@ def clone_lock(clone_path: Any) -> CloneLock:
 
 
 class HeadGuard:
-    def __init__(self, task_id: str, clone_path: str, expected_head: str):
+    def __init__(self, task_id: str, clone_path: str, expected_head: str, attempt_id: Any = None):
         self.task_id = str(task_id)
         self.clone_path = str(clone_path)
         self.expected_head = str(expected_head).strip().lower()
+        self.attempt_id = attempt_id if attempt_id is not None else threading.get_ident()
         self.claimed = False
 
 
@@ -908,14 +909,21 @@ _ACTIVE_HEAD_GUARDS: dict[str, list[HeadGuard]] = {}
 
 def _execute_with_head_guard(tid: str, orig_fn, self, *args, **kwargs):
     guard = None
+    att_id = threading.get_ident()
     with _HEAD_GUARDS_LOCK:
         guards = _ACTIVE_HEAD_GUARDS.get(tid)
         if guards:
             for g in guards:
-                if not g.claimed:
+                if not g.claimed and g.attempt_id == att_id:
                     guard = g
                     guard.claimed = True
                     break
+            if guard is None:
+                for g in guards:
+                    if not g.claimed:
+                        guard = g
+                        guard.claimed = True
+                        break
             if guard is None:
                 guard = guards[-1]
 
@@ -1008,26 +1016,56 @@ def _patch_store_classes() -> None:
         pass
 
 
-def bind_atomic_head_guard(store: Any, task_id: str, clone_path: Any, certified_head: str) -> None:
+def bind_atomic_head_guard(store: Any, task_id: str, clone_path: Any, certified_head: str, attempt_id: Any = None) -> None:
     """Make final HEAD check atomic with completion transition (Issue #228 Item 4).
 
     Registers the certified HEAD for the task and patches store transition methods
     so that the final clone HEAD check and CAS transition execute atomically under
-    the clone lock.
+    the clone lock. Deduplicates multiple calls within the same completion attempt /
+    thread so ordinary double-validation paths (CLI precheck + kernel transition)
+    do not leak lingering guards.
     """
     if not task_id or not clone_path or not certified_head:
         return
-    guard = HeadGuard(str(task_id), str(clone_path), str(certified_head).strip().lower())
+    tid = str(task_id)
+    c_path = str(clone_path)
+    exp_head = str(certified_head).strip().lower()
+    att_id = attempt_id if attempt_id is not None else threading.get_ident()
     with _HEAD_GUARDS_LOCK:
-        _ACTIVE_HEAD_GUARDS.setdefault(str(task_id), []).append(guard)
+        guards = _ACTIVE_HEAD_GUARDS.setdefault(tid, [])
+        existing = None
+        for g in guards:
+            if not g.claimed and g.attempt_id == att_id:
+                existing = g
+                break
+        if existing is not None:
+            existing.clone_path = c_path
+            existing.expected_head = exp_head
+        else:
+            guards.append(HeadGuard(tid, c_path, exp_head, attempt_id=att_id))
     if store is not None:
         _patch_store_class(store.__class__)
+
+
+def release_atomic_head_guard(task_id: str, attempt_id: Any = None) -> None:
+    """Explicitly release any unclaimed head guard for a task / attempt."""
+    if not task_id:
+        return
+    att_id = attempt_id if attempt_id is not None else threading.get_ident()
+    with _HEAD_GUARDS_LOCK:
+        guards = _ACTIVE_HEAD_GUARDS.get(str(task_id))
+        if guards:
+            remaining = [g for g in guards if g.claimed or g.attempt_id != att_id]
+            if remaining:
+                _ACTIVE_HEAD_GUARDS[str(task_id)] = remaining
+            else:
+                del _ACTIVE_HEAD_GUARDS[str(task_id)]
 
 
 _patch_store_classes()
 
 
-def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
+def check_completion_allowed(store, task: Any, bind_guard: bool = True) -> Tuple[bool, str]:
 
     """(ok, refusal_reason) for a wrapup completion transition."""
     task = task or {}
@@ -1093,7 +1131,8 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                             "re-record the receipt on the current head."
                         )
                     else:
-                        bind_atomic_head_guard(store, task_id, task.get("clone_path"), head)
+                        if bind_guard:
+                            bind_atomic_head_guard(store, task_id, task.get("clone_path"), head)
                         return True, ""
             else:
                 identity_why = identity_mismatch(store, task, payload.get("pr_url"), head)
@@ -1124,7 +1163,8 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                                 "re-record the receipt on the current head."
                             )
                         else:
-                            bind_atomic_head_guard(store, task_id, task.get("clone_path"), head)
+                            if bind_guard:
+                                bind_atomic_head_guard(store, task_id, task.get("clone_path"), head)
                             return True, ""
 
     skip = latest_skip(store, task_id)
@@ -1132,7 +1172,8 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
         skip_head = str(skip.get("head_sha") or "").strip().lower()
         confirm = clone_head_sha(task.get("clone_path"))  # re-read at commit time
         if confirm and skip_head and confirm == skip_head:
-            bind_atomic_head_guard(store, task_id, task.get("clone_path"), skip_head)
+            if bind_guard:
+                bind_atomic_head_guard(store, task_id, task.get("clone_path"), skip_head)
             return True, ""
 
         if not confirm:

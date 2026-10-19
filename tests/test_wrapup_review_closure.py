@@ -1325,8 +1325,8 @@ def test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_
     orig_head = scene.head
 
     # Bind guard for two concurrent attempts
-    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
-    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head, attempt_id="attempt_1")
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head, attempt_id="attempt_2")
 
     # Both guards must be registered
     assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 2
@@ -1348,6 +1348,65 @@ def test_atomic_head_guard_concurrent_completion_attempts_retain_guard_and_fail_
         scene.store.compare_and_set_task_transition(task_id=task_id, to_status="completed")
 
     # Guard 2 was cleaned up in finally, no lingering guards
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+
+def test_double_validation_cli_precheck_and_kernel_transition_leaves_no_lingering_guard(scene, monkeypatch):
+    """PR #271 Codex P2: Pair each head guard with its completion attempt.
+
+    1. Ordinary double-validation (CLI precheck then kernel transition) must deduplicate
+       within the same attempt and leave no lingering guard in _ACTIVE_HEAD_GUARDS.
+    2. Reworking after a CLI precheck correctly updates the guard without stale refusal.
+    3. check_completion_allowed(..., bind_guard=False) validates without binding a guard.
+    """
+    from herdr import review_closure
+
+    monkeypatch.setenv("PATH", f"{scene.fakebin}:{os.environ.get('PATH', '')}")
+
+    task_id = "wrapup-task"
+    c_path = scene.clone
+    orig_head = scene.head
+
+    # Record valid receipt for orig_head
+    record_valid(scene.store, orig_head)
+
+    # Step 1: verify bind_guard=False validates without binding
+    task = scene.store.get_task(task_id)
+    ok, why = review_closure.check_completion_allowed(scene.store, task, bind_guard=False)
+    assert ok, why
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+    # Step 2: verify deduplication in same attempt
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+    # Deduplicated to 1 guard
+    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 1
+
+    # Step 3: verify transition completes and cleans up guard completely
+    scene.store.transition_task(task_id, "completed", "test")
+    assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
+
+    # Step 4: verify rework after precheck updates guard without stale refusal
+    task["status"] = "agent_done"
+    scene.store.save_task(task)
+    # Precheck binds guard on orig_head
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, orig_head)
+    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 1
+
+    # Task reworked, commit advanced
+    commit_more(scene.clone, "rework content\n")
+    new_head = clone_head(scene.clone)
+    assert new_head != orig_head
+    set_fake_head(scene, new_head)
+    record_valid(scene.store, new_head)
+
+    # Fresh validation binds guard on new_head for same attempt
+    review_closure.bind_atomic_head_guard(scene.store, task_id, c_path, new_head)
+    assert len(review_closure._ACTIVE_HEAD_GUARDS[task_id]) == 1
+    assert review_closure._ACTIVE_HEAD_GUARDS[task_id][0].expected_head == new_head
+
+    # Completion succeeds against new_head and leaves no guard behind
+    scene.store.transition_task(task_id, "completed", "test")
     assert task_id not in review_closure._ACTIVE_HEAD_GUARDS
 
 
