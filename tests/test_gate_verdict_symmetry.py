@@ -11,6 +11,8 @@ automatic advance (funnel to coordinator adjudication) without destroying
 downstream work. Voiding the verdict (supersede) must resume advance.
 """
 
+from tests.support.console_source import console_source
+
 import importlib.machinery
 import importlib.util
 import json
@@ -331,8 +333,7 @@ class DirectBlockedDepTest(unittest.TestCase):
 
 class ConsolePollWindowTest(unittest.TestCase):
     def test_poll_window_covers_backend_timeout(self):
-        text = (HERDR_ROOT / "console" / "herdr_factory_console.py"
-                ).read_text(encoding="utf-8")
+        text = console_source(HERDR_ROOT)
         start = text.index("async function waitForWorkflowJob")
         end = text.index("async function submitNewWorkflowAsync")
         block = text[start:end]

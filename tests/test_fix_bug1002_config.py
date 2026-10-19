@@ -1,3 +1,4 @@
+from tests.support.console_source import console_source
 import hashlib
 import json
 import os
@@ -72,7 +73,7 @@ def test_independent_cli_updates_are_serialized(tmp_path):
 
 def test_browser_checklist_does_not_claim_unblocked_when_manifest_blocks():
     """Execute the real render helper, preserving its reason and severity."""
-    source=(Path(__file__).resolve().parents[1]/'console/herdr_factory_console.py').read_text()
+    source=console_source(Path(__file__).resolve().parents[1])
     start=source.index('function flowChecklist(node){')
     end=source.index('function flowOverviewHtml(',start)
     script="const flowGraphData=()=>({nodes:[]});const cleanStageLabel=x=>x;\n"+source[start:end]

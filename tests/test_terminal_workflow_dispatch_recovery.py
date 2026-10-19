@@ -1,4 +1,6 @@
 """Regression tests for terminal workflows and completed node dispatches."""
+
+from tests.support.console_source import console_source
 import json
 import shutil
 import subprocess
@@ -131,7 +133,7 @@ def test_console_completed_workflow_no_active_recovery_and_completed_node_protec
     node = shutil.which('node')
     if node is None:
         pytest.skip('node unavailable for Console runtime rendering')
-    source = (ROOT / 'console/herdr_factory_console.py').read_text()
+    source = console_source(ROOT)
     
     renderer = source.split('function currentRecovery(nodeId){', 1)[1].split('function decideRecovery(', 1)[0]
     renderer = 'function currentRecovery(nodeId){' + renderer

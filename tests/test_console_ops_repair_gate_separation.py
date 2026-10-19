@@ -1,3 +1,4 @@
+from tests.support.console_source import console_source
 #!/usr/bin/env python3
 """Regression tests: ops repair and gate pass separation.
 
@@ -39,8 +40,8 @@ def ops_test_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERDR_STATE_DB", str(db_path))
     monkeypatch.setenv("WORKFLOWS_FILE", str(wf_file))
     monkeypatch.setenv("TASKS_FILE", str(tasks_file))
-    monkeypatch.setattr(c, "WORKFLOWS_FILE", str(wf_file))
-    monkeypatch.setattr(c, "TASKS_FILE", str(tasks_file))
+    monkeypatch.setattr(c.common, "WORKFLOWS_FILE", str(wf_file))
+    monkeypatch.setattr(c.common, "TASKS_FILE", str(tasks_file))
 
     store = get_state_store(db_path)
 
@@ -143,13 +144,13 @@ def test_scenario_2_recovery_command_failure_or_timeout_preserves_error(ops_test
         "node": "implementation",
     }
     # Case A: command returns non-zero error
-    with patch.object(c, "run", side_effect=RuntimeError("工位通信中断")):
+    with patch.object(c.common, "run", side_effect=RuntimeError("工位通信中断")):
         with pytest.raises(RuntimeError) as exc_info:
             c.api_controller_execute_action(payload)
         assert "工位通信中断" in str(exc_info.value)
 
     # Case B: timeout
-    with patch.object(c, "run", side_effect=RuntimeError("命令超时: herdr rework")):
+    with patch.object(c.common, "run", side_effect=RuntimeError("命令超时: herdr rework")):
         with pytest.raises(RuntimeError) as exc_info:
             c.api_controller_execute_action(payload)
         assert "超时" in str(exc_info.value)
@@ -243,7 +244,7 @@ def test_scenario_4_legitimate_normal_recovery_succeeds_without_gate_override(op
         "node": "implementation",
     }
     calls = []
-    with patch.object(c, "run", side_effect=lambda cmd, timeout=20, check=False:
+    with patch.object(c.common, "run", side_effect=lambda cmd, timeout=20, check=False:
                       (calls.append(list(cmd)),
                        MagicMock(returncode=0, stdout="reworked", stderr=""))[1]):
         res = c.api_controller_execute_action(payload)
@@ -350,8 +351,8 @@ def test_scenario_6_legitimate_force_pass_scoped_with_audit(ops_test_env):
         "reason": "已知非核心偶发用例失败，主管核查允许放行",
         "operator": "lead_engineer",
     }
-    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
-        with patch.object(c, "manual_advance", return_value={"completed_stage": "test", "next_stage": "wrapup"}):
+    with patch.object(c.workflow_api, "api_workflow_recovery", return_value={"operations": []}):
+        with patch.object(c.workflow_api, "manual_advance", return_value={"completed_stage": "test", "next_stage": "wrapup"}):
             res = c.api_controller_execute_action(payload)
 
     assert res.get("ok") is True
@@ -387,8 +388,8 @@ def test_scenario_7_force_pass_succeeds_but_advance_fails_returns_partial(ops_te
         "reason": "测试门禁人工豁免",
         "operator": "admin",
     }
-    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
-        with patch.object(c, "manual_advance", side_effect=RuntimeError("后续阶段 wrapup 依赖未就绪")):
+    with patch.object(c.workflow_api, "api_workflow_recovery", return_value={"operations": []}):
+        with patch.object(c.workflow_api, "manual_advance", side_effect=RuntimeError("后续阶段 wrapup 依赖未就绪")):
             res = c.api_controller_execute_action(payload)
 
     # Must report partial=True, ok=False, not pseudo-success
@@ -990,6 +991,7 @@ def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_e
     from unittest.mock import patch
     from pathlib import Path
 
+
     # Ensure task has version and pane
     task = store.get_task("wf-ops-01-reworkable")
     assert task is not None
@@ -1012,7 +1014,7 @@ def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_e
     assert pass_act.api_payload.get("expected_pane_id") == cur_pane
 
     # 2. Server-side api_controller_execute_action: missing expected_version when targeting task is REJECTED
-    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+    with patch.object(c.workflow_api, "api_workflow_recovery", return_value={"operations": []}):
         with pytest.raises(RuntimeError) as exc:
             c.api_controller_execute_action({
                 "type": "force_pass_advance",
@@ -1026,7 +1028,7 @@ def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_e
     assert "缺少 expected_version" in str(exc.value)
 
     # 3. Server-side api_controller_execute_action: stale expected_version is REJECTED
-    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
+    with patch.object(c.workflow_api, "api_workflow_recovery", return_value={"operations": []}):
         with pytest.raises(RuntimeError) as exc2:
             c.api_controller_execute_action({
                 "type": "force_pass_advance",
@@ -1040,8 +1042,8 @@ def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_e
     assert "任务版本已变化" in str(exc2.value)
 
     # 4. Server-side api_controller_execute_action: matching version and pane SUCCEEDS
-    with patch.object(c, "api_workflow_recovery", return_value={"operations": []}):
-        with patch.object(c, "manual_advance") as mock_adv:
+    with patch.object(c.workflow_api, "api_workflow_recovery", return_value={"operations": []}):
+        with patch.object(c.workflow_api, "manual_advance") as mock_adv:
             mock_adv.return_value = {"ok": True, "advanced": True}
             res = c.api_controller_execute_action({
                 "type": "force_pass_advance",
@@ -1058,7 +1060,7 @@ def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_e
             assert res.get("gate_passed") is True
 
     # 5. Frontend template source verification: executeControllerAction and forcePassTask bind snapshot
-    src = Path("console/herdr_factory_console.py").read_text(encoding="utf-8")
+    src = console_source(Path.cwd())
     assert "payload.expected_version=matchedTask.version" in src
     assert "payload.expected_pane_id=matchedTask.pane_id" in src
     assert "expVer=matchedTask.version" in src
@@ -1175,7 +1177,7 @@ def test_scenario_18_task_signoff_force_pass_parity_and_protections(ops_test_env
     assert "经过专家组复核成果无误" in t_pass["stage_verdict_note"]
 
     # 18.8 Frontend template checks: submitSignoffDecision requires non-empty reason and passes snapshot
-    src = Path("console/herdr_factory_console.py").read_text(encoding="utf-8")
+    src = console_source(Path.cwd())
     assert "submitSignoffDecision" in src
     assert "body.confirmed=true" in src
     assert "body.expected_version" in src

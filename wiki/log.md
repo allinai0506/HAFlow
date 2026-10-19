@@ -2983,6 +2983,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 沉淀教训 `docs/lessons/lessons-learned.md` §173（缺派承诺、candidate_mismatch 登记伪影、隔离绕池 opt-out 审计、漂移旋转第二次命中、--allow-pending 义务死端、D3 契约-能力裁决）；收尾报告 `docs/walkthroughs/20261018-wf-haflow-1018-02-wrapup.md`。
 - 本记录描述本地沙盒源码；交付 PR 保持 OPEN，未合并、未部署、未重启服务。
 
+- 2026-10-19：将 Console 入口拆为 HTTP、查询、运行现场、Workflow、Task、控制和共享校验模块；主页面模板转为 release 快照内的 `console/static/console.html`，直接脚本入口继续提供兼容导出。Evidence: `console/herdr_factory_console.py`, `console/http_server.py`, `console/read_api.py`, `tests/test_console_module_boundaries.py`.
+
 ## [2026-10-19] fix | 门禁裁决采纳绑定磁盘持久化证据快照与非交互评测超时修复 (PR #266 Codex Review Round 7)
 
 - 背景：
@@ -3002,3 +3004,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   2. 全量 63 项 Issue #250 及交付回执回归测试全部 PASS；
   3. 门禁状态机及关联测试 148 项用例全部 PASS；
   4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 均 0 警告通过。
+

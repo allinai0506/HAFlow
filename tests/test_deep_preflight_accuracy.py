@@ -7,6 +7,8 @@ Covers the 2026-09-15 report: "opencode ERROR code=1 / claude TIMEOUT 35s".
   fell through to generic ERROR with no actionable classification.
 """
 
+from tests.support.console_source import console_source
+
 import importlib.util
 import threading
 import unittest
@@ -27,7 +29,7 @@ def load_deep_preflight():
 
 
 def load_console_html():
-    return (ROOT / "console" / "herdr_factory_console.py").read_text(encoding="utf-8")
+    return console_source(ROOT)
 
 
 class TestClassifyAccuracy(unittest.TestCase):

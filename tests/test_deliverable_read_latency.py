@@ -15,8 +15,8 @@ def seed(tmp_path, monkeypatch):
     state_db.save_task({'task_id': 't', 'workflow_id': 'wf', 'node': 'impl', 'status': 'cleaned'}, db_path=db)
     state_db.record_event({'workflow_id': 'wf', 'task_id': 't', 'event_type': 'pull_request_created',
                            'source': 'herdr-task', 'timestamp': 1, 'payload': {'url': 'https://example.com/pulls/1'}}, db_path=db)
-    monkeypatch.setattr(c, '_deliverable_observation_loader', c._load_deliverable_observations)
-    monkeypatch.setattr(c, '_deliverable_pr_loader', c._load_deliverable_pr)
+    monkeypatch.setattr(c.read_api, '_deliverable_observation_loader', c._load_deliverable_observations)
+    monkeypatch.setattr(c.read_api, '_deliverable_pr_loader', c._load_deliverable_pr)
     return db
 
 
@@ -26,8 +26,8 @@ def test_catalog_and_file_read_never_initialize_or_load_global_inventory(tmp_pat
         pytest.fail('deliverable read entered mutable/global state path')
     monkeypatch.setattr(state_db, 'get_db_connection', forbidden)
     monkeypatch.setattr(c.herdr_kernel, '_get_store', forbidden)
-    monkeypatch.setattr(c, 'workflows', forbidden)
-    monkeypatch.setattr(c, 'tasks_for_workflow', forbidden)
+    monkeypatch.setattr(c.inventory, 'workflows', forbidden)
+    monkeypatch.setattr(c.inventory, 'tasks_for_workflow', forbidden)
     result = c.api_workflow_deliverables('wf')
     assert [row['url'] for row in result['items'] if row['kind'] == 'git_pr'] == ['https://example.com/pulls/1']
     with pytest.raises(c.herdr_deliverables.DeliverableError) as exc:

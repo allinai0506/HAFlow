@@ -1,5 +1,7 @@
 """PR #211 R8 regression tests: Codex follow-ups on f6b7e2f (real entries)."""
 
+from tests.support.console_source import console_source
+
 import tempfile
 import time
 from pathlib import Path
@@ -60,6 +62,6 @@ def test_scope_all_with_customer_stays_narrowed():
 
 
 def test_customer_filter_is_applicable():
-    text = Path("console/herdr_factory_console.py").read_text()
+    text = console_source(Path(__file__).resolve().parents[1])
     assert "applyHubFilter" in text
     assert "_hubCustomerFilter" in text

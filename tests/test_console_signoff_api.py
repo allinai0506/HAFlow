@@ -25,8 +25,8 @@ def console_signoff_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TASKS_FILE", str(tasks_file))
     monkeypatch.setenv("STEERING_FILE", str(steer_file))
 
-    monkeypatch.setattr(c, "WORKFLOWS_FILE", str(wf_file))
-    monkeypatch.setattr(c, "TASKS_FILE", str(tasks_file))
+    monkeypatch.setattr(c.common, "WORKFLOWS_FILE", str(wf_file))
+    monkeypatch.setattr(c.common, "TASKS_FILE", str(tasks_file))
 
     wf_file.write_text(json.dumps({"workflows": {}}), encoding="utf-8")
     tasks_file.write_text(json.dumps({"tasks": []}), encoding="utf-8")

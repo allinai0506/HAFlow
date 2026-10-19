@@ -198,13 +198,13 @@ class TestFlowWorkbenchBackend(unittest.TestCase):
             ]}, f)
             wf_path = f.name
         try:
-            with patch.object(self.console, "workflow_by_id", return_value={
+            with patch.object(self.console.inventory, "workflow_by_id", return_value={
                 "workflow_id": "wf-1", "project_id": "p-1",
-            }), patch.object(self.console, "project_for_workflow", return_value={
+            }), patch.object(self.console.inventory, "project_for_workflow", return_value={
                 "workflow_file": wf_path,
-            }), patch.object(self.console, "tasks_for_workflow", return_value=[
+            }), patch.object(self.console.inventory, "tasks_for_workflow", return_value=[
                 {"task_id": "t-1", "workflow_id": "wf-1", "node": "plan", "stage": "plan", "status": "completed", "agent": "codex"},
-            ]), patch.object(self.console, "agent_runtime", return_value=None), patch.object(
+            ]), patch.object(self.console.runtime, "agent_runtime", return_value=None), patch.object(
                 self.console.herdr_projection, "detect_workflow_stalls", return_value=None,
             ), patch.object(self.console.herdr_projects, "workflow_config_for", return_value=None):
                 detail = self.console.workflow_detail("wf-1")

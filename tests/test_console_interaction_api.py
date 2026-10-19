@@ -42,14 +42,14 @@ def mock_tasks(monkeypatch, tmp_path):
         "version": 2,
     }
     task_list = [t_active, t_done]
-    monkeypatch.setattr(c, "tasks", lambda: list(task_list))
+    monkeypatch.setattr(c.inventory, "tasks", lambda: list(task_list))
     return task_list
 
 
 
 def test_api_task_interaction_get_detected(mock_tasks, monkeypatch):
-    monkeypatch.setattr(c, "read_pane", lambda pid: SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "agent_runtime", lambda pid: {
+    monkeypatch.setattr(c.read_api, "read_pane", lambda pid: SAMPLE_PROMPT)
+    monkeypatch.setattr(c.runtime, "agent_runtime", lambda pid: {
         "agent": "claude",
         "agent_status": "blocked",
         "terminal_id": "term_123",
@@ -69,8 +69,8 @@ def test_api_task_interaction_get_detected(mock_tasks, monkeypatch):
 
 
 def test_api_task_interaction_get_not_detected(mock_tasks, monkeypatch):
-    monkeypatch.setattr(c, "read_pane", lambda pid: "Compiling binary...\nDone in 0.5s\n")
-    monkeypatch.setattr(c, "agent_runtime", lambda pid: {
+    monkeypatch.setattr(c.read_api, "read_pane", lambda pid: "Compiling binary...\nDone in 0.5s\n")
+    monkeypatch.setattr(c.runtime, "agent_runtime", lambda pid: {
         "agent": "claude",
         "agent_status": "working",
         "terminal_id": "term_123",
@@ -88,8 +88,8 @@ def test_api_task_interaction_get_nonexistent_task(mock_tasks):
 
 
 def test_api_task_interaction_get_workflow_scan(mock_tasks, monkeypatch):
-    monkeypatch.setattr(c, "read_pane", lambda pid: SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "agent_runtime", lambda pid: {
+    monkeypatch.setattr(c.read_api, "read_pane", lambda pid: SAMPLE_PROMPT)
+    monkeypatch.setattr(c.runtime, "agent_runtime", lambda pid: {
         "agent": "claude",
         "agent_status": "blocked",
         "terminal_id": "term_123",
@@ -104,8 +104,8 @@ def test_api_task_interaction_get_workflow_scan(mock_tasks, monkeypatch):
 
 def test_api_task_interaction_respond_success(mock_tasks, monkeypatch):
     fp = il.compute_prompt_fingerprint(SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "read_pane", lambda pid: SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "agent_runtime", lambda pid: {
+    monkeypatch.setattr(c.read_api, "read_pane", lambda pid: SAMPLE_PROMPT)
+    monkeypatch.setattr(c.runtime, "agent_runtime", lambda pid: {
         "agent": "claude",
         "agent_status": "blocked",
         "terminal_id": "term_123",
@@ -123,8 +123,8 @@ def test_api_task_interaction_respond_success(mock_tasks, monkeypatch):
         def updated_rt(pid):
             return {"agent": "claude", "agent_status": "working", "terminal_id": "term_123", "revision": 6}
 
-        with patch.object(c, "read_pane", side_effect=[SAMPLE_PROMPT, "Proceeding...\n"]):
-            with patch.object(c, "agent_runtime", side_effect=[
+        with patch.object(c.read_api, "read_pane", side_effect=[SAMPLE_PROMPT, "Proceeding...\n"]):
+            with patch.object(c.runtime, "agent_runtime", side_effect=[
                 {"agent": "claude", "agent_status": "blocked", "terminal_id": "term_123", "revision": 5},
                 {"agent": "claude", "agent_status": "working", "terminal_id": "term_123", "revision": 6},
             ]):
@@ -144,8 +144,8 @@ def test_api_task_interaction_respond_success(mock_tasks, monkeypatch):
 
 
 def test_api_task_interaction_respond_fingerprint_mismatch(mock_tasks, monkeypatch):
-    monkeypatch.setattr(c, "read_pane", lambda pid: SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "agent_runtime", lambda pid: {
+    monkeypatch.setattr(c.read_api, "read_pane", lambda pid: SAMPLE_PROMPT)
+    monkeypatch.setattr(c.runtime, "agent_runtime", lambda pid: {
         "agent": "claude",
         "agent_status": "blocked",
         "terminal_id": "term_123",
@@ -165,8 +165,8 @@ def test_api_task_interaction_respond_fingerprint_mismatch(mock_tasks, monkeypat
 
 def test_api_task_interaction_respond_pane_drift(mock_tasks, monkeypatch):
     fp = il.compute_prompt_fingerprint(SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "read_pane", lambda pid: SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "agent_runtime", lambda pid: {
+    monkeypatch.setattr(c.read_api, "read_pane", lambda pid: SAMPLE_PROMPT)
+    monkeypatch.setattr(c.runtime, "agent_runtime", lambda pid: {
         "agent": "claude",
         "agent_status": "blocked",
         "terminal_id": "term_123",
@@ -192,8 +192,8 @@ def test_api_task_interaction_respond_completed_task_rejected(mock_tasks):
 
 def test_api_task_interaction_respond_duplicate_rejection(mock_tasks, monkeypatch):
     fp = il.compute_prompt_fingerprint(SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "read_pane", lambda pid: SAMPLE_PROMPT)
-    monkeypatch.setattr(c, "agent_runtime", lambda pid: {
+    monkeypatch.setattr(c.read_api, "read_pane", lambda pid: SAMPLE_PROMPT)
+    monkeypatch.setattr(c.runtime, "agent_runtime", lambda pid: {
         "agent": "claude",
         "agent_status": "blocked",
         "terminal_id": "term_123",

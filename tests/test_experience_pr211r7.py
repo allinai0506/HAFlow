@@ -1,5 +1,7 @@
 """PR #211 R7 regression tests: XSS, mandatory inheritance, admin listing, poison queue."""
 
+from tests.support.console_source import console_source
+
 import json
 import tempfile
 import time
@@ -38,7 +40,7 @@ def test_evil_experience_id_rejected_and_escaped():
             assert c.submit_candidate(_mkexp("ok-id_123")).get("ok") is True
         finally:
             srv.stop()
-    text = Path("console/herdr_factory_console.py").read_text()
+    text = console_source(Path(__file__).resolve().parents[1])
     assert "jsArg(c.experience_id)" in text
     assert "jsArg(r.experience_id)" in text
     assert "sessionStorage" in text

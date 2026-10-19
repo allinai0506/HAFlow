@@ -22,7 +22,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CONSOLE_SRC = ROOT / "console" / "herdr_factory_console.py"
+CONSOLE_SRC = ROOT / "console" / "static" / "console.html"
 
 NODE = shutil.which("node")
 
