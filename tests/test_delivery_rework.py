@@ -340,18 +340,21 @@ def test_durable_dispatch_receipt_repairs_post_send_crash_without_resend(deliver
 
 
 def test_legacy_rework_receives_pinned_delivery_requirements(delivery_env, monkeypatch):
-    import importlib.machinery
     from types import SimpleNamespace
     from herdr import task_resources, kernel
+    from herdr.task_cli_rework import handle_rework
     _, store = delivery_env
-    loader = importlib.machinery.SourceFileLoader('legacy_delivery_cli', str(ROOT / 'bin/herdr-task'))
-    spec = importlib.util.spec_from_loader(loader.name, loader); cli = importlib.util.module_from_spec(spec); loader.exec_module(cli)
-    monkeypatch.setattr(cli, '_get_store', lambda: store)
     monkeypatch.setattr(task_resources, 'owned_live_pane', lambda task: (True, 'match'))
     monkeypatch.setattr(kernel, 'sync_tasks_projection', lambda **kw: None)
     sent = []
-    monkeypatch.setattr(cli, '_herdr', lambda *args: (sent.append(args[-1]) or SimpleNamespace(returncode=0)))
-    cli.cmd_rework(SimpleNamespace(task_id='t', request_id='legacy-1', reason='repair', prompt='do work'))
+    handle_rework(
+        SimpleNamespace(task_id='t', request_id='legacy-1', reason='repair', prompt='do work'),
+        get_store=lambda: store,
+        herdr=lambda *args: (sent.append(args[-1]) or SimpleNamespace(returncode=0)),
+        is_gate_task=lambda task: False,
+        recover_unconsumed_gate_cleanup_id=lambda task, store: None,
+        cleanup_gate_for_rework=lambda task, token, store: None,
+    )
     assert len(sent) == 1 and 'docs/postmortem.md' in sent[0]
     assert 'delivery-check' in sent[0]
 
