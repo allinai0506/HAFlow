@@ -10,6 +10,26 @@ from herdr.task_resources import workflow_launch_lock, begin_launch_intent, reco
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_launch_reconcile_handler_rejects_missing_intent_without_side_effects(tmp_path, capsys):
+    from types import SimpleNamespace
+    from herdr.task_cli_resources import handle_launch_reconcile
+
+    store = get_state_store(tmp_path / 'handler-state.db')
+    args = SimpleNamespace(
+        workflow_id='wf', node='n', dispatch_role='worker', candidate_sha='abc',
+        dispatch_round=1, authorize_terminal_id=None, apply=True,
+        confirm_agent_never_started=False, reason=None,
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        handle_launch_reconcile(args, get_store=lambda: store,
+                                release_agent_reservation=lambda _task_id: pytest.fail('unexpected release'))
+
+    assert raised.value.code == 2
+    assert '[LAUNCH RECONCILE REJECTED] launch intent not found' in capsys.readouterr().err
+    assert store.list_events(event_type='launch_intent') == []
+
+
 @pytest.mark.parametrize('resource_status', ['absent', 'owned', 'foreign', 'unknown'])
 def test_real_reconcile_cli_only_proven_absence_releases(tmp_path, resource_status):
     store = get_state_store(tmp_path / 'state.db')

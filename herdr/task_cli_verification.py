@@ -257,3 +257,49 @@ def verify_metrics(task_id, min_score=99.9, if_present=False, *,
 
     if not passed:
         sys.exit(5)
+
+
+def differential_test(args):
+    """Evaluate candidate test failures against the selected baseline."""
+    from herdr.domain import get_domain_adapter
+
+    candidate_path = getattr(args, "candidate_output", None)
+    if not candidate_path:
+        print("ERROR: --candidate-output is required for differential-test", file=sys.stderr)
+        sys.exit(2)
+    if not os.path.isfile(candidate_path):
+        print("ERROR: candidate output file not found: " + str(candidate_path), file=sys.stderr)
+        sys.exit(1)
+
+    base_output = None
+    base_output_path = getattr(args, "base_output", None)
+    if base_output_path:
+        if not os.path.isfile(base_output_path):
+            print("ERROR: base output file not found: " + str(base_output_path), file=sys.stderr)
+            sys.exit(1)
+        base_output = Path(base_output_path).read_text(encoding="utf-8", errors="replace")
+
+    base_snapshot_path = getattr(args, "base_snapshot", None)
+    if base_snapshot_path and not os.path.isfile(base_snapshot_path):
+        print("ERROR: base snapshot file not found: " + str(base_snapshot_path), file=sys.stderr)
+        sys.exit(1)
+
+    candidate_output = Path(candidate_path).read_text(encoding="utf-8", errors="replace")
+    adapter = get_domain_adapter(domain=getattr(args, "domain", "software"))
+    result = adapter.evaluate_differential_tests(
+        candidate_output=candidate_output,
+        base_output=base_output,
+        base_snapshot=base_snapshot_path,
+        candidate_exit_code=getattr(args, "candidate_exit_code", 0),
+        base_exit_code=getattr(args, "base_exit_code", 0),
+    )
+
+    verdict = result.get("verdict", "pass")
+    delta_count = len(result.get("delta_failures", []))
+    baseline_count = len(result.get("pre_existing_failures", []))
+    print(f"DIFFERENTIAL_TEST: verdict={verdict} delta={delta_count} pre_existing={baseline_count}")
+    if result.get("warning"):
+        print(f"WARNING: {result['warning']}")
+    print("HERDR_DIFFERENTIAL_TEST_RESULT=" + json.dumps(result, ensure_ascii=False))
+    if verdict != "pass":
+        sys.exit(1)

@@ -1812,51 +1812,12 @@ def _validate_selective_replacement_baseline(args, candidate_sha, baseline_commi
 
 
 def cmd_launch_reconcile(args):
-    import shlex
-    from herdr.task_resources import (dispatch_identity, _latest_intent, workflow_launch_lock,
-                                      inventory_launch_resources, reconcile_launch_intent, registered_launch_task)
-    try:
-        store = _get_store()
-        key = dispatch_identity(args.workflow_id, args.node, args.dispatch_role,
-                                args.candidate_sha or '', args.dispatch_round)
-        with workflow_launch_lock(store.db_path, args.workflow_id):
-            intent = _latest_intent(store, key)
-            if not intent:
-                alternatives = store.list_events(workflow_id=args.workflow_id, node_id=args.node, event_type='launch_intent', source='launch', desc=True, limit=100)
-                roles = sorted({e['payload'].get('role', 'worker') for e in alternatives if e['payload'].get('candidate_sha', '') == (args.candidate_sha or '') and e['payload'].get('dispatch_round', 1) == args.dispatch_round})
-                if roles:
-                    raise ValueError('launch intent role mismatch: requested=' + args.dispatch_role + '; available=' + ','.join(roles))
-                raise ValueError('launch intent not found')
-            registered = registered_launch_task(store, intent)
-            if registered:
-                report = {'resource_status': 'registered', 'task_id': registered['task_id'], 'applied': False}
-            elif store.get_task(intent['task_id']):
-                report = {'resource_status': 'foreign', 'task_id': intent['task_id'], 'applied': False,
-                          'reason': 'task_id_reused_by_another_identity'}
-            else:
-                if getattr(args, 'authorize_terminal_id', None):
-                    if args.apply or not args.confirm_agent_never_started or not args.reason:
-                        raise ValueError('Authorization requires --confirm-agent-never-started --reason and a separate subsequent --apply')
-                    from herdr.task_resources import authorize_launch_recovery
-                    report = authorize_launch_recovery(store, intent, args.authorize_terminal_id, args.reason)
-                    print(json.dumps(report, ensure_ascii=False))
-                    return
-                report = inventory_launch_resources(intent)
-                report.update(intent_id=intent['intent_id'], task_id=intent['task_id'], applied=False)
-                report['recovery_command'] = 'herdr-task launch-reconcile --workflow-id ' + shlex.quote(args.workflow_id) + ' --node ' + shlex.quote(args.node) + ' --dispatch-role ' + shlex.quote(args.dispatch_role) + ' --candidate-sha ' + shlex.quote(args.candidate_sha or '') + ' --dispatch-round ' + str(args.dispatch_round) + ' --apply'
-                if report.get('resource_status') != 'absent':
-                    report['authentication_help'] = 'Inspect herdr pane get <pane_id>; only with evidence no Agent start occurred, run this command without --apply plus --authorize-terminal-id <terminal_id> --confirm-agent-never-started --reason <evidence>; then repeat --apply. Started/foreign instances require task recovery rather than reclamation.'
-                if args.apply:
-                    from herdr.task_resources import recover_launch_resources
-                    recovered = recover_launch_resources(store, intent)
-                    report.update(recovered)
-                    if recovered['status'] == 'resources_absent':
-                        release_agent_reservation(intent['task_id'])
-                        report['applied'] = True
-            print(json.dumps(report, ensure_ascii=False))
-    except (OSError, ValueError, RuntimeError) as exc:
-        print(f'[LAUNCH RECONCILE REJECTED] {exc}', file=sys.stderr)
-        sys.exit(2)
+    from herdr.task_cli_resources import handle_launch_reconcile
+    return handle_launch_reconcile(
+        args,
+        get_store=_get_store,
+        release_agent_reservation=release_agent_reservation,
+    )
 
 
 def cmd_tool_run(args):
@@ -1869,54 +1830,20 @@ def cmd_task_checkpoint(args):
     return handle_task_checkpoint(args, get_store=_get_store)
 
 def _capacity_definition(project):
-    config = project.get("config")
-    path = project.get("workflow_file")
-    if not isinstance(config, dict) or not config.get('nodes'):
-        config = json.loads(Path(path).expanduser().read_text(encoding="utf-8")) if path else project
-    return normalize_workflow(config)
+    from herdr.task_cli_resources import capacity_definition
+    return capacity_definition(project)
 
 
 def _check_launch_capacity(args, project, tasks, node_id):
-    from herdr.node_capacity import node_usage, launch_capacity_error
-    try:
-        definition = _capacity_definition(project)
-        node = next((n for n in definition.get("nodes", [])
-                     if (n.get("id") or n.get("key")) == node_id), {"id": node_id})
-        usage = node_usage(node, tasks, args.workflow_id)
-        old_id = getattr(args, "supersedes", None)
-        old = next((t for t in tasks if t.get("task_id") == old_id), None) if old_id else None
-        if old_id and (not old or old.get("workflow_id") != args.workflow_id
-                       or (old.get("node") or old.get("stage")) != node_id):
-            raise ValueError("--supersedes must name an existing task in the same workflow/node")
-        if old_id and not str(getattr(args, "supersede_reason", "") or "").strip():
-            raise ValueError("Replacement requires --supersede-reason; prefer herdr-task rework")
-        error = launch_capacity_error(usage)
-        if error:
-            raise ValueError(error)
-        warning = usage["confirmation_threshold"]
-        overflow = warning is not None and usage["task_count"] + 1 > warning
-        if usage["legacy_max_agents"] is not None:
-            print("[DEPRECATED] max_agents is a legacy dispatch switch; migrate to "
-                  "max_concurrency and max_tasks_per_node")
-        if overflow:
-            print(f"[NODE OVERFLOW] node={node_id} cumulative tasks={usage['task_count']} "
-                  f"pane_refs={usage['pane_count']} legacy max_agents={warning}")
-            print("Existing task_ids: " + ", ".join(usage["task_ids"]))
-            if not getattr(args, "ack_overflow", False):
-                raise ValueError("Legacy cumulative threshold exceeded; use explicit --ack-overflow "
-                                 "(audited), or rework the existing task")
-            _get_store().record_event(
-                "node_overflow_acknowledged",
-                {**usage, "proposed_task_count": usage["task_count"] + 1},
-                workflow_id=args.workflow_id, node_id=node_id, task_id=args.task_id,
-                run_id=args.run_id, source="herdr-task",
-            )
-    except (OSError, RuntimeError, ValueError, TypeError) as exc:
-        print(f"[NODE CAPACITY REJECTED] {exc}; existing task_ids: "
-              + ", ".join(str(t.get("task_id")) for t in tasks
-                          if t.get("workflow_id") == args.workflow_id
-                          and (t.get("node") or t.get("stage")) == node_id))
-        sys.exit(2)
+    from herdr.task_cli_resources import check_launch_capacity
+    return check_launch_capacity(
+        args,
+        project,
+        tasks,
+        node_id,
+        get_store=_get_store,
+        load_capacity_definition=_capacity_definition,
+    )
 
 
 def cmd_panes(args):
@@ -3302,48 +3229,8 @@ def verify_metrics(task_id, min_score=99.9, if_present=False):
 
 
 def differential_test(args):
-    """Evaluate differential test failures between candidate and base."""
-    from herdr.domain import get_domain_adapter
-    cand_path = getattr(args, "candidate_output", None)
-    if not cand_path:
-        print("ERROR: --candidate-output is required for differential-test", file=sys.stderr)
-        sys.exit(2)
-    if not os.path.isfile(cand_path):
-        print(f"ERROR: candidate output file not found: {cand_path}", file=sys.stderr)
-        sys.exit(1)
-
-    base_out = None
-    base_out_path = getattr(args, "base_output", None)
-    if base_out_path:
-        if not os.path.isfile(base_out_path):
-            print(f"ERROR: base output file not found: {base_out_path}", file=sys.stderr)
-            sys.exit(1)
-        base_out = Path(base_out_path).read_text(encoding="utf-8", errors="replace")
-
-    base_snap_path = getattr(args, "base_snapshot", None)
-    if base_snap_path and not os.path.isfile(base_snap_path):
-        print(f"ERROR: base snapshot file not found: {base_snap_path}", file=sys.stderr)
-        sys.exit(1)
-
-    cand_out = Path(cand_path).read_text(encoding="utf-8", errors="replace")
-    adapter = get_domain_adapter(domain=getattr(args, "domain", "software"))
-    result_dict = adapter.evaluate_differential_tests(
-        candidate_output=cand_out,
-        base_output=base_out,
-        base_snapshot=base_snap_path,
-        candidate_exit_code=getattr(args, "candidate_exit_code", 0),
-        base_exit_code=getattr(args, "base_exit_code", 0),
-    )
-
-    verdict = result_dict.get("verdict", "pass")
-    delta_len = len(result_dict.get("delta_failures", []))
-    pre_len = len(result_dict.get("pre_existing_failures", []))
-    print(f"DIFFERENTIAL_TEST: verdict={verdict} delta={delta_len} pre_existing={pre_len}")
-    if result_dict.get("warning"):
-        print(f"WARNING: {result_dict['warning']}")
-    print("HERDR_DIFFERENTIAL_TEST_RESULT=" + json.dumps(result_dict, ensure_ascii=False))
-    if verdict != "pass":
-        sys.exit(1)
+    from herdr.task_cli_verification import differential_test as handle
+    return handle(args)
 
 
 def bypass_gate_cli(task_id, reason, operator="human", note=None, as_json=False):
