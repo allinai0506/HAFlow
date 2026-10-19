@@ -1275,131 +1275,45 @@ def cmd_renew_completion(args):
     return handle_renew_completion(args, get_store=_get_store, herdr=_herdr)
 
 def _is_gate_cleanup_completed(task, delivery_id, store):
-    """Check if a durable gate cleanup completion phase was already persisted for this delivery."""
-    if not delivery_id or not store:
-        return False
-    from herdr import state_db
-    conn = state_db.get_db_connection(store.db_path)
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM events WHERE task_id=? AND event_type='gate_cleanup_completed' AND json_extract(payload_json, '$.delivery_id')=? LIMIT 1",
-            (task["task_id"], delivery_id),
-        ).fetchone()
-        return bool(row)
-    finally:
-        conn.close()
+    from herdr.task_cli_rework import _is_gate_cleanup_completed as handle
+
+    return handle(task, delivery_id, store, deps={"is_gate_task": _is_gate_task})
 
 
 def _recover_unconsumed_gate_cleanup_id(task, store):
-    """Recover existing gate cleanup operation ID when retrying a rework before delivery committed."""
-    if not task or not store or not _is_gate_task(task):
-        return None
-    from herdr import state_db
-    conn = state_db.get_db_connection(store.db_path)
-    try:
-        meta_id = task.get("rework_cleanup_id")
-        if meta_id:
-            dispatched = conn.execute(
-                """
-                SELECT 1 FROM events
-                WHERE task_id=? AND json_extract(payload_json, '$.intervention_id')=? AND event_type IN ('rework_dispatched', 'rework_dispatch_prepared')
-                LIMIT 1
-                """,
-                (task["task_id"], meta_id),
-            ).fetchone()
-            if not dispatched and not (task.get("rework_delivery") == "delivered" and task.get("execution_token") == meta_id):
-                return meta_id
+    from herdr.task_cli_rework import _recover_unconsumed_gate_cleanup_id as handle
 
-        row = conn.execute(
-            """
-            SELECT json_extract(payload_json, '$.delivery_id') AS delivery_id
-            FROM events
-            WHERE task_id=? AND (run_id=? OR ? IS NULL) AND event_type='gate_cleanup_completed'
-            ORDER BY id DESC LIMIT 1
-            """,
-            (task["task_id"], task.get("run_id"), task.get("run_id")),
-        ).fetchone()
-        if not row or not row["delivery_id"]:
-            return None
-        candidate_id = row["delivery_id"]
-
-        dispatched = conn.execute(
-            """
-            SELECT 1 FROM events
-            WHERE task_id=? AND json_extract(payload_json, '$.intervention_id')=? AND event_type IN ('rework_dispatched', 'rework_dispatch_prepared')
-            LIMIT 1
-            """,
-            (task["task_id"], candidate_id),
-        ).fetchone()
-        if dispatched:
-            return None
-
-        if task.get("rework_delivery") == "delivered" and (task.get("rework_request_id") == candidate_id or task.get("execution_token") == candidate_id):
-            return None
-
-        return candidate_id
-    finally:
-        conn.close()
+    return handle(task, store, deps={"is_gate_task": _is_gate_task})
 
 
 def _cleanup_gate_for_rework(task, delivery_id=None, store=None):
-    """PR #250 & Codex review: Stop old writer and purge prior verdicts for gate tasks in a two-phase recoverable cleanup."""
-    if not _is_gate_task(task):
-        return
-    # If this delivery is already pending retry, skip interrupt side-effect
-    if task.get("status") == "rework" and task.get("rework_delivery") == "pending" and not task.get("_force_cleanup"):
-        return
-    if not task.get("_force_cleanup") and store and delivery_id and _is_gate_cleanup_completed(task, delivery_id, store):
-        # P1/P2: Completed cleanup phase was already persisted and executed for this delivery attempt.
-        # Do not repeat C-c to avoid terminating work started after the first interruption.
-        return
-    # P1: Persist cleanup intent before issuing the pane interrupt side effect
-    if store and delivery_id:
-        store.record_event(
-            "gate_cleanup_intent",
-            {"delivery_id": delivery_id, "task_id": task["task_id"], "run_id": task.get("run_id")},
-            task_id=task["task_id"],
-            workflow_id=task.get("workflow_id"),
-            run_id=task.get("run_id"),
-            source="herdr-task",
-        )
-    from herdr.node_capacity import pane_reference
-    pane_ref = pane_reference(task)
-    if pane_ref:
-        res = _herdr("pane", "send-keys", str(pane_ref), "C-c")
-        # P1: Check returncode; abort rework if the pane interrupt fails so we never continue with an old writer running
-        if res.returncode != 0:
-            raise RuntimeError(f"Failed to interrupt gate pane {pane_ref} (exit {res.returncode}): {res.stderr or res.stdout}")
-    candidates = _gate_verdict_file_candidates(task)
+    from herdr.task_cli_rework import _cleanup_gate_for_rework as handle
 
-    for cand in candidates:
-        if cand and os.path.exists(cand):
-            try:
-                os.remove(cand)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                raise RuntimeError(f"Failed to purge gate verdict file {cand}: {exc}") from exc
-            if os.path.exists(cand):
-                raise RuntimeError(f"Gate verdict file still exists after removal attempt: {cand}")
-    # P1: Persist cleanup completion phase only after interrupt and purge succeed
-    if store and delivery_id:
-        store.record_event(
-            "gate_cleanup_completed",
-            {"delivery_id": delivery_id, "task_id": task["task_id"], "run_id": task.get("run_id")},
-            task_id=task["task_id"],
-            workflow_id=task.get("workflow_id"),
-            run_id=task.get("run_id"),
-            source="herdr-task",
-        )
+    return handle(
+        task,
+        delivery_id,
+        store,
+        deps={
+            "is_gate_task": _is_gate_task,
+            "herdr": _herdr,
+            "gate_verdict_file_candidates": _gate_verdict_file_candidates,
+            "os": os,
+            "gate_cleanup_completed": _is_gate_cleanup_completed,
+        },
+    )
 
 
 def cmd_rework(args):
     from herdr.task_cli_rework import handle_rework
+
     return handle_rework(
-        args, get_store=_get_store, herdr=_herdr, is_gate_task=_is_gate_task,
+        args,
+        get_store=_get_store,
+        herdr=_herdr,
+        is_gate_task=_is_gate_task,
         recover_unconsumed_gate_cleanup_id=_recover_unconsumed_gate_cleanup_id,
-        cleanup_gate_for_rework=_cleanup_gate_for_rework, now=time.time,
+        cleanup_gate_for_rework=_cleanup_gate_for_rework,
+        now=time.time,
     )
 
 
@@ -1465,42 +1379,63 @@ def _git_current_branch(clone):
 
 def _git_remote_contained_shas(clone, shas, exclude_branches=None):
     from herdr.git_adoption_probe import git_remote_contained_shas
+
     return git_remote_contained_shas(clone, shas, exclude_branches=exclude_branches)
 
 
 def _git_interval_commits(clone, baseline, head):
     from herdr.git_adoption_probe import git_interval_commits
-    return git_interval_commits(clone, baseline, head,
-                                log_commits=_git_log_commits,
-                                commit_paths=_git_commit_paths)
+
+    return git_interval_commits(
+        clone,
+        baseline,
+        head,
+        log_commits=_git_log_commits,
+        commit_paths=_git_commit_paths,
+    )
 
 
 def _git_head_history(clone, head, limit=100):
     from herdr.git_adoption_probe import git_head_history
-    return git_head_history(clone, head, limit=limit,
-                            log_commits=_git_log_commits,
-                            commit_paths=_git_commit_paths)
+
+    return git_head_history(
+        clone,
+        head,
+        limit=limit,
+        log_commits=_git_log_commits,
+        commit_paths=_git_commit_paths,
+    )
+
 
 def _adopt_head_if_attributable(task_id, task, clone, allow_rebase=False):
     from herdr.task_cli_adoption import adopt_head_if_attributable
+
     return adopt_head_if_attributable(
-        task_id, task, clone, allow_rebase=allow_rebase,
-        get_store=_get_store, adoption_skew_seconds=_adoption_skew_seconds,
-        git_head_sha=_git_head_sha, git_current_branch=_git_current_branch,
-        git_is_ancestor=_git_is_ancestor, git_interval_commits=_git_interval_commits,
+        task_id,
+        task,
+        clone,
+        allow_rebase=allow_rebase,
+        get_store=_get_store,
+        adoption_skew_seconds=_adoption_skew_seconds,
+        git_head_sha=_git_head_sha,
+        git_current_branch=_git_current_branch,
+        git_is_ancestor=_git_is_ancestor,
+        git_interval_commits=_git_interval_commits,
         git_head_history=_git_head_history,
         git_remote_contained_shas=_git_remote_contained_shas,
-        coerce_epoch=_coerce_epoch, set_status=set_status,
+        coerce_epoch=_coerce_epoch,
+        set_status=set_status,
     )
 
 
 def _publish_integrated_task(task_id):
     from herdr.scheduler_facts import publish_integrated_candidate
+
     try:
         publish_integrated_candidate(_get_store(), task_id)
     except ValueError as exc:
         # Legacy integration can finish, but cannot silently publish a candidate.
-        print(f'[CANDIDATE PUBLICATION REJECTED] {exc}', file=sys.stderr)
+        print(f"[CANDIDATE PUBLICATION REJECTED] {exc}", file=sys.stderr)
 
 
 @_with_git_operation_lock(include_source_repo=True)
