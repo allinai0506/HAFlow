@@ -8,6 +8,26 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-19] fix | 恢复前置校验凭证交付状态、拒绝未来时间戳异常延期 (PR #266 Codex Review Round 3)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 最新一轮审查中指出 2 项副作用与时间戳边界缺陷：
+     - [P1] `bin/herdr-task:cmd_rework` 中无条件执行的 `pane send-keys C-c` 位于 `supervisor_delivery.deliver()` 校验持久化交付阶段之前。在 `receipt-v1` 协议下，若在 `before_prompt` 或 `after_prompt` 崩溃后重试返工，由于任务处于 `rework` 且交付为 `pending`，无条件中断会在 `deliver()` 抛出 `DeliveryUnknown` 前破坏已在运行的新执行尝试，破坏了无重复副作用恢复契约，同时导致 `tests/test_cli_receipt_delivery.py::test_real_cli_entry_crash_recovery` 的 4 个 rework 用例全部失败；
+     - [P2] `services/herdr-sentinel.py` 与 `services/herdr-controller.py`：如果裁决文件的 `mtime` 在未来（例如时钟回拨或还原保留了未来时间戳的文件），`verdict_age < 0` 会持续成立直至现实时间追平，导致 Sentinel 超出配置宽限期无限期抑制 watchdog；Controller 同样存在负龄跳过对账问题，导致挂起门禁无限期维持活动状态。必须在超出合理时钟偏差时拒绝未来时间戳延期。
+- 变更：
+  1. **门禁工位中断与裁决清理移至首个幂等交付阶段**：
+     - `bin/herdr-task`：将无条件的顶层中断与文件清理封装为 `_cleanup_gate_for_rework(task)`，且仅对门禁任务生效（`_is_gate_task(task)`）；
+     - 对于 `receipt-v1` 任务，将其移入 `prepare_task(conn)` 阶段，在 prompt 分发前且仅在首次准备时幂等执行；重试恢复触发 `DeliveryUnknown` 时绝不向 pane 发送中断；
+     - 对于非 `receipt-v1` 任务，仅在非 pending delivery 重试状态下执行清理；
+  2. **拒绝未来时间戳异常延期并限制时钟偏差**：
+     - Sentinel 与 Controller 引入 `DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5.0` 及环境变量 `HERDR_MAX_CLOCK_SKEW_SECONDS`，严格校验有限非负浮点；
+     - Sentinel 校验 `is_future = verdict_mtime is not None and (verdict_mtime - now) > skew_limit`；若为未来时间戳，绝不抑制 watchdog，超时后正常判定失败放行恢复；
+     - Controller 校验未来时间戳，当 `is_future` 为 True 时不跳过对账，立即执行裁决采纳流转 `agent_done`。
+- 证据：
+  1. `tests/test_cli_receipt_delivery.py::test_real_cli_entry_crash_recovery` 8 个测试全部通过（4 个 rework 崩溃恢复用例完全修复）；
+  2. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 4 个专项回归测试（时钟偏差配置、Sentinel 拒绝未来时间戳、Controller 拒绝未来时间戳延期、首个幂等阶段门禁清理），全量 22 个测试通过；
+  3. 全量 `test_issue_250_*.py` 39 个测试全部 PASS；`compileall` 与 `git diff --check` 零告警。
+
 ## [2026-10-19] fix | 返工执行令牌绑定、消除门禁名称子串冒用与校验有限硬超时 (PR #266 Codex Review)
 
 - 背景：

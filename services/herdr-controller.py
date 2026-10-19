@@ -3127,6 +3127,19 @@ def process_blocked_observations():
 
 
 DEFAULT_GATE_HANDOFF_GRACE_SECONDS = 300.0
+DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5.0
+
+
+def max_clock_skew_seconds():
+    raw = os.environ.get("HERDR_MAX_CLOCK_SKEW_SECONDS")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val >= 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_MAX_CLOCK_SKEW_SECONDS
 
 
 def task_gate_handoff_grace_seconds():
@@ -3188,10 +3201,16 @@ def process_gate_verdict_reconciliations():
                 except Exception:
                     runtime_settled = False
             if not runtime_settled:
-                # Issue #250 & Codex review: If runtime is not settled, allow adoption after bounded handoff grace
+                # Issue #250 & Codex review: If runtime is not settled, allow adoption after bounded handoff grace.
+                # Timestamps beyond clock skew allowance are rejected from extending grace.
                 verdict_mtime = _gate_verdict_file_mtime(task)
                 grace = task_gate_handoff_grace_seconds()
-                if not verdict_mtime or (time.time() - verdict_mtime) < grace:
+                skew_limit = max_clock_skew_seconds()
+                now = time.time()
+                is_future = verdict_mtime is not None and (verdict_mtime - now) > skew_limit
+                if not verdict_mtime:
+                    continue
+                if not is_future and (now - verdict_mtime) < grace:
                     continue
             if gate_verdict_ready(task):
                 if _set_observed_status(task, "agent_done", "gate_verdict_recovery"):

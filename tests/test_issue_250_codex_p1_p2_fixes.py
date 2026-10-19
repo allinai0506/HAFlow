@@ -929,6 +929,192 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         with patch.dict(os.environ, {"HERDR_TASK_HARD_TIMEOUT": "1800.0"}):
             self.assertEqual(sentinel.task_hard_timeout_seconds(), 1800.0)
 
+    def test_p2_clock_skew_configuration(self):
+        """P2: max_clock_skew_seconds returns configured finite positive float or default 5.0."""
+        sentinel = _load_sentinel()
+        controller = _load_controller()
+
+        self.assertEqual(sentinel.max_clock_skew_seconds(), 5.0)
+        self.assertEqual(controller.max_clock_skew_seconds(), 5.0)
+
+        for invalid in ["inf", "+inf", "-inf", "nan", "-1.0", "abc"]:
+            with patch.dict(os.environ, {"HERDR_MAX_CLOCK_SKEW_SECONDS": invalid}):
+                self.assertEqual(sentinel.max_clock_skew_seconds(), 5.0)
+                self.assertEqual(controller.max_clock_skew_seconds(), 5.0)
+
+        with patch.dict(os.environ, {"HERDR_MAX_CLOCK_SKEW_SECONDS": "10.5"}):
+            self.assertEqual(sentinel.max_clock_skew_seconds(), 10.5)
+            self.assertEqual(controller.max_clock_skew_seconds(), 10.5)
+
+    def test_p2_sentinel_rejects_future_verdict_timestamp(self):
+        """P2: Sentinel does not suppress watchdog when verdict mtime is in the future beyond skew limit."""
+        sentinel = _load_sentinel()
+        now = 10000.0
+        tid = "wf-p2-gate-future"
+        task = {
+            "task_id": tid,
+            "workflow_id": "wf-p2",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "updated_at": now - 8000.0,
+            "pane_id": "p-gate-1",
+        }
+        verdict_file = self.verdicts_dir / f"{tid}.json"
+        verdict_file.write_text(json.dumps({"verdict": "pass", "note": "future verdict"}), encoding="utf-8")
+
+        # Future timestamp: now + 3600s (> 5s skew limit)
+        future_mtime = now + 3600.0
+        os.utime(str(verdict_file), (future_mtime, future_mtime))
+
+        state = {"stalls": {}, "timeouts": {}}
+        mock_store = MagicMock()
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "update_statuses", return_value=True) as mock_update_statuses:
+            sentinel.check_task_stalls([task], state, now=now)
+            # Watchdog should NOT be suppressed; timeout must trigger update_statuses
+            mock_update_statuses.assert_called_once_with(
+                {tid: ("failed", "hard_timeout_watchdog")},
+                expected={tid: "working"},
+                versions=None,
+            )
+
+        # Small clock skew: now + 2.0s (<= 5s skew limit) -> treated as fresh within grace, suppressed
+        state = {"stalls": {}, "timeouts": {}}
+        skew_mtime = now + 2.0
+        os.utime(str(verdict_file), (skew_mtime, skew_mtime))
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "update_statuses", return_value=True) as mock_update_statuses:
+            sentinel.check_task_stalls([task], state, now=now)
+            # Small skew within grace: Watchdog must be suppressed!
+            mock_update_statuses.assert_not_called()
+
+    def test_p2_controller_rejects_future_verdict_timestamp(self):
+        """P2: Controller reconciles and adopts verdict when verdict mtime is in the future beyond skew limit."""
+        controller = _load_controller()
+        now = time.time()
+        tid = "wf-p2-gate-future-ctrl"
+        task = {
+            "task_id": tid,
+            "workflow_id": "wf-p2",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "updated_at": now - 8000.0,
+            "pane_id": "p-gate-2",
+            "version": 1,
+        }
+        verdict_file = self.verdicts_dir / f"{tid}.json"
+        verdict_file.write_text(json.dumps({"verdict": "pass", "note": "future verdict ctrl"}), encoding="utf-8")
+
+        # Future timestamp: now + 3600s (> 5s skew limit)
+        future_mtime = now + 3600.0
+        os.utime(str(verdict_file), (future_mtime, future_mtime))
+
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(controller, "load_tasks", return_value=[task]), \
+             patch.object(controller, "get_task", return_value=task), \
+             patch.object(controller, "node_is_gate", return_value=True), \
+             patch.object(controller, "get_agent_runtime_status", return_value="running"), \
+             patch.object(controller, "_set_observed_status", return_value=True) as mock_set_status, \
+             patch.object(controller, "emit_done_if_allowed"):
+            processed = controller.process_gate_verdict_reconciliations()
+            # Future timestamp must NOT extend grace -> adopted immediately
+            self.assertEqual(processed, 1)
+            mock_set_status.assert_called_once_with(task, "agent_done", "gate_verdict_recovery")
+
+        # Normal fresh verdict within grace: now - 10s -> runtime unsettled, waits (continue)
+        past_mtime = now - 10.0
+        os.utime(str(verdict_file), (past_mtime, past_mtime))
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(controller, "load_tasks", return_value=[task]), \
+             patch.object(controller, "get_task", return_value=task), \
+             patch.object(controller, "node_is_gate", return_value=True), \
+             patch.object(controller, "get_agent_runtime_status", return_value="running"), \
+             patch.object(controller, "_set_observed_status") as mock_set_status, \
+             patch.object(controller, "emit_done_if_allowed"):
+            processed = controller.process_gate_verdict_reconciliations()
+            self.assertEqual(processed, 0)
+            mock_set_status.assert_not_called()
+
+        # Small clock skew: now + 2.0s (<= 5s skew limit) -> within grace, waits (continue)
+        skew_mtime = now + 2.0
+        os.utime(str(verdict_file), (skew_mtime, skew_mtime))
+        with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
+             patch.object(controller, "load_tasks", return_value=[task]), \
+             patch.object(controller, "get_task", return_value=task), \
+             patch.object(controller, "node_is_gate", return_value=True), \
+             patch.object(controller, "get_agent_runtime_status", return_value="running"), \
+             patch.object(controller, "_set_observed_status") as mock_set_status, \
+             patch.object(controller, "emit_done_if_allowed"):
+            processed = controller.process_gate_verdict_reconciliations()
+            self.assertEqual(processed, 0)
+            mock_set_status.assert_not_called()
+
+    def test_p1_rework_interrupt_only_in_first_idempotent_phase(self):
+        """P1: Pane interrupt and verdict purge execute only in first idempotent delivery phase."""
+        from types import SimpleNamespace
+        import herdr.task_resources
+        herdr_task = _load_herdr_task()
+        from herdr.state_store import SQLiteStateStore
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-p1-rework", "status": "running"})
+
+        task_id = "task-gate-rework"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-p1-rework",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "working",
+            "pane_id": "p-rework-gate",
+            "clone_path": str(self.tmp_dir),
+            "completion_protocol": "receipt-v1",
+        }
+        store.save_task(task)
+
+        calls = []
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": store.list_tasks()}), \
+             patch.object(herdr.task_resources, "owned_live_pane", lambda t: (True, "identity_match")), \
+             patch.object(herdr_task, "_compile_working_context_ref", lambda t: None), \
+             patch.object(herdr_task, "_herdr", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")), \
+             patch.object(herdr_task.time, "sleep", lambda s: None):
+
+            # Initial rework invocation: prepare_task runs, performs cleanup and delivers prompt
+            args = SimpleNamespace(task_id=task_id, request_id="req-1", prompt="retest", reason="review")
+            herdr_task.cmd_rework(args)
+
+            # calls must contain: 1 send-keys C-c (from prepare_task) + 1 agent prompt
+            send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+            prompt_calls = [c for c in calls if len(c) >= 2 and c[0] == "agent" and c[1] == "prompt"]
+            self.assertEqual(len(send_keys_calls), 1)
+            self.assertEqual(len(prompt_calls), 1)
+
+            # Now simulate a retry of a pending delivery
+            # Update task to status='rework', rework_delivery='pending'
+            current = store.get_task(task_id)
+            current.update(status="rework", rework_delivery="pending")
+            store.save_task(current)
+
+            calls.clear()
+            # For non-receipt-v1 retry scenario: _cleanup_gate_for_rework is skipped
+            task_non_receipt = dict(current, completion_protocol=None)
+            store.save_task(task_non_receipt)
+            import herdr.kernel
+            with patch.object(herdr.kernel, "transition_task", return_value={"accepted": True}):
+                herdr_task.cmd_rework(args)
+            # send-keys C-c must NOT have been called because rework_delivery was pending
+            send_keys_calls = [c for c in calls if len(c) >= 2 and c[0] == "pane" and c[1] == "send-keys"]
+            self.assertEqual(len(send_keys_calls), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

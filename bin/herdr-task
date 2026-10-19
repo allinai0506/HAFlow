@@ -5491,6 +5491,28 @@ def cmd_renew_completion(args):
     return result
 
 
+def _cleanup_gate_for_rework(task):
+    """PR #250 & Codex review: Stop old writer and purge prior verdicts for gate tasks in first idempotent phase."""
+    if not _is_gate_task(task):
+        return
+    from herdr.node_capacity import pane_reference
+    pane_ref = pane_reference(task)
+    if pane_ref:
+        try:
+            _herdr("pane", "send-keys", str(pane_ref), "C-c")
+        except Exception:
+            pass
+    for cand in [
+        str((Path.home() / ".herdr-controller" / "gate-verdicts" / f"{task['task_id']}.json")),
+        os.path.join(task.get("clone_path", ""), ".herdr", "gate-verdict.json") if task.get("clone_path") else None,
+    ]:
+        if cand and os.path.exists(cand):
+            try:
+                os.remove(cand)
+            except OSError:
+                pass
+
+
 def cmd_rework(args):
     from herdr.task_resources import owned_live_pane, workflow_launch_lock
     from herdr.node_capacity import pane_reference
@@ -5513,13 +5535,6 @@ def cmd_rework(args):
         if not owned:
             print(f"Rework refused: pane ownership {reason}")
             sys.exit(2)
-        # Codex P1: Stop old writer in pane before recording new rework epoch
-        pane_ref = pane_reference(task)
-        if pane_ref:
-            try:
-                _herdr("pane", "send-keys", str(pane_ref), "C-c")
-            except Exception:
-                pass
         import uuid
         execution_token = (
             getattr(args, "execution_token", None)
@@ -5527,16 +5542,6 @@ def cmd_rework(args):
             or f"tok-{uuid.uuid4().hex[:12]}"
         )
         prompt = args.prompt or task.get("rework_prompt") or "继续当前任务，就地修复评审问题并重新自测，不新建 Task。"
-        # PR #250 & Codex P1: Purge prior gate-verdict files before rework starts
-        for cand in [
-            str((Path.home() / ".herdr-controller" / "gate-verdicts" / f"{args.task_id}.json")),
-            os.path.join(task.get("clone_path", ""), ".herdr", "gate-verdict.json") if task.get("clone_path") else None,
-        ]:
-            if cand and os.path.exists(cand):
-                try:
-                    os.remove(cand)
-                except OSError:
-                    pass
         if _is_gate_task(task):
             prompt += (
                 f"\n\n【门禁执行令牌契约】\n"
@@ -5549,6 +5554,7 @@ def cmd_rework(args):
             from herdr import state_db
             delivery_id = request_id or (task.get('rework_request_id') if task.get('rework_delivery') == 'pending' else None) or execution_token
             def prepare_task(conn):
+                _cleanup_gate_for_rework(task)
                 current = state_db._decode_task_row(conn.execute('SELECT * FROM tasks WHERE task_id=?', (args.task_id,)).fetchone())
                 result = state_db.transition_task(args.task_id, 'rework', reason=args.reason,
                     source='herdr-task', conn=conn, expected_status=current['status'], expected_version=current['version'],
@@ -5567,6 +5573,8 @@ def cmd_rework(args):
             store.update_task_metadata(args.task_id, {'rework_delivery':'delivered', 'execution_token':delivery_id})
             print(f"[REWORK] {args.task_id} pane={pane_reference(task)} reused")
             return result
+        if not (task.get("status") == "rework" and task.get("rework_delivery") == "pending"):
+            _cleanup_gate_for_rework(task)
         from herdr.task_delivery import instruction_block
         prompt += instruction_block(task)
         started_at = time.time()

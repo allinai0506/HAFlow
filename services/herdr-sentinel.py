@@ -80,6 +80,19 @@ def task_gate_hard_timeout_seconds(base_timeout=None):
 
 
 DEFAULT_GATE_HANDOFF_GRACE_SECONDS = 300.0
+DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5.0
+
+
+def max_clock_skew_seconds():
+    raw = os.environ.get("HERDR_MAX_CLOCK_SKEW_SECONDS")
+    if raw is not None and raw.strip():
+        try:
+            val = float(raw.strip())
+            if val >= 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_MAX_CLOCK_SKEW_SECONDS
 
 
 def task_gate_handoff_grace_seconds():
@@ -910,8 +923,10 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
             verdict_mtime = res[3] if len(res) > 3 else None
             if has_verdict:
                 grace = task_gate_handoff_grace_seconds()
+                skew_limit = max_clock_skew_seconds()
+                is_future = verdict_mtime is not None and (verdict_mtime - now) > skew_limit
                 verdict_age = (now - verdict_mtime) if verdict_mtime is not None else 0
-                if verdict_mtime is None or verdict_age < 0 or verdict_age < grace:
+                if not is_future and (verdict_mtime is None or verdict_age < grace):
                     print(
                         f"[SENTINEL TIMEOUT SUPPRESSED] task={tid} status={status} idle={int(idle_seconds)}s — "
                         f"gate verdict '{verdict_val}' written recently ({int(verdict_age)}s ago, grace={int(grace)}s), suppressing watchdog failure",
@@ -920,9 +935,14 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
                     timeouts.pop(tid, None)
                     continue
                 else:
+                    reason_msg = (
+                        f"future timestamp (ahead by {int(verdict_mtime - now)}s > skew limit {int(skew_limit)}s)"
+                        if is_future
+                        else f"written {int(verdict_age)}s ago exceeded handoff grace ({int(grace)}s)"
+                    )
                     print(
                         f"[SENTINEL TIMEOUT HANDOFF EXPIRED] task={tid} status={status} idle={int(idle_seconds)}s — "
-                        f"gate verdict '{verdict_val}' written {int(verdict_age)}s ago exceeded handoff grace ({int(grace)}s), allowing watchdog failure for recovery",
+                        f"gate verdict '{verdict_val}' {reason_msg}, allowing watchdog failure for recovery",
                         flush=True,
                     )
 
