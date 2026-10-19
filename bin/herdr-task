@@ -10,8 +10,6 @@ import subprocess
 import sys
 import tarfile
 import time
-from contextlib import ExitStack
-from functools import wraps
 from pathlib import Path
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -241,6 +239,7 @@ resolve_stage = resolve_node
 
 
 from herdr.ops_center_helpers import (
+    _coerce_epoch,
     _init_status_history,
     _node_delivery_complete,
     _normalize_workflow_nodes,
@@ -1013,67 +1012,42 @@ def adopt_verdict_cli(task_id, verdict=None, note=None, operator="human", as_jso
 
 
 def _with_git_operation_lock(*, include_source_repo=False):
-    """Serialize Git operations and fail closed while another Git process runs."""
-    def decorate(func):
-        @wraps(func)
-        def wrapped(task_id, *args, **kwargs):
-            task = find_task(load_tasks(), task_id)
-            paths = []
-            if task and task.get("clone_path"):
-                paths.append(task["clone_path"])
-            if include_source_repo and task:
-                project = project_for_workflow(task.get("workflow_id")) or {}
-                source = task.get("source_repo") or project.get("project_root")
-                if source:
-                    paths.append(source)
-            try:
-                with ExitStack() as stack:
-                    locks = []
-                    for path in dict.fromkeys(paths):
-                        lock = GitOperationLock(path)
-                        lock.acquire()
-                        stack.callback(lock.release)
-                        locks.append(path)
-                    for path in locks:
-                        ensure_no_git_processes(path)
-                    return func(task_id, *args, **kwargs)
-            except (GitOperationBusyError, GitProcessActiveError) as exc:
-                print(f"[GIT BUSY] task={task_id}: {exc}")
-                sys.exit(75)
-        return wrapped
-    return decorate
+    from herdr.task_cli_git_lock import with_git_operation_lock
+
+    return with_git_operation_lock(
+        include_source_repo=include_source_repo,
+        deps={
+            "load_tasks": load_tasks,
+            "find_task": find_task,
+            "project_for_workflow": project_for_workflow,
+            "GitOperationLock": GitOperationLock,
+            "ensure_no_git_processes": ensure_no_git_processes,
+            "GitOperationBusyError": GitOperationBusyError,
+            "GitProcessActiveError": GitProcessActiveError,
+        },
+    )
 
 
 def launch_task(args):
-    """Serialize the workflow budget check through task registration across sources."""
-    from herdr.task_resources import workflow_launch_lock, NodeLaunchBusy, record_launch_rejection
-    source = getattr(args, "source", None)
-    entered = False
+    from herdr.task_cli_launch import launch_task as handle_launch_task
+    from herdr.task_resources import (
+        NodeLaunchBusy,
+        record_launch_rejection,
+        workflow_launch_lock,
+    )
 
-    def run_launch():
-        nonlocal entered
-        entered = True
-        try:
-            return _launch_task(args)
-        except BaseException:
-            settled = record_launch_rejection(_get_store(), args, reason='launch_preallocation_rejected',
-                resources_absent=not getattr(args, '_launch_resources_started', False))
-            if settled and getattr(args, '_launch_reservation_acquired', False):
-                release_agent_reservation(args.task_id)
-            raise
-
-    try:
-        with workflow_launch_lock(_get_store().db_path, args.workflow_id):
-            if not source:
-                return run_launch()
-            with GitOperationLock(source):
-                ensure_no_git_processes(source)
-                return run_launch()
-    except (GitOperationBusyError, GitProcessActiveError, NodeLaunchBusy) as exc:
-        if not entered:
-            record_launch_rejection(_get_store(), args, reason='launch_lock_busy', resources_absent=True)
-        print(f"[LAUNCH BUSY] {exc}")
-        sys.exit(75)
+    return handle_launch_task(args, deps={
+        "NodeLaunchBusy": NodeLaunchBusy,
+        "workflow_launch_lock": workflow_launch_lock,
+        "record_launch_rejection": record_launch_rejection,
+        "get_store": _get_store,
+        "launch": _launch_task,
+        "release_agent_reservation": release_agent_reservation,
+        "GitOperationLock": GitOperationLock,
+        "GitOperationBusyError": GitOperationBusyError,
+        "GitProcessActiveError": GitProcessActiveError,
+        "ensure_no_git_processes": ensure_no_git_processes,
+    })
 
 
 def _capture_pane_transcript(pane):

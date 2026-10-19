@@ -6,6 +6,46 @@ import sys
 from pathlib import Path
 
 
+def launch_task(args, *, deps):
+    """Serialize launch admission and settle any rejected reservation."""
+    workflow_launch_lock = deps["workflow_launch_lock"]
+    NodeLaunchBusy = deps["NodeLaunchBusy"]
+    record_launch_rejection = deps["record_launch_rejection"]
+    get_store = deps["get_store"]
+    launch = deps["launch"]
+    source = getattr(args, "source", None)
+    entered = False
+
+    def run_launch():
+        nonlocal entered
+        entered = True
+        try:
+            return launch(args)
+        except BaseException:
+            settled = record_launch_rejection(
+                get_store(), args, reason="launch_preallocation_rejected",
+                resources_absent=not getattr(args, "_launch_resources_started", False),
+            )
+            if settled and getattr(args, "_launch_reservation_acquired", False):
+                deps["release_agent_reservation"](args.task_id)
+            raise
+
+    try:
+        with workflow_launch_lock(get_store().db_path, args.workflow_id):
+            if not source:
+                return run_launch()
+            with deps["GitOperationLock"](source):
+                deps["ensure_no_git_processes"](source)
+                return run_launch()
+    except (deps["GitOperationBusyError"], deps["GitProcessActiveError"], NodeLaunchBusy) as exc:
+        if not entered:
+            record_launch_rejection(
+                get_store(), args, reason="launch_lock_busy", resources_absent=True
+            )
+        print(f"[LAUNCH BUSY] {exc}")
+        sys.exit(75)
+
+
 def prepare_launch_context(args, *, load_tasks, project_for_workflow,
                            execution_fields_from_workflow, new_run_id):
     """Resolve launch identity before any resource or durable state is created."""
