@@ -275,6 +275,25 @@ def make_scene(root: Path) -> SimpleNamespace:
     return SimpleNamespace(store=store, clone=clone, head=head, fakebin=fakebin)
 
 
+@pytest.fixture(autouse=True)
+def isolate_credentials_environment(tmp_path, monkeypatch):
+    """B2 isolation: ensure tests never touch real ~/.herdr-controller/credentials."""
+    real_path = Path.home() / ".herdr-controller" / "credentials"
+    before_files = set(real_path.iterdir()) if real_path.is_dir() else set()
+
+    fake_home = tmp_path / "test_home"
+    fake_cred_dir = fake_home / ".herdr-controller" / "credentials"
+    fake_cred_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    from herdr import state_db
+    monkeypatch.setattr(state_db, "_get_credentials_dir", lambda: fake_cred_dir)
+
+    yield fake_home
+
+    after_files = set(real_path.iterdir()) if real_path.is_dir() else set()
+    assert before_files == after_files, f"Test polluted real credentials dir: {after_files - before_files}"
+
+
 @pytest.fixture
 def scene(tmp_path):
     return make_scene(tmp_path)
@@ -1185,3 +1204,110 @@ def test_immutable_launch_delivery_identities_respected(scene):
         pr_url="https://github.com/launch-owner/repo/pull/1",
     )
     assert ok.returncode == 0, ok.stdout + ok.stderr
+
+
+def test_adversarial_b1_vector_a_no_presented_token_rejected_even_if_registered(scene):
+    """B1 Vector a: Registered operator token exists on server, but caller presents NO token.
+    Must be strictly rejected (cannot auto-discover presented token from server directory).
+    """
+    from herdr import review_closure, state_db
+
+    # Register token in authoritative state_db
+    token = "registered_secret_123"
+    state_db.save_user_token("ops-lead", "operator", token, db_path=scene.store.db_path)
+
+    # Also place token file in server credentials dir (db_path.parent / credentials) to simulate production co-location
+    server_cred_dir = Path(scene.store.db_path).parent / "credentials"
+    server_cred_dir.mkdir(parents=True, exist_ok=True)
+    (server_cred_dir / "ops-lead_operator.token").write_text(token)
+
+    task = scene.store.get_task("wrapup-task")
+
+    # 1. Direct function call with no token / no credentials path
+    ok, why = review_closure.authenticate_operator(scene.store, task, "ops-lead", token=None, credentials_path=None)
+    assert not ok, f"Expected rejection, but authenticate_operator succeeded: {why}"
+    assert "missing operator token" in why or "required" in why
+
+    # 2. CLI call with no token presented
+    res = run_cli(
+        scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+        "--operator", "ops-lead", "--note", "adversarial no token bypass",
+        env_extra={"HERDR_OPERATOR": "1"},
+    )
+    assert res.returncode == 2
+    assert "authentication failed" in (res.stdout + res.stderr).lower() or "missing" in (res.stdout + res.stderr).lower()
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
+
+
+def test_adversarial_b1_vector_b_path_traversal_operator_name_rejected(scene):
+    """B1 Vector b: Operator name contains path traversal characters (e.g. ../clones/worker/x).
+    Must be rejected; cannot traverse to worker clone or arbitrary files.
+    """
+    from herdr import review_closure
+
+    # Worker creates token file in their own clone
+    server_cred_dir = Path(scene.store.db_path).parent / "credentials"
+    server_cred_dir.mkdir(parents=True, exist_ok=True)
+    evil_token = "worker_evil_secret"
+    evil_token_file = scene.clone / "evil_operator.token"
+    evil_token_file.write_text(evil_token)
+
+    task = scene.store.get_task("wrapup-task")
+
+    # Relative path from credentials dir to worker clone file
+    traversal_operator = "../clone/evil"
+
+    # 1. Direct function call with path traversal operator name (with and without token)
+    ok1, why1 = review_closure.authenticate_operator(scene.store, task, traversal_operator, token=None)
+    assert not ok1, f"Expected rejection of traversal operator, but succeeded: {why1}"
+
+    ok2, why2 = review_closure.authenticate_operator(scene.store, task, traversal_operator, token=evil_token)
+    assert not ok2, f"Expected rejection of traversal operator even with token, but succeeded: {why2}"
+
+    # Also test standard traversal patterns
+    for bad_op in ("../../etc/passwd", "..\\windows\\win.ini", "../clones/worker/x", "ops/../evil"):
+        ok, _why = review_closure.authenticate_operator(scene.store, task, bad_op, token="some_token")
+        assert not ok, f"Expected rejection for '{bad_op}', but got ok={ok}"
+
+    # 2. CLI call with path traversal operator
+    res = run_cli(
+        scene.store, "set", "wrapup-task", "completed", "--skip-review-closure",
+        "--operator", traversal_operator, "--note", "adversarial traversal bypass",
+        env_extra={"HERDR_OPERATOR": "1"},
+    )
+    assert res.returncode == 2
+    assert scene.store.get_task("wrapup-task")["status"] == "agent_done"
+
+
+def test_adversarial_b1_operator_token_positive_and_negative_matching(scene):
+    """B1 verification: Explicit valid token succeeds; invalid / other operator's token fails."""
+    from herdr import review_closure, state_db
+
+    state_db.save_user_token("ops-lead", "operator", "lead_token_secret", db_path=scene.store.db_path)
+    state_db.save_user_token("sec-admin", "operator", "sec_token_secret", db_path=scene.store.db_path)
+
+    task = scene.store.get_task("wrapup-task")
+
+    # Positive: explicit correct token matches
+    ok, why = review_closure.authenticate_operator(scene.store, task, "ops-lead", token="lead_token_secret")
+    assert ok, f"Expected success with correct token, got: {why}"
+
+    # Negative: wrong token fails
+    ok, why = review_closure.authenticate_operator(scene.store, task, "ops-lead", token="wrong_token")
+    assert not ok
+    assert "invalid operator token" in why
+
+    # Negative: other operator's token fails
+    ok, why = review_closure.authenticate_operator(scene.store, task, "ops-lead", token="sec_token_secret")
+    assert not ok
+    assert "invalid operator token" in why
+
+    # Negative: unregistered operator fails
+    ok, why = review_closure.authenticate_operator(scene.store, task, "non-existent-op", token="any_token")
+    assert not ok
+    assert "no credentials registered" in why
+
+    # Negative: task worker cannot act as operator
+    ok, why = review_closure.authenticate_operator(scene.store, task, "qodercli", token="lead_token_secret")
+    assert not ok
+    assert "must be independent" in why

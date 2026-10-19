@@ -120,6 +120,11 @@ def authenticate_operator(
     op_clean = str(operator_id or "").strip()
     if not op_clean:
         return False, "--skip-review-closure requires --operator <identity>"
+    if "/" in op_clean or "\\" in op_clean or ".." in op_clean:
+        return False, f"invalid operator identity: '{op_clean}' contains path traversal or invalid characters"
+    op_clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", op_clean)
+    if not op_clean:
+        return False, "--skip-review-closure requires --operator <identity>"
     task = task or {}
     task_agent = str(task.get("agent") or "").strip().lower()
     if task_agent and op_clean.lower() == task_agent:
@@ -134,7 +139,7 @@ def authenticate_operator(
     if project_root:
         forbidden_roots.append(Path(project_root).expanduser().resolve())
 
-    # 1. Resolve presented token
+    # 1. Resolve presented token: must be explicitly presented by caller
     presented_token = str(token or "").strip() or os.environ.get("HERDR_OPERATOR_TOKEN", "").strip()
     cred_file_arg = credentials_path or os.environ.get("HERDR_OPERATOR_CREDENTIALS")
     if not presented_token and cred_file_arg:
@@ -155,26 +160,11 @@ def authenticate_operator(
             return False, f"unreadable operator credentials file: {exc}"
 
     if not presented_token:
-        # Check if the server-managed credentials directory contains a local operator token
-        db_path = getattr(store, "db_path", None)
-        if db_path:
-            server_cred_dir = Path(db_path).parent / "credentials"
-            for candidate_name in (f"{op_clean}_operator.token", f"operator_{op_clean}.token", f"{op_clean}.token"):
-                cand = server_cred_dir / candidate_name
-                if cand.is_file():
-                    try:
-                        presented_token = cand.read_text(encoding="utf-8").strip()
-                        if presented_token:
-                            break
-                    except OSError:
-                        pass
-
-    if not presented_token:
         return False, (
             f"operator authentication required: missing operator token or credentials file for '{op_clean}'"
         )
 
-    # 2. Resolve registered token from server-side authority
+    # 2. Resolve registered token from server-side authority (single source: get_user_token)
     registered_token = None
     db_path = getattr(store, "db_path", None)
     try:
@@ -182,33 +172,6 @@ def authenticate_operator(
         registered_token = state_db.get_user_token(op_clean, "operator", db_path=db_path)
     except Exception:
         registered_token = None
-
-    if not registered_token and db_path:
-        server_cred_dir = Path(db_path).parent / "credentials"
-        for candidate_name in (f"{op_clean}_operator.token", f"operator_{op_clean}.token", f"{op_clean}.token"):
-            cand = server_cred_dir / candidate_name
-            if cand.is_file():
-                try:
-                    val = cand.read_text(encoding="utf-8").strip()
-                    if val:
-                        registered_token = val
-                        break
-                except OSError:
-                    pass
-
-    if not registered_token:
-        try:
-            from . import state_db
-            cred_dir = state_db._get_credentials_dir()
-            for candidate_name in (f"{op_clean}_operator.token", f"operator_{op_clean}.token", f"{op_clean}.token"):
-                cand = cred_dir / candidate_name
-                if cand.is_file():
-                    val = cand.read_text(encoding="utf-8").strip()
-                    if val:
-                        registered_token = val
-                        break
-        except Exception:
-            pass
 
     if not registered_token:
         return False, (
@@ -219,7 +182,6 @@ def authenticate_operator(
         return False, "operator authentication failed: invalid operator token"
 
     return True, ""
-
 
 
 def parse_pr_url(pr_url: Any) -> Optional[Tuple[str, str, str, int]]:
