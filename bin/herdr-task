@@ -2126,97 +2126,18 @@ def integrate_task(task_id):
 
 
 def cleanup_task(task_id):
-    data = load_tasks()
-    task = find_task(data, task_id)
-
-    if not task:
-        print(f"Task not found: {task_id}")
-        sys.exit(1)
-
-    if task["status"] != "cleanup_ready":
-        print(
-            f"Task cannot cleanup from status: "
-            f"{task['status']}"
-        )
-        sys.exit(2)
-
-    # Logical cleanup only.
-    # Workspace / Stage Tab / Task Pane / Task Clone are retained.
-    from herdr import kernel
-    kernel.update_task_metadata(task_id, {
-        "resource_retention": "persistent",
-        "pane_retained": True,
-        "clone_retained": True,
-    }, store=_get_store())
-
-    set_status(
-        task_id,
-        "cleaned"
-    )
-
-    print(f"[PANE RETAINED] {task.get('pane_id')}")
-    print(f"[CLONE RETAINED] {task.get('clone_path')}")
-    print(f"[LOGICAL CLEANUP] {task_id} -> cleaned")
-
+    from herdr.task_cli_delivery import cleanup_task as handle_cleanup
+    return handle_cleanup(task_id, load_tasks=load_tasks, find_task=find_task,
+                          get_store=_get_store, set_status=set_status)
 
 def purge_task(task_id):
-    data = load_tasks()
-    task = find_task(data, task_id)
-
-    if not task:
-        print(f"Task not found: {task_id}")
-        sys.exit(1)
-
-    if task.get("status") in TEARDOWN_BLOCKING_STATUSES:
-        print(
-            f"Task can only purge from a settled status, "
-            f"current={task.get('status')}"
-        )
-        sys.exit(2)
-
-    pane_id = task.get("pane_id")
-    clone_path = task.get("clone_path")
-
-    if pane_id:
-        subprocess.run(
-            [
-                "herdr",
-                "pane",
-                "close",
-                pane_id
-            ],
-            text=True,
-            capture_output=True
-        )
-        print(f"[PANE PURGED] {pane_id}")
-
-    if clone_path:
-        if delete_clone_safely(clone_path):
-            print(f"[CLONE PURGED] {clone_path}")
-        elif os.path.exists(clone_path):
-            print(
-                f"Unsafe clone path, refusing delete: "
-                f"{clone_path}"
-            )
-            sys.exit(3)
-
-    from herdr import kernel
-    kernel.update_task_metadata(task_id, {
-        "pane_retained": False,
-        "clone_retained": False,
-        "resource_retention": "purged",
-    }, store=_get_store())
-
-    print(f"[PURGED] {task_id}")
-
-
-# ---------------------------------------------------------------------------
-# Physical teardown (finalize / close-workflow)
-#
-# 设计原则:任务生而隔离(独立 pane + CoW clone + 全新会话),
-# 死而清零。上下文只在任务体内生存,跨任务唯一合法通道是固化产物。
-# 销毁前必须先把 pane 终端转写固化为证据(herdr 不持久化 scrollback)。
-# ---------------------------------------------------------------------------
+    from herdr.task_cli_delivery import purge_task as handle_purge
+    return handle_purge(
+        task_id, load_tasks=load_tasks, find_task=find_task, get_store=_get_store,
+        teardown_blocking_statuses=TEARDOWN_BLOCKING_STATUSES,
+        delete_clone_safely=delete_clone_safely, run_command=subprocess.run,
+        path_exists=os.path.exists,
+    )
 
 def _herdr(*args):
     """调用 herdr CLI;显式解析绝对路径以兼容 LaunchAgent 精简 PATH。"""

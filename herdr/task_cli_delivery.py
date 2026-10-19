@@ -303,3 +303,87 @@ def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_t
             ensure_ascii=False,
         )
     )
+
+
+def cleanup_task(task_id, *, load_tasks, find_task, get_store, set_status):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task["status"] != "cleanup_ready":
+        print(
+            f"Task cannot cleanup from status: "
+            f"{task['status']}"
+        )
+        sys.exit(2)
+
+    # Logical cleanup only.
+    # Workspace / Stage Tab / Task Pane / Task Clone are retained.
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {
+        "resource_retention": "persistent",
+        "pane_retained": True,
+        "clone_retained": True,
+    }, store=get_store())
+
+    set_status(
+        task_id,
+        "cleaned"
+    )
+
+    print(f"[PANE RETAINED] {task.get('pane_id')}")
+    print(f"[CLONE RETAINED] {task.get('clone_path')}")
+    print(f"[LOGICAL CLEANUP] {task_id} -> cleaned")
+
+def purge_task(task_id, *, load_tasks, find_task, get_store, teardown_blocking_statuses, delete_clone_safely, run_command, path_exists):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task.get("status") in teardown_blocking_statuses:
+        print(
+            f"Task can only purge from a settled status, "
+            f"current={task.get('status')}"
+        )
+        sys.exit(2)
+
+    pane_id = task.get("pane_id")
+    clone_path = task.get("clone_path")
+
+    if pane_id:
+        run_command(
+            [
+                "herdr",
+                "pane",
+                "close",
+                pane_id
+            ],
+            text=True,
+            capture_output=True
+        )
+        print(f"[PANE PURGED] {pane_id}")
+
+    if clone_path:
+        if delete_clone_safely(clone_path):
+            print(f"[CLONE PURGED] {clone_path}")
+        elif path_exists(clone_path):
+            print(
+                f"Unsafe clone path, refusing delete: "
+                f"{clone_path}"
+            )
+            sys.exit(3)
+
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {
+        "pane_retained": False,
+        "clone_retained": False,
+        "resource_retention": "purged",
+    }, store=get_store())
+
+    print(f"[PURGED] {task_id}")
