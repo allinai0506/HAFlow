@@ -191,10 +191,10 @@ class SentinelBlockerDetectionTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class PromptIronRuleInjectionTest(unittest.TestCase):
-    """herdr-task dispatch_task() prompt must contain all inner loop iron rules."""
+    """Task CLI dispatch prompt must contain all inner loop iron rules."""
 
     def _herdr_task_source(self):
-        return (HERDR_ROOT / "bin" / "herdr-task").read_text(encoding="utf-8")
+        return (HERDR_ROOT / "herdr" / "task_cli_execution.py").read_text(encoding="utf-8")
 
     def test_prohibit_done_before_self_check(self):
         src = self._herdr_task_source()
@@ -221,7 +221,7 @@ class PromptIronRuleInjectionTest(unittest.TestCase):
         src = self._herdr_task_source()
         self.assertIn("GOAL.md", src)
         self.assertIn("{artifact_loop} eval", src)
-        self.assertIn("cli_path().with_name('herdr-loop')", src)
+        self.assertIn('cli_path().with_name("herdr-loop")', src)
 
 
 # ---------------------------------------------------------------------------

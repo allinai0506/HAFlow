@@ -10,36 +10,17 @@ Contract under test: the primary prompt submission must be time-bounded;
 on timeout the existing verify/fallback path proceeds instead of hanging.
 """
 
-import importlib.machinery
-import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-HERDR_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(HERDR_ROOT))
-
-
-def _import_herdr_task():
-    task_bin = HERDR_ROOT / "bin" / "herdr-task"
-    spec = importlib.util.spec_from_loader(
-        "herdr_task_dispatch_timeout_test",
-        importlib.machinery.SourceFileLoader(
-            "herdr_task_dispatch_timeout_test",
-            str(task_bin),
-        ),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_ht = _import_herdr_task()
-
+from herdr.state_store import SQLiteStateStore
+from herdr import kernel
+from herdr import task_cli_execution as _execution
 
 def _pending_task(task_id="t-dispatch-1"):
     return {
@@ -72,14 +53,12 @@ def _agent_get(status):
 class DispatchDeliveryTimeoutTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="herdr-dispatch-timeout-")
-        self.task_file = str(Path(self.tmp.name) / "tasks.json")
-        _ht.TASKS_FILE = self.task_file
-        with open(self.task_file, "w", encoding="utf-8") as f:
-            json.dump({"tasks": [_pending_task()]}, f)
+        self.store = SQLiteStateStore(Path(self.tmp.name) / "state.db")
+        self.store.save_task(_pending_task())
         clock = _FastClock()
         self.patchers = [
-            patch.object(_ht.time, "time", side_effect=clock),
-            patch.object(_ht.time, "sleep", return_value=None),
+            patch.object(time, "time", side_effect=clock),
+            patch.object(time, "sleep", return_value=None),
         ]
         for p in self.patchers:
             p.start()
@@ -89,9 +68,21 @@ class DispatchDeliveryTimeoutTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def _task(self):
-        with open(self.task_file, encoding="utf-8") as f:
-            tasks = json.load(f)["tasks"]
-        return next(t for t in tasks if t["task_id"] == "t-dispatch-1")
+        return self.store.get_task("t-dispatch-1")
+
+    def _dispatch(self):
+        return _execution.handle_dispatch_task(
+            "t-dispatch-1",
+            "做需求分析",
+            get_store=lambda: self.store,
+            set_status=lambda task_id, status: kernel.transition_task(
+                task_id, status, "dispatch delivery test",
+                source="herdr-task", store=self.store,
+            ),
+            compile_context_ref=lambda _task: None,
+            fetch_rules_block=lambda _task: "",
+            prefetch_rules=lambda _task: "",
+        )
 
     def test_primary_prompt_timeout_is_bounded_and_recovers(self):
         seen = []
@@ -104,12 +95,12 @@ class DispatchDeliveryTimeoutTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, _agent_get("working"), "")
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        with patch.object(_ht.subprocess, "run", side_effect=fake_run):
-            _ht.dispatch_task("t-dispatch-1", "做需求分析")
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            self._dispatch()
 
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0], _ht.PROMPT_DELIVERY_TIMEOUT)
-        self.assertGreater(_ht.PROMPT_DELIVERY_TIMEOUT, 0)
+        self.assertEqual(seen[0], _execution.PROMPT_DELIVERY_TIMEOUT)
+        self.assertGreater(_execution.PROMPT_DELIVERY_TIMEOUT, 0)
         self.assertEqual(self._task()["status"], "dispatched")
 
     def test_primary_timeout_and_fallback_failure_marks_failed(self):
@@ -124,9 +115,9 @@ class DispatchDeliveryTimeoutTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 1, "", "send failed")
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        with patch.object(_ht.subprocess, "run", side_effect=fake_run):
+        with patch.object(subprocess, "run", side_effect=fake_run):
             with self.assertRaises(SystemExit) as ctx:
-                _ht.dispatch_task("t-dispatch-1", "做需求分析")
+                self._dispatch()
 
         self.assertEqual(ctx.exception.code, 3)
         self.assertEqual(self._task()["status"], "failed")
