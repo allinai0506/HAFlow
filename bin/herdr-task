@@ -1799,147 +1799,31 @@ def _launch_task(args):
 
     now = _now()
 
-    # RuntimeState:只记录本次真实执行的位置证据,不改变任务编排字段。
-    try:
-        from herdr import runtime_state as _runtime_state
-    except ImportError:
-        _runtime_state = None
-
-    runtime = None
-    if _runtime_state is not None:
-        runtime = _runtime_state.build_runtime_state(
-            agent=resolved_agent,
-            agent_session_id=worker_result.get("agent_session_id"),
-            agent_name=worker_result.get("agent_name"),
-            workspace_id=workspace_id,
-            tab_id=stage_config.get("tab_id"),
-            pane_id=pane_id,
-            cwd=clone_path,
-            status="running",
-            now=now,
-        )
-
-    launch_delivery_identities = []
-    if source_repo:
-        try:
-            from herdr.review_closure import _path_delivery_identities
-            launch_delivery_identities = _path_delivery_identities(source_repo)
-        except Exception:
-            launch_delivery_identities = []
-
-    task = {
-        "task_id": args.task_id,
-        "workflow_id": args.workflow_id,
-        "run_id": run_id,
-        "project_id": project.get("project_id"),
-        "project_name": project.get("project_name"),
-        "source_repo": source_repo,
-        "delivery_identities": launch_delivery_identities,
-        "base_branch": base_branch,
-        "coordinator_pane_id": project.get("coordinator_pane_id"),
-        "workflow_config": project.get("workflow_file"),
-        "node": node_id,
-        "node_label": stage_config.get("node_label") or stage_config.get("stage_label", ""),
-        "stage": node_id,
-        "stage_label": stage_config.get("stage_label") or stage_config.get("node_label", ""),
-        "tab_id": stage_config["tab_id"],
-        "workspace_id": workspace_id,
-        "pane_id": pane_id,
-        "pane_source": pane_source,
-        "pane_persistent": True,
-        "agent": resolved_agent,
-        "requested_agent": requested_agent,
-        "clone_path": clone_path,
-        "branch": branch,
-        "baseline_commit": baseline_commit,
-        "onto_branch": onto_branch,
-        "baseline_untracked": baseline_untracked,
-        "baseline_fingerprint": baseline_fingerprint,
-        "baseline_commit": baseline_commit,
-        "onto_branch": recorded_onto,
-        "integration_mode": args.integration_mode,
-        "artifact_mode": args.artifact_mode,
-        "dispatch_role": args.dispatch_role,
-        "dispatch_round": args.dispatch_round,
-        "launch_intent_id": launch_intent['intent_id'],
-        "task_type": args.task_type,
-        "status": "pending",
-        "goal": args.goal,
-        "acceptance_criteria": args.acceptance,
-        "candidate_episode_id": project.get("candidate_episode_id"),
-    }
-    # Enterprise experience attribution: persist only when provided so legacy
-    # records stay byte-identical.
-    if getattr(args, "customer", None):
-        task["customer"] = str(args.customer).strip()
-    if getattr(args, "business_task_type", None):
-        task["business_task_type"] = str(args.business_task_type).strip()
-    if getattr(args, "mandatory_experience_rules", False):
-        task["mandatory_experience_rules"] = True
-    replay_of = getattr(args, "replay_of", None)
-    if replay_of:
-        task["replay_of"] = replay_of
-    # Scheduler v1:冻结候选版本绑定(只做持久化,不改变任何派发语义)。
-    bound_sha = str(getattr(args, "candidate_sha", None) or "").strip()
-    if bound_sha:
-        task["candidate_sha"] = bound_sha
-    _apply_execution_identity(task, args)
-    if launch_intent.get('dispatch_operation_id') is not None:
-        task['dispatch_operation_id'] = launch_intent['dispatch_operation_id']
-        if launch_intent.get('supersedes'):
-            task['supersedes'] = launch_intent['supersedes']
-    if raw_policy:
-        task["agent_policy"] = agent_policy
-    if exec_fields["execution_mode"] == "context":
-        # Git 模式任务记录保持字节级不变；context 附加字段仅在 context 模式出现。
-        task["execution_mode"] = "context"
-        task["context"] = exec_fields.get("context") or {}
-    if runtime is not None:
-        task["runtime"] = runtime
-    _init_status_history(
-        task,
-        "pending",
-        now,
+    from herdr.task_cli_launch_registration import (
+        LaunchRegistration,
+        register_launched_task,
     )
-
-    is_gate = False
-    if node:
-        if node.get("gate") or node.get("node_type") == "gate":
-            is_gate = True
-        elif node.get("node_type") in ("agent", "implementation", "worker", "code"):
-            is_gate = False
-        else:
-            is_gate = _is_gate_task(task)
-    else:
-        is_gate = _is_gate_task(task)
-    if is_gate:
-        task["gate"] = True
-
-    if node.get("delivery_contract") is not None:
-        from herdr.task_delivery import validate_contract
-        task["delivery_contract"] = validate_contract(node["delivery_contract"])
-
-    if committed_recovery:
-        task.update(recovery_predecessor=predecessor['task_id'],
-                    expected_predecessor_version=predecessor['version'],
-                    expected_predecessor_sha=predecessor['commit'])
-    store.save_task(task)
-
-    from herdr.task_resources import finish_launch_intent
-    finish_launch_intent(store, launch_intent)
-
-    trajectory_ledger = TrajectoryLedger(getattr(_get_store(), "db_path", None))
-    record_trajectory_event_best_effort(
-        task, "run_started", ledger=trajectory_ledger, status="pending"
+    registration = LaunchRegistration(
+        args=args, now=now, node=node, node_id=node_id, run_id=run_id,
+        project=project, exec_fields=exec_fields, source_repo=source_repo,
+        base_branch=base_branch, stage_config=stage_config,
+        workspace_id=workspace_id, pane_id=pane_id, pane_source=pane_source,
+        resolved_agent=resolved_agent, requested_agent=requested_agent,
+        clone_path=clone_path, branch=branch, baseline_commit=baseline_commit,
+        onto_branch=onto_branch, baseline_untracked=baseline_untracked,
+        baseline_fingerprint=baseline_fingerprint, recorded_onto=recorded_onto,
+        launch_intent=launch_intent, worker_result=worker_result,
+        predecessor=predecessor, committed_recovery=committed_recovery,
     )
-    record_trajectory_event_best_effort(
-        task, "task_started", ledger=trajectory_ledger, status="pending"
-    )
-    record_trajectory_event_best_effort(
-        task,
-        "agent_started",
-        ledger=trajectory_ledger,
-        status=(task.get("runtime") or {}).get("status") or "running",
+    task = register_launched_task(
+        registration, store,
+        apply_execution_identity=_apply_execution_identity,
+        init_status_history=_init_status_history,
+        is_gate_task=_is_gate_task,
+        trajectory_ledger_factory=lambda _path: TrajectoryLedger(
+            getattr(_get_store(), "db_path", None)
+        ),
+        record_trajectory_event=record_trajectory_event_best_effort,
     )
 
     release_agent_reservation(
