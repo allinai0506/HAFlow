@@ -46,6 +46,17 @@ def load_workflow(workflow_id=None, *, deps):
         return normalize_workflow(json.load(f))
 
 
+def safe_workflow(workflow_id, *, load_workflow):
+    """Return a workflow and display label, failing closed on invalid config."""
+    if not workflow_id:
+        return None, "unknown-workflow"
+    try:
+        workflow = load_workflow(workflow_id)
+        return workflow, workflow.get("name") or workflow_id
+    except Exception:
+        return {"configuration_error": "workflow_config_invalid"}, workflow_id
+
+
 def resolve_node(node_id, workflow_id=None, *, deps):
     ensure_node_runtime = deps["ensure_node_runtime"]
     load_workflow = deps["load_workflow"]

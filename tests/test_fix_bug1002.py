@@ -102,12 +102,13 @@ def test_required_ids_reject_invalid_config(required):
 
 
 def test_ops_exposes_foreign_required_id_without_accepting_it():
-    from tests.test_herdr_task_ops_center import _ht
+    from herdr.ops_center_projection import _build_workflow_cards
     owned = {**_task(), 'status': 'integrated'}
     foreign = {**_task(task_id='foreign'), 'workflow_id': 'wf-other', 'status': 'cleaned'}
     config = {'nodes': [{'id': 'implementation', 'required_task_ids': ['foreign']}]}
-    with patch.object(_ht, '_safe_workflow', return_value=(config, 'Workflow')):
-        cards = _ht._build_workflow_cards({'wf-1': [owned], 'wf-other': [foreign]}, 1)
+    cards = _build_workflow_cards(
+        {'wf-1': [owned], 'wf-other': [foreign]}, 1,
+        workflow_lookup=lambda _: (config, 'Workflow'))
     node = next(c for c in cards if c['workflow_id'] == 'wf-1')['nodes'][0]
     assert node['status'] == 'pending'
     assert node['completion_issues'] == [
@@ -167,9 +168,15 @@ def test_supervisor_log_distinguishes_observation_from_enforcement(enforce):
 
 
 def test_ops_config_error_cannot_look_completed():
-    from tests.test_herdr_task_ops_center import _ht
-    with patch.object(_ht, 'load_workflow', side_effect=ValueError('required_task_ids invalid')):
-        cards = _ht._build_workflow_cards({'wf-1': [{**_task(), 'status': 'integrated'}]}, 1)
+    from herdr.ops_center_projection import _build_workflow_cards
+    from herdr.task_cli_tasks import safe_workflow
+    lookup = lambda workflow_id: safe_workflow(
+        workflow_id,
+        load_workflow=lambda _: (_ for _ in ()).throw(ValueError('required_task_ids invalid')),
+    )
+    cards = _build_workflow_cards(
+        {'wf-1': [{**_task(), 'status': 'integrated'}]}, 1,
+        workflow_lookup=lookup)
     node = cards[0]['nodes'][0]
     assert node['status'] == 'pending'
     assert node['completion_issues'] == [{'task_id': None, 'reason': 'workflow_config_invalid'}]

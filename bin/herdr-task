@@ -241,80 +241,11 @@ resolve_stage = resolve_node
 
 
 from herdr.ops_center_helpers import (
-    ANOMALY_ACTIONS,
-    ACTIVE_TASK_STATUSES,
-    COMPLETED_TASK_STATUSES,
-    TERMINAL_STATUSES,
-    KNOWN_AGENTS,
-    _now,
-    _coerce_epoch,
     _init_status_history,
-    _append_status_history,
-    _safe_float,
-    _elapsed_seconds,
-    _task_status_trajectory,
-    _agent_runtime_status,
-    _normalize_workflow_nodes,
-    _node_task_status_counts,
-    _task_healthy_status,
-    _trajectory_bucket,
-    _task_summaries_for_ops,
-    _format_age,
-    _collect_workflow_node_metadata,
-    _safe_text,
-    _anomaly_reason_text,
-    _contains_any,
-    _classify_task_anomalies,
-    _suggested_actions_for_anomaly,
-    _select_drilldown_task,
     _node_delivery_complete,
+    _normalize_workflow_nodes,
+    _now,
 )
-from herdr.ops_center_projection import (
-    _build_workflow_cards as _ops_center_build_workflow_cards,
-    _build_agent_fleet,
-    _build_anomalies,
-    _build_boss_summary,
-    _ops_center_payload as _ops_center_projection_payload,
-)
-
-
-def _safe_workflow(workflow_id):
-    if not workflow_id:
-        return None, "unknown-workflow"
-    try:
-        workflow = load_workflow(workflow_id)
-        return workflow, workflow.get("name") or workflow_id
-    except Exception:
-        return {"configuration_error": "workflow_config_invalid"}, workflow_id
-
-
-def _build_workflow_cards(workflows_tasks, now, all_tasks=None, workflow_lookup=None):
-    return _ops_center_build_workflow_cards(
-        workflows_tasks,
-        now,
-        all_tasks=all_tasks,
-        workflow_lookup=workflow_lookup or _safe_workflow,
-    )
-
-
-def _ops_center_payload(
-    workflow_id=None,
-    now=None,
-    include_tasks=False,
-    *,
-    snapshot_tasks=None,
-    workflow_lookup=None,
-    runtime_probe=None,
-):
-    data = load_tasks() if snapshot_tasks is None else {"tasks": snapshot_tasks}
-    return _ops_center_projection_payload(
-        workflow_id,
-        now,
-        include_tasks,
-        snapshot_tasks=data.get("tasks", []),
-        workflow_lookup=workflow_lookup or _safe_workflow,
-        runtime_probe=runtime_probe or _agent_runtime_status,
-    )
 
 
 def ops_center(args):
@@ -1661,13 +1592,16 @@ def _close_workflow_owned(
 
 def node_status(workflow_id, node_key):
     from herdr.task_cli_workflow import node_status as handle_node_status
+    from herdr.task_cli_tasks import safe_workflow
 
     return handle_node_status(
         workflow_id,
         node_key,
         resolve_node=resolve_node,
         load_tasks=load_tasks,
-        safe_workflow=_safe_workflow,
+        safe_workflow=lambda workflow_id: safe_workflow(
+            workflow_id, load_workflow=load_workflow
+        ),
         normalize_workflow_nodes=_normalize_workflow_nodes,
         node_delivery_complete=_node_delivery_complete,
     )

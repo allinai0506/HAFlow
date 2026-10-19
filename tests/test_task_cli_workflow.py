@@ -3,6 +3,16 @@ import json
 from herdr.task_cli_workflow import node_status, stage_reset, supersede_task
 
 
+def test_safe_workflow_uses_injected_loader_and_fails_closed():
+    from herdr.task_cli_tasks import safe_workflow
+
+    assert safe_workflow('wf-1', load_workflow=lambda _: {'name': 'Workflow'}) == (
+        {'name': 'Workflow'}, 'Workflow')
+    assert safe_workflow('wf-1', load_workflow=lambda _: {}) == ({}, 'wf-1')
+    assert safe_workflow('wf-1', load_workflow=lambda _: (_ for _ in ()).throw(ValueError())) == (
+        {'configuration_error': 'workflow_config_invalid'}, 'wf-1')
+
+
 def test_node_status_empty_node_uses_resolved_labels(capsys):
     node_status(
         'wf-1', 'build',
