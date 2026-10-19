@@ -1761,70 +1761,9 @@ def check_zombie_obligations(data=None):
 
 
 def main():
-    from herdr.task_cli import main as run
+    from herdr.task_cli_entry import main as run
 
-    return run(
-        handlers={
-            "_get_store": _get_store,
-            "add_task": add_task,
-            "adopt_verdict_cli": adopt_verdict_cli,
-            "bypass_gate_cli": bypass_gate_cli,
-            "check_delivery_for_pr": check_delivery_for_pr,
-            "check_zombie_obligations": check_zombie_obligations,
-            "cleanup_task": cleanup_task,
-            "clear_finalize_escalation": clear_finalize_escalation,
-            "close_workflow": close_workflow,
-            "cmd_canary_eval": cmd_canary_eval,
-            "cmd_compact": cmd_compact,
-            "cmd_eval": cmd_eval,
-            "cmd_eval_compare": cmd_eval_compare,
-            "cmd_launch_reconcile": cmd_launch_reconcile,
-            "cmd_metrics": cmd_metrics,
-            "cmd_observe": cmd_observe,
-            "cmd_panes": cmd_panes,
-            "cmd_reap": cmd_reap,
-            "cmd_renew_completion": cmd_renew_completion,
-            "cmd_replay": cmd_replay,
-            "cmd_reverification": cmd_reverification,
-            "cmd_rework": cmd_rework,
-            "cmd_rollout": cmd_rollout,
-            "cmd_route_shadow": cmd_route_shadow,
-            "cmd_shadow_eval": cmd_shadow_eval,
-            "cmd_task_checkpoint": cmd_task_checkpoint,
-            "cmd_tool_run": cmd_tool_run,
-            "cmd_workflow_migration": cmd_workflow_migration,
-            "cmd_workflow_recovery": cmd_workflow_recovery,
-            "cmd_working_context": cmd_working_context,
-            "commit_task": commit_task,
-            "create_pull_request": create_pull_request,
-            "differential_test": differential_test,
-            "dispatch_task": dispatch_task,
-            "ensure_node_runtime": ensure_node_runtime,
-            "finalize_task": finalize_task,
-            "force_advance": force_advance,
-            "get_task": get_task,
-            "integrate_task": integrate_task,
-            "launch_task": launch_task,
-            "list_tasks": list_tasks,
-            "merge_pull_request": merge_pull_request,
-            "node_status": node_status,
-            "note_add": note_add,
-            "note_list": note_list,
-            "ops_center": ops_center,
-            "pause_task": pause_task,
-            "purge_task": purge_task,
-            "record_delivery_note": record_delivery_note,
-            "record_review_closure": record_review_closure,
-            "reopen_workflow": reopen_workflow,
-            "resolve_workflow_id_for_close": resolve_workflow_id_for_close,
-            "resume_task": resume_task,
-            "set_status": set_status,
-            "stage_reset": stage_reset,
-            "supersede_task": supersede_task,
-            "verify_baseline": verify_baseline,
-            "verify_metrics": verify_metrics,
-        }
-    )
+    return run(dependencies=globals())
 
 
 if __name__ == "__main__":
