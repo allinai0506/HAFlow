@@ -941,7 +941,14 @@ class TestGuard(unittest.TestCase):
             self.db_path, agent="codex", node="implementation",
             task_type="fix", new_percentage=5, reason="r", source="cli")
         barrier = threading.Barrier(2)
+        snapshot_barrier = threading.Barrier(2)
+        read_snapshot = rollout_policy.state_db.read_rollout_snapshot
         results = []
+
+        def synchronized_snapshot(*args, **kwargs):
+            snapshot = read_snapshot(*args, **kwargs)
+            snapshot_barrier.wait(timeout=5)
+            return snapshot
 
         def promote(target):
             barrier.wait()
@@ -954,12 +961,14 @@ class TestGuard(unittest.TestCase):
             except ValueError as exc:
                 results.append(("conflict", str(exc)))
 
-        threads = [threading.Thread(target=promote, args=(10,)),
-                   threading.Thread(target=promote, args=(25,))]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        with patch.object(rollout_policy.state_db, "read_rollout_snapshot",
+                          side_effect=synchronized_snapshot):
+            threads = [threading.Thread(target=promote, args=(10,)),
+                       threading.Thread(target=promote, args=(25,))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
         self.assertEqual(len(results), 2)
         self.assertEqual(
             sum(1 for status, _ in results if status == "ok"), 1)
