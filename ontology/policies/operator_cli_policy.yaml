@@ -1,0 +1,50 @@
+id: operator_cli_policy
+name: 操作者 CLI 权限
+description: 操作者 CLI 权限（候选策略，待人工评审；allowed_actions 由 actions 的 authorization 派生）
+lifecycle: experimental
+subjects:
+  roles:
+  - human_operator
+  roles_implemented: false
+  note: 本机 CLI 调用者；--operator 为自由字符串（默认 human），无身份校验
+resources:
+  objects:
+  - project
+  - workflow_instance
+  - task
+  - gate
+  - agent_reservation
+allowed_actions:
+- bypass_gate
+- cleanup_task
+- close_workflow
+- commit_task
+- finalize_task
+- force_pass_gate
+- integrate_task
+- launch_task
+- provision_project
+- purge_task
+- record_gate_verdict
+- release_agent_reservation
+- reserve_agent
+- rollback_workflow
+- start_workflow
+- supersede_task
+- transition_task
+- verify_task_baseline
+conditions:
+- bypass-gate 与 force-pass 要求非空 reason（kernel.py L850-852）
+- 无角色或身份校验（已知缺口）
+agent_execution:
+  mode: inherit_user
+  note: 以操作者 OS 身份运行
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: bypass-gate parser L87-90（--operator 默认 human）
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: bypass_task_gate 原因校验 L832-857
+  confidence: high

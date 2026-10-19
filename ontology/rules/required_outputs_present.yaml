@@ -1,0 +1,18 @@
+id: required_outputs_present
+name: 必备产出存在
+description: 非 gate 节点的 required_outputs 是相对路径，必须在 clone 内存在且非空；gate 节点上它们是人工契约标签，机器证据走 verdict。
+lifecycle: experimental
+inputs:
+- workflow_node
+- task
+- artifact
+returns: boolean
+logic_ref: services/herdr-controller.py:check_task_deliverables_ready
+evidence:
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: L8377-8432
+  confidence: high
+outputs:
+- present
+- missing

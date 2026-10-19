@@ -1,0 +1,29 @@
+id: reservation_handoff
+name: 选人与预占交接
+description: 选人 -> 写预占 -> 启动任务 -> 注册后释放预占（或失败、TTL 回收）。
+lifecycle: experimental
+trigger:
+  type: event
+  event: herdr-task launch
+steps:
+- id: s1
+  type: action
+  ref: reserve_agent
+- id: s2
+  type: action
+  ref: launch_task
+- id: s3
+  type: action
+  ref: release_agent_reservation
+- id: s4
+  type: rule
+  ref: agent_reservation_ttl_bounded
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: _clean_reservations L260-280 / 预占写入 L809-819
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: launch 预占调用 L3697-3749；释放 L4263-4265
+  confidence: high

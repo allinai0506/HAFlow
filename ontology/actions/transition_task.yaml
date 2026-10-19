@@ -1,0 +1,67 @@
+id: transition_task
+name: 迁移任务状态
+description: 受控任务状态迁移的通用动作；经 kernel.transition_task 网关时做 CAS 与同事务事件。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+- to_status
+- reason
+- expected_status
+- expected_version
+preconditions:
+- task_transition_allowed
+- review_closure_required_for_wrapup
+authorization:
+  policies:
+  - controller_service_policy
+  - operator_cli_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: <current>
+    to: <target>
+side_effects:
+- 同一事务写 task_transition 事件
+- best-effort 写 task_status_changed 轨迹事件（kernel L203-222）
+- version 自增
+idempotency:
+  strategy: cas_when_expected_provided
+  key: task_id + expected_status/expected_version（CLI set 不传 expected_*，见 SC-018）
+transaction:
+  mode: atomic_via_gateway
+  owner: herdr.kernel.transition_task -> herdr.state_db.transition_task
+  note: 只有经网关的迁移是原子的；直接 save_task 的路径不适用（见 out_of_matrix_writers）
+audit:
+  required: true
+  event: task_transition
+failure_behavior:
+  retry: safe_on_cas_mismatch（返回 accepted=false）
+  compensation: reread_and_redecide
+bindings:
+- connector: herdr_task_cli
+  operation: set
+- connector: herdr_core_lib
+  operation: herdr.kernel.transition_task
+- connector: herdr_controller_service
+  operation: try_auto_accept
+verification:
+  strategy: reread_target
+  target: state.db tasks[task_id].status
+evidence:
+- kind: implemented
+  source: herdr/kernel.py
+  locator: transition_task L133-253
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: transition_task L6658-6909（CAS L6689-6733；同事务事件 L6820-6833）
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: set_status L877 / set 子命令 parser L13
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: try_auto_accept L8159-8202
+  confidence: high

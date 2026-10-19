@@ -1,0 +1,57 @@
+id: agent_reservation
+name: Agent 预占锁
+description: 选人后、任务正式注册前的跨进程预占记录，关闭路由竞争窗口。记录在三种情况下被移除：显式 release、任务已注册后的交接清理、未注册且超过 TTL 300 秒的超时清理；磁盘上不存在持久化的 expired 状态。
+lifecycle: experimental
+identity:
+  primary_key: task_id
+  note: reservation_key 即 task_id
+aliases:
+- Reservation
+- 预占锁
+properties:
+- id: task_id
+  name: 预占的任务
+  type: string
+  required: true
+- id: project_id
+  name: 所属项目
+  type: string
+  required: true
+- id: workflow_id
+  name: 所属工作流
+  type: string
+  required: false
+- id: stage
+  name: 阶段
+  type: string
+  required: false
+- id: task_type
+  name: 任务类型
+  type: string
+  required: false
+- id: agent
+  name: 被预占 Agent
+  type: string
+  required: true
+- id: created_at
+  name: 创建时间
+  type: float
+  required: true
+  notes: TTL 基准
+- id: dispatch_role
+  name: 派发角色
+  type: string
+  required: false
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: RESERVATIONS_FILE L16 / 写预占 L810-819
+  confidence: high
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: _clean_reservations TTL=300 L260-280 / release_agent_reservation L283-297
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: launch 传 reservation_key 与注册后释放 L3697-3749, L4263-4265
+  confidence: high

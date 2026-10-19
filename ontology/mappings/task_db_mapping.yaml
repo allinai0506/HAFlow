@@ -1,0 +1,36 @@
+id: task_db_mapping
+name: 任务数据库映射
+description: 任务数据库映射（事实来源映射）
+lifecycle: experimental
+object: task
+source:
+  type: database
+  path: ~/.herdr-controller/state.db
+  table: tasks
+fields:
+  task_id: task_id
+  workflow_id: workflow_id
+  node: node
+  stage: stage
+  agent: agent
+  status: status
+  stage_verdict: stage_verdict
+  stage_verdict_note: stage_verdict_note
+  pane_id: pane_id
+  goal: goal
+  blocker: blocker
+  version: version
+  task_type: payload_json.task_type
+  branch: payload_json.branch
+  clone_path: payload_json.clone_path
+  integration_mode: payload_json.integration_mode
+  baseline_fingerprint: payload_json.baseline_fingerprint
+  superseded_by: payload_json.superseded_by
+authority:
+  read: database
+  write: herdr.state_db.save_task / transition_task
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: DDL L385-402 / payload 规则 L1591-1607
+  confidence: high

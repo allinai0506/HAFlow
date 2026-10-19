@@ -1,0 +1,22 @@
+id: herdr_controller_service
+name: herdr-controller 守护进程
+description: herdr-controller 守护进程（运行时绑定目标）
+lifecycle: experimental
+type: daemon
+entrypoint: services/herdr-controller.py
+operations:
+- id: maybe_close_completed_workflow
+  kind: function
+- id: try_auto_accept
+  kind: function
+- id: try_auto_verdict
+  kind: function
+timeout_ms: null
+retry:
+  mode: unknown
+  note: 未在候选中核对超时与重试配置
+evidence:
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: try_auto_accept L8159 / try_auto_verdict L8460 / maybe_close_completed_workflow L844
+  confidence: high

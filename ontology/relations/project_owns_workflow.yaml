@@ -1,0 +1,17 @@
+id: project_owns_workflow
+name: 项目拥有工作流
+description: 一个项目可注册多个工作流实例；实例通过 metadata.project_id 归属项目。
+lifecycle: experimental
+from: project
+to: workflow_instance
+cardinality: one_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: metadata_json.project_id 索引 L679
+  confidence: high
+- kind: implemented
+  source: herdr/projects.py
+  locator: register_workflow L551-603
+  confidence: high

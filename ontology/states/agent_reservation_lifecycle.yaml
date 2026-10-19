@@ -1,0 +1,38 @@
+id: agent_reservation_lifecycle
+name: Agent 预占记录生命周期
+description: 预占记录只有一个持久状态 reserved；移除有三种途径：显式 release、任务已注册后的交接清理、未注册且超过 TTL 300 秒的超时清理。磁盘上不存在 expired 状态（r1 撤回原 expired 设计，F-19）。
+lifecycle: experimental
+object: agent_reservation
+initial: reserved
+terminal:
+- removed
+states:
+- reserved
+- removed
+transitions:
+- from: reserved
+  to: removed
+  trigger: herdr.agent_router.release_agent_reservation（显式 pop；herdr-task launch 注册或失败路径调用）
+  guards: []
+- from: reserved
+  to: removed
+  trigger: herdr.agent_router._clean_reservations：task_id 已在 StateStore 注册（交接清理）
+  guards: []
+- from: reserved
+  to: removed
+  trigger: herdr.agent_router._clean_reservations：未注册且 created_at 超过 TTL 300 秒
+  guards:
+  - agent_reservation_ttl_bounded
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: _clean_reservations L260-280（registered 分支 L272-274 直接跳过，即丢弃）
+  confidence: high
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: release_agent_reservation L283-297
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: release 调用点 L4263-4265
+  confidence: high

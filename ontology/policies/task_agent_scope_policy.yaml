@@ -1,0 +1,30 @@
+id: task_agent_scope_policy
+name: Task Agent 范围权限
+description: Task Agent 范围权限（候选策略，待人工评审；allowed_actions 由 actions 的 authorization 派生）
+lifecycle: experimental
+subjects:
+  roles:
+  - task_agent
+  roles_implemented: false
+  note: 运行在独占克隆内的执行 Agent
+resources:
+  objects:
+  - task
+  - artifact
+  - workflow_node
+allowed_actions: []
+conditions:
+- 设计意图：仅可见自身任务、所属节点与产物（无策略执行点，未强制）
+- 凭证应脱敏后传递（设计意图，未核对）
+agent_execution:
+  mode: inherit_user
+  note: 以本机用户身份运行于克隆；业务范围未强制
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: bypass-gate parser L87-90（--operator 默认 human）
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: bypass_task_gate 原因校验 L832-857
+  confidence: high

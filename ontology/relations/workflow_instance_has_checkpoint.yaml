@@ -1,0 +1,13 @@
+id: workflow_instance_has_checkpoint
+name: 工作流拥有检查点
+description: 检查点按 workflow_id 归属并形成父子链。
+lifecycle: experimental
+from: workflow_instance
+to: checkpoint
+cardinality: one_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: checkpoints DDL L428-440 / lineage L7842-7870
+  confidence: high

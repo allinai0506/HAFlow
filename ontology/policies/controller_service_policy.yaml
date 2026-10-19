@@ -1,0 +1,34 @@
+id: controller_service_policy
+name: Controller 服务权限
+description: Controller 服务权限（候选策略，待人工评审；allowed_actions 由 actions 的 authorization 派生）
+lifecycle: experimental
+subjects:
+  roles:
+  - controller_service
+  roles_implemented: false
+  note: 常驻守护进程 services/herdr-controller.py
+resources:
+  objects:
+  - workflow_instance
+  - task
+  - gate
+allowed_actions:
+- close_workflow
+- record_gate_verdict
+- supersede_task
+- transition_task
+conditions:
+- 状态仲裁应携带 expected_status/version（CAS）；supervisor RETRY/VERIFY 与 set_task_status 回退路径未满足（controller L8524-8531, L8649-8656）
+- 自动验收排除门禁节点（取证来自子代理，未逐行复核）
+agent_execution:
+  mode: service_identity
+  note: 本机服务身份（设计意图），不继承用户权限
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: bypass-gate parser L87-90（--operator 默认 human）
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: bypass_task_gate 原因校验 L832-857
+  confidence: high

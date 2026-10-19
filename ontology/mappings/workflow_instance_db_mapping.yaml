@@ -1,0 +1,26 @@
+id: workflow_instance_db_mapping
+name: 工作流实例数据库映射
+description: 工作流实例数据库映射（事实来源映射）
+lifecycle: experimental
+object: workflow_instance
+source:
+  type: database
+  path: ~/.herdr-controller/state.db
+  table: workflows
+fields:
+  workflow_id: workflow_id
+  title: title
+  status: status
+  template_name: template_name
+  current_stage: current_stage
+  config_json: config_json
+  metadata_json: metadata_json
+authority:
+  read: database
+  write: herdr.state_db / herdr.projects.register_workflow
+notes: workflows.json 只是 export/projection（state_store.py 头注释 L7-10）
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: DDL L368-377
+  confidence: high

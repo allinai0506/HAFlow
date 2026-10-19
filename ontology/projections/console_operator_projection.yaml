@@ -1,0 +1,71 @@
+id: console_operator_projection
+name: 运维控制台只读投影
+description: 面向人类操作者的只读聚合视图。r1：移除原有写动作（transition_task、close_workflow、bypass_gate）。控制台写路由（/api/kernel/force-pass、/api/task/force-review 等）未建模且未鉴权，见评审 F-07、F-22。
+lifecycle: experimental
+consumers:
+- role: human_operator_console
+  role_implemented: false
+objects:
+  project:
+    properties:
+    - project_id
+    - project_name
+    - project_root
+    - base_branch
+    - workspace_id
+  workflow_instance:
+    properties:
+    - workflow_id
+    - title
+    - status
+    - created_at
+    - updated_at
+  workflow_node:
+    properties:
+    - id
+    - label
+    - node_type
+    - depends_on
+  task:
+    properties:
+    - task_id
+    - node
+    - status
+    - agent
+    - version
+    - stage_verdict
+  event:
+    properties:
+    - event_type
+    - task_id
+    - timestamp
+    - source
+  checkpoint:
+    properties:
+    - checkpoint_id
+    - tag
+    - created_at
+  artifact:
+    properties:
+    - rel_path
+    - status
+    - kind
+relations:
+- project_owns_workflow
+- workflow_instance_groups_task
+- task_produces_artifact
+rules:
+- task_transition_allowed
+- workflow_transition_allowed
+actions: []
+policies: []
+exclude_by_default: true
+evidence:
+- kind: implemented
+  source: herdr/projection.py
+  locator: project_task L270（4D 白盒遥测投影，r1 修正原 L57-64）
+  confidence: high
+- kind: implemented
+  source: console/http_server.py
+  locator: POST 路由 L244-304（无鉴权）
+  confidence: high

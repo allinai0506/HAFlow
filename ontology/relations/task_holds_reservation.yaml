@@ -1,0 +1,17 @@
+id: task_holds_reservation
+name: 任务持有预占锁
+description: 选人后任务在正式注册前持有预占记录，注册后显式释放；TTL 300 秒过期回收。
+lifecycle: experimental
+from: task
+to: agent_reservation
+cardinality: one_to_zero_or_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: choose_agent 写预占 L809-819 / release L283-297
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: 注册后释放 L4263-4265
+  confidence: high

@@ -1,0 +1,20 @@
+id: workflow_transition_allowed
+name: 工作流状态迁移合法
+description: 给定当前状态与目标状态，判定边是否在 WORKFLOW_TRANSITIONS 内。
+lifecycle: experimental
+inputs:
+- workflow_instance
+returns: boolean
+logic_ref: herdr/transitions.py:validate_workflow_transition
+evidence:
+- kind: implemented
+  source: herdr/transitions.py
+  locator: L112-131
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: CAS 前校验 L7135-7148
+  confidence: high
+outputs:
+- allowed
+- reason

@@ -1,0 +1,43 @@
+id: release_agent_reservation
+name: 释放 Agent 预占
+description: 任务注册、失败或回收时显式释放预占记录。
+lifecycle: experimental
+target: agent_reservation
+inputs:
+- task_id
+preconditions: []
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  deletes:
+  - agent_reservation
+side_effects:
+- flock 写 agent-reservations.json（同时执行 _clean_reservations）
+idempotency:
+  strategy: business_key
+  key: task_id（pop 幂等）
+transaction:
+  mode: file_lock
+  owner: herdr.agent_router.release_agent_reservation
+audit:
+  required: false
+  notes: 无独立审计事件（审计缺口）
+failure_behavior:
+  retry: always_safe
+  compensation: none
+bindings:
+- connector: herdr_core_lib
+  operation: herdr.agent_router.release_agent_reservation
+verification:
+  strategy: reread_target
+  target: agent-reservations.json 不再含 task_id
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: release_agent_reservation L283-297
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: release 调用点 L2675, L4263-4265, L5196
+  confidence: high

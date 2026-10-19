@@ -1,0 +1,58 @@
+id: task_delivery_workflow
+name: 任务交付闭环
+description: 从项目供给到工作流收尾的标准交付编排（描述性，非控制器执行的 DAG 副本）。
+lifecycle: experimental
+trigger:
+  type: manual
+  event: herdr-factory run；Controller 按 DAG 就绪推进（check_workflow_stage_advance L4810）
+steps:
+- id: s1
+  type: action
+  ref: provision_project
+  notes: 首次使用或模板切换时
+- id: s2
+  type: action
+  ref: start_workflow
+- id: s3
+  type: rule
+  ref: workflow_dag_acyclic
+- id: s4
+  type: action
+  ref: launch_task
+- id: s5
+  type: action
+  ref: verify_task_baseline
+- id: s6
+  type: rule
+  ref: required_outputs_present
+- id: s7
+  type: action
+  ref: record_gate_verdict
+  notes: 门禁节点
+- id: s8
+  type: action
+  ref: commit_task
+  notes: integration_mode=git 时
+- id: s9
+  type: action
+  ref: integrate_task
+  notes: integration_mode=git 时
+- id: s10
+  type: action
+  ref: finalize_task
+- id: s11
+  type: action
+  ref: close_workflow
+evidence:
+- kind: implemented
+  source: bin/herdr-factory
+  locator: run / start 路径 L403-623
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: check_workflow_stage_advance L4918 / get_ready_nodes 调用 L5080
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: close-workflow L7273-7590
+  confidence: high

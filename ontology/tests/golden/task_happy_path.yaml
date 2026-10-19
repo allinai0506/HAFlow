@@ -1,0 +1,16 @@
+id: task_happy_path
+name: 任务主路径可派发
+facts:
+  task:
+    task_id: wf-demo-1019-01-impl
+    status: pending
+    workflow_id: wf-demo-1019-01
+    node: implementation
+  workflow_instance:
+    workflow_id: wf-demo-1019-01
+    status: running
+expected:
+  rules:
+    task_transition_allowed: true
+  allowed_actions:
+  - launch_task

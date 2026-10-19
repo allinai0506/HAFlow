@@ -1,0 +1,55 @@
+id: start_workflow
+name: 启动工作流 Run
+description: 为项目创建一次工作流运行实例，冻结定义快照并初始化节点运行现场。
+lifecycle: experimental
+target: workflow_instance
+inputs:
+- project_id
+- template_name
+- title
+- context_bindings
+preconditions:
+- workflow_dag_acyclic
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  creates:
+  - workflow_instance
+  state_transition:
+    state_machine: workflow_lifecycle
+    from: （无）
+    to: running
+    note: 注册直接写 running，不经过 pending（SC-011）
+side_effects:
+- 冻结 Run 定义快照 workflows/<id>/workflow.json（失败则不注册，L573-577）
+- 初始化 node_runtime 映射
+idempotency:
+  strategy: generated_id
+  key: wf-{slug}-{MMDD}-{seq}（seq 扫描注册表）
+transaction:
+  mode: snapshot_then_store
+  owner: herdr.projects.register_workflow
+audit:
+  required: false
+  notes: 注册本身无独立事件；后续迁移写 workflow_transition（审计缺口）
+failure_behavior:
+  retry: unknown
+  compensation: none
+bindings:
+- connector: herdr_factory_cli
+  operation: run
+- connector: herdr_core_lib
+  operation: herdr.projects.register_workflow
+verification:
+  strategy: reread_target
+  target: state.db workflows[workflow_id]
+evidence:
+- kind: implemented
+  source: herdr/projects.py
+  locator: register_workflow L551-603 / freeze_run_definition L510-577
+  confidence: high
+- kind: implemented
+  source: bin/herdr-factory
+  locator: run 子命令 L833
+  confidence: high

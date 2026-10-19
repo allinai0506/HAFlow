@@ -1,0 +1,46 @@
+id: herdr_task_cli
+name: herdr-task CLI
+description: herdr-task CLI（运行时绑定目标）
+lifecycle: experimental
+type: cli
+entrypoint: bin/herdr-task
+operations:
+- id: bypass-gate
+  kind: subcommand
+- id: cleanup
+  kind: subcommand
+- id: close-workflow
+  kind: subcommand
+- id: commit
+  kind: subcommand
+- id: finalize
+  kind: subcommand
+- id: integrate
+  kind: subcommand
+- id: launch
+  kind: subcommand
+- id: purge
+  kind: subcommand
+- id: set
+  kind: subcommand
+- id: supersede
+  kind: subcommand
+- id: verify-baseline
+  kind: subcommand
+timeout_ms: null
+retry:
+  mode: unknown
+  note: 未在候选中核对超时与重试配置
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: "build_parser() L6971-6972"
+  confidence: high
+- kind: implemented
+  source: herdr/task_cli_parser_workflow.py
+  locator: "bypass-gate parser L87-90 / set parser L13"
+  confidence: high
+- kind: implemented
+  source: herdr/task_cli_parser_execution.py
+  locator: "launch parser L73-115 / cleanup parser L218-223 / finalize parser L224-231 / close-workflow parser L238"
+  confidence: high

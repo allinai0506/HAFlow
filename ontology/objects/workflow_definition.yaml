@@ -1,0 +1,68 @@
+id: workflow_definition
+name: 工作流定义
+description: 描述项目研发或业务生产流程的声明式 DAG；模板（template）与某次 Run 冻结的不可变快照（run snapshot）都是定义载体。
+lifecycle: experimental
+identity:
+  primary_key: definition_ref
+  format: template:<name>@<version> | run:<workflow_id>
+aliases:
+- WorkflowDefinition
+- Workflow Template
+- 工作流模板
+properties:
+- id: name
+  name: 模板名
+  type: string
+  required: true
+- id: label
+  name: 展示名
+  type: string
+  required: false
+- id: version
+  name: 版本
+  type: string
+  required: false
+  notes: 默认 1.0
+- id: description
+  name: 描述
+  type: string
+  required: false
+- id: execution_mode
+  name: 执行模式
+  type: enum
+  required: false
+  notes: git | context；未知值在 normalize 时报错
+- id: nodes
+  name: 节点列表
+  type: list[workflow_node]
+  required: true
+  notes: canonical 形式；stages 由 nodes 推导
+- id: context_required
+  name: 必需上下文
+  type: list[string]
+  required: false
+- id: context_optional
+  name: 可选上下文
+  type: list[string]
+  required: false
+- id: base_branch
+  name: 绑定基线分支
+  type: string
+  required: false
+evidence:
+- kind: implemented
+  source: herdr/workflow.py
+  locator: normalize_workflow L177-179 / _normalize_workflow_body L330-510
+  confidence: high
+- kind: implemented
+  source: herdr/workflow.py
+  locator: validate_workflow_dag L104-174
+  confidence: high
+- kind: implemented
+  source: herdr/projects.py
+  locator: _snapshot_workflow_definition L472-508 / freeze_run_definition L510-577
+  confidence: high
+- kind: intended
+  source: docs/product-specs/workflow-template-schema.md
+  locator: 顶层 Schema 1-17
+  confidence: high

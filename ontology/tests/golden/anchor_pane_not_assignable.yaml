@@ -1,0 +1,15 @@
+id: anchor_pane_not_assignable
+name: Anchor 窗格不可分配
+facts:
+  workflow_node:
+    id: impl
+    anchor_pane_id: w9:p2
+  candidate_panes:
+  - w9:p1 (coordinator)
+  - w9:p2 (Anchor)
+  - w9:p3
+expected:
+  rules:
+    anchor_pane_never_assigned: true
+  assignable:
+  - w9:p3

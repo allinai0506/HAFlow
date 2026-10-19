@@ -1,0 +1,28 @@
+id: artifact_projection_mapping
+name: 交付产物投影映射
+description: 交付产物投影映射（事实来源映射）
+lifecycle: experimental
+object: artifact
+source:
+  type: computed
+  module: herdr/deliverables.py
+  inputs:
+  - tasks
+  - git 状态与提交
+  - observations(source_type=artifact)
+  - node.required_outputs
+fields:
+  artifact_id: sha256(task_id\nkind\nkey)[:20]
+  kind: derived
+  rel_path: file path
+  status: read-time status
+  git_commit.sha: recorded sha -> workspace HEAD 兜底
+authority:
+  read: computed
+  write: none (read-time projection)
+notes: deliverables 明确不构成已验证事实（docstring L6）
+evidence:
+- kind: implemented
+  source: herdr/deliverables.py
+  locator: L76-114, L341-357, L777-821
+  confidence: high

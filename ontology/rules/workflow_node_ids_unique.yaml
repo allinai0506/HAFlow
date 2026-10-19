@@ -1,0 +1,16 @@
+id: workflow_node_ids_unique
+name: 节点 ID 唯一
+description: 同一工作流定义内节点 id 不得重复，否则加载即失败。
+lifecycle: experimental
+inputs:
+- workflow_definition
+- workflow_node
+returns: boolean
+logic_ref: herdr/workflow.py:validate_workflow_dag
+evidence:
+- kind: implemented
+  source: herdr/workflow.py
+  locator: 重复 id 抛错 L106-108
+  confidence: high
+outputs:
+- unique

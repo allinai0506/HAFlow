@@ -1,0 +1,20 @@
+id: task_transition_allowed
+name: 任务状态迁移合法
+description: 给定当前状态与目标状态，判定边是否在 TASK_TRANSITIONS 内；目标状态未知一律非法；old == new 视为合法自迁移；force 跳过边校验但不跳过未知目标校验。状态机之外的写入路径见 task_lifecycle.out_of_matrix_writers，本规则不覆盖它们。
+lifecycle: experimental
+inputs:
+- task
+returns: boolean
+logic_ref: herdr/transitions.py:validate_task_transition
+evidence:
+- kind: implemented
+  source: herdr/transitions.py
+  locator: L62-82
+  confidence: high
+- kind: implemented
+  source: tests/test_state_transition_gateway.py
+  locator: 非法迁移不写事件 L97-142
+  confidence: high
+outputs:
+- allowed
+- reason

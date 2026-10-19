@@ -1,0 +1,43 @@
+id: commit_task
+name: 提交任务分支
+description: 将克隆内产出提交到任务独占分支，推进 completed -> committed。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+preconditions:
+- task_transition_allowed
+- task_has_isolated_clone
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: completed
+    to: committed
+side_effects:
+- git commit 与分支 ref 写入
+idempotency:
+  strategy: business_key
+  key: task_id + commit sha
+transaction:
+  mode: git_then_store
+  owner: bin/herdr-task commit
+audit:
+  required: true
+  event: task_transition
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+- connector: herdr_task_cli
+  operation: commit
+verification:
+  strategy: reread_target
+  target: git refs + tasks.status
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: commit 迁移 L5693-5700, L6025-6032
+  confidence: high

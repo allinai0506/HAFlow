@@ -1,0 +1,14 @@
+id: workflow_instance_instantiates_definition
+name: 实例实例化定义
+description: 实例在注册时冻结一份不可变定义快照；共享 workflow.json 只代表下一次 Run 的模板。
+lifecycle: experimental
+from: workflow_instance
+to: workflow_definition
+cardinality: one_to_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/projects.py
+  locator: freeze_run_definition L510-577 / _snapshot_workflow_definition L472-508
+  confidence: high
+notes: 快照失败时若源文件可读则拒绝注册（文档描述为降级回退，见冲突 SC-006）

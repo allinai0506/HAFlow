@@ -1,0 +1,17 @@
+id: gate_verdict_valid
+name: 门禁结论合法
+description: 结论仅允许 pass|blocked；blocked 必须携带非空 note；结论写入与 completed 在同一次 set 调用中完成；同状态再次写入允许（见 gate_verdict_lifecycle）。
+lifecycle: experimental
+inputs:
+- gate
+- task
+returns: boolean
+logic_ref: bin/herdr-task:set_status
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: L2402-2419
+  confidence: high
+outputs:
+- valid
+- reason

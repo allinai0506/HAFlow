@@ -7397,3 +7397,41 @@ issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候
 pytest -q tests/test_wrapup_review_closure.py   # 58 passed，含 B1 向量 a/b 对抗用例、B2 凭据目录零污染断言、真多线程独立连接并发 HEAD guard 竞争测试、bypass-gate 直写 clone lock 守护测试及 attempt 关联去重零残留测试
 ```
 关键回归验证：无呈现 token 即使服务端已注册也拒绝；路径遍历 operator 名拒绝；跨 operator 串用 token 拒绝；worker 自身身份冒充 operator 拒绝；正向旁路成功路径落 `review_closure_skipped` 事件并完成状态迁移；真实 `~/.herdr-controller/credentials` 在全量套件运行后零变化；真多线程并发 completion 请求在持有锁交叠边界 HEAD 推进时无法绕过 lock/HEAD check；`bypass_task_gate` 直写安全受 `clone_lock` 与 `HeadGuard` 保护，HEAD 变化时坚决拒绝并不泄露 guard；双重校验路径按 attempt 去重，流转完成后活跃 guard 零残留。
+
+## 176. 测试进程不得写真实控制台目录；前置条件消失后的断言是静默假绿（2026-10-19）
+
+### 问题背景
+
+> 与 §175 的“凭据目录测试污染”同源：§175 修复的是 `HOME` 未隔离导致凭据文件写入真实宿主；本条覆盖同一次隔离缺失在控制台 `projects/` 目录上的大规模残留，以及隔离后前置条件消失造成的静默假绿。
+
+评审候选本体时顺带发现：`herdr/projects.py`、`herdr/state_db.py`、`herdr/kernel.py`、`console/common.py` 都在**导入期**由 `Path.home()` 计算 `~/.herdr-controller` 根路径，而测试套件只隔离了工作流文档目录、attention 账本与 observer 开关（`tests/conftest.py`），没有隔离 `HOME`。在真实 HOME 下拉一次控制台全量测试，会通过 `provision_project` / `/api/project/create` 把临时项目写进生产目录：真实 `~/.herdr-controller/projects/` 累积了 1499 个 `tmp…-<hash>` 目录（其中 2 个由本次运行新增），全部只含一份测试模板 `workflow.json`。加隔离修复后，OS 沙箱边界用例又暴露第二类问题：金丝雀写在 `Path.home()` 下，隔离后沙箱可读（`test_03` 失败）；`test_08`（`~/.gemini`）、`test_09`（钥匙串）因路径不存在被 `if exists` **静默跳过**，以"通过"掩盖了检查从未执行。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 测试在真实 HOME 下运行，导入期常量把 `~/.herdr-controller` 指向生产目录，累积 1499 个测试项目目录 | 路径隔离必须在任何 HAFlow 模块导入前设置 `HOME`；逐个 monkeypatch `ROOT` 会漏（多个模块各自在导入期计算） | `tests/conftest.py` 顶部把 `HOME` 指向临时目录，保留 `PYTHONUSERBASE`（子进程找得到用户 site-packages）并复制 git 身份（测试仍可提交）；用 `tests/test_test_isolation.py` 守护 |
+| 验证"沙箱拒绝访问开发者 HOME"的用例把金丝雀写在 `Path.home()` 下，隔离后落在临时目录 → 沙箱允许读取，`test_03` 失败 | 保护性测试的被保护路径必须绑定**真实**开发者主目录；测试隔离改变 `Path.home()` 语义后，这类断言的前提失效 | 该模块在 `setUpClass` 用 `pwd.getpwuid(os.getuid()).pw_dir` 并把 `HOME` 恢复到真实值，`tearDownClass` 还原 |
+| `~/.gemini`、钥匙串检查用 `if exists` 包住，临时 HOME 下路径不存在 → 用例静默通过，实际未验证 | 前置条件消失后的断言是**假绿**：没有任何标记区分"验证通过"与"跳过未验证" | 前置条件缺失时显式 skip 并说明原因，或在测试类里恢复真实环境使其可执行；禁止用"仍然绿色"代替"已覆盖" |
+| 核实 D4：controller 派发把节点 `default_task_type` 原样传给 `launch --task-type`，argparse 只接受 fix/feat/refactor/docs/test/chore/perf/ci；`business-research-v1.yaml` 的 `plan`、`explore` 节点无法派发 | 枚举校验发生在 argparse，拒绝早于任何副作用（无半成品）；但节点 schema 的 `default_task_type` 枚举与 launch choices 是两套词表，配置合法≠可派发 | 派发边界必须校验任务类型属于 choices；模板词表与 CLI choices 统一为单一枚举（本体 SC-013） |
+| 核实 SC-016：`resume_task` 允许把 `paused` 恢复到 `dispatched` 或 `blocked`，状态矩阵不允许这两条边 → `Illegal transition`，任务停在 paused | 恢复路径必须只在矩阵允许的边内选择目标回退状态；默认 `working`，历史回退仅接受 `working` 与 `rework`，其他落回默认 | 若历史前态不在 `paused` 的出边中，回退目标取默认值；补"paused from dispatched → resume 成功"的回归测试 |
+
+### 操作规范
+
+1. 跑任何 HAFlow 测试前，确认 `HOME` 已指向临时目录（修复后由 conftest 自动完成）；在未合入该修复的副本上，禁止在真实 HOME 下跑全量测试。
+2. 新增"保护真实资源"的测试时，先问一句：隔离环境下这个前置条件还存在吗？不存在就会静默假绿；存在性检查必须与断言分开。
+3. 派发任务类型只使用 `launch --task-type` 的 choices；模板节点若需要 `explore`、`plan`、`review` 语义，另行表达（`business_task_type`），不得混入技术任务类型。
+4. 总裁判 resume 类恢复动作时，目标状态取矩阵允许的前态；修正前 `paused` 只能人工 `set` 回到允许状态。
+
+### 验证命令 / 证据
+
+```bash
+# 隔离守护：HOME 与 ROOT 必须落在临时目录
+python3 -m pytest -q tests/test_test_isolation.py
+# OS 沙箱边界（真实 HOME 语义）：22 项全绿、无静默跳过
+python3 -m pytest -q tests/test_os_sandbox_boundary.py -rs
+# D4 证据：argparse 直接拒绝非 choices 的任务类型
+bin/herdr-task launch --task-id T-PLAN --workflow wf-x --node impl --source g --agent claude --task-type plan
+```
+
+证据：`tests/conftest.py`（HOME 隔离）、`tests/test_os_sandbox_boundary.py`（真实 HOME 恢复）、`tests/test_test_isolation.py`；全量隔离运行 4908 通过 / 3 跳过 / 1 失败（即 test_03，已修复），真实 `projects/` 运行前后均为 1504；1497 个旧临时目录已移入 `~/.sandboxes/quarantine/console-test-pollution-20261019/older-tmp-projects`（含可逆清单）。关联：候选本体评审 `ontology/proposals/OEP-0001-review-r1.md` 的 SC-013、SC-016。n 解死端）、n-1792330151841-f810（D3 裁决）；回归测试 `tests/test_quality_assessment.py`（含 `test_historical_receipt_does_not_leak_across_runs`），候选 `ce5875b` 上 103 passed + 13 subtests。

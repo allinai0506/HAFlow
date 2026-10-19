@@ -1,0 +1,21 @@
+id: agent_capacity_within_node_limit
+name: 节点并发与累计配额内
+description: 节点级 max_concurrency（含 pending）与 max_tasks_per_node 在工作流锁内校验；超限拒绝派发，系统无全局 per-agent 硬上限。
+lifecycle: experimental
+inputs:
+- workflow_node
+- task
+returns: boolean
+logic_ref: herdr/node_capacity.py:launch_capacity_error
+evidence:
+- kind: implemented
+  source: herdr/node_capacity.py
+  locator: L2-4, L22-81
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: launch 调用 L3332-3348
+  confidence: high
+outputs:
+- within_limit
+- error

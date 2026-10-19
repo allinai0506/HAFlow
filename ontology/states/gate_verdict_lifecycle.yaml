@@ -1,0 +1,69 @@
+id: gate_verdict_lifecycle
+name: 门禁结论生命周期
+description: 门禁结论字段（tasks.stage_verdict）从 unset 出发。结论随 completed 写入，同一任务可被再次写入；rework 与 delivery-repair 会清空结论；bypass 与 force-pass 可在任意前态写入 pass。
+lifecycle: experimental
+object: gate
+initial: unset
+terminal: []
+states:
+- unset
+- pass
+- blocked
+transitions:
+- from: unset
+  to: pass
+  trigger: herdr-task set <task> completed --verdict pass
+  guards:
+  - gate_verdict_valid
+- from: unset
+  to: blocked
+  trigger: herdr-task set <task> completed --verdict blocked --note <note>
+  guards:
+  - gate_verdict_valid
+- from: pass
+  to: blocked
+  trigger: herdr-task set（同任务再次 completed 写入结论）
+  guards:
+  - gate_verdict_valid
+- from: blocked
+  to: pass
+  trigger: herdr-task set（同任务再次 completed 写入结论）
+  guards:
+  - gate_verdict_valid
+- from: unset
+  to: pass
+  trigger: kernel.bypass_task_gate / kernel.force_pass_gate 直接写 pass
+  guards:
+  - gate_bypass_audited
+- from: blocked
+  to: pass
+  trigger: kernel.bypass_task_gate / kernel.force_pass_gate 直接写 pass
+  guards:
+  - gate_bypass_audited
+- from: pass
+  to: unset
+  trigger: rework / delivery-repair 清空结论（delivery_rework.py L108）
+  guards: []
+- from: blocked
+  to: unset
+  trigger: rework / delivery-repair 清空结论（delivery_rework.py L108）
+  guards: []
+unknowns:
+- 结论与任务状态的一致性约束（例如 rework 后是否必须重新 completed）未在矩阵中声明
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: set_status L877-1019（verdict 规则 L941-958；同状态写入先于 no-op 检测 L970-998）
+  confidence: high
+- kind: implemented
+  source: herdr/delivery_rework.py
+  locator: 清空 stage_verdict L102-108
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: bypass_task_gate 写 pass L832-957
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: try_auto_verdict L8460-8501
+  confidence: high

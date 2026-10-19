@@ -1,0 +1,22 @@
+id: gate_bypass_audited
+name: 门禁豁免可审计
+description: 豁免必须提供非空 reason，签发唯一 bypass_id 回执。写入顺序为先直写任务行，后 best-effort 写文件、轨迹与笔记；后置写入异常被吞掉，因此不满足原子性。当前代码不强制第二人审批（SC-010）。
+lifecycle: experimental
+inputs:
+- gate
+- task
+returns: boolean
+logic_ref: herdr/kernel.py:bypass_task_gate
+evidence:
+- kind: implemented
+  source: herdr/kernel.py
+  locator: L832-957
+  confidence: high
+- kind: intended
+  source: wiki/domain-model.md
+  locator: 不变量 5
+  confidence: high
+notes: r1 修正：原 bypass_gate 声明的 transaction=atomic 不成立（F-02）。
+outputs:
+- audited
+- bypass_id

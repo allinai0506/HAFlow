@@ -1,0 +1,18 @@
+id: dag_cycle_rejected
+name: DAG 环被拒绝
+facts:
+  workflow_definition:
+    nodes:
+    - id: a
+      depends_on:
+      - c
+    - id: b
+      depends_on:
+      - a
+    - id: c
+      depends_on:
+      - b
+expected:
+  rules:
+    workflow_dag_acyclic: false
+  error_contains: cycle

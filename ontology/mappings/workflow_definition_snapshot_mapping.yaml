@@ -1,0 +1,26 @@
+id: workflow_definition_snapshot_mapping
+name: 工作流定义文件映射
+description: 工作流定义文件映射（事实来源映射）
+lifecycle: experimental
+object: workflow_definition
+source:
+  type: file
+  paths:
+  - ~/.herdr-controller/workflows/<workflow_id>/workflow.json (Run 冻结快照)
+  - ~/.herdr-controller/projects/<project_id>/workflow.json (下一次 Run 模板)
+fields:
+  name: name
+  version: version
+  execution: execution
+  context: context
+  nodes: nodes
+  node_runtime: 由 StateDB metadata 覆盖投影
+authority:
+  read: file
+  write: herdr.projects.freeze_run_definition / _register_project_workflow
+notes: 运行期修复只写 StateStore metadata+event；读取时叠加（projects.py L288-362, L1543-1546）
+evidence:
+- kind: implemented
+  source: herdr/projects.py
+  locator: L472-577 / L1003-1018
+  confidence: high

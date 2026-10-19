@@ -1,0 +1,75 @@
+id: project
+name: 项目空间
+description: 对应本地一个 Git 仓库根目录的注册项目；承载工作流模板绑定、基线分支与空间现场身份。
+lifecycle: experimental
+identity:
+  primary_key: project_id
+  natural_key: project_root (canonical path)
+aliases:
+- Project
+- Space
+- 项目
+properties:
+- id: project_id
+  name: 项目标识
+  type: string
+  required: true
+  notes: slug(dirname)-sha1(canonical_root)[:8]，如 nexusarchive-a1b2c3d4
+- id: project_name
+  name: 项目名称
+  type: string
+  required: true
+- id: project_root
+  name: 仓库根目录
+  type: path
+  required: true
+  notes: canonical absolute path，projects.json 的 key
+- id: base_branch
+  name: 基线分支
+  type: string
+  required: true
+  notes: detect_base_branch：当前分支 -> origin/HEAD -> dev/main/master；context 项目为空串
+- id: workspace_id
+  name: Herdr Workspace ID
+  type: string
+  required: false
+- id: coordinator_pane_id
+  name: 协调器窗格 ID
+  type: string
+  required: false
+- id: workflow_file
+  name: 下一次 Run 的模板文件
+  type: path
+  required: false
+- id: execution
+  name: 执行契约
+  type: object
+  required: false
+  notes: git | context；context 模式无 Git 语义
+- id: context_bindings
+  name: 上下文绑定
+  type: object
+  required: false
+  notes: context id -> 绝对路径
+evidence:
+- kind: implemented
+  source: herdr/projects.py
+  locator: project_id_for L108-113
+  confidence: high
+- kind: implemented
+  source: herdr/projects.py
+  locator: detect_base_branch L116-145
+  confidence: high
+- kind: implemented
+  source: herdr/projects.py
+  locator: _register_project_workflow L967-1028
+  confidence: high
+- kind: implemented
+  source: herdr/projects.py
+  locator: provision_project L877-949
+  confidence: high
+- kind: intended
+  source: docs/product-specs/workflow-template-schema.md
+  locator: 1.1 ExecutionSpec / 1.2 ContextContract
+  confidence: high
+  notes: 文档描述 context 语义，源码实现一致

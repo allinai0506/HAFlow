@@ -1,0 +1,15 @@
+id: task_illegal_transition
+name: pending 不可直接 completed
+facts:
+  task:
+    task_id: T-ILLEGAL
+    status: pending
+  proposed_transition:
+    from: pending
+    to: completed
+expected:
+  rules:
+    task_transition_allowed: false
+  disallowed_actions:
+  - transition_task
+  error: InvalidTransitionError

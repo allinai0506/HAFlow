@@ -1,0 +1,43 @@
+id: task_executor_projection
+name: Task Agent 执行上下文投影
+description: 面向克隆内执行 Agent 的最小上下文：自身任务、所在节点目标与产出、自身产物。不授予写动作。
+lifecycle: experimental
+consumers:
+- role: task_agent
+  role_implemented: false
+objects:
+  task:
+    properties:
+    - task_id
+    - node
+    - goal
+    - status
+    - payload.integration_mode
+  workflow_node:
+    properties:
+    - id
+    - label
+    - purpose
+    - required_outputs
+    - rules
+  artifact:
+    properties:
+    - rel_path
+    - status
+relations: []
+rules:
+- required_outputs_present
+- task_has_isolated_clone
+actions: []
+policies:
+- task_agent_scope_policy
+exclude_by_default: true
+evidence:
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: 任务提示词注入 required_outputs L7524-7548（r1 修正：原误指 bin/herdr-task）
+  confidence: high
+- kind: implemented
+  source: herdr/workflow.py
+  locator: context 引用块只给 id 与路径 L286-298
+  confidence: high

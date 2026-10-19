@@ -1,0 +1,60 @@
+id: finalize_task
+name: 规范化任务收尾
+description: 将完成泳道任务推进到 cleanup_ready 与 cleaned，并按 clone_deletable 决定是否删除克隆；failed 任务需 --force。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+- force（仅 failed）
+- purge_clones
+preconditions:
+- task_transition_allowed
+- task_teardown_allowed
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  state_transition:
+    state_machine: task_lifecycle
+    from: completed|integrated
+    to: cleanup_ready -> cleaned（FINALIZE_ADVANCE）
+side_effects:
+- 关闭窗格（按 resource_retention 策略）
+- 删除克隆：clone_deletable 为真（integrated 或 superseded）或 --purge-clones
+- 写终端转录 terminal.log / meta.json
+idempotency:
+  strategy: business_key
+  key: task_id
+transaction:
+  mode: per_task_best_effort
+  owner: bin/herdr-task finalize -> _finalize_one
+audit:
+  required: true
+  event: task_transition
+failure_behavior:
+  retry: safe_only
+  compensation: none
+  notes: failed 任务需 --force（bin/herdr-task L8958-8966）
+bindings:
+- connector: herdr_task_cli
+  operation: finalize
+verification:
+  strategy: reread_target
+  target: tasks.status 与文件系统
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: finalize 子命令 parser L224-231（--force 语义 L227-230）
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: _finalize_one L5049（删除分支见 clone_deletable 调用）
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: clone_deletable L4944-4963
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: FINALIZE_ADVANCE L193-197
+  confidence: high

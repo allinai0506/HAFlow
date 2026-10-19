@@ -1,0 +1,50 @@
+id: reserve_agent
+name: 预占执行 Agent
+description: 选人并写跨进程预占记录，关闭路由到任务注册之间的竞争窗口。
+lifecycle: experimental
+target: agent_reservation
+inputs:
+- task_id
+- project_id
+- stage
+- task_type
+- node_policy
+preconditions:
+- agent_capacity_within_node_limit
+- agent_reservation_ttl_bounded
+authorization:
+  policies:
+  - operator_cli_policy
+effects:
+  creates:
+  - agent_reservation
+side_effects:
+- flock 写 agent-reservations.json
+idempotency:
+  strategy: business_key
+  key: task_id
+transaction:
+  mode: file_lock
+  owner: herdr.agent_router.choose_agent（传入 reservation_key 时写入）
+audit:
+  required: false
+  notes: 无独立审计事件（审计缺口）
+failure_behavior:
+  retry: safe_only
+  compensation: TTL 清理
+bindings:
+- connector: herdr_core_lib
+  operation: herdr.agent_router.choose_agent
+verification:
+  strategy: reread_target
+  target: agent-reservations.json[task_id]
+evidence:
+- kind: implemented
+  source: herdr/agent_router.py
+  locator: choose_agent L1063 / _choose_agent_locked L430 / 预占写入 L809-819
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: recover_router_isolation_tasks L1651-1672（调用 choose_agent 但不传 reservation_key，故不写预占）
+  confidence: high
+notes: r1 修正：控制器路径调用 choose_agent 不写预占，因此 controller 未被授权（F-20）。

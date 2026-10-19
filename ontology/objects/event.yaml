@@ -1,0 +1,77 @@
+id: event
+name: 事实事件
+description: StateDB 追加式事件账本的一行；状态迁移的权威伴随记录为 task_transition / workflow_transition，轨迹事件为 best-effort 历史。
+lifecycle: experimental
+identity:
+  primary_key: id
+  trajectory_identity: (run_id, sequence)
+aliases:
+- WorkflowEvent
+- 事件
+properties:
+- id: id
+  name: 自增主键
+  type: int
+  required: true
+- id: workflow_id
+  name: 关联工作流
+  type: string
+  required: false
+- id: node_id
+  name: 关联节点
+  type: string
+  required: false
+- id: task_id
+  name: 关联任务
+  type: string
+  required: false
+- id: agent_id
+  name: 关联 Agent
+  type: string
+  required: false
+- id: event_type
+  name: 事件类型
+  type: string
+  required: true
+  notes: task_transition|workflow_transition|task_status_changed|gate_bypassed|...
+- id: payload_json
+  name: 载荷
+  type: object
+  required: false
+  notes: from_status/to_status/reason/forced 等
+- id: timestamp
+  name: 发生时间
+  type: float
+  required: true
+- id: source
+  name: 来源
+  type: string
+  required: false
+  notes: herdr-task|herdr-controller|trajectory|...
+- id: run_id
+  name: 轨迹 Run
+  type: string
+  required: false
+  notes: 仅 source=trajectory 行
+- id: sequence
+  name: 轨迹序号
+  type: int
+  required: false
+  notes: 每 run_id 单调递增，BEGIN IMMEDIATE 内分配
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: events DDL L443-456 / record_event L3205-3234 / trajectory 序号 L3384-3458
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: task_transition 同事务写入 L6820-6833
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: task_status_changed best-effort L203-222
+  confidence: high
+- kind: implemented
+  source: herdr/trajectory.py
+  locator: 轨迹账本语义 L1, L147-175
+  confidence: high

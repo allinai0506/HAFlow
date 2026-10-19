@@ -1,0 +1,14 @@
+id: task_produces_artifact
+name: 任务产出交付物
+description: 交付物是读取期投影：文件、提交、PR 或 Observation 引用；不保证已验证。
+lifecycle: experimental
+from: task
+to: artifact
+cardinality: one_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/deliverables.py
+  locator: project_for_tasks L76-114
+  confidence: high
+notes: 关系状态（present/missing）是投影结果，历史引用仍需有效性检查

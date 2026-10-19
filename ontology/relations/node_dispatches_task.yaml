@@ -1,0 +1,17 @@
+id: node_dispatches_task
+name: 节点派发任务
+description: 节点可对应多个 Task（并行或重做）；Task 通过 workflow_id+node 归属节点。
+lifecycle: experimental
+from: workflow_node
+to: task
+cardinality: one_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/state_db.py
+  locator: tasks DDL L385-402
+  confidence: high
+- kind: implemented
+  source: herdr/workflow.py
+  locator: get_ready_nodes L522-541
+  confidence: high

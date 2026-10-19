@@ -1,0 +1,28 @@
+id: gate_verdict_file_mapping
+name: 门禁结论文件映射
+description: 门禁结论文件映射（事实来源映射）
+lifecycle: experimental
+object: gate
+source:
+  type: file
+  paths:
+  - ~/.herdr-controller/gate-verdicts/<task_id>.json
+  - .herdr/gate-verdict.json (fallback)
+  - tasks.stage_verdict / tasks.stage_verdict_note (canonical)
+fields:
+  verdict: verdict
+  verdict_note: note
+  affected_task_ids: affected_task_ids
+authority:
+  read: tasks.stage_verdict（任务行）与 verdict 文件；controller 要求二者一致
+  write: herdr-task set --verdict；direct_dispatch 写 verdict 文件；bypass_task_gate 同时直写二者
+evidence:
+- kind: implemented
+  source: herdr/direct_dispatch.py
+  locator: L135-158
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: verdict 通道与别名 L8101-8157
+  confidence: high
+notes: 双重权威：违反常驻约束 1（单一事实源）。SC-012 待人工决策。

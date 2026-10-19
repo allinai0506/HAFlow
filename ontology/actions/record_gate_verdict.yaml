@@ -1,0 +1,58 @@
+id: record_gate_verdict
+name: 记录门禁结论
+description: 随任务 completed 写入 pass 或 blocked 结论与备注；blocked 触发下游阻断与 fix-loop。
+lifecycle: experimental
+target: task
+inputs:
+- task_id
+- verdict
+- note
+- affected_task_ids（可选）
+preconditions:
+- gate_verdict_valid
+- task_transition_allowed
+authorization:
+  policies:
+  - controller_service_policy
+  - operator_cli_policy
+effects:
+  sets:
+    stage_verdict: pass | blocked
+  state_transition: null
+side_effects:
+- 写 gate-verdict 文件（direct_dispatch 协议）
+- blocked 时 Controller 触发 fix-loop（handle_fix_loop L2481）
+idempotency:
+  strategy: business_key
+  key: task_id（同状态改写允许）
+transaction:
+  mode: same_call_as_completed
+  owner: bin/herdr-task set -> set_status
+audit:
+  required: true
+  event: task_transition（verdict 载荷 UNVERIFIED）
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+- connector: herdr_task_cli
+  operation: set
+- connector: herdr_controller_service
+  operation: try_auto_verdict
+verification:
+  strategy: reread_target
+  target: tasks[task_id].stage_verdict
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: set_status L877-1019（verdict 规则 L941-958）
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: try_auto_verdict L8460-8501
+  confidence: high
+- kind: implemented
+  source: herdr/direct_dispatch.py
+  locator: verdict 文件协议 L135-158
+  confidence: high
+notes: r1 修正：目标由 gate 改为 task（写入的是 tasks.stage_verdict，F-10/M8）。controller 亦为执行者（try_auto_verdict）。
