@@ -121,9 +121,13 @@ def test_controller_persists_obligation_and_reloads_without_duplicate_prompt(sce
     assert ep['attempts'] == 0
 
 
-def test_projection_displays_specific_obligations_even_with_superseded_tasks(scene):
+def test_projection_displays_specific_obligations_even_with_superseded_tasks(scene, tmp_path, monkeypatch):
     from herdr.projection import detect_workflow_stalls
+    from herdr.state_store import SQLiteStateStore
     wf, cfg, tasks = scene
+    store = SQLiteStateStore(tmp_path / 'state.db', auto_migrate_json=False)
+    store.save_task(tasks[0])
+    monkeypatch.setenv('HERDR_STATE_DB', str(store.db_path))
     tasks.append({'workflow_id': 'wf', 'task_id': 'old', 'status': 'superseded'})
     with patch('herdr.projects.workflow_config_for', side_effect=AssertionError('global config read')):
         result = detect_workflow_stalls('wf', tasks, workflow=wf, config=cfg)
@@ -207,7 +211,7 @@ def test_concurrent_processes_claim_one_durable_recovery(scene, tmp_path):
     assert sum(output.get(timeout=2) for _ in workers) == 1
 
 
-def test_real_sqlite_controller_and_projection_chain(scene, tmp_path):
+def test_real_sqlite_controller_and_projection_chain(scene, tmp_path, monkeypatch):
     from herdr.state_store import SQLiteStateStore
     from herdr import projects, projection
     controller = importlib.import_module('services.herdr-controller')
@@ -219,6 +223,7 @@ def test_real_sqlite_controller_and_projection_chain(scene, tmp_path):
     store = SQLiteStateStore(tmp_path / 'state.db', auto_migrate_json=False)
     store.save_workflow(wf)
     store.save_task(tasks[0])
+    monkeypatch.setenv('HERDR_STATE_DB', str(store.db_path))
     queued = []
     with patch.object(projects, '_get_store', return_value=store), \
          patch.object(controller, 'load_tasks', side_effect=lambda: store.list_tasks(workflow_id='wf')), \
