@@ -329,65 +329,44 @@ def ops_center(args):
 
 
 def _state_db_path():
-    if os.environ.get("HERDR_STATE_DB"):
-        return Path(os.environ["HERDR_STATE_DB"])
-    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
-    if t_file:
-        p = Path(t_file)
-        db_path = (
-            p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
-        )
-        if db_path.parent.exists():
-            return db_path
-    legacy_wf_file = globals().get("WORKFLOW_FILE")
-    if legacy_wf_file == _DEFAULT_WORKFLOW_FILE and not os.environ.get("WORKFLOW_FILE"):
-        legacy_wf_file = None  # Default config path is not an explicit DB selector.
-    wf_file = (
-        legacy_wf_file
-        or globals().get("WORKFLOWS_FILE")
-        or os.environ.get("WORKFLOW_FILE")
-        or os.environ.get("WORKFLOWS_FILE")
+    from herdr.task_cli_state import state_db_path
+
+    return state_db_path(
+        environ=os.environ,
+        tasks_file=globals().get("TASKS_FILE"),
+        workflow_file=globals().get("WORKFLOW_FILE"),
+        workflows_file=globals().get("WORKFLOWS_FILE"),
+        default_workflow_file=_DEFAULT_WORKFLOW_FILE,
     )
-    if wf_file:
-        p = Path(wf_file)
-        db_path = (
-            p.parent / "state.db"
-            if p.name in ("workflows.json", "workflow.json")
-            else p.with_suffix(".db")
-        )
-        if db_path.parent.exists():
-            return db_path
-    return None
 
 
 def _get_store():
-    db_path = _state_db_path()
-    return (
-        get_state_store(db_path=db_path) if db_path is not None else get_state_store()
-    )
+    from herdr.task_cli_state import get_store
+
+    return get_store(state_db_path=_state_db_path, get_state_store=get_state_store)
 
 
 def load_tasks():
-    store = _get_store()
-    return {"tasks": store.list_tasks()}
+    from herdr.task_cli_state import load_tasks as read_tasks
+
+    return read_tasks(get_store=_get_store)
 
 
 def save_tasks(data):
-    store = _get_store()
-    for t in data.get("tasks", []):
-        if t.get("task_id"):
-            store.save_task(t)
+    from herdr.task_cli_state import save_tasks as persist_tasks
 
-    # Sync backward-compatible JSON mirror (SQLite -> JSON only)
-    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
-    sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
+    return persist_tasks(
+        data,
+        get_store=_get_store,
+        sync_tasks_projection=sync_tasks_projection,
+        tasks_file=globals().get("TASKS_FILE"),
+    )
 
 
 def find_task(data, task_id):
-    for task in data["tasks"]:
-        if task["task_id"] == task_id:
-            return task
-    return None
+    from herdr.task_cli_state import find_task as lookup
+
+    return lookup(data, task_id)
 
 
 def add_task(args):
