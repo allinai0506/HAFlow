@@ -45,11 +45,11 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: set_status L2338-2480（verdict 规则 L2402-2419）
+  locator: set_status L877-1019（verdict 规则 L941-958）
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py
-  locator: try_auto_verdict L8275-8316
+  locator: try_auto_verdict L8460-8501
   confidence: high
 - kind: implemented
   source: herdr/direct_dispatch.py

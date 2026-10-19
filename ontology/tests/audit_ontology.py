@@ -162,8 +162,12 @@ def audit_logic_ref(origin: str, ref: str) -> None:
 
 
 def subcommands(p: Path) -> set[str]:
-    txt = p.read_text(encoding="utf-8", errors="ignore")
-    return set(re.findall(r"add_parser\(\s*['\"]([A-Za-z0-9_\-]+)['\"]", txt))
+    """Collect subcommands from the entrypoint and (after the #269 split) its parser modules."""
+    texts = [p.read_text(encoding="utf-8", errors="ignore")]
+    if p.name == "herdr-task":
+        texts += [q.read_text(encoding="utf-8", errors="ignore")
+                  for q in sorted((REPO / "herdr").glob("task_cli_parser*.py"))]
+    return set().union(*[set(re.findall(r"add_parser\(\s*['\"]([A-Za-z0-9_\-]+)['\"]", t)) for t in texts])
 
 
 def python_op_resolves(dotted: str) -> bool:

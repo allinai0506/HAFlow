@@ -57,6 +57,6 @@ evidence:
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: bypass-gate 子命令 L9080-9086（--operator 默认 human）
+  locator: bypass-gate parser L87-90（--operator 默认 human）
   confidence: high
 notes: r1 修正：目标由 gate 改为 task；transaction 由 atomic 改为 non_atomic（F-01、F-02）。高风险，需人工评审。

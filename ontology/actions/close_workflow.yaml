@@ -47,7 +47,7 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: close-workflow preflight L7273-7287 / closing L7450-7460 / completed L7583-7590
+  locator: close-workflow preflight L5497-5502 / closing 迁移 L5677-5680 / _mark_workflow_completed L5273-5300 / completed 调用 L5810
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py

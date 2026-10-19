@@ -59,9 +59,9 @@ evidence:
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: set_status L2338 / set 子命令 L9026
+  locator: set_status L877 / set 子命令 parser L13
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py
-  locator: try_auto_accept L8051-8094
+  locator: try_auto_accept L8159-8202
   confidence: high

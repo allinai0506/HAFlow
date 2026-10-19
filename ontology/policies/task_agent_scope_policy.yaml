@@ -22,7 +22,7 @@ agent_execution:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: bypass-gate --operator 默认 human L9080-9086
+  locator: bypass-gate parser L87-90（--operator 默认 human）
   confidence: high
 - kind: implemented
   source: herdr/kernel.py

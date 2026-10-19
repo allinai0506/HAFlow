@@ -34,5 +34,13 @@ retry:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: argparse 子命令 add_parser L8741-9568
+  locator: "build_parser() L6971-6972"
+  confidence: high
+- kind: implemented
+  source: herdr/task_cli_parser_workflow.py
+  locator: "bypass-gate parser L87-90 / set parser L13"
+  confidence: high
+- kind: implemented
+  source: herdr/task_cli_parser_execution.py
+  locator: "launch parser L73-115 / cleanup parser L218-223 / finalize parser L224-231 / close-workflow parser L238"
   confidence: high

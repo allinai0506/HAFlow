@@ -35,7 +35,7 @@ exclude_by_default: true
 evidence:
 - kind: implemented
   source: services/herdr-controller.py
-  locator: 任务提示词注入 required_outputs L7398-7420（r1 修正：原误指 bin/herdr-task）
+  locator: 任务提示词注入 required_outputs L7524-7548（r1 修正：原误指 bin/herdr-task）
   confidence: high
 - kind: implemented
   source: herdr/workflow.py

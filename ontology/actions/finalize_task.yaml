@@ -44,15 +44,15 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: finalize 子命令 L8958-8972（--force 语义 L8960-8964）
+  locator: finalize 子命令 parser L224-231（--force 语义 L227-230）
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: _finalize_one L6825（删除分支约 L6933-6945）
+  locator: _finalize_one L5049（删除分支见 clone_deletable 调用）
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: clone_deletable L6720-6739
+  locator: clone_deletable L4944-4963
   confidence: high
 - kind: implemented
   source: bin/herdr-task

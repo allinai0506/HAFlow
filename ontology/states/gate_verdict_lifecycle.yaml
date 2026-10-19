@@ -53,7 +53,7 @@ unknowns:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: set_status L2338-2480（verdict 规则 L2402-2419；同状态写入先于 no-op 检测 L2429-2457）
+  locator: set_status L877-1019（verdict 规则 L941-958；同状态写入先于 no-op 检测 L970-998）
   confidence: high
 - kind: implemented
   source: herdr/delivery_rework.py
@@ -65,5 +65,5 @@ evidence:
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py
-  locator: try_auto_verdict L8275-8316
+  locator: try_auto_verdict L8460-8501
   confidence: high

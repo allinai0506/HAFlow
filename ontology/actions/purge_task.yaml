@@ -42,14 +42,14 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: purge_task L6560-6604
+  locator: purge_task L4784-4828
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: delete_clone_safely L6630
+  locator: delete_clone_safely L4854
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: purge 子命令 L8955-8957
+  locator: purge 子命令 parser L212-215
   confidence: high
 notes: r1 新增：原模型缺失物理删除路径（F-13）。高风险，按 references/05 需人工评审。

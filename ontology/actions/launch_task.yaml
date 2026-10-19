@@ -54,7 +54,7 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: launch 子命令 L8807-8836（--task-type choices L8823-8835）
+  locator: launch parser L73-115（--task-type choices L89-101）
   confidence: high
 - kind: implemented
   source: bin/herdr-task

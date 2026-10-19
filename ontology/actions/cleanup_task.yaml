@@ -38,5 +38,5 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: cleanup_task L6526-6557（logical cleanup only）
+  locator: cleanup_task L4750-4781（logical cleanup only）
   confidence: high

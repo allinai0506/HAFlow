@@ -127,5 +127,5 @@ evidence:
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: launch 字段落库 L4183-4191 / supersede L7849-7853
+  locator: launch 字段落库 L4183-4191 / supersede_task L6014-6080
   confidence: high

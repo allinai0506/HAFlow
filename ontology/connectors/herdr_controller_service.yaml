@@ -18,5 +18,5 @@ retry:
 evidence:
 - kind: implemented
   source: services/herdr-controller.py
-  locator: try_auto_accept L8051 / try_auto_verdict L8275 / maybe_close_completed_workflow L844
+  locator: try_auto_accept L8159 / try_auto_verdict L8460 / maybe_close_completed_workflow L844
   confidence: high

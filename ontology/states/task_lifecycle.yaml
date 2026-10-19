@@ -324,7 +324,7 @@ evidence:
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: set_status L2338（CLI set 入口与 verdict 规则）
+  locator: set_status L877（CLI set 入口与 verdict 规则）
   confidence: high
 out_of_matrix_writers:
 - from: completed

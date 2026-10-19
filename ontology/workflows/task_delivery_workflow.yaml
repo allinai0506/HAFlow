@@ -50,7 +50,7 @@ evidence:
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py
-  locator: check_workflow_stage_advance L4810 / get_ready_nodes 调用 L4972
+  locator: check_workflow_stage_advance L4918 / get_ready_nodes 调用 L5080
   confidence: high
 - kind: implemented
   source: bin/herdr-task

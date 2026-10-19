@@ -43,7 +43,7 @@ verification:
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: supersede 子命令 L9106-9110
+  locator: supersede 子命令 parser 与 supersede_task L6014-6080
   confidence: high
 - kind: implemented
   source: herdr/state_db.py
