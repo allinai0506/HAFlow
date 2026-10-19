@@ -458,3 +458,31 @@ def check_delivery_for_pr(
     if warn["warn"]:
         print(f"[DELIVERY WARN] {warn['detail']}")
     return {"equivalent": equivalent, "warn": warn, "fields": fields}
+
+
+def task_head_sha(task):
+    """Best-effort: task branch head sha from its CoW clone (gate evidence)."""
+    task = task or {}
+    task_id = task.get("task_id") or ""
+    branch = task.get("branch") or ""
+    if not task_id or not branch:
+        return ""
+    clone_root = Path(
+        os.environ.get("HERDR_CLONES_DIR")
+        or (Path.home() / ".herdr-controller" / "clones")
+    )
+    clone = clone_root / task_id
+    if not clone.exists():
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "--short", branch],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""

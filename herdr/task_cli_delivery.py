@@ -4,11 +4,22 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
-def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_task,
-                get_store, is_internal_untracked, adopt_head_if_attributable,
-                set_status, run_commit_index_command):
+def commit_task(
+    task_id,
+    message=None,
+    allow_rebase=False,
+    *,
+    load_tasks,
+    find_task,
+    get_store,
+    is_internal_untracked,
+    adopt_head_if_attributable,
+    set_status,
+    run_commit_index_command,
+):
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -52,32 +63,44 @@ def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_t
             has_uncommitted = False
             if clone_path and os.path.exists(clone_path):
                 status_res = subprocess.run(
-                    ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
-                    capture_output=True, text=True
+                    [
+                        "git",
+                        "-C",
+                        clone_path,
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=normal",
+                    ],
+                    capture_output=True,
+                    text=True,
                 )
                 if status_res.returncode != 0:
                     print(
                         f"Failed to inspect worktree status for task (rc={status_res.returncode}): {task_id}",
-                        file=sys.stderr
+                        file=sys.stderr,
                     )
                     sys.exit(1)
                 from herdr.repo_hygiene import teardown_output_diagnosis
+
                 diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
                 has_dirty = bool(diag.get("reason"))
 
                 head_res = subprocess.run(
                     ["git", "-C", clone_path, "rev-parse", "HEAD"],
-                    capture_output=True, text=True
+                    capture_output=True,
+                    text=True,
                 )
                 if head_res.returncode != 0:
                     print(
                         f"Failed to resolve HEAD for task (rc={head_res.returncode}): {task_id}",
-                        file=sys.stderr
+                        file=sys.stderr,
                     )
                     sys.exit(1)
                 head_sha = head_res.stdout.strip()
                 expected_commit = task.get("integrated_commit") or task.get("commit")
-                head_diverged = bool(head_sha and expected_commit and head_sha != expected_commit)
+                head_diverged = bool(
+                    head_sha and expected_commit and head_sha != expected_commit
+                )
                 has_uncommitted = has_dirty or head_diverged
             if has_uncommitted:
                 print(
@@ -98,32 +121,44 @@ def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_t
             has_uncommitted = False
             if clone_path and os.path.exists(clone_path):
                 status_res = subprocess.run(
-                    ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
-                    capture_output=True, text=True
+                    [
+                        "git",
+                        "-C",
+                        clone_path,
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=normal",
+                    ],
+                    capture_output=True,
+                    text=True,
                 )
                 if status_res.returncode != 0:
                     print(
                         f"Failed to inspect worktree status for task (rc={status_res.returncode}): {task_id}",
-                        file=sys.stderr
+                        file=sys.stderr,
                     )
                     sys.exit(1)
                 from herdr.repo_hygiene import teardown_output_diagnosis
+
                 diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
                 has_dirty = bool(diag.get("reason"))
 
                 head_res = subprocess.run(
                     ["git", "-C", clone_path, "rev-parse", "HEAD"],
-                    capture_output=True, text=True
+                    capture_output=True,
+                    text=True,
                 )
                 if head_res.returncode != 0:
                     print(
                         f"Failed to resolve HEAD for task (rc={head_res.returncode}): {task_id}",
-                        file=sys.stderr
+                        file=sys.stderr,
                     )
                     sys.exit(1)
                 head_sha = head_res.stdout.strip()
                 expected_commit = task.get("integrated_commit") or task.get("commit")
-                head_diverged = bool(head_sha and expected_commit and head_sha != expected_commit)
+                head_diverged = bool(
+                    head_sha and expected_commit and head_sha != expected_commit
+                )
                 has_uncommitted = has_dirty or head_diverged
 
             if task.get("integration_mode") == "git":
@@ -153,10 +188,7 @@ def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_t
             return
 
         else:
-            print(
-                f"Task cannot commit from status: "
-                f"{task['status']}"
-            )
+            print(f"Task cannot commit from status: " f"{task['status']}")
             sys.exit(2)
 
     clone = task.get("clone_path")
@@ -165,38 +197,22 @@ def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_t
         print("Task missing clone_path")
         sys.exit(1)
 
-    clone = os.path.realpath(
-        os.path.expanduser(clone)
-    )
+    clone = os.path.realpath(os.path.expanduser(clone))
 
-    baseline_untracked = set(
-        task.get("baseline_untracked", [])
-    )
+    baseline_untracked = set(task.get("baseline_untracked", []))
 
     # 当前 untracked
     result = subprocess.run(
-        [
-            "git",
-            "-C",
-            clone,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z"
-        ],
+        ["git", "-C", clone, "ls-files", "--others", "--exclude-standard", "-z"],
         text=True,
-        capture_output=True
+        capture_output=True,
     )
 
     if result.returncode != 0:
         print(result.stderr.strip())
         sys.exit(1)
 
-    current_untracked = {
-        item
-        for item in result.stdout.split("\0")
-        if item
-    }
+    current_untracked = {item for item in result.stdout.split("\0") if item}
 
     # 只允许提交 Task 新产生的 untracked（内部控制文件不属于业务交付）
     task_untracked = sorted(
@@ -207,37 +223,54 @@ def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_t
 
     # tracked 文件在 Task 创建前要求 clean，
     # 因此当前 tracked 修改全部属于该 Task。
-    staged_update = run_commit_index_command(task_id, clone, ["git", "-C", clone, "add", "-u"])
+    staged_update = run_commit_index_command(
+        task_id, clone, ["git", "-C", clone, "add", "-u"]
+    )
     if staged_update.returncode:
-        raise subprocess.CalledProcessError(staged_update.returncode, staged_update.args,
-                                            staged_update.stdout, staged_update.stderr)
+        raise subprocess.CalledProcessError(
+            staged_update.returncode,
+            staged_update.args,
+            staged_update.stdout,
+            staged_update.stderr,
+        )
 
     if task_untracked:
-        staged_new = run_commit_index_command(task_id, clone, ["git", "-C", clone, "add", "--", *task_untracked])
+        staged_new = run_commit_index_command(
+            task_id, clone, ["git", "-C", clone, "add", "--", *task_untracked]
+        )
         if staged_new.returncode:
-            raise subprocess.CalledProcessError(staged_new.returncode, staged_new.args,
-                                                staged_new.stdout, staged_new.stderr)
+            raise subprocess.CalledProcessError(
+                staged_new.returncode,
+                staged_new.args,
+                staged_new.stdout,
+                staged_new.stderr,
+            )
 
     if task.get("delivery_contract") is not None:
         from herdr.task_delivery import check_delivery
+
         delivery = check_delivery(task_id, store=get_store())
-        if delivery['status'] != 'ready':
-            print('HERDR_COMMIT_RESULT=' + json.dumps({'task_id': task_id,
-                  'result': 'delivery_blocked' if delivery['status'] == 'blocked' else 'delivery_unknown',
-                  'delivery': delivery}, ensure_ascii=False))
+        if delivery["status"] != "ready":
+            print(
+                "HERDR_COMMIT_RESULT="
+                + json.dumps(
+                    {
+                        "task_id": task_id,
+                        "result": (
+                            "delivery_blocked"
+                            if delivery["status"] == "blocked"
+                            else "delivery_unknown"
+                        ),
+                        "delivery": delivery,
+                    },
+                    ensure_ascii=False,
+                )
+            )
             sys.exit(7)
 
     # 必须确实存在 staged changes
     staged = subprocess.run(
-        [
-            "git",
-            "-C",
-            clone,
-            "diff",
-            "--cached",
-            "--quiet"
-        ],
-        check=False
+        ["git", "-C", clone, "diff", "--cached", "--quiet"], check=False
     )
 
     if staged.returncode == 0:
@@ -249,27 +282,21 @@ def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_t
     if message is None:
         message = f"task: {task_id}"
 
-    result = run_commit_index_command(task_id, clone, ["git", "-C", clone, "commit", "-m", message])
+    result = run_commit_index_command(
+        task_id, clone, ["git", "-C", clone, "commit", "-m", message]
+    )
 
     if result.returncode != 0:
-        print(
-            f"Commit failed: {task_id}"
-        )
+        print(f"Commit failed: {task_id}")
         sys.exit(result.returncode)
 
     commit_hash = subprocess.check_output(
-        [
-            "git",
-            "-C",
-            clone,
-            "rev-parse",
-            "HEAD"
-        ],
-        text=True
+        ["git", "-C", clone, "rev-parse", "HEAD"], text=True
     ).strip()
 
     # 保存 commit hash
     from herdr import kernel
+
     kernel.update_task_metadata(
         task_id,
         {
@@ -280,14 +307,19 @@ def commit_task(task_id, message=None, allow_rebase=False, *, load_tasks, find_t
         store=get_store(),
     )
 
-    is_none_mode = (task.get("integration_mode") or ("none" if not task.get("branch") else "git")) == "none"
-    preserve_status = ("completed", "cleanup_ready", "cleaned") if is_none_mode else ("cleanup_ready", "cleaned")
-    target_status = task["status"] if task.get("status") in preserve_status else "committed"
+    is_none_mode = (
+        task.get("integration_mode") or ("none" if not task.get("branch") else "git")
+    ) == "none"
+    preserve_status = (
+        ("completed", "cleanup_ready", "cleaned")
+        if is_none_mode
+        else ("cleanup_ready", "cleaned")
+    )
+    target_status = (
+        task["status"] if task.get("status") in preserve_status else "committed"
+    )
     if task.get("status") != target_status:
-        set_status(
-            task_id,
-            target_status
-        )
+        set_status(task_id, target_status)
 
     print(f"[COMMITTED] {task_id}")
     print(f"[COMMIT] {commit_hash}")
@@ -314,31 +346,41 @@ def cleanup_task(task_id, *, load_tasks, find_task, get_store, set_status):
         sys.exit(1)
 
     if task["status"] != "cleanup_ready":
-        print(
-            f"Task cannot cleanup from status: "
-            f"{task['status']}"
-        )
+        print(f"Task cannot cleanup from status: " f"{task['status']}")
         sys.exit(2)
 
     # Logical cleanup only.
     # Workspace / Stage Tab / Task Pane / Task Clone are retained.
     from herdr import kernel
-    kernel.update_task_metadata(task_id, {
-        "resource_retention": "persistent",
-        "pane_retained": True,
-        "clone_retained": True,
-    }, store=get_store())
 
-    set_status(
+    kernel.update_task_metadata(
         task_id,
-        "cleaned"
+        {
+            "resource_retention": "persistent",
+            "pane_retained": True,
+            "clone_retained": True,
+        },
+        store=get_store(),
     )
+
+    set_status(task_id, "cleaned")
 
     print(f"[PANE RETAINED] {task.get('pane_id')}")
     print(f"[CLONE RETAINED] {task.get('clone_path')}")
     print(f"[LOGICAL CLEANUP] {task_id} -> cleaned")
 
-def purge_task(task_id, *, load_tasks, find_task, get_store, teardown_blocking_statuses, delete_clone_safely, run_command, path_exists):
+
+def purge_task(
+    task_id,
+    *,
+    load_tasks,
+    find_task,
+    get_store,
+    teardown_blocking_statuses,
+    delete_clone_safely,
+    run_command,
+    path_exists,
+):
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -357,40 +399,41 @@ def purge_task(task_id, *, load_tasks, find_task, get_store, teardown_blocking_s
     clone_path = task.get("clone_path")
 
     if pane_id:
-        run_command(
-            [
-                "herdr",
-                "pane",
-                "close",
-                pane_id
-            ],
-            text=True,
-            capture_output=True
-        )
+        run_command(["herdr", "pane", "close", pane_id], text=True, capture_output=True)
         print(f"[PANE PURGED] {pane_id}")
 
     if clone_path:
         if delete_clone_safely(clone_path):
             print(f"[CLONE PURGED] {clone_path}")
         elif path_exists(clone_path):
-            print(
-                f"Unsafe clone path, refusing delete: "
-                f"{clone_path}"
-            )
+            print(f"Unsafe clone path, refusing delete: " f"{clone_path}")
             sys.exit(3)
 
     from herdr import kernel
-    kernel.update_task_metadata(task_id, {
-        "pane_retained": False,
-        "clone_retained": False,
-        "resource_retention": "purged",
-    }, store=get_store())
+
+    kernel.update_task_metadata(
+        task_id,
+        {
+            "pane_retained": False,
+            "clone_retained": False,
+            "resource_retention": "purged",
+        },
+        store=get_store(),
+    )
 
     print(f"[PURGED] {task_id}")
 
 
-def finalize_task(task_id, force=False, purge_clones=False, *, load_tasks,
-                  find_task, teardown_blocking_statuses, finalize_one):
+def finalize_task(
+    task_id,
+    force=False,
+    purge_clones=False,
+    *,
+    load_tasks,
+    find_task,
+    teardown_blocking_statuses,
+    finalize_one,
+):
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -414,8 +457,10 @@ def finalize_task(task_id, force=False, purge_clones=False, *, load_tasks,
         print("[FINALIZE ABORT] " + json.dumps(row, ensure_ascii=False))
         sys.exit(2)
 
-    print(f"[FINALIZE] {task_id} status={row['status']} "
-          f"pane_closed={row['pane_closed']}")
+    print(
+        f"[FINALIZE] {task_id} status={row['status']} "
+        f"pane_closed={row['pane_closed']}"
+    )
     if row["evidence"]:
         print(f"[EVIDENCE] {row['evidence']}")
     if row["clone_deleted"]:
@@ -428,3 +473,30 @@ def finalize_task(task_id, force=False, purge_clones=False, *, load_tasks,
         )
     print(f"[FINALIZED] {task_id}")
     return row
+
+
+def create_pull_request(args, *, get_store):
+    from herdr.pr_delivery import create_task_pr
+
+    body = ""
+    if args.body_file:
+        path = Path(args.body_file).expanduser()
+        if path.stat().st_size > 65536:
+            raise ValueError("PR body exceeds publication budget")
+        body = path.read_text()
+    result = create_task_pr(
+        get_store(), args.task_id, title=args.title, body=body, draft=args.draft
+    )
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def merge_pull_request(args, *, get_store):
+    from herdr.pr_delivery import merge_task_pr
+
+    result = merge_task_pr(
+        get_store(),
+        args.task_id,
+        pr_number=args.number,
+        merge_method=getattr(args, "method", "merge"),
+    )
+    print(json.dumps(result, ensure_ascii=False))

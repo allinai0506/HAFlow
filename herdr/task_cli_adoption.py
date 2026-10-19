@@ -4,16 +4,33 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
 def adopt_head_if_attributable(
-    task_id, task, clone, allow_rebase=False, *, get_store, adoption_skew_seconds,
-    git_head_sha, git_current_branch, git_is_ancestor, git_interval_commits,
-    git_head_history, git_remote_contained_shas, coerce_epoch, set_status,
-    classify_commit_state=None, explain=None,
+    task_id,
+    task,
+    clone,
+    allow_rebase=False,
+    *,
+    get_store,
+    adoption_skew_seconds,
+    git_head_sha,
+    git_current_branch,
+    git_is_ancestor,
+    git_interval_commits,
+    git_head_history,
+    git_remote_contained_shas,
+    coerce_epoch,
+    set_status,
+    classify_commit_state=None,
+    explain=None,
 ):
     """空 index 收编:ADOPT 登记 HEAD,EMPTY exit 3,REFUSED exit 4。"""
-    from herdr.git_adoption import classify_commit_state as classify, explain as explain_result
+    from herdr.git_adoption import (
+        classify_commit_state as classify,
+        explain as explain_result,
+    )
 
     if classify_commit_state is None:
         classify_commit_state = classify
@@ -32,6 +49,7 @@ def adopt_head_if_attributable(
     # a legitimate agent-side push of the task branch cannot refuse.
     exclude_branches = [b for b in (branch, onto) if b]
     from herdr.domain import get_domain_adapter
+
     _domain_adapter = get_domain_adapter(
         domain=task.get("domain"),
         task_type=task.get("task_type"),
@@ -40,7 +58,8 @@ def adopt_head_if_attributable(
     effective_allow_rebase = _domain_adapter.should_allow_rebase(
         task,
         explicit_flag=allow_rebase,
-        env_flag=os.environ.get("HERDR_ADOPT_ALLOW_REBASE", "").strip().lower() in ("1", "true", "yes"),
+        env_flag=os.environ.get("HERDR_ADOPT_ALLOW_REBASE", "").strip().lower()
+        in ("1", "true", "yes"),
     )
 
     interval = None
@@ -58,10 +77,11 @@ def adopt_head_if_attributable(
             elif interval:
                 try:
                     probed = git_remote_contained_shas(
-                        clone, [c.get("sha") for c in interval],
-                        exclude_branches=exclude_branches)
-                except (OSError, ValueError, RuntimeError,
-                        subprocess.SubprocessError):
+                        clone,
+                        [c.get("sha") for c in interval],
+                        exclude_branches=exclude_branches,
+                    )
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
                     probed = None
                 if probed is None:
                     # P1: unknown foreignness must fail closed, never be
@@ -78,10 +98,11 @@ def adopt_head_if_attributable(
         elif history:
             try:
                 probed = git_remote_contained_shas(
-                    clone, [c.get("sha") for c in history],
-                    exclude_branches=exclude_branches)
-            except (OSError, ValueError, RuntimeError,
-                    subprocess.SubprocessError):
+                    clone,
+                    [c.get("sha") for c in history],
+                    exclude_branches=exclude_branches,
+                )
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
                 probed = None
             if probed is None:
                 remote_probe_failed = True
@@ -123,14 +144,20 @@ def adopt_head_if_attributable(
             },
             store=get_store(),
         )
-        is_none_mode = (task.get("integration_mode") or ("none" if not task.get("branch") else "git")) == "none"
-        preserve_status = ("completed", "cleanup_ready", "cleaned") if is_none_mode else ("cleanup_ready", "cleaned")
-        target_status = task["status"] if task.get("status") in preserve_status else "committed"
+        is_none_mode = (
+            task.get("integration_mode")
+            or ("none" if not task.get("branch") else "git")
+        ) == "none"
+        preserve_status = (
+            ("completed", "cleanup_ready", "cleaned")
+            if is_none_mode
+            else ("cleanup_ready", "cleaned")
+        )
+        target_status = (
+            task["status"] if task.get("status") in preserve_status else "committed"
+        )
         if task.get("status") != target_status:
-            set_status(
-                task_id,
-                target_status
-            )
+            set_status(task_id, target_status)
         short_base = str(detail.get("baseline") or "")[:8]
         print(
             f"[ADOPTED] task={task_id} "
@@ -211,3 +238,64 @@ def adopt_head_if_attributable(
         )
     )
     sys.exit(4)
+
+
+def run_commit_index_command(task_id, clone, command, *, run_command):
+    """Report native index contention without claiming or removing the lock."""
+
+    def native_lock():
+        resolved = run_command(
+            [
+                "git",
+                "-C",
+                clone,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "index",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return (
+            Path(resolved.stdout.strip() + ".lock")
+            if resolved.returncode == 0 and resolved.stdout.strip()
+            else None
+        )
+
+    def identity(path):
+        try:
+            stat = path.stat()
+            return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        except (OSError, AttributeError):
+            return None
+
+    before_path = native_lock()
+    before_identity = identity(before_path) if before_path else None
+    result = run_command(command, text=True, capture_output=True, check=False)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode:
+        lock_path = native_lock()
+        expected = f"fatal: Unable to create '{lock_path}': File exists."
+        verified = (
+            before_identity is not None
+            and lock_path == before_path
+            and (identity(lock_path) == before_identity)
+        )
+        if (
+            lock_path is not None
+            and verified
+            and (expected in result.stderr.splitlines())
+        ):
+            print(
+                "HERDR_COMMIT_RESULT="
+                + json.dumps(
+                    {"task_id": task_id, "result": "wait", "reason": "git_index_lock"}
+                )
+            )
+            sys.exit(75)
+    return result
