@@ -611,7 +611,9 @@ class TestOpsCardParity(unittest.TestCase):
         ctrl.load_tasks = lambda: tasks
 
         self.assertTrue(ctrl.is_node_complete("wf1", "fix"))
-        counts = _ht._node_task_status_counts(tasks)
+        from herdr.ops_center_helpers import _node_task_status_counts
+
+        counts = _node_task_status_counts(tasks)
         self.assertEqual(counts["total"], counts["completed"])
         self.assertEqual(counts["total"], 1)
         self.assertEqual(counts["superseded"], 1)

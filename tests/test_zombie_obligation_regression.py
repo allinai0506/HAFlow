@@ -86,14 +86,7 @@ def test_supersede_task_allows_abandon(tmp_path, monkeypatch):
 
 
 def test_check_zombie_obligations_detects_inventory():
-    import importlib.machinery
-    import importlib.util
-    from pathlib import Path
-
-    path = Path(__file__).resolve().parents[1] / "bin/herdr-task"
-    spec = importlib.util.spec_from_loader("herdr_task_zombie3", importlib.machinery.SourceFileLoader("herdr_task_zombie3", str(path)))
-    cli = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cli)
+    from herdr.task_cli_tasks import check_zombie_obligations
 
     data = {
         "tasks": [
@@ -102,6 +95,6 @@ def test_check_zombie_obligations_detects_inventory():
             {"task_id": "ok2", "status": "completed"},
         ]
     }
-    zombies = cli.check_zombie_obligations(data)
+    zombies = check_zombie_obligations(data, deps={"load_tasks": lambda: data})
     assert len(zombies) == 1
     assert zombies[0]["task_id"] == "z1"

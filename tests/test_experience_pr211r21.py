@@ -2,6 +2,7 @@
 
 import importlib.machinery
 import importlib.util
+import ast
 import json
 import re
 import sqlite3
@@ -74,16 +75,31 @@ def test_gate_passes_with_published_rule(tmp_path):
 
 def test_gate_runs_before_resource_allocation():
     """The fail-closed gate must precede clone/pane allocation, not dispatch."""
-    src = (Path(__file__).resolve().parent.parent / "bin" / "herdr-task").read_text()
-    start = src.index("def _launch_task(args):")
-    body = src[start:src.index("\ndef ", start + 10)]
-    gate = body.index("_mandatory_experience_gate(args, node_id)")
-    allocate = body.index("worker_cmd = [")
-    register = body.index("store.save_task(task)")
-    dispatch = body.index("    dispatch_task(")
-    assert gate < allocate, "gate must run before the worker allocates clone/pane"
-    assert gate < register, "gate must run before the task is registered"
-    assert gate < dispatch
+    import inspect
+    from herdr.task_cli_launch_orchestrator import launch_task_orchestrated
+
+    function = ast.parse(inspect.getsource(launch_task_orchestrated)).body[0]
+
+    def first_call_line(name):
+        return min(
+            node.lineno
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == name
+        )
+
+    gate = first_call_line("_mandatory_experience_gate")
+    for resource_call in (
+        "ensure_stage_topology",
+        "acquire_pane_for_task",
+        "run_launch_worker",
+        "register_launched_task",
+        "dispatch_task",
+    ):
+        assert gate < first_call_line(resource_call), (
+            f"mandatory experience gate must run before {resource_call}"
+        )
 
 
 def test_recovery_uses_persisted_state_db(tmp_path):

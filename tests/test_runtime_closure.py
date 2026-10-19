@@ -126,11 +126,11 @@ def test_controller_launch_passes_execution_id(tmp_path):
 
 
 def test_dispatch_compiles_context_after_dispatched_transition():
-    source = (ROOT / "bin" / "herdr-task").read_text(encoding="utf-8")
+    source = (ROOT / "herdr" / "task_cli_execution.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     dispatch_fn = next(
         node for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "dispatch_task"
+        if isinstance(node, ast.FunctionDef) and node.name == "handle_dispatch_task"
     )
     order = []
 
@@ -143,8 +143,8 @@ def test_dispatch_compiles_context_after_dispatched_transition():
 
     CallOrder().visit(dispatch_fn)
     assert "set_status" in order
-    assert "_compile_working_context_ref" in order
-    assert order.index("set_status") < order.index("_compile_working_context_ref"), (
+    assert "compile_ref" in order
+    assert order.index("set_status") < order.index("compile_ref"), (
         "context must be compiled after the dispatched transition, "
         f"call order: {order}"
     )

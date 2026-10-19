@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LAUNCH_PATH = ROOT / "bin" / "herdr-task"
+LAUNCH_PATH = ROOT / "herdr" / "task_cli_launch_orchestrator.py"
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -197,7 +197,7 @@ class TestBaselineFreshnessPreflight(GitFixture):
 
 
 class TestLaunchOrderGuard(unittest.TestCase):
-    """结构性护栏：`_launch_task` 内预检必须先于一切资源创建。
+    """结构性护栏：launch owner 内预检必须先于一切资源创建。
 
     若将来有人把校验移回 worker 之后（重蹈 #5），此测试变红。
     """
@@ -205,9 +205,9 @@ class TestLaunchOrderGuard(unittest.TestCase):
     def _launch_fn(self):
         tree = ast.parse(LAUNCH_PATH.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_launch_task":
+            if isinstance(node, ast.FunctionDef) and node.name == "launch_task_orchestrated":
                 return node
-        self.fail("_launch_task not found")
+        self.fail("launch_task_orchestrated not found")
 
     def _first_call_line(self, fn, name):
         for node in ast.walk(fn):
@@ -220,7 +220,7 @@ class TestLaunchOrderGuard(unittest.TestCase):
         fn = self._launch_fn()
         gate = self._first_call_line(fn, "_preflight_baseline_freshness")
         self.assertIsNotNone(
-            gate, "_launch_task 必须调用 _preflight_baseline_freshness",
+            gate, "launch_task_orchestrated 必须调用 _preflight_baseline_freshness",
         )
         for resource_call in (
             "ensure_stage_topology",
