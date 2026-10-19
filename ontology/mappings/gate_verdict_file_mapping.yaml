@@ -13,6 +13,7 @@ fields:
   verdict: verdict
   verdict_note: note
   affected_task_ids: affected_task_ids
+  evidence_snapshot_hash: tasks.payload_json.evidence_snapshot_hash
 authority:
   read: tasks.stage_verdict（任务行）为唯一调度事实源；verdict 文件为只读不可变快照凭证（DB 记录哈希强引用）
   write: herdr-task set --verdict；direct_dispatch 写 verdict 文件；bypass_task_gate 原子核验 HeadGuard 并写入

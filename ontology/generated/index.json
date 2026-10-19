@@ -40,9 +40,21 @@
       },
       {
         "id": "gate",
-        "name": "节点门禁",
-        "lifecycle": "experimental",
+        "name": "节点门禁（已废弃合并对象）",
+        "lifecycle": "deprecated",
         "path": "objects/gate.yaml"
+      },
+      {
+        "id": "gate_spec",
+        "name": "门禁契约规格",
+        "lifecycle": "experimental",
+        "path": "objects/gate_spec.yaml"
+      },
+      {
+        "id": "gate_verdict",
+        "name": "门禁执行裁决事实",
+        "lifecycle": "experimental",
+        "path": "objects/gate_verdict.yaml"
       },
       {
         "id": "project",
@@ -83,6 +95,12 @@
         "path": "relations/agent_pool_authorizes_agent.yaml"
       },
       {
+        "id": "gate_verdict_evaluates_gate_spec",
+        "name": "门禁裁决核验门禁规格",
+        "lifecycle": "experimental",
+        "path": "relations/gate_verdict_evaluates_gate_spec.yaml"
+      },
+      {
         "id": "node_dispatches_task",
         "name": "节点派发任务",
         "lifecycle": "experimental",
@@ -90,7 +108,7 @@
       },
       {
         "id": "node_specifies_gate",
-        "name": "节点声明门禁",
+        "name": "节点声明门禁规格",
         "lifecycle": "experimental",
         "path": "relations/node_specifies_gate.yaml"
       },
@@ -123,6 +141,12 @@
         "name": "任务产出交付物",
         "lifecycle": "experimental",
         "path": "relations/task_produces_artifact.yaml"
+      },
+      {
+        "id": "task_produces_gate_verdict",
+        "name": "任务产出门禁裁决",
+        "lifecycle": "experimental",
+        "path": "relations/task_produces_gate_verdict.yaml"
       },
       {
         "id": "workflow_definition_contains_node",
@@ -327,6 +351,12 @@
         "name": "记录门禁结论",
         "lifecycle": "experimental",
         "path": "actions/record_gate_verdict.yaml"
+      },
+      {
+        "id": "register_workflow",
+        "name": "注册工作流 Run",
+        "lifecycle": "experimental",
+        "path": "actions/register_workflow.yaml"
       },
       {
         "id": "release_agent_reservation",

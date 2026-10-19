@@ -39,6 +39,11 @@ properties:
   type: list[string]
   required: false
   notes: 仅允许随 blocked 结论持久化
+- id: evidence_snapshot_hash
+  name: 证据快照哈希
+  type: string
+  required: false
+  notes: 快照文件的 SHA256 校验和（持久化于 DB 任务行中以实现单向防篡改引用，见 ADR-0006）
 evidence:
 - kind: implemented
   source: bin/herdr-task
