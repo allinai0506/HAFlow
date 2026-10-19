@@ -115,6 +115,29 @@ def candidate_branch_for_node(
 DEFAULT_TASK_TYPE = "feat"
 DEFAULT_INTEGRATION_MODE = "none"
 
+# launch --task-type 的 argparse choices（bin/herdr-task）必须与此一致。
+TASK_TYPE_CHOICES = ("fix", "feat", "refactor", "docs", "test", "chore", "perf", "ci")
+# 早期模板使用的词表：配置合法但 argparse 会拒绝，导致节点永远无法派发。
+TASK_TYPE_ALIASES = {"plan": "docs", "explore": "docs", "code": "docs", "review": "test"}
+
+
+def resolve_task_type(value, node_id=None):
+    """节点声明的任务类型 -> launch choices 之一。
+
+    技术任务类型（含早期模板的 plan/explore/code/review）是强约束；业务任务类型
+    （如 default_task_type: quote，与 business_task_type 同义）不是 CLI 的枚举维度，
+    不在这里拒绝，而是回落到 DEFAULT_TASK_TYPE 安全派发，原始声明保留在
+    declared_task_type 供调用方与审计使用。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return DEFAULT_TASK_TYPE
+    if raw in TASK_TYPE_CHOICES:
+        return raw
+    if raw in TASK_TYPE_ALIASES:
+        return TASK_TYPE_ALIASES[raw]
+    return DEFAULT_TASK_TYPE
+
 GENERIC_ACCEPTANCE = (
     "改动范围以 herdr-task verify-baseline 为准",
     "产物必须落盘到当前工作目录，禁止只写在回复里",
@@ -262,9 +285,8 @@ def normalize_node(node):
         "purpose": purpose,
         "required_outputs": _as_list(node.get("required_outputs")),
         "rules": _as_list(node.get("rules")),
-        "task_type": str(
-            node.get("default_task_type") or DEFAULT_TASK_TYPE
-        ).strip(),
+        "task_type": resolve_task_type(node.get("default_task_type"), node_id),
+        "declared_task_type": str(node.get("default_task_type") or "").strip(),
         "integration_mode": str(
             node.get("default_integration_mode") or DEFAULT_INTEGRATION_MODE
         ).strip(),
