@@ -198,6 +198,7 @@ class StateStore(ABC):
         source: str = "system",
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
+        intent: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Atomically validate and transition a task status, appending a WorkflowEvent."""
         pass
@@ -214,6 +215,7 @@ class StateStore(ABC):
         expected_status: str | None = None,
         expected_version: int | None = None,
         expected_updated_at: float | None = None,
+        intent: Optional[str] = None,
     ) -> dict[str, Any]:
         """Atomically transition a task only when its observed epoch matches."""
 
@@ -743,6 +745,7 @@ class SQLiteStateStore(StateStore):
         source: str = "system",
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
+        intent: Optional[str] = None,
     ) -> Dict[str, Any]:
         return state_db.transition_task(
             task_id=task_id,
@@ -752,6 +755,7 @@ class SQLiteStateStore(StateStore):
             metadata=metadata,
             force=force,
             db_path=self.db_path,
+            intent=intent,
         )
 
     def compare_and_set_task_transition(
@@ -765,6 +769,7 @@ class SQLiteStateStore(StateStore):
         expected_status: str | None = None,
         expected_version: int | None = None,
         expected_updated_at: float | None = None,
+        intent: Optional[str] = None,
     ) -> dict[str, Any]:
         return state_db.compare_and_set_task_transition(
             task_id=task_id,
@@ -777,6 +782,7 @@ class SQLiteStateStore(StateStore):
             expected_version=expected_version,
             expected_updated_at=expected_updated_at,
             db_path=self.db_path,
+            intent=intent,
         )
 
     def compare_and_set_completion_transition(

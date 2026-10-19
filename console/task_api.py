@@ -285,9 +285,25 @@ def api_task_force_review(b):
         task['updated_at'] = time.time()
         herdr_kernel.save_tasks_data(tdata)
     else:
-        task['status'] = 'agent_done'
-        task['updated_at'] = time.time()
-        store.save_task(task)
+        if hasattr(store, "compare_and_set_task_transition"):
+            res = store.compare_and_set_task_transition(
+                task_id=tid,
+                to_status="agent_done",
+                reason="console_force_review",
+                source="console-force-review",
+                intent="console-force-review",
+                expected_status=task.get("status"),
+                expected_version=task.get("version"),
+            )
+            if not res.get("ok", True):
+                raise RuntimeError(f"任务状态流转失败: {res.get('reason')}")
+            task = store.get_task(tid) or task
+            if hasattr(herdr_kernel, "sync_tasks_projection"):
+                herdr_kernel.sync_tasks_projection(store=store)
+        else:
+            task['status'] = 'agent_done'
+            task['updated_at'] = time.time()
+            store.save_task(task)
 
     wid=task.get('workflow_id')
     notified=False

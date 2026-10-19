@@ -6667,6 +6667,7 @@ def transition_task(
     expected_status: Optional[str] = None,
     expected_version: Optional[int] = None,
     expected_updated_at: Optional[float] = None,
+    intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Atomically validate and transition a task status, appending a canonical WorkflowEvent."""
     should_close = False
@@ -6731,13 +6732,21 @@ def transition_task(
                 "current_status": old_status,
                 "current_version": current_version,
             }
-        if old_status == "completed" and to_status == "rework" and not force:
+
+        effective_intent = intent
+        if effective_intent is None and source == "delivery-repair":
+            effective_intent = "delivery-repair"
+
+        if (old_status == "completed" and to_status == "rework" and not force) or effective_intent == "delivery-repair":
             from .delivery_rework import validate_repair_transition
             validate_repair_transition(_decode_task_row(row), dict(metadata or {}), source, conn)
         else:
-            validate_task_transition(old_status, to_status, force=force)
+            validate_task_transition(old_status, to_status, force=force, intent=effective_intent)
 
         meta = dict(metadata or {})
+        if effective_intent:
+            meta["intent"] = effective_intent
+
         if to_status == "superseded" and old_status != "superseded":
             # New invalidation never silently deletes an output obligation.
             # An explicit abandon is the only opt-out; old rows stay compatible.
@@ -6888,6 +6897,7 @@ def compare_and_set_task_transition(
     expected_version: Optional[int] = None,
     expected_updated_at: Optional[float] = None,
     db_path: Optional[Path] = None,
+    intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Atomically transition only when the observed task epoch still matches.
 
@@ -6907,6 +6917,7 @@ def compare_and_set_task_transition(
         expected_status=expected_status,
         expected_version=expected_version,
         expected_updated_at=expected_updated_at,
+        intent=intent,
     )
 
 

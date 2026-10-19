@@ -308,7 +308,7 @@ transitions:
 evidence:
 - kind: implemented
   source: herdr/transitions.py
-  locator: TASK_TRANSITIONS L19-35 / validate_task_transition L62-82
+  locator: TASK_TRANSITIONS L19-35 / validate_task_transition L85-127
   confidence: high
 - kind: implemented
   source: herdr/state_db.py
@@ -365,7 +365,7 @@ out_of_matrix_writers:
     confidence: high
   - kind: implemented
     source: herdr/transitions.py
-    locator: validate_task_transition force 分支 L73-74
+    locator: validate_task_transition force 分支 L118-119
     confidence: high
 - from: 任意状态
   to: agent_done

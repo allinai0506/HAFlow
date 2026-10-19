@@ -58,10 +58,40 @@ TERMINAL_TASK_STATUSES: Set[str] = {
     "superseded",
 }
 
+# ============================================================
+# Privileged Task Transitions (ADR-0005 / OEP-0002)
+# ============================================================
 
-def validate_task_transition(old_status: str, new_status: str, force: bool = False) -> bool:
+PRIVILEGED_TASK_TRANSITIONS: Dict[str, Set[tuple[str, str]]] = {
+    "delivery-repair": {("completed", "rework")},
+    "operator-bypass": {
+        ("blocked", "completed"),
+        ("suspended", "completed"),
+        ("failed", "completed"),
+        ("paused", "working"),
+    },
+    "rollback": {
+        *((s, "superseded") for s in TASK_TRANSITIONS if s != "superseded"),
+        ("active", "superseded"),
+        ("suspended", "superseded"),
+    },
+    "console-force-review": {
+        *((s, "agent_done") for s in TASK_TRANSITIONS if s not in TERMINAL_TASK_STATUSES),
+        ("active", "agent_done"),
+    },
+}
+
+
+def validate_task_transition(
+    old_status: str,
+    new_status: str,
+    force: bool = False,
+    intent: str | None = None,
+) -> bool:
     """Validate whether task transition old_status -> new_status is legal.
 
+    If intent is provided, the transition must match the declared privileged intent contract
+    (ADR-0005 / OEP-0002).
     If force is True, edge legality (old_status -> new_status) is bypassed,
     but new_status MUST still be a recognized, valid task status.
     Returns True if valid (including idempotent self-transitions).
@@ -70,7 +100,22 @@ def validate_task_transition(old_status: str, new_status: str, force: bool = Fal
     if new_status not in TASK_TRANSITIONS:
         raise InvalidTransitionError(f"Invalid target task status: '{new_status}'")
 
-    if old_status == new_status or force:
+    if old_status == new_status:
+        return True
+
+    if intent is not None:
+        if intent not in PRIVILEGED_TASK_TRANSITIONS:
+            raise InvalidTransitionError(f"Unknown privileged transition intent: '{intent}'")
+        allowed_pairs = PRIVILEGED_TASK_TRANSITIONS[intent]
+        if (old_status, new_status) in allowed_pairs:
+            return True
+        if intent == "rollback" and new_status == "superseded":
+            return True
+        raise InvalidTransitionError(
+            f"Illegal privileged transition for intent '{intent}': '{old_status}' -> '{new_status}'"
+        )
+
+    if force:
         return True
 
     allowed = TASK_TRANSITIONS.get(old_status, set())

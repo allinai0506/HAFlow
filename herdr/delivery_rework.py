@@ -100,6 +100,7 @@ def repair_delivery(task_id, run_id, request_id, *, store, probe=None, send=None
             def prepare(conn):
                 current = state_db._decode_task_row(conn.execute('SELECT * FROM tasks WHERE task_id=?', (task_id,)).fetchone())
                 result = state_db.transition_task(task_id, 'rework', source='delivery-repair', reason='repository_delivery_incomplete',
+                    intent='delivery-repair',
                     expected_status='completed', expected_version=task['version'], conn=conn,
                     metadata={'rework_prompt': prompt, 'rework_request_id': request_id, 'rework_delivery': 'pending',
                               'delivery_repair_request_id': request_id,
