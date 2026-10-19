@@ -381,10 +381,9 @@ def cmd_rework(args):
     )
 
 
-def _run_commit_index_command(task_id, clone, command):
-    from herdr.task_cli_adoption import run_commit_index_command
+from herdr.task_cli_adoption_bindings import build_adoption_bindings
 
-    return run_commit_index_command(task_id, clone, command, run_command=subprocess.run)
+globals().update(build_adoption_bindings(globals()))
 
 
 @_with_git_operation_lock()
@@ -403,103 +402,6 @@ def commit_task(task_id, message=None, allow_rebase=False):
         set_status=set_status,
         run_commit_index_command=_run_commit_index_command,
     )
-
-
-def _adoption_skew_seconds():
-    from herdr.git_adoption_probe import adoption_skew_seconds
-
-    return adoption_skew_seconds()
-
-
-def _git_head_sha(clone):
-    from herdr.git_adoption_probe import git_head_sha
-
-    return git_head_sha(clone)
-
-
-def _git_is_ancestor(clone, baseline, head):
-    from herdr.git_adoption_probe import git_is_ancestor
-
-    return git_is_ancestor(clone, baseline, head)
-
-
-def _git_log_commits(clone, rev, limit=None, first_parent=False):
-    from herdr.git_adoption_probe import git_log_commits
-
-    return git_log_commits(clone, rev, limit=limit, first_parent=first_parent)
-
-
-def _git_commit_paths(clone, sha):
-    from herdr.git_adoption_probe import git_commit_paths
-
-    return git_commit_paths(clone, sha)
-
-
-def _git_current_branch(clone):
-    from herdr.git_adoption_probe import git_current_branch
-
-    return git_current_branch(clone)
-
-
-def _git_remote_contained_shas(clone, shas, exclude_branches=None):
-    from herdr.git_adoption_probe import git_remote_contained_shas
-
-    return git_remote_contained_shas(clone, shas, exclude_branches=exclude_branches)
-
-
-def _git_interval_commits(clone, baseline, head):
-    from herdr.git_adoption_probe import git_interval_commits
-
-    return git_interval_commits(
-        clone,
-        baseline,
-        head,
-        log_commits=_git_log_commits,
-        commit_paths=_git_commit_paths,
-    )
-
-
-def _git_head_history(clone, head, limit=100):
-    from herdr.git_adoption_probe import git_head_history
-
-    return git_head_history(
-        clone,
-        head,
-        limit=limit,
-        log_commits=_git_log_commits,
-        commit_paths=_git_commit_paths,
-    )
-
-
-def _adopt_head_if_attributable(task_id, task, clone, allow_rebase=False):
-    from herdr.task_cli_adoption import adopt_head_if_attributable
-
-    return adopt_head_if_attributable(
-        task_id,
-        task,
-        clone,
-        allow_rebase=allow_rebase,
-        get_store=_get_store,
-        adoption_skew_seconds=_adoption_skew_seconds,
-        git_head_sha=_git_head_sha,
-        git_current_branch=_git_current_branch,
-        git_is_ancestor=_git_is_ancestor,
-        git_interval_commits=_git_interval_commits,
-        git_head_history=_git_head_history,
-        git_remote_contained_shas=_git_remote_contained_shas,
-        coerce_epoch=_coerce_epoch,
-        set_status=set_status,
-    )
-
-
-def _publish_integrated_task(task_id):
-    from herdr.scheduler_facts import publish_integrated_candidate
-
-    try:
-        publish_integrated_candidate(_get_store(), task_id)
-    except ValueError as exc:
-        # Legacy integration can finish, but cannot silently publish a candidate.
-        print(f"[CANDIDATE PUBLICATION REJECTED] {exc}", file=sys.stderr)
 
 
 @_with_git_operation_lock(include_source_repo=True)
