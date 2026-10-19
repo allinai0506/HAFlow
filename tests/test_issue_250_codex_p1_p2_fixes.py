@@ -1577,6 +1577,138 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
         cleanup_events = [e for e in events if e.get("event_type") == "gate_cleanup_completed"]
         self.assertEqual(len(cleanup_events), 1)
 
+    def test_round6_keep_receipt_v1_rework_behind_receipt_validation(self):
+        """Round 6: receipt-v1 rework tasks must NOT bypass receipt validation via legacy rework recovery."""
+        from herdr.state_store import SQLiteStateStore
+        ctrl = _load_controller()
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r6", "status": "running"})
+
+        task_id = "task-r6-receipt-v1-rework"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r6",
+            "run_id": "r1",
+            "node": "implementation",
+            "stage": "implementation",
+            "gate": False,
+            "status": "rework",
+            "pane_id": "p-r6",
+            "completion_protocol": "receipt-v1",
+            "version": 1,
+        }
+        store.save_task(task)
+
+        # Mock deliverables ready and verification/retry complete
+        with patch.object(ctrl, "get_task", lambda tid: store.get_task(tid)), \
+             patch.object(ctrl, "_completion_marker_snapshot", lambda t: (False, "screen output")), \
+             patch.object(ctrl, "check_task_deliverables_ready", lambda t: True), \
+             patch.object(ctrl, "_verification_execution_complete_for_rework", lambda t: True), \
+             patch.object(ctrl, "_retry_execution_complete_for_rework", lambda t: True), \
+             patch.object(ctrl, "emit_done_if_allowed", MagicMock()) as mock_emit, \
+             patch.object(ctrl, "_set_observed_status", MagicMock(wraps=ctrl._set_observed_status)):
+            ctrl.handle_event(task_id, "idle")
+
+        # Must NOT transition to agent_done via rework_recovery
+        updated = store.get_task(task_id)
+        self.assertEqual(updated["status"], "rework")
+        mock_emit.assert_not_called()
+
+        # Non-receipt-v1 task with the same conditions DOES transition
+        task_id_legacy = "task-r6-legacy-rework"
+        task_legacy = {
+            "task_id": task_id_legacy,
+            "workflow_id": "wf-r6",
+            "run_id": "r1",
+            "node": "implementation",
+            "stage": "implementation",
+            "gate": False,
+            "status": "rework",
+            "pane_id": "p-legacy",
+            "version": 1,
+        }
+        store.save_task(task_legacy)
+
+        with patch.object(ctrl, "get_task", lambda tid: store.get_task(tid)), \
+             patch.object(ctrl, "_completion_marker_snapshot", lambda t: (False, "screen output")), \
+             patch.object(ctrl, "check_task_deliverables_ready", lambda t: True), \
+             patch.object(ctrl, "_verification_execution_complete_for_rework", lambda t: True), \
+             patch.object(ctrl, "_retry_execution_complete_for_rework", lambda t: True), \
+             patch.object(ctrl, "emit_done_if_allowed", MagicMock()), \
+             patch.object(ctrl, "_set_observed_status", lambda t, st, rs: (store.save_task({**t, "status": st}), True)[1]):
+            ctrl.handle_event(task_id_legacy, "idle")
+
+        updated_legacy = store.get_task(task_id_legacy)
+        self.assertEqual(updated_legacy["status"], "agent_done")
+
+    def test_round6_adopt_verdict_preserves_authorized_snapshot_version(self):
+        """Round 6: adopt-verdict must validate fresh snapshot and abort if failure_reason, token, or version changed."""
+        import io
+        from herdr.state_store import SQLiteStateStore
+        herdr_task = _load_herdr_task()
+
+        store = SQLiteStateStore(self.db_path)
+        store.save_workflow({"workflow_id": "wf-r6-p2", "status": "running"})
+
+        task_id = "task-r6-adopt-race"
+        task = {
+            "task_id": task_id,
+            "workflow_id": "wf-r6-p2",
+            "run_id": "r1",
+            "node": "cleanroom_test",
+            "stage": "cleanroom_test",
+            "gate": True,
+            "status": "failed",
+            "failure_reason": "hard_timeout_watchdog",
+            "execution_token": "token-r6",
+            "version": 2,
+        }
+        store.save_task(task)
+
+        # Case A: When fresh snapshot from store has a different failure_reason (e.g. concurrent writer updated it)
+        fresh_modified_reason = dict(task, failure_reason="script_error", version=3)
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [dict(task)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None), \
+             patch.object(store, "get_task", lambda tid: dict(fresh_modified_reason)):
+            with self.assertRaises(SystemExit) as ctx, patch("sys.stderr", new_callable=io.StringIO) as err:
+                herdr_task.set_status(task_id, "completed", verdict="pass")
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("is no longer an authorized watchdog-failed gate", err.getvalue())
+
+        # Case B: When fresh snapshot has a different execution_token
+        fresh_modified_token = dict(task, execution_token="token-epoch-2", version=3)
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [dict(task)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None), \
+             patch.object(store, "get_task", lambda tid: dict(fresh_modified_token)):
+            with self.assertRaises(SystemExit) as ctx, patch("sys.stderr", new_callable=io.StringIO) as err:
+                herdr_task.set_status(task_id, "completed", verdict="pass")
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("execution token changed", err.getvalue())
+
+        # Case C: When fresh snapshot has a newer version modified by another writer
+        fresh_modified_version = dict(task, version=5)
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [dict(task)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None), \
+             patch.object(store, "get_task", lambda tid: dict(fresh_modified_version)):
+            with self.assertRaises(SystemExit) as ctx, patch("sys.stderr", new_callable=io.StringIO) as err:
+                herdr_task.set_status(task_id, "completed", verdict="pass")
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("was modified by another writer", err.getvalue())
+
+        # Case D: Consistent authorized snapshot succeeds and updates task to completed
+        with patch.object(herdr_task, "_get_store", lambda: store), \
+             patch.object(herdr_task, "load_tasks", lambda: {"tasks": [store.get_task(task_id)]}), \
+             patch.object(herdr_task, "_capture_verified_candidate", lambda t: None):
+            herdr_task.set_status(task_id, "completed", verdict="pass", note="verified")
+
+        adopted = store.get_task(task_id)
+        self.assertEqual(adopted["status"], "completed")
+        self.assertEqual(adopted["stage_verdict"], "pass")
+
 
 if __name__ == "__main__":
     unittest.main()

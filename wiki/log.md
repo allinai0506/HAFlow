@@ -8,6 +8,26 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-19] fix | 严格守护 receipt-v1 返工回执校验、保留采纳授权快照 CAS 版本 (PR #266 Codex Review Round 6)
+
+- 背景：
+  1. GitHub Codex 自动化评审在 PR #266 commit b31e42c 中指出 1 项 P1 与 1 项 P2 协议守护与并发采纳缺陷：
+     - [P1] `services/herdr-controller.py` 中将 `completion_protocol == "receipt-v1"` 守护置于通用返工恢复逻辑之后。当处于 `rework` 状态且无完成标记（done marker）的普通任务进入 `idle` 时，若交付物存在且重试/校验谓词通过，会直接通过通用返工恢复流转至 `agent_done`，完全绕过了交付回执校验（`consume_completion_receipt`），跳过了执行纪元、凭证签名与工件完整性核验；必须将 receipt-v1 协议守护前置于通用返工恢复之前，仅对已验证机器可读裁决的门禁工位做受控豁免；
+     - [P2] `bin/herdr-task:set_status` 在为 watchdog-failed 门禁实施异常采纳前，通过 `fresh = store.get_task(task_id)` 无条件复制 `fresh["version"]` 覆盖当前 task 的版本号。若并发写入者在授权检查后将任务更新为其他失败原因（如脚本错误）、派发了新执行令牌或重试轮次，此无条件版本刷新使得随后的 CAS 乐观锁依然能够匹配成功，从而误把陈旧裁决采纳并关闭新的失败；必须保留由候选证据写入所绑定的授权版本号，并在向数据库流转前完整重验当前持久化快照的门禁属性、failed 状态、watchdog 失败原因与执行令牌一致性。
+- 变更：
+  1. **前置 receipt-v1 协议守护**：
+     - `services/herdr-controller.py:handle_event`：在 `gate_verdict_ready` 恢复之后、通用返工恢复（`rework_recovery`）之前前置注入 `if task.get("completion_protocol") == "receipt-v1": return`；
+     - 确保普通 receipt-v1 任务即便满足交付物和重试检查，也绝不绕过 `consume_completion_receipt` 直接流转至 `agent_done`。
+  2. **保留采纳授权快照版本并全量重验快照一致性**：
+     - `bin/herdr-task:set_status`：彻底删除无条件覆盖 `task["version"] = fresh["version"]` 的逻辑；
+     - 在执行 CAS 强制状态转移前，从存储拉取最新快照，严格核验：1) 仍为门禁任务且状态仍为 `failed`；2) 失败原因仍为 `hard_timeout_watchdog`；3) 若绑定了执行令牌，最新快照令牌必须完全一致；4) 最新快照版本号必须完全匹配当前绑定的授权版本；
+     - 任何校验不一致立即报错退出（exit 2），杜绝并发写入篡改后将陈旧裁决强行应用于新执行。
+- 证据：
+  1. `tests/test_issue_250_codex_p1_p2_fixes.py` 新增 2 项专项测试（`test_round6_keep_receipt_v1_rework_behind_receipt_validation` 与 `test_round6_adopt_verdict_preserves_authorized_snapshot_version`），全量 30 项测试全部 PASS；
+  2. `tests/test_cli_receipt_delivery.py` 8 项测试全部 PASS；
+  3. 全量 `tests/test_issue_250_*.py` 47 项用例全部通过（总计 55 项全量通过）；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警通过。
+
 ## [2026-10-19] fix | 遵循裁决配置目录解析与裁决删除失败强行阻断 (PR #266 Codex Review Round 5 Follow-up)
 
 - 背景：

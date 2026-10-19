@@ -7325,6 +7325,8 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 | 缺省 CLI 返工未复用清理令牌 | 未指定 `--request-id` 的 CLI 返工每次调用生成新随机令牌；若清理完成但 `deliver()` 准备事务提交前崩溃，重试生成新 ID 无法匹配前次清理标记，导致重复发送 `C-c` | 在未指定 request_id 时，返工前先从 events 检索尚未被交付消费的 `gate_cleanup_completed` 标识；若存在未消费的清理 ID 则原地复用，保障默认 CLI 调用全链路幂等 |
 | 清理裁决硬编码忽略环境变量配置 | 清理门禁旧裁决硬编码默认路径，忽略 `HERDR_GATE_VERDICT_DIR`，导致自定义或测试目录下旧裁决残留并被 Controller 重新采纳 | 裁决候选路径必须使用规范助手 `gate_verdict_path(task_id)` 动态解析，严格遵循环境配置目录与 clone 目录 |
 | 裁决文件删除失败静默吞异常误标完成 | `os.remove` 发生权限或只读异常被静默忽略，旧裁决未被物理删除即持久化 `gate_cleanup_completed`，后续重试跳过清理直接采纳残留陈旧裁决 | 物理删除失败时必须立即抛出异常阻断流转，严禁持久化完成标记，确保所有候选裁决物理清除后才记录完成 |
+| receipt-v1 返工跳过凭据校验 | `services/herdr-controller.py` 中将 `completion_protocol == "receipt-v1"` 守护置于通用返工恢复之后，导致 idle 无 done marker 的普通任务在交付物满足时直接流转为 `agent_done`，完全绕过了交付回执校验（`consume_completion_receipt`） | 必须将 receipt-v1 协议守护前置于通用返工恢复逻辑，仅对门禁裁决恢复（`gate_verdict_ready`）做受控豁免，确保普通返工任务严格受凭证契约约束 |
+| 采纳裁决无条件刷新任务版本破坏 CAS 保护 | `bin/herdr-task:set_status` 在强制流转前无条件从数据库拉取最新版本号覆盖当前 task 版本，若其他写入者将任务置为不同失败原因或派发新执行，CAS 依然匹配成功并采用陈旧裁决完成任务 | 采纳流转必须保留由完成证据写入所绑定的授权快照版本（`expected_version`），并在流转前重新完整校验持久化快照的门禁属性、failed 状态、watchdog 失败原因与执行令牌，严禁无条件覆盖版本号 |
 
 ### 操作规范
 
@@ -7345,6 +7347,8 @@ wf-haflow-1017-01 工作流现场暴露：洁净室外环门禁任务（`cleanro
 15. **未指定 request_id 的 CLI 默认调用幂等性保障**：对于未显式传递 request_id 的 CLI 命令，状态恢复时必须能通过底层事件链或持久化元数据回收未消费的操作凭据（operation ID），避免重试重新生成随机 ID 导致前期已执行的副作用被重复触发。
 16. **清理路径必须遵守裁决配置目录**：清理门禁旧裁决时，必须通过 `gate_verdict_path(task_id)` 解析路径，确保遵循 `HERDR_GATE_VERDICT_DIR`，禁止硬编码路径导致自定义目录残留。
 17. **裁决物理清除失败坚决阻断**：清理旧裁决时遇到除不存在外的任何错误（如权限不足或文件未被真正解挂），必须中断执行且绝对扣留 `gate_cleanup_completed` 事件，严禁静默忽略导致误采纳残留旧结论。
+18. **receipt-v1 返工流转必须严格受回执契约守护**：在控制器对账与事件处理循环中，除已验证机器可读裁决的门禁工位外，任何 `receipt-v1` 任务绝不允许通过通用交付物恢复绕过 `consume_completion_receipt`，严禁将协议守护置于通用返工恢复之后。
+19. **裁决采纳必须绑定授权快照版本与全量字段重验**：对 watchdog-failed 门禁实施异常采纳时，必须保持受检快照的版本号（CAS），并在向数据库发起状态转移前，对持久化最新记录重验其门禁身份、`status == "failed"`、`failure_reason == "hard_timeout_watchdog"` 及 `execution_token` 一致性，任何不符立即阻断并退出，严禁盲目复制并发写入者的递增版本。
 
 ### 验证命令 / 守护测试
 
@@ -7357,4 +7361,4 @@ pytest -q tests/test_issue_250_eval_timeout_adaptive.py \
           tests/test_issue_250_codex_p1_p2_fixes.py \
           tests/test_cli_receipt_delivery.py
 ```
-关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与执行令牌拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog；普通 Agent 节点绝不被误判为门禁；无穷大超时配置安全回退至默认值；receipt-v1 返工重试保持零额外副作用；超前未来时间戳被拒绝延期；工位中断失败立即阻断返工；清理阶段前置持久化防止重试重复发送中断；清理意图与完成两阶段彻底杜绝进程意外退出留存旧 writer；CLI 无 request_id 缺省调用全链路幂等恢复；清理过程遵守配置的裁决目录；裁决物理删除失败立即阻断并扣留完成事件。
+关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与执行令牌拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog；普通 Agent 节点绝不被误判为门禁；无穷大超时配置安全回退至默认值；receipt-v1 返工重试保持零额外副作用；超前未来时间戳被拒绝延期；工位中断失败立即阻断返工；清理阶段前置持久化防止重试重复发送中断；清理意图与完成两阶段彻底杜绝进程意外退出留存旧 writer；CLI 无 request_id 缺省调用全链路幂等恢复；清理过程遵守配置的裁决目录；裁决物理删除失败立即阻断并扣留完成事件；receipt-v1 普通返工任务绝不绕过交付回执验证；裁决采纳严格保留授权版本号并全量重验快照一致性杜绝采纳竞争。

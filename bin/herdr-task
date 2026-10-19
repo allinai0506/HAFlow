@@ -2545,12 +2545,40 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
     expected_status = old_status if force_transition else None
     store = _get_store()
     if force_transition:
-        try:
-            fresh = store.get_task(task_id)
-            if fresh and isinstance(fresh, dict) and "version" in fresh:
-                task["version"] = fresh["version"]
-        except Exception:
-            pass
+        # P2: Validate that the current persistent snapshot still satisfies the authorized
+        # watchdog-recovery invariants before adopting the verdict. If another writer updated
+        # the task (e.g. different failure reason, execution epoch, or status), abort adoption.
+        fresh = store.get_task(task_id)
+        if not fresh or not isinstance(fresh, dict):
+            print(f"Task not found: {task_id}", file=sys.stderr)
+            sys.exit(2)
+        fresh_watchdog_gate = (
+            _is_gate_task(fresh)
+            and fresh.get("status") == "failed"
+            and fresh.get("failure_reason") == "hard_timeout_watchdog"
+        )
+        if not fresh_watchdog_gate:
+            print(
+                f"Concurrent state change: task {task_id} is no longer an authorized watchdog-failed gate (status={fresh.get('status')}, reason={fresh.get('failure_reason')})",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if task.get("execution_token") and fresh.get("execution_token") != task.get("execution_token"):
+            print(
+                f"Concurrent state change: task {task_id} execution token changed ({fresh.get('execution_token')} != {task.get('execution_token')})",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Retain the version bound to the authorized snapshot / candidate capture;
+        # do not overwrite with an unverified newer version from another writer.
+        if task.get("version") is not None and fresh.get("version") != task.get("version"):
+            print(
+                f"Concurrent state change: task {task_id} was modified by another writer (expected version {task.get('version')}, found {fresh.get('version')})",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        elif task.get("version") is None:
+            task["version"] = fresh.get("version")
     expected_version = task.get("version") if force_transition else None
     try:
         from herdr import kernel

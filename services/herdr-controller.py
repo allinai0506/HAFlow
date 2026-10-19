@@ -10161,6 +10161,10 @@ def handle_event(task_id, agent_status):
                     if _set_observed_status(task, "agent_done", "gate_verdict_recovery"):
                         emit_done_if_allowed(get_task(task_id), report_text=screen)
                     return
+                # receipt-v1 tasks must strictly go through completion receipt validation
+                # (consume_completion_receipt); only the gate-verdict recovery above is carved out.
+                if task.get("completion_protocol") == "receipt-v1":
+                    return
                 # Rework recovery is allowed only after the existing
                 # verification/retry evidence gates have passed.
                 if (
