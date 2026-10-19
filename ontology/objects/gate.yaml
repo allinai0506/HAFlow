@@ -1,63 +1,24 @@
 id: gate
-name: 节点门禁
-description: 节点级质量/合规门禁契约与运行结论；GATE_DEFAULTS 将 test/review/wrapup 视为门禁，结论 pass/blocked 驱动阶段推进或 fix-loop。 注意：门禁配置按节点（workflow_id:node_id），结论按任务（tasks.stage_verdict）；本对象合并了二者，见 SC-012（待人工决策）。
-lifecycle: experimental
+name: 节点门禁（已废弃合并对象）
+description: 历史合并门禁对象（已在 OEP-0002 中解耦废弃）。门禁配置已迁移至 gate_spec（节点级契约规范），门禁结论已迁移至 gate_verdict（任务级评测结论事实）。详见 ADR-0006 与 SC-012。
+lifecycle: deprecated
 identity:
   primary_key: gate_ref
   format: workflow_id:node_id
 aliases:
 - Gate
-- Verdict
-- 门禁
+- LegacyGate
 properties:
 - id: type
   name: 门禁类型
   type: enum
   required: false
-  notes: auto|human|hybrid
-- id: auto_criteria
-  name: 自动判定条件
-  type: string
-  required: false
-- id: requires_human_approval
-  name: 需人工审批
-  type: bool
-  required: false
-- id: retry_node
-  name: 打回目标节点
-  type: string
-  required: false
-  notes: 运行时 fix-loop 实际读取该字段
-- id: retry_target
-  name: 打回目标（文档字段）
-  type: string
-  required: false
-  notes: schema 校验存在，但运行时 fix-loop 未消费（冲突 SC-005）
-- id: max_loops
-  name: 最大循环次数
-  type: int
-  required: false
-  notes: 默认 HERDR_FIX_LOOP_MAX=3
-- id: command
-  name: 门禁命令
-  type: string
-  required: false
-  notes: 经 herdr/gate_validator 校验
+  notes: 已迁移至 gate_spec
 - id: verdict
   name: 门禁结论
   type: enum
   required: false
-  notes: pass|blocked|null
-- id: verdict_note
-  name: 结论备注
-  type: string
-  required: false
-  notes: blocked 必填
-- id: verdict_file
-  name: 结论文件
-  type: path
-  required: false
-  notes: ~/.herdr-controller/gate-verdicts/<task_id>.json（回退 .herdr/gate-verdict.json）
+  notes: 已迁移至 gate_verdict
 evidence:
 - kind: intended
   source: docs/product-specs/workflow-template-schema.md
@@ -66,16 +27,4 @@ evidence:
 - kind: implemented
   source: services/herdr-controller.py
   locator: GATE_DEFAULTS L938-944 / resolve_gate_config L946-973
-  confidence: high
-- kind: implemented
-  source: bin/herdr-task
-  locator: verdict 规则 L2402-2419
-  confidence: high
-- kind: implemented
-  source: herdr/direct_dispatch.py
-  locator: verdict 文件与 HERDR_GATE_VERDICT 协议 L135-158
-  confidence: high
-- kind: implemented
-  source: herdr/kernel.py
-  locator: bypass_task_gate L832-957
   confidence: high

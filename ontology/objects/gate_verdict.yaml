@@ -1,0 +1,63 @@
+id: gate_verdict
+name: 门禁执行裁决事实
+description: 针对特定任务执行 Attempt 交付物的权威评测裁决事实；数据库 tasks.stage_verdict 为唯一调度事实源，关联的 gate-verdict.json 为不可变证据快照。见 ADR-0006 与 SC-012。
+lifecycle: experimental
+identity:
+  primary_key: task_id
+  format: "{task_id}"
+aliases:
+- GateVerdict
+- StageVerdict
+- 门禁裁决
+properties:
+- id: verdict
+  name: 门禁结论
+  type: enum
+  required: false
+  notes: pass|blocked|null
+- id: verdict_note
+  name: 结论备注
+  type: string
+  required: false
+  notes: blocked 必填
+- id: verdict_file
+  name: 证据快照文件
+  type: path
+  required: false
+  notes: ~/.herdr-controller/gate-verdicts/<task_id>.json（只读不可变工件快照，由 DB 哈希强引用）
+- id: evaluator
+  name: 评估者身份
+  type: string
+  required: false
+  notes: worker|watchdog|operator
+- id: evaluated_at
+  name: 裁决时间戳
+  type: timestamp
+  required: false
+- id: affected_task_ids
+  name: 结构化归因目标
+  type: list[string]
+  required: false
+  notes: 仅允许随 blocked 结论持久化
+- id: evidence_snapshot_hash
+  name: 证据快照哈希
+  type: string
+  required: false
+  notes: 快照文件的 SHA256 校验和（持久化于 DB 任务行中以实现单向防篡改引用，见 ADR-0006）
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: set_status L877-1019
+  confidence: high
+- kind: implemented
+  source: herdr/direct_dispatch.py
+  locator: gate_verdict_path L158-185
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: bypass_task_gate L832-957
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: try_auto_verdict L8460-8501
+  confidence: high

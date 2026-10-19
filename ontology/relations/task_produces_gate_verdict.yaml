@@ -1,0 +1,17 @@
+id: task_produces_gate_verdict
+name: 任务产出门禁裁决
+description: 门禁节点任务执行完成后，产生针对该 Attempt 的门禁执行裁决事实（gate_verdict）。见 ADR-0006。
+lifecycle: experimental
+from: task
+to: gate_verdict
+cardinality: one_to_zero_or_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: bin/herdr-task
+  locator: set_status L877-1019
+  confidence: high
+- kind: implemented
+  source: herdr/kernel.py
+  locator: bypass_task_gate L832-957
+  confidence: high

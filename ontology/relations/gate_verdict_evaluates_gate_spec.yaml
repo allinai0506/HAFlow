@@ -1,0 +1,17 @@
+id: gate_verdict_evaluates_gate_spec
+name: 门禁裁决核验门禁规格
+description: 门禁任务裁决结论根据节点声明的门禁契约规格（gate_spec）进行准出评估；多轮 fix-loop 重试派生多份裁决核验同一种规格。见 ADR-0006。
+lifecycle: experimental
+from: gate_verdict
+to: gate_spec
+cardinality: many_to_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: GATE_DEFAULTS L938-944 / resolve_gate_config L946-973
+  confidence: high
+- kind: implemented
+  source: bin/herdr-task
+  locator: set_status L877-1019
+  confidence: high

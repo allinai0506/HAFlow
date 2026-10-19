@@ -165,7 +165,7 @@ evidence:
   locator: transition_workflow L7108-7227（workflow_transition 事件 L7197）
   confidence: high
 initial_declared_in_matrix: pending
-initial_note: 矩阵声明 pending 为起点，但 projects.register_workflow 直接写 status=running（projects.py L593）；占位工作流 save_task 以 pending 创建（state_db.py L1617）。
+initial_note: ADR-0007 / D3 落地：running 定案为标准装配初始态（Active Initial State，通过 projects.register_workflow / herdr-factory run 创建），pending 保留为未装配/占位草稿通道（Draft / Placeholder State，由 state_db.py L1617 占位创建）。
 out_of_matrix_writers:
 - from: pending|paused|failed
   to: closing（force）

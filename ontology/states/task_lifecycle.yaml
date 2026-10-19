@@ -1,6 +1,6 @@
 id: task_lifecycle
 name: 任务生命周期状态机
-description: 15 状态任务状态机，边集与 herdr/transitions.py TASK_TRANSITIONS 逐边一致。superseded 是唯一吸收态。状态机之外存在多条写入路径，见 out_of_matrix_writers（SC-018）。
+description: 15 状态任务状态机，边集与 herdr/transitions.py TASK_TRANSITIONS 逐边一致。superseded 是唯一吸收态。按 ADR-0005 (D1) 将状态机外写入收敛为 privileged_transitions 特权流转契约，历史裸写点归档于 out_of_matrix_writers。
 lifecycle: experimental
 object: task
 initial: pending
@@ -392,3 +392,70 @@ out_of_matrix_writers:
     source: herdr/state_db.py
     locator: restore_checkpoint DELETE FROM tasks L7719-7765
     confidence: high
+privileged_transitions:
+- id: delivery_repair
+  name: 交付物修复特权流转
+  intent: delivery-repair
+  from: completed
+  to: rework
+  policy: operator_cli_policy
+  preconditions:
+  - delivery_repair_authorized
+  audit:
+    required: true
+    event: task_transition
+    payload:
+      source: delivery-repair
+      reason: rework_requested
+  effects:
+    sets:
+      stage_verdict: null
+  notes: ADR-0005 / D1：仅在交付物修复且授权通过时允许 completed -> rework，网关层原子 CAS 推进并清空 stage_verdict
+- id: operator_bypass
+  name: 门禁旁路放行特权流转
+  intent: operator-bypass
+  from: blocked
+  to: completed
+  secondary_from: paused
+  secondary_to: working
+  policy: gate_bypass_policy
+  preconditions:
+  - gate_bypass_audited
+  audit:
+    required: true
+    events:
+    - task_transition
+    - gate_bypassed
+  effects:
+    sets:
+      stage_verdict: pass
+      blocker: null
+  notes: ADR-0005 / D1：门禁旁路放行必须走网关完成 blocked -> completed，在 clone_lock 下原子核验 HeadGuard 并记录流转与旁路审计事件
+- id: rollback
+  name: 工作流回滚特权流转
+  intent: rollback
+  from: 任意非 superseded 状态
+  to: superseded
+  policy: operator_cli_policy
+  preconditions:
+  - rollback_authorized
+  audit:
+    required: true
+    event: task_transition
+    payload:
+      reason: workflow_rollback
+  notes: ADR-0005 / D1：工作流回滚走显式的受控批量流转 * -> superseded，废弃无语义 force=True，附带操作员与原因凭据
+- id: console_force_review
+  name: 控制台强制复审特权流转
+  intent: console-force-review
+  from: 任意非 terminal 状态
+  to: agent_done
+  policy: operator_cli_policy
+  preconditions:
+  - console_operator_authenticated
+  audit:
+    required: true
+    event: task_transition
+    payload:
+      source: console-force-review
+  notes: ADR-0005 / D1：控制台强制转入人工审查重构为网关 CAS 调用，校验 Origin、CSRF 头及操作员凭据后推进至 agent_done，杜绝裸写 SQL

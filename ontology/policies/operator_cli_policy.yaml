@@ -12,6 +12,8 @@ resources:
   - project
   - workflow_instance
   - task
+  - gate_spec
+  - gate_verdict
   - gate
   - agent_reservation
 allowed_actions:
@@ -26,6 +28,7 @@ allowed_actions:
 - provision_project
 - purge_task
 - record_gate_verdict
+- register_workflow
 - release_agent_reservation
 - reserve_agent
 - rollback_workflow

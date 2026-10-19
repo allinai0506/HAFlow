@@ -1,14 +1,14 @@
-# Validation Result — 候选本体 v0.1（R1 修订）
+# Validation Result — 候选本体（OEP-0002 D1–D3 收敛版）
 
 日期：2026-10-19
-基线：origin/main @ 6b4d48b（沙盒分支 feat/ontology-brownfield-discovery-v1）
+基线：origin/main @ 8d8759f（分支 feat/ontology-oep-0002-d1-d3）
 模式：BROWNFIELD_DISCOVERY，首轮 READ_ONLY（仅新增与修改 `ontology/**`；未改业务代码）
 
 ## 1. Skill 自带校验器（schema 与引用完整性）
 
 ```text
 $ python3 <skill>/scripts/ontology_validate.py ontology
-Counts: objects 12, relations 12, states 4, rules 14, actions 18, policies 4,
+Counts: objects 14, relations 14, states 4, rules 14, actions 19, policies 4,
         workflows 3, connectors 5, mappings 10, projections 3
 PASSED   exit=0
 ```
@@ -25,9 +25,9 @@ $ python3 <skill>/scripts/ontology_index.py ontology  -> generated/index.json
 
 ```text
 $ python3 ontology/tests/audit_ontology.py <repo-root>
-Stats: bindings=28, bindings_ok=28, connector_ops=26, evidence_items=202,
+Stats: bindings=30, bindings_ok=30, connector_ops=26, evidence_items=213,
        logic_ref=14, logic_ref_ok=14, out_of_matrix_writers=8,
-       state_edges_equal_code=77, symbol_refs_ok=110, line_refs_in_range=185
+       state_edges_equal_code=77, symbol_refs_ok=127, line_refs_in_range=186
 Totals: MAJOR=0, MINOR=0, INFO=2
 exit=0
 ```
@@ -60,5 +60,5 @@ exit=0
 
 ## 7. 状态
 
-- 对 1b2fe9a：REQUEST_CHANGES。
-- 对 R1 修正：schema PASSED，审计 MAJOR=0，待独立复审与人工批准。
+- 对 OEP-0001 (1b2fe9a)：PR #275 已合并人工批准。
+- 对 OEP-0002 D1–D3 演化：schema PASSED，索引已同步，审计 MAJOR=0, MINOR=0，待人工批准合并。
