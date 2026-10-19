@@ -692,199 +692,53 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
 
 
 def _is_gate_task(t):
-    if not t:
-        return False
-    if t.get("gate") is False:
-        return False
+    from herdr.task_cli_verification import _is_gate_task as handle
 
-    workflow_id = t.get("workflow_id")
-    node_id = t.get("node") or t.get("stage")
-
-    # Authoritative workflow configuration check FIRST
-    wf_cfg = None
-    if workflow_id:
-        try:
-            from herdr.projects import workflow_config_for
-            wf_cfg = workflow_config_for(workflow_id) or {}
-        except Exception:
-            pass
-    if not wf_cfg and t.get("workflow_config") and node_id:
-        try:
-            import yaml
-            from pathlib import Path
-            p = Path(t["workflow_config"]).expanduser()
-            if p.exists():
-                with open(p, "r", encoding="utf-8") as f:
-                    wf_cfg = yaml.safe_load(f) or {}
-        except Exception:
-            pass
-
-    if wf_cfg and isinstance(wf_cfg, dict):
-        for n in wf_cfg.get("nodes", []):
-            if n.get("id") == node_id:
-                if n.get("gate") or n.get("node_type") == "gate":
-                    return True
-                if n.get("node_type") in ("agent", "implementation", "worker", "code") and not n.get("gate"):
-                    return False
-                break
-
-    if t.get("gate") is True:
-        return True
-
-    # Legacy fallback: exact names or word-boundary tokens, NOT arbitrary substring
-    node = str(node_id or "").lower()
-    if node in ("test", "review", "wrapup", "gate", "cleanroom", "cleanroom_test", "cleanroom_review", "cleanroom_gate"):
-        return True
-    if re.search(r"(^|[_-])(gate|cleanroom)($|[_-])", node):
-        return True
-    return bool(t.get("gate"))
+    return handle(t)
 
 
 def _gate_verdict_file_candidates(task):
-    """PR #250 & Codex review: Return ordered list of candidate gate-verdict file paths."""
-    candidates = []
-    task_id = task.get("task_id") or task.get("id")
-    if task_id:
-        try:
-            from herdr.direct_dispatch import gate_verdict_path
-            candidates.append(gate_verdict_path(task_id))
-        except Exception:
-            pass
-        override = os.environ.get("HERDR_GATE_VERDICT_DIR")
-        vdir = Path(override).expanduser() if override else (Path.home() / ".herdr-controller" / "gate-verdicts")
-        candidates.append(str(vdir / f"{task_id}.json"))
+    from herdr.task_cli_verification import _gate_verdict_file_candidates as handle
 
-    clone_path = task.get("clone_path")
-    if clone_path:
-        candidates.append(os.path.join(clone_path, ".herdr/gate-verdict.json"))
-        candidates.append(os.path.join(clone_path, ".herdr", "gate-verdict.json"))
-
-    seen = set()
-    result = []
-    for c in candidates:
-        if c and c not in seen:
-            seen.add(c)
-            result.append(c)
-    return result
+    return handle(task)
 
 
 def _authenticate_gate_verdict_evidence(task, expected_verdict=None):
-    """Authenticate durable gate verdict evidence from disk for task.
+    from herdr.task_cli_verification import (
+        _authenticate_gate_verdict_evidence as handle,
+    )
 
-    Verifies that a valid gate verdict file exists for the task, belongs to
-    the current execution epoch, has a fresh mtime (not older than rework_started_at,
-    and not in the future beyond clock skew allowance), and matches expected_verdict.
-
-    Returns (True, (verdict, note, affected_ids, st_mtime)) if valid and matches expected_verdict.
-    Returns (False, err_msg) if missing, stale, invalid, or mismatched.
-    """
-    candidates = _gate_verdict_file_candidates(task)
-    rework_started = task.get("rework_started_at")
-    expected_token = task.get("execution_token") or task.get("rework_request_id")
-    skew_limit = 5.0
-    try:
-        raw_skew = os.environ.get("HERDR_MAX_CLOCK_SKEW_SECONDS")
-        if raw_skew is not None and raw_skew.strip():
-            skew_limit = float(raw_skew.strip())
-    except Exception:
-        skew_limit = 5.0
-
-    now = time.time()
-    found_any = False
-    last_err = "no durable gate verdict file found"
-
-    for path in candidates:
-        try:
-            if not os.path.exists(path):
-                continue
-            found_any = True
-            st = os.stat(path)
-            if rework_started and st.st_mtime < (rework_started - 1.0):
-                last_err = f"gate verdict file {path} is stale (mtime {st.st_mtime} < rework_started {rework_started})"
-                continue
-            if (st.st_mtime - now) > skew_limit:
-                last_err = f"gate verdict file {path} has future timestamp exceeding clock skew allowance ({st.st_mtime - now:.1f}s > {skew_limit}s)"
-                continue
-            with open(path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            if not isinstance(payload, dict):
-                last_err = f"gate verdict file {path} is not a valid JSON dictionary"
-                continue
-            if expected_token:
-                file_token = (
-                    payload.get("execution_token")
-                    or payload.get("rework_request_id")
-                    or payload.get("rework_token")
-                )
-                if not file_token or file_token != expected_token:
-                    # Codex Review Round 7 P2: Authenticate operator bypass receipts as a trusted path
-                    bypass = payload.get("bypass")
-                    tid = task.get("task_id") or task.get("id")
-                    if bool(tid) and isinstance(bypass, dict) and (bypass.get("task_id") == tid) and bypass.get("bypass_id"):
-                        pass
-                    else:
-                        last_err = f"execution token mismatch in {path} ({file_token} != {expected_token})"
-                        continue
-            file_v = str(payload.get("verdict") or "").strip().lower()
-            if file_v not in ("pass", "blocked"):
-                last_err = f"gate verdict file {path} contains invalid verdict: '{file_v}'"
-                continue
-            if expected_verdict:
-                norm_exp = str(expected_verdict).strip().lower()
-                if file_v != norm_exp:
-                    return False, f"durable gate verdict on disk changed to '{file_v}' (expected '{norm_exp}')"
-            note = str(payload.get("note") or "").strip()
-            affected_ids = []
-            if file_v == "blocked":
-                raw_aff = payload.get("affected_task_ids")
-                if raw_aff is not None:
-                    if not isinstance(raw_aff, list):
-                        print(
-                            f"[ADOPT VERDICT WARN] Malformed affected_task_ids in {path}: "
-                            f"expected list, got {type(raw_aff).__name__}; rejecting attribution",
-                            file=sys.stderr,
-                        )
-                        affected_ids = []
-                    else:
-                        valid = True
-                        ids = []
-                        for item in raw_aff:
-                            text = str(item).strip() if isinstance(item, str) else ""
-                            if not text:
-                                valid = False
-                                break
-                            if text not in ids:
-                                ids.append(text)
-                        if valid:
-                            affected_ids = ids
-                        else:
-                            print(
-                                f"[ADOPT VERDICT WARN] Malformed affected_task_ids in {path}: "
-                                f"contains non-string or blank item; rejecting attribution",
-                                file=sys.stderr,
-                            )
-                            affected_ids = []
-            return True, (file_v, note, affected_ids, st.st_mtime)
-        except Exception as exc:
-            last_err = f"error inspecting gate verdict candidate {path}: {exc}"
-            continue
-
-    if not found_any:
-        return False, "no durable gate verdict file found"
-    return False, last_err
+    return handle(task, expected_verdict)
 
 
-def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=None,
-               skip_review_closure=False, skip_operator=None,
-               operator_token=None, operator_credentials=None):
+def set_status(
+    task_id,
+    new_status,
+    verdict=None,
+    note=None,
+    affected_task_ids=None,
+    skip_review_closure=False,
+    skip_operator=None,
+    operator_token=None,
+    operator_credentials=None,
+):
     from herdr.task_cli_status import set_task_status
+
     return set_task_status(
-        task_id, new_status, verdict=verdict, note=note,
+        task_id,
+        new_status,
+        verdict=verdict,
+        note=note,
         affected_task_ids=affected_task_ids,
-        skip_review_closure=skip_review_closure, skip_operator=skip_operator,
-        operator_token=operator_token, operator_credentials=operator_credentials,
-        load_tasks=load_tasks, find_task=find_task, get_store=_get_store,
-        transitions=TRANSITIONS, active_task_statuses=ACTIVE_TASK_STATUSES,
+        skip_review_closure=skip_review_closure,
+        skip_operator=skip_operator,
+        operator_token=operator_token,
+        operator_credentials=operator_credentials,
+        load_tasks=load_tasks,
+        find_task=find_task,
+        get_store=_get_store,
+        transitions=TRANSITIONS,
+        active_task_statuses=ACTIVE_TASK_STATUSES,
         is_gate_task=_is_gate_task,
         capture_verified_candidate=_capture_verified_candidate,
         enforce_wrapup_review_closure=_enforce_wrapup_review_closure,
@@ -896,15 +750,33 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
     )
 
 
-def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_cmd=None, repro_cmd=None, node=None, task_type=None):
+def auto_init_task_loop(
+    clone_path,
+    goal,
+    acceptance_list,
+    test_cmd=None,
+    lint_cmd=None,
+    repro_cmd=None,
+    node=None,
+    task_type=None,
+):
     from herdr.task_cli_launch import auto_init_task_loop as initialize
-    return initialize(clone_path, goal, acceptance_list, test_cmd=test_cmd,
-                      lint_cmd=lint_cmd, repro_cmd=repro_cmd, node=node,
-                      task_type=task_type)
+
+    return initialize(
+        clone_path,
+        goal,
+        acceptance_list,
+        test_cmd=test_cmd,
+        lint_cmd=lint_cmd,
+        repro_cmd=repro_cmd,
+        node=node,
+        task_type=task_type,
+    )
 
 
 def _refuse_loop_launch(args, refusal, *, clone_path, pane_id, pane_source):
     from herdr.task_cli_launch import refuse_loop_launch
+
     return refuse_loop_launch(
         args,
         refusal,
@@ -919,18 +791,30 @@ def _refuse_loop_launch(args, refusal, *, clone_path, pane_id, pane_source):
 def _is_isolation_rejection(exc):
     try:
         from herdr.agent_router import RouterIsolationRejection
+
         if isinstance(exc, RouterIsolationRejection):
             return True
     except ImportError:
         pass
     msg = str(exc).lower()
-    return "isolation" in msg or "prohibited for stage" in msg or ("candidates" in msg and "used in stage" in msg)
+    return (
+        "isolation" in msg
+        or "prohibited for stage" in msg
+        or ("candidates" in msg and "used in stage" in msg)
+    )
 
 
-def _record_router_failure_task(args, node_id, error, *,
-                                reason="router_isolation_rejected",
-                                failure_code=None, remediation=None):
+def _record_router_failure_task(
+    args,
+    node_id,
+    error,
+    *,
+    reason="router_isolation_rejected",
+    failure_code=None,
+    remediation=None,
+):
     from herdr.task_cli_launch import record_router_failure_task
+
     return record_router_failure_task(
         args,
         node_id,
