@@ -99,6 +99,25 @@ Evidence:
 - `console/herdr_factory_console.py` #create_candidate / #manual_advance
 - `tests/test_fix_loop_pr1.py`、`tests/test_fix_loop_gates.py`
 
+### 1.1.1 评审闭环操作员旁路认证（issue #228 后契约，2026-10-19）
+
+`FACT` wrapup 评审闭环的紧急操作员旁路（`herdr/review_closure.py::authenticate_operator`）遵循
+**显式呈现原则**：presented token 只能来自调用方显式通道（`--operator-token` /
+`--operator-credentials` / `HERDR_OPERATOR_TOKEN` / `HERDR_OPERATOR_CREDENTIALS` 环境变量），
+服务端已注册凭据的自动加载兜底已删除——同源自动发现会使 compare 退化为同一文件的自比较，
+同 UID worker 无需任何密钥即可绕过门禁。registered token 只查单一权威源
+`state_db.get_user_token`。`operator_id` 在任何文件系统使用前拒绝 `/`、`\`、`..` 并按
+`[^a-zA-Z0-9_\-]` → `_` 净化（与写入端一致），阻断把查找路径引向 worker 克隆目录的遍历向量。
+
+`FACT` 已知部署边界 R1：同 UID 进程间没有机密性——worker 读取服务端凭据库后可自行凑齐
+presented==registered。模块内无解，登记任何应急操作员前须由负责人决策隔离方案。
+成功旁路必须落 `review_closure_skipped` 事件并绑定任务头，供审计回读。
+
+Evidence:
+- `herdr/review_closure.py` #authenticate_operator
+- `tests/test_wrapup_review_closure.py`（B1 向量 a/b 对抗用例、B2 凭据目录零污染断言）
+- `docs/bug-reports/2026-10-19-wf-haflow-1019-01-craft-228-r3.md`、lessons §175
+
 ### 1.2 Trajectory Ledger：一次执行的历史事实流
 
 `FACT` Task 的当前状态仍由 Runtime State/StateStore 表示；Trajectory Ledger

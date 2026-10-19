@@ -49,6 +49,16 @@ def add_workflow_parsers(sub):
         help="Audited operator identity for --skip-review-closure (must be "
              "independent of the task worker; requires HERDR_OPERATOR=1)",
     )
+    set_cmd.add_argument(
+        "--operator-token",
+        default=None,
+        help="Authenticated operator token for --skip-review-closure",
+    )
+    set_cmd.add_argument(
+        "--operator-credentials",
+        default=None,
+        help="Path to file containing operator token (must be outside task clone)",
+    )
 
     adopt_verdict_cmd = sub.add_parser(
         "adopt-verdict",

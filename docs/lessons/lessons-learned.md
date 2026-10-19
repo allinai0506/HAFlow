@@ -7366,3 +7366,29 @@ pytest -q tests/test_issue_250_eval_timeout_adaptive.py \
           tests/test_task_loop_noninteractive.py
 ```
 关键回归验证：自适应超时各优先级解析无误；Sentinel 遇到落盘结论抑制超时失败；Receipt-v1 门禁工位 idle 状态下成功恢复并被 Controller 自动采纳为 stage_verdict；`herdr-task adopt-verdict` 成功将 watchdog-failed 门禁转为 completed 并同步至工作流状态；返工任务陈旧裁决被物理清理与执行令牌拦截；强制流转 CAS 并发校验有效；非门禁工位绝不逃避 watchdog；普通 Agent 节点绝不被误判为门禁；无穷大超时配置安全回退至默认值；receipt-v1 返工重试保持零额外副作用；超前未来时间戳被拒绝延期；工位中断失败立即阻断返工；清理阶段前置持久化防止重试重复发送中断；清理意图与完成两阶段彻底杜绝进程意外退出留存旧 writer；CLI 无 request_id 缺省调用全链路幂等恢复；清理过程遵守配置的裁决目录；裁决物理删除失败立即阻断并扣留完成事件；receipt-v1 普通返工任务绝不绕过交付回执验证；裁决采纳严格保留授权版本号并全量重验快照一致性杜绝采纳竞争；采纳裁决必须在提交前重读鉴权磁盘证据快照并绑定 evidence_mtime，杜绝多进程改写导致的陈旧/篡改结论被采纳；非交互评测超时适配规避 CI 负载下假死。
+
+## 175. 旁路认证的自比较陷阱与凭据目录的测试污染：一条安全阻塞项和一条卫生阻塞项的复盘（2026-10-19）
+
+### 问题背景
+
+issue #228（PR #225 Codex 评审 4 项 backlog）的洁净室评审首轮在候选 971cb45 上给出 blocked：`herdr/review_closure.py::authenticate_operator`（wrapup 紧急旁路认证）存在同 UID worker 无密钥绕过（B1）；测试用例直接写入宿主真实 `~/.herdr-controller/credentials`（B2）。返工候选 fb392ba 修复后双门禁 r3 均 pass。根因与修复细节见 `docs/bug-reports/2026-10-19-wf-haflow-1019-01-craft-228-r3.md`，本条只沉淀可复用教训。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 未呈现 token 时自动从服务端凭据目录发现"呈现值"，再与同源注册值比对，`hmac.compare_digest` 沦为同一文件的自比较 | 认证材料必须显式呈现；任何"帮调用方自动补齐凭据"的兜底都会把认证变成存在性检查，凭据保护的是知识（secret）而非文件（artifact） | presented 只能来自调用方显式通道（CLI 参数 / 环境变量）；registered 只查单一权威源（`state_db.get_user_token`）；删除一切同源发现与 fallback 分支 |
+| `operator_id` 仅 `strip()` 未过滤路径分隔符，`--operator ../clone/evil` 把服务端查找路径引向 worker 自己克隆目录中的伪造文件 | 参与文件路径拼接的外部标识符是注入面；净化必须在任何文件系统使用之前完成 | 检测 `/`、`\`、`..` 立即拒绝，并用与写入端一致的正则 `[^a-zA-Z0-9_\-]` → `_` 净化；对抗用例覆盖遍历向量 |
+| 测试调用 `save_user_token` 时 `HOME` 未隔离，真实宿主凭据目录被写出 `ops-lead_operator.token` 残留 | 凭据读写路径以 `Path.home()` 派生的测试不是 hermetic 测试；CI/本地混跑时会污染生产身份 | 凭据相关测试必须 autouse fixture 隔离 `HOME` 至临时目录并 mock `_get_credentials_dir`；测试结束断言真实凭据目录零新增、零篡改 |
+| 阻塞项 B1 由洁净室评审（独立黑盒复现攻击向量）发现，craft 自审未识别 | 认证类代码的自审不可信；绕过要靠"重放攻击向量验证闭环"来排除，而不是靠声明已修复 | 安全修复的收口标准是复现原攻击向量被拒（如 r3 的 13/13 边界探针），并保留可核查的复现证据 |
+
+### 已知边界（残留 R1，非阻塞，负责人决策项）
+
+同一 UID 下的 worker 进程仍可读取服务端凭据库，通过 `--operator-credentials <vault文件>`、`HERDR_OPERATOR_CREDENTIALS` 或 `--operator-token "$(cat vault)"` 自行凑齐 presented==registered。这不属于本模块可修复的逻辑缺陷——同 UID 进程间没有机密性边界，任何模块内校验都可被读到密钥的一方满足。约束应落在部署边界：登记任何应急操作员之前，必须先决策操作员凭据与 worker 运行账号的隔离方案（独立 UID / vault 权限 / 双人放行）。该决策已在 cleanroom_review r3 的 note 中逐字留痕。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_wrapup_review_closure.py   # 54 passed，含 B1 向量 a/b 对抗用例与 B2 凭据目录零污染断言
+```
+关键回归验证：无呈现 token 即使服务端已注册也拒绝；路径遍历 operator 名拒绝；跨 operator 串用 token 拒绝；worker 自身身份冒充 operator 拒绝；正向旁路成功路径落 `review_closure_skipped` 事件并完成状态迁移；真实 `~/.herdr-controller/credentials` 在全量套件运行后零变化。

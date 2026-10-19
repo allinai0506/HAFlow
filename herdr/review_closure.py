@@ -35,17 +35,33 @@ absent capability (legacy workflows, custom templates without the flag)
 keeps the previous completion path.
 """
 
+import fcntl
+import hashlib
+import hmac
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
+
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _PR_URL = re.compile(r"^https?://([^/]+)/([^/]+)/([^/]+)/pull/(\d+)(?:[/?#].*)?$")
-_CODEX_BOT = "chatgpt-codex-connector"
+_TRUSTED_CODEX_LOGINS = frozenset({"chatgpt-codex-connector", "chatgpt-codex-connector[bot]"})
+
+
+def is_trusted_codex_bot(login: Any) -> bool:
+    """Exact whitelist match for trusted Codex bot identity (Issue #228 Item 2)."""
+    return str(login or "").strip().lower() in _TRUSTED_CODEX_LOGINS
+
+
 _BLOCK_MARKS = ("P1 Badge", "P0 Badge")
+_P2_MARKS = ("P2 Badge",)
+
+
 _THREADS_QUERY = """
 query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
@@ -88,6 +104,86 @@ def latest_skip(store, task_id: str) -> Optional[Dict[str, Any]]:
     return _latest_event(store, task_id, "review_closure_skipped")
 
 
+def authenticate_operator(
+    store,
+    task: Any,
+    operator_id: str,
+    token: Optional[str] = None,
+    credentials_path: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Authenticate the emergency-bypass caller with non-worker credentials (Issue #228 Item 1).
+
+    The operator must be independent of the task worker. The operator's credentials
+    must reside in a worker-inaccessible location (server-side token store / credentials
+    dir outside worker clone).
+    """
+    op_clean = str(operator_id or "").strip()
+    if not op_clean:
+        return False, "--skip-review-closure requires --operator <identity>"
+    if "/" in op_clean or "\\" in op_clean or ".." in op_clean:
+        return False, f"invalid operator identity: '{op_clean}' contains path traversal or invalid characters"
+    op_clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", op_clean)
+    if not op_clean:
+        return False, "--skip-review-closure requires --operator <identity>"
+    task = task or {}
+    task_agent = str(task.get("agent") or "").strip().lower()
+    if task_agent and op_clean.lower() == task_agent:
+        return False, "the operator must be independent of the task worker"
+
+    # Worker clone / workspace paths that MUST NOT contain operator credentials
+    clone_path = str(task.get("clone_path") or "").strip()
+    project_root = str(task.get("project_root") or "").strip()
+    forbidden_roots = []
+    if clone_path:
+        forbidden_roots.append(Path(clone_path).expanduser().resolve())
+    if project_root:
+        forbidden_roots.append(Path(project_root).expanduser().resolve())
+
+    # 1. Resolve presented token: must be explicitly presented by caller
+    presented_token = str(token or "").strip() or os.environ.get("HERDR_OPERATOR_TOKEN", "").strip()
+    cred_file_arg = credentials_path or os.environ.get("HERDR_OPERATOR_CREDENTIALS")
+    if not presented_token and cred_file_arg:
+        p = Path(str(cred_file_arg)).expanduser().resolve()
+        for root in forbidden_roots:
+            try:
+                p.relative_to(root)
+                return False, (
+                    "operator credentials file cannot reside in worker clone or project workspace"
+                )
+            except ValueError:
+                pass
+        if not p.is_file():
+            return False, f"operator credentials file not found: {p}"
+        try:
+            presented_token = p.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            return False, f"unreadable operator credentials file: {exc}"
+
+    if not presented_token:
+        return False, (
+            f"operator authentication required: missing operator token or credentials file for '{op_clean}'"
+        )
+
+    # 2. Resolve registered token from server-side authority (single source: get_user_token)
+    registered_token = None
+    db_path = getattr(store, "db_path", None)
+    try:
+        from . import state_db
+        registered_token = state_db.get_user_token(op_clean, "operator", db_path=db_path)
+    except Exception:
+        registered_token = None
+
+    if not registered_token:
+        return False, (
+            f"operator authentication failed: no credentials registered for operator '{op_clean}'"
+        )
+
+    if not hmac.compare_digest(presented_token, registered_token):
+        return False, "operator authentication failed: invalid operator token"
+
+    return True, ""
+
+
 def parse_pr_url(pr_url: Any) -> Optional[Tuple[str, str, str, int]]:
     """(host, owner, repo, number) for a recognizable pull-request URL."""
     match = _PR_URL.match(str(pr_url or "").strip())
@@ -103,12 +199,13 @@ def _run_gh(argv: List[str], timeout: int = 45) -> Tuple[int, str, str]:
     return probe.returncode, probe.stdout or "", probe.stderr or ""
 
 
-def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[Dict[str, Any]]]:
-    """Unresolved, non-outdated Codex P1/P0 threads (marks mirror scripts/codex-gate.py).
+def _fetch_codex_threads(owner: str, repo: str, number: int) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]:
+    """Unresolved, non-outdated Codex (P1/P0 blockers, P2 findings) threads.
 
-    Returns None when the forge could not be queried (caller fails closed).
+    Returns (p1_blockers, p2_unresolved) or None when the forge could not be queried.
     """
     blockers: List[Dict[str, Any]] = []
+    p2_threads: List[Dict[str, Any]] = []
     cursor = None
     for _ in range(5):
         argv = ["api", "--hostname", "github.com", "graphql",
@@ -138,11 +235,11 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
                 continue
             comments = ((node.get("comments") or {}).get("nodes") or [])
             comments = [c for c in comments if isinstance(c, dict)]
-            if not any(_CODEX_BOT in str((c.get("author") or {}).get("login") or "")
+            if not any(is_trusted_codex_bot((c.get("author") or {}).get("login"))
                        for c in comments):
                 continue
             has_backlog = any(
-                _CODEX_BOT not in str((c.get("author") or {}).get("login") or "").lower()
+                not is_trusted_codex_bot((c.get("author") or {}).get("login"))
                 and re.search(r"(?:issues/\d+|#\d+|review[-_]backlog|转入\s*backlog|defer|backlog)",
                               str(c.get("body") or ""), re.IGNORECASE)
                 for c in comments
@@ -152,11 +249,19 @@ def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[D
             text = "\n".join(str(c.get("body") or "") for c in comments)
             if any(mark in text for mark in _BLOCK_MARKS):
                 blockers.append(node)
+            elif any(mark in text for mark in _P2_MARKS):
+                p2_threads.append(node)
         page = threads.get("pageInfo") or {}
         if not page.get("hasNextPage"):
-            return blockers
+            return blockers, p2_threads
         cursor = page.get("endCursor")
     return None  # pagination budget exhausted → fail closed
+
+
+def _fetch_codex_blockers(owner: str, repo: str, number: int) -> Optional[List[Dict[str, Any]]]:
+    threads = _fetch_codex_threads(owner, repo, number)
+    return threads[0] if threads is not None else None
+
 
 
 def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[List[Tuple[str, str, str]]]:
@@ -195,8 +300,9 @@ def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[L
         for item in items:
             if not isinstance(item, dict):
                 continue
-            if _CODEX_BOT not in str(item.get("login") or "").lower():
+            if not is_trusted_codex_bot(item.get("login")):
                 continue  # only the trusted Codex App may attest a review
+
             match = re.search(r"codex-review-state:v1 (\{.*?\})\s*-->", str(item.get("body") or ""), re.S)
             if not match:
                 continue
@@ -213,7 +319,13 @@ def _fetch_codex_review_states(owner: str, repo: str, number: int) -> Optional[L
     return states
 
 
-def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+def verify_against_forge(
+    pr_url: Any,
+    head_sha: str,
+    *,
+    declared_p2: Optional[int] = None,
+    findings: Optional[str] = None,
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """Query the forge for authoritative closure evidence (via gh).
 
     Returns (ok, detail, verification_block). The block is what the receipt
@@ -284,12 +396,13 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
             f"PR checks are not all passing (gh pr checks rc={rc}): "
             f"{(out or err).strip()[:300]}"
         ), None
-    blockers = _fetch_codex_blockers(owner, repo, number)
-    if blockers is None:
+    thread_data = _fetch_codex_threads(owner, repo, number)
+    if thread_data is None:
         return False, (
             "forge verification failed: could not read review threads via "
             "gh api graphql"
         ), None
+    blockers, p2_threads = thread_data
     review_states = _fetch_codex_review_states(owner, repo, number)
     if review_states is None:
         return False, (
@@ -320,15 +433,35 @@ def verify_against_forge(pr_url: Any, head_sha: str) -> Tuple[bool, str, Optiona
             f"{len(blockers)} unresolved Codex P1/P0 review thread(s) remain on "
             f"the PR; resolve them (and re-review the new head) before recording"
         ), None
+    forge_unresolved_p2 = len(p2_threads)
+    if declared_p2 is not None:
+        if forge_unresolved_p2 > 0 and declared_p2 == 0:
+            return False, (
+                f"{forge_unresolved_p2} unresolved Codex P2 review thread(s) remain on "
+                f"the PR, but receipt declared --unresolved-p2 0; record the unresolved count "
+                f"and disposition (--findings) or resolve them"
+            ), None
+        if forge_unresolved_p2 > declared_p2:
+            return False, (
+                f"{forge_unresolved_p2} unresolved Codex P2 review thread(s) remain on "
+                f"the PR, but receipt only declared {declared_p2}; record the accurate count "
+                f"and disposition (--findings)"
+            ), None
+        if declared_p2 > 0 and not str(findings or "").strip():
+            return False, (
+                f"--findings must state the disposition for {declared_p2} unresolved P2 finding(s)"
+            ), None
     verification = {
         "provider": "github",
         "pr": f"{owner}/{repo}#{number}",
         "head": pr_head,
         "checks": "pass",
         "unresolved_codex_p1": 0,
+        "unresolved_codex_p2": forge_unresolved_p2,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
     return True, "forge verification passed", verification
+
 
 
 def git_named_remotes(path: Any) -> List[Tuple[str, str]]:
@@ -690,7 +823,152 @@ def clone_head_sha(clone_path: Any) -> str:
     return (probe.stdout or "").strip().lower()
 
 
+class CloneLock:
+
+    """A cross-process lock keyed by the task clone repository path (Issue #228 Item 4)."""
+
+    def __init__(self, repo_path: Any):
+        self.repo = str(repo_path or "").strip()
+        self._handle = None
+        if self.repo:
+            root = Path(
+                os.environ.get("HERDR_GIT_LOCK_ROOT", "~/.herdr-controller/locks/git")
+            ).expanduser()
+            key = hashlib.sha256(str(Path(self.repo).expanduser().resolve()).encode("utf-8")).hexdigest()[:20]
+            self.path = root / f"{key}.lock"
+        else:
+            self.path = None
+
+    def __enter__(self):
+        if self.path is None:
+            return self
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            handle.close()
+            raise
+        self._handle = handle
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._handle is not None:
+            try:
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            self._handle.close()
+            self._handle = None
+        return False
+
+
+def clone_lock(clone_path: Any) -> CloneLock:
+    return CloneLock(clone_path)
+
+
+_ACTIVE_HEAD_GUARDS: dict[str, tuple[str, str]] = {}
+
+
+def _patch_store_class(cls: Any) -> None:
+    if "_atomic_head_guard_patched" in cls.__dict__:
+        return
+    cls._atomic_head_guard_patched = True
+
+    orig_transition = getattr(cls, "transition_task", None)
+    orig_cas = getattr(cls, "compare_and_set_task_transition", None)
+    orig_completion_cas = getattr(cls, "compare_and_set_completion_transition", None)
+
+    if orig_transition:
+        def _make_wrapped_transition(orig_fn):
+            def wrapped_transition(self, *args, **kwargs):
+                tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
+                to_st = kwargs.get("to_status") if "to_status" in kwargs else (args[1] if len(args) > 1 else "")
+                if to_st == "completed" and tid in _ACTIVE_HEAD_GUARDS:
+                    c_path, exp_head = _ACTIVE_HEAD_GUARDS.pop(tid)
+                    with clone_lock(c_path):
+                        now_head = clone_head_sha(c_path)
+                        if now_head != exp_head:
+                            raise ValueError(
+                                f"[REVIEW CLOSURE REQUIRED] clone HEAD advanced before completion CAS "
+                                f"(expected {exp_head[:12]}, found {(now_head or 'unavailable')[:12]}); "
+                                "re-record the receipt on the current head."
+                            )
+                        return orig_fn(self, *args, **kwargs)
+                return orig_fn(self, *args, **kwargs)
+            return wrapped_transition
+        cls.transition_task = _make_wrapped_transition(orig_transition)
+
+    if orig_cas:
+        def _make_wrapped_cas(orig_fn):
+            def wrapped_cas(self, *args, **kwargs):
+                tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
+                to_st = kwargs.get("to_status") if "to_status" in kwargs else (args[1] if len(args) > 1 else "")
+                if to_st == "completed" and tid in _ACTIVE_HEAD_GUARDS:
+                    c_path, exp_head = _ACTIVE_HEAD_GUARDS.pop(tid)
+                    with clone_lock(c_path):
+                        now_head = clone_head_sha(c_path)
+                        if now_head != exp_head:
+                            raise ValueError(
+                                f"[REVIEW CLOSURE REQUIRED] clone HEAD advanced before completion CAS "
+                                f"(expected {exp_head[:12]}, found {(now_head or 'unavailable')[:12]}); "
+                                "re-record the receipt on the current head."
+                            )
+                        return orig_fn(self, *args, **kwargs)
+                return orig_fn(self, *args, **kwargs)
+            return wrapped_cas
+        cls.compare_and_set_task_transition = _make_wrapped_cas(orig_cas)
+
+    if orig_completion_cas:
+        def _make_wrapped_completion_cas(orig_fn):
+            def wrapped_completion_cas(self, *args, **kwargs):
+                tid = kwargs.get("task_id") if "task_id" in kwargs else (args[0] if args else "")
+                if tid in _ACTIVE_HEAD_GUARDS:
+                    c_path, exp_head = _ACTIVE_HEAD_GUARDS.pop(tid)
+                    with clone_lock(c_path):
+                        now_head = clone_head_sha(c_path)
+                        if now_head != exp_head:
+                            raise ValueError(
+                                f"[REVIEW CLOSURE REQUIRED] clone HEAD advanced before completion CAS "
+                                f"(expected {exp_head[:12]}, found {(now_head or 'unavailable')[:12]}); "
+                                "re-record the receipt on the current head."
+                            )
+                        return orig_fn(self, *args, **kwargs)
+                return orig_fn(self, *args, **kwargs)
+            return wrapped_completion_cas
+        cls.compare_and_set_completion_transition = _make_wrapped_completion_cas(orig_completion_cas)
+
+
+def _patch_store_classes() -> None:
+    try:
+        from . import state_store
+        for name in ("StateStore", "SQLiteStateStore"):
+            c = getattr(state_store, name, None)
+            if c is not None:
+                _patch_store_class(c)
+    except (ImportError, AttributeError):
+        pass
+
+
+def bind_atomic_head_guard(store: Any, task_id: str, clone_path: Any, certified_head: str) -> None:
+    """Make final HEAD check atomic with completion transition (Issue #228 Item 4).
+
+    Registers the certified HEAD for the task and patches store transition methods
+    so that the final clone HEAD check and CAS transition execute atomically under
+    the clone lock.
+    """
+    if not task_id or not clone_path or not certified_head:
+        return
+    _ACTIVE_HEAD_GUARDS[task_id] = (str(clone_path), str(certified_head).strip().lower())
+    if store is not None:
+        _patch_store_class(store.__class__)
+
+
+_patch_store_classes()
+
+
 def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
+
     """(ok, refusal_reason) for a wrapup completion transition."""
     task = task or {}
     task_id = str(task.get("task_id") or "")
@@ -755,6 +1033,7 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                             "re-record the receipt on the current head."
                         )
                     else:
+                        bind_atomic_head_guard(store, task_id, task.get("clone_path"), head)
                         return True, ""
             else:
                 identity_why = identity_mismatch(store, task, payload.get("pr_url"), head)
@@ -766,7 +1045,10 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                 else:
                     reok, rewhy, _verification = verify_against_forge(
                         payload.get("pr_url"), head,
+                        declared_p2=payload.get("unresolved_p2"),
+                        findings=payload.get("findings"),
                     )
+
                     if not reok:
                         receipt_refusal = (
                             "review-closure receipt no longer holds: forge "
@@ -782,6 +1064,7 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
                                 "re-record the receipt on the current head."
                             )
                         else:
+                            bind_atomic_head_guard(store, task_id, task.get("clone_path"), head)
                             return True, ""
 
     skip = latest_skip(store, task_id)
@@ -789,7 +1072,9 @@ def check_completion_allowed(store, task: Any) -> Tuple[bool, str]:
         skip_head = str(skip.get("head_sha") or "").strip().lower()
         confirm = clone_head_sha(task.get("clone_path"))  # re-read at commit time
         if confirm and skip_head and confirm == skip_head:
+            bind_atomic_head_guard(store, task_id, task.get("clone_path"), skip_head)
             return True, ""
+
         if not confirm:
             receipt_refusal += (
                 " The audited bypass cannot be validated either: the task "

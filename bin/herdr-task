@@ -518,17 +518,18 @@ def cmd_eval_compare(args):
     return _runs_cli.cmd_eval_compare(args, get_store=_get_store)
 
 
-def _enforce_wrapup_review_closure(task_id, task, *, skip, note, operator=None):
+def _enforce_wrapup_review_closure(task_id, task, *, skip, note, operator=None,
+                                   operator_token=None, operator_credentials=None):
     """CLI-side pre-check for the shared wrapup review-closure invariant.
 
     The authoritative gate lives in ``herdr.kernel.transition_task`` — every
     completion source (CLI ``set``, the controller's CAS auto-accept path and
     repair flows) funnels through it. This pre-check only exists for a
     friendly refusal message. The audited ``--skip-review-closure`` bypass
-    requires an operator identity independent of the task worker plus the
-    ``HERDR_OPERATOR=1`` shell capability (task workers do not carry it); it
-    records a ``review_closure_skipped`` event, which also satisfies the
-    kernel gate (Codex review P1, wf-haflow-1015-01).
+    requires an authenticated operator identity independent of the task worker
+    plus the ``HERDR_OPERATOR=1`` shell capability (task workers do not carry it);
+    it records a ``review_closure_skipped`` event, which also satisfies the
+    kernel gate (Codex review P1, Issue #228 Item 1).
     """
     from herdr import review_closure
     store = _get_store()
@@ -558,11 +559,14 @@ def _enforce_wrapup_review_closure(task_id, task, *, skip, note, operator=None):
                 file=sys.stderr,
             )
             sys.exit(2)
-        task_agent = str(task.get("agent") or "").strip().lower()
-        if task_agent and operator_id.lower() == task_agent:
+        auth_ok, auth_why = review_closure.authenticate_operator(
+            store, task, operator_id,
+            token=operator_token,
+            credentials_path=operator_credentials,
+        )
+        if not auth_ok:
             print(
-                "[REVIEW CLOSURE SKIP REFUSED] the operator must be independent "
-                "of the task worker",
+                f"[REVIEW CLOSURE SKIP REFUSED] operator authentication failed: {auth_why}",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -585,6 +589,7 @@ def _enforce_wrapup_review_closure(task_id, task, *, skip, note, operator=None):
         )
         print(f"[REVIEW CLOSURE SKIPPED] {task_id}: completion allowed with audited bypass")
         return
+
     ok, why = review_closure.check_completion_allowed(store, task)
     if ok:
         print(f"[REVIEW CLOSURE RECEIPT] {task_id}: receipt present")
@@ -651,7 +656,10 @@ def record_review_closure(task_id, pr_url=None, ci_status=None, findings=None,
             sys.exit(2)
         verified, detail, verification = review_closure.verify_against_forge(
             payload["pr_url"], payload["head_sha"],
+            declared_p2=payload.get("unresolved_p2"),
+            findings=payload.get("findings"),
         )
+
         if not verified:
             print(
                 f"[REVIEW CLOSURE REFUSED] forge verification failed: {detail}",
@@ -867,7 +875,9 @@ def _authenticate_gate_verdict_evidence(task, expected_verdict=None):
 
 
 def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=None,
-               skip_review_closure=False, skip_operator=None):
+               skip_review_closure=False, skip_operator=None,
+               operator_token=None, operator_credentials=None):
+
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -1014,7 +1024,10 @@ def set_status(task_id, new_status, verdict=None, note=None, affected_task_ids=N
     # which is also a CLI set (Codex review P1, wf-haflow-1015-01).
     if new_status == "completed" and (task.get("node") or task.get("stage")) == "wrapup":
         _enforce_wrapup_review_closure(task_id, task, skip=skip_review_closure,
-                                       note=note, operator=skip_operator)
+                                       note=note, operator=skip_operator,
+                                       operator_token=operator_token,
+                                       operator_credentials=operator_credentials)
+
 
     metadata = {}
     if verdict:
@@ -7141,7 +7154,10 @@ def main():
         set_status(args.task_id, args.status, args.verdict, args.note,
                    affected_task_ids=args.affected_task_ids,
                    skip_review_closure=args.skip_review_closure,
-                   skip_operator=args.operator)
+                   skip_operator=args.operator,
+                   operator_token=getattr(args, "operator_token", None),
+                   operator_credentials=getattr(args, "operator_credentials", None))
+
 
     elif args.command == "adopt-verdict":
         adopt_verdict_cli(
