@@ -1,8 +1,8 @@
 id: gate_verdict_file_mapping
 name: 门禁结论文件映射
-description: 门禁结论文件映射（事实来源映射）
+description: 门禁结论文件映射（事实与凭据映射）。根据 ADR-0006，数据库任务行为调度推进唯一事实源，磁盘文件为不可变证据快照。
 lifecycle: experimental
-object: gate
+object: gate_verdict
 source:
   type: file
   paths:
@@ -14,15 +14,15 @@ fields:
   verdict_note: note
   affected_task_ids: affected_task_ids
 authority:
-  read: tasks.stage_verdict（任务行）与 verdict 文件；controller 要求二者一致
-  write: herdr-task set --verdict；direct_dispatch 写 verdict 文件；bypass_task_gate 同时直写二者
+  read: tasks.stage_verdict（任务行）为唯一调度事实源；verdict 文件为只读不可变快照凭证（DB 记录哈希强引用）
+  write: herdr-task set --verdict；direct_dispatch 写 verdict 文件；bypass_task_gate 原子核验 HeadGuard 并写入
 evidence:
 - kind: implemented
   source: herdr/direct_dispatch.py
-  locator: L135-158
+  locator: gate_verdict_path L158-185
   confidence: high
 - kind: implemented
   source: services/herdr-controller.py
-  locator: verdict 通道与别名 L8101-8157
+  locator: try_auto_verdict L8460-8501
   confidence: high
-notes: 双重权威：违反常驻约束 1（单一事实源）。SC-012 待人工决策。
+notes: SC-012 冲突解决：明确主从权威，排除双重权威风险（ADR-0006）。

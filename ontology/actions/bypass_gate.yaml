@@ -2,7 +2,7 @@ id: bypass_gate
 name: 豁免门禁（人工例外）
 description: 人工例外通道：提供原因后把被阻断的任务强制推进为 completed（或 paused 转 working），置 verdict=pass，签发 bypass 回执并写审计。
 lifecycle: experimental
-target: task
+target: gate_verdict
 inputs:
 - task_id
 - reason
@@ -59,4 +59,4 @@ evidence:
   source: bin/herdr-task
   locator: bypass-gate parser L87-90（--operator 默认 human）
   confidence: high
-notes: r1 修正：目标由 gate 改为 task；transaction 由 atomic 改为 non_atomic（F-01、F-02）。高风险，需人工评审。
+notes: D2 / ADR-0006 落地：目标绑定为解耦后的门禁裁决事实 gate_verdict；D1 / ADR-0005 明确特权流转收敛至 intent='operator-bypass'。transaction 由 atomic 改为 non_atomic（F-01、F-02）。高风险，需人工评审。

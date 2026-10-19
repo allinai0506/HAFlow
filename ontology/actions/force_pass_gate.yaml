@@ -2,7 +2,7 @@ id: force_pass_gate
 name: 强制放行门禁节点（节点级）
 description: 节点级人工强制放行：把门禁节点（未 superseded 的任务）的结论置为 pass。
 lifecycle: experimental
-target: gate
+target: gate_verdict
 inputs:
 - workflow_id
 - gate_node_id
@@ -56,4 +56,4 @@ evidence:
   source: console/http_server.py
   locator: POST 路由 /api/kernel/force-pass L290（无鉴权）
   confidence: high
-notes: r1 新增：原模型缺失节点级放行路径。控制台路径带 expected_version 守卫，CLI 路径不带（SC-015）。高风险，需人工评审。
+notes: D2 / ADR-0006 落地：目标绑定为解耦后的门禁裁决事实 gate_verdict（节点级批量放行未 superseded 任务）。控制台路径带 expected_version 守卫，CLI 路径不带（SC-015）。高风险，需人工评审。

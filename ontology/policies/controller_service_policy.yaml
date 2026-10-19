@@ -11,10 +11,13 @@ resources:
   objects:
   - workflow_instance
   - task
+  - gate_spec
+  - gate_verdict
   - gate
 allowed_actions:
 - close_workflow
 - record_gate_verdict
+- register_workflow
 - supersede_task
 - transition_task
 conditions:

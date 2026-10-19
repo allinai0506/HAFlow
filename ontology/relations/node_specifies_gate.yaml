@@ -1,9 +1,9 @@
 id: node_specifies_gate
-name: 节点声明门禁
-description: 节点可选声明门禁契约；test/review/wrapup 默认视为门禁。
+name: 节点声明门禁规格
+description: 工作流节点可选声明门禁规格契约（gate_spec）；test/review/wrapup 默认装配门禁。
 lifecycle: experimental
 from: workflow_node
-to: gate
+to: gate_spec
 cardinality: one_to_zero_or_one
 object_backed: false
 evidence:

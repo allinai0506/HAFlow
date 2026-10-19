@@ -1,0 +1,54 @@
+id: gate_spec
+name: 门禁契约规格
+description: 节点级质量/合规门禁契约规范；声明门禁类型、判定命令、打回重试目标与准入/准出条件。见 ADR-0006 与 SC-012。
+lifecycle: experimental
+identity:
+  primary_key: gate_spec_id
+  format: "{workflow_id}:{node_id}"
+aliases:
+- GateSpec
+- NodeGateConfig
+- 门禁规格
+properties:
+- id: type
+  name: 门禁类型
+  type: enum
+  required: false
+  notes: auto|human|hybrid
+- id: auto_criteria
+  name: 自动判定条件
+  type: string
+  required: false
+- id: requires_human_approval
+  name: 需人工审批
+  type: bool
+  required: false
+- id: retry_node
+  name: 打回目标节点
+  type: string
+  required: false
+  notes: 运行时 fix-loop 实际读取该字段
+- id: retry_target
+  name: 打回目标（文档字段）
+  type: string
+  required: false
+  notes: schema 校验存在，但运行时 fix-loop 未消费（冲突 SC-005）
+- id: max_loops
+  name: 最大循环次数
+  type: int
+  required: false
+  notes: 默认 HERDR_FIX_LOOP_MAX=3
+- id: command
+  name: 门禁命令
+  type: string
+  required: false
+  notes: 经 herdr/gate_validator 校验
+evidence:
+- kind: intended
+  source: docs/product-specs/workflow-template-schema.md
+  locator: GateSpec L89-96
+  confidence: high
+- kind: implemented
+  source: services/herdr-controller.py
+  locator: GATE_DEFAULTS L938-944 / resolve_gate_config L946-973
+  confidence: high

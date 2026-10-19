@@ -1,8 +1,8 @@
 id: gate_verdict_lifecycle
 name: 门禁结论生命周期
-description: 门禁结论字段（tasks.stage_verdict）从 unset 出发。结论随 completed 写入，同一任务可被再次写入；rework 与 delivery-repair 会清空结论；bypass 与 force-pass 可在任意前态写入 pass。
+description: 门禁结论字段（tasks.stage_verdict）从 unset 出发。结论随 completed 写入，同一任务可被再次写入；rework 与 delivery-repair 会清空结论；bypass 与 force-pass 可在任意前态写入 pass。见 ADR-0006。
 lifecycle: experimental
-object: gate
+object: gate_verdict
 initial: unset
 terminal: []
 states:
