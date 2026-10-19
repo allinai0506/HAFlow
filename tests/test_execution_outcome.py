@@ -489,7 +489,13 @@ class OutcomeHookTest(unittest.TestCase):
         self.store, self.db_path = _make_env(self)
 
     def _enable_hooks(self):
-        hook_patch = patch.dict(os.environ, {"HERDR_OUTCOME_AUTOFINALIZE": "1"})
+        hook_patch = patch.dict(
+            os.environ,
+            {
+                "HERDR_OUTCOME_AUTOFINALIZE": "1",
+                "HERDR_EXPERIENCE_COLLECTION_DISABLED": "1",
+            },
+        )
         hook_patch.start()
         self.addCleanup(hook_patch.stop)
 
