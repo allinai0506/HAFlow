@@ -6,11 +6,13 @@ Validates that AI reviewer subprocesses run under strictly enforced OS-level
 Seatbelt/container boundaries rather than declarative environment variables.
 """
 import os
+import pwd
 import shutil
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from herdr.review_benchmark import (
     STRICT_ENV_WHITELIST_KEYS,
@@ -23,9 +25,17 @@ from herdr.review_benchmark import (
 )
 
 
+REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
 class TestOSSandboxBoundary(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # tests/conftest.py points HOME at a throwaway directory for the whole suite. This module
+        # verifies OS-level protection of the developer's REAL home (canary, ~/.gemini, Keychains,
+        # Seatbelt deny rules), so it must see the real HOME while its tests run.
+        cls._home_patch = patch.dict(os.environ, {"HOME": str(REAL_HOME)})
+        cls._home_patch.start()
         cls.repo_dir = Path(__file__).resolve().parent.parent
         cls.canary_path = Path.home() / ".haflow_protected_test_credential.txt"
         cls.canary_path.write_text("TEST_CANARY_PROTECTED_SECRET_DO_NOT_EXPOSE", encoding="utf-8")
@@ -38,6 +48,8 @@ class TestOSSandboxBoundary(unittest.TestCase):
                 cls.canary_path.unlink()
         except Exception:
             pass
+        finally:
+            cls._home_patch.stop()
 
     def test_01_verify_os_isolation_detects_real_kernel_seatbelt_with_dedicated_identity(self):
         """Active probe must verify macOS Seatbelt kernel enforcement when dedicated identity is present."""
