@@ -99,7 +99,8 @@ class CleanroomGateEndToEndTest(unittest.TestCase):
             "HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir),
             "HERDR_STATE_DB": str(self.db_path),
             "TASKS_FILE": str(self.tasks_file),
-        }), patch.object(self.sentinel, "_get_store", return_value=self.store):
+        }), patch.object(self.sentinel, "_get_store", return_value=self.store), \
+            patch.object(self.sentinel, "notify_stall"):
 
             # Check stalls - must suppress watchdog failure
             self.sentinel.check_task_stalls([task], sentinel_state, now=now)

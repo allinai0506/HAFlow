@@ -58,6 +58,7 @@ class SentinelGateVerdictWatchdogTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
              patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "notify_stall"), \
              patch.object(sentinel, "update_statuses") as mock_update_statuses:
             changed = sentinel.check_task_stalls([task], state, now=now)
 
@@ -85,6 +86,7 @@ class SentinelGateVerdictWatchdogTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"HERDR_GATE_VERDICT_DIR": str(self.verdicts_dir)}), \
              patch.object(sentinel, "_get_store", return_value=mock_store), \
+             patch.object(sentinel, "notify_stall"), \
              patch.object(sentinel, "update_statuses", return_value=True) as mock_update_statuses:
             changed = sentinel.check_task_stalls([task], state, now=now)
 
