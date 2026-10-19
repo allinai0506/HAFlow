@@ -10,10 +10,39 @@ scheduler and write findings into the production state DB. Tests that need the
 observer enable it explicitly (HERDR_OBSERVER_ENABLED=1).
 """
 
+import atexit
 import os
+import shutil
+import site
 import tempfile
+from pathlib import Path
 
 import pytest
+
+
+def _isolate_home():
+    """Point HOME at a throwaway directory before any HAFlow module reads Path.home().
+
+    herdr.projects, herdr.state_db, herdr.kernel and console.common compute ROOT
+    (~/.herdr-controller) at import time, so this must run before test modules import them.
+    PYTHONUSERBASE pins user site-packages for subprocesses; git identity is copied so
+    commits made by tests keep working.
+    """
+    real_home = Path(os.path.expanduser("~"))
+    os.environ.setdefault("PYTHONUSERBASE", site.getuserbase())
+    home = Path(tempfile.mkdtemp(prefix="haflow-test-home-"))
+    for name in (".gitconfig", ".config/git"):
+        src, dst = real_home / name, home / name
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        elif src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+    os.environ["HOME"] = str(home)
+    atexit.register(shutil.rmtree, home, True)
+
+
+_isolate_home()
 
 os.environ.setdefault(
     "HERDR_WORKFLOW_DOCS_DIR",
