@@ -666,3 +666,23 @@ Evidence:
 - `bin/herdr-task#close_workflow/_close_workflow_owned`
 - `tests/test_close_workflow_receipt_cli.py#test_atomic_transition_rejects_empty_delivery_even_with_force`
 - `tests/test_close_workflow_receipt_cli.py#test_historical_task_cannot_prove_current_execution_delivery`
+
+## Task CLI 模块边界
+
+`FACT` `bin/herdr-task` 保留 CLI 装配入口和兼容调用点；参数定义由 `herdr/task_cli_parser*.py` 按命令族组织。Ops Center 投影与有界运行时探测位于 `herdr/ops_center.py` 及其 helpers/projection 模块；rollout、runs、observability、execution、resources 和 verification 命令分别由对应 `herdr/task_cli_*.py` 模块承载。Git adoption 探测与 workspace fingerprint 也独立于脚本入口。
+
+`FACT` 此次是分阶段拆分。task launch、dispatch、commit/integrate、cleanup/finalize、workflow lifecycle 和 `main()` 命令分发仍由 `bin/herdr-task` 承载。
+
+Evidence:
+- `herdr/task_cli_parser.py#build_parser`
+- `herdr/task_cli_observability.py`
+- `herdr/task_cli_rollout.py`
+- `herdr/task_cli_runs.py`
+- `herdr/task_cli_execution.py`
+- `herdr/task_cli_resources.py`
+- `herdr/task_cli_verification.py`
+- `herdr/ops_center.py#build_ops_center_payload`
+- `herdr/git_adoption_probe.py`
+- `herdr/workspace_fingerprint.py`
+- `bin/herdr-task#_launch_task/dispatch_task/integrate_task/cleanup_task/main`
+- `tests/test_ops_center_read_path.py`

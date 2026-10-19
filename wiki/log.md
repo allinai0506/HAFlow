@@ -2985,6 +2985,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - 2026-10-19：将 Console 入口拆为 HTTP、查询、运行现场、Workflow、Task、控制和共享校验模块；主页面模板转为 release 快照内的 `console/static/console.html`，直接脚本入口继续提供兼容导出。Evidence: `console/herdr_factory_console.py`, `console/http_server.py`, `console/read_api.py`, `tests/test_console_module_boundaries.py`.
 
+## [2026-10-19] Refactor | 拆分 herdr-task CLI 职责
+- Updated [[task-lifecycle]]：记录 parser、Ops Center、rollout、runs、observability、execution、resources、verification、Git adoption 与 workspace fingerprint 的模块边界，并明确剩余 lifecycle/dispatch 仍在 CLI 脚本中。
+- Evidence：`herdr/task_cli_parser.py`、`herdr/ops_center.py`、`herdr/task_cli_rollout.py`、`herdr/task_cli_runs.py`、`herdr/task_cli_observability.py`、`herdr/task_cli_execution.py`、`herdr/task_cli_resources.py`、`herdr/task_cli_verification.py`、`herdr/git_adoption_probe.py`、`herdr/workspace_fingerprint.py`。
+- PR #269 基于 PR #266 源分支；本次变更待 CI 与评审，未合并或部署。
+
 ## [2026-10-19] fix | 门禁裁决采纳绑定磁盘持久化证据快照与非交互评测超时修复 (PR #266 Codex Review Round 7)
 
 - 背景：
