@@ -1210,77 +1210,15 @@ def _resolve_expected_candidate(workflow_id, claim):
 
 
 def _preflight_delivery_identity(workflow_id, node_id, task_id, claim=""):
-    """Reject ambiguous/invalidated/unprovable delivery before creating resources."""
-    if node_id not in {"test", "review"}:
-        return None
-    from herdr import delivery_record as _dr
-    from herdr import workflow_docs as _wd
-
-    notes = _wd.load_notes(workflow_id)
-    legacy = _dr.unidentified_delivery_notes(notes)
-    if legacy:
-        shown = ", ".join(str(note.get("note_id") or "?") for note in legacy[:5])
-        print(
-            f"[BASELINE DEGRADED] {len(legacy)} identity-less delivery note(s) "
-            f"ignored (human evidence, not delivery claims): {shown}"
-        )
-    delivery_notes = [note for note in notes if note.get("kind") == "delivery"]
-    def reject(code, detail):
-        payload = {
-            "workflow_id": workflow_id,
-            "task_id": task_id,
-            "stage": node_id,
-            "failure_code": code,
-            "detail": str(detail)[:500],
-            "actionable": True,
-            "remediation": (
-                "record a valid delivery with herdr-task record-delivery "
-                "before launching test/review"
-            ),
-        }
-        try:
-            _get_store().record_event(
-                "test_baseline_rejected", payload,
-                workflow_id=workflow_id, node_id=node_id, task_id=task_id,
-                source="herdr-task",
-            )
-        except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
-            print(f"[BASELINE EVENT WARN] rejection audit unavailable: {exc}", file=sys.stderr)
-        print(
-            f"[BASELINE REJECTED] {code}: workflow={workflow_id} "
-            f"task={task_id}; {detail}; launch refused (FR-6.2 fail-closed)."
-        )
-        raise SystemExit(2)
-
-    if not delivery_notes:
-        # No delivery record yet: the scheduler-frozen candidate is the only
-        # acceptable identity, and only when the dispatch claim proves it.
-        candidate, source = _resolve_expected_candidate(workflow_id, claim)
-        if source == "frozen":
-            return {"candidate_sha": candidate, "identity_source": "frozen"}
-        reject(
-            "delivery_missing",
-            "no valid delivery baseline exists and no matching frozen "
-            "candidate is recorded for this dispatch claim",
-        )
-    try:
-        effective = _dr.select_effective_delivery(notes)
-    except _dr.DeliveryAmbiguityError as exc:
-        reject("delivery_ambiguous", exc)
-    if effective is None:
-        # A prior candidate exists but none is eligible (invalidated by a
-        # fix-loop rework). The frozen candidate for the CURRENT revision is
-        # the legitimate identity: it never resurrects the invalidated one,
-        # and the join gate still requires every verifier on that revision.
-        candidate, source = _resolve_expected_candidate(workflow_id, claim)
-        if source == "frozen":
-            return {"candidate_sha": candidate, "identity_source": "frozen"}
-        reject(
-            "delivery_invalidated",
-            "delivery candidate was invalidated and no matching frozen "
-            "candidate exists for this dispatch claim",
-        )
-    return effective
+    from herdr.task_cli_launch_preflight import preflight_delivery_identity
+    return preflight_delivery_identity(
+        workflow_id,
+        node_id,
+        task_id,
+        claim,
+        get_store=_get_store,
+        resolve_expected_candidate=_resolve_expected_candidate,
+    )
 
 
 def _preflight_baseline_freshness(args, source_repo, base_branch):
@@ -1294,65 +1232,14 @@ def _preflight_baseline_freshness(args, source_repo, base_branch):
     release reservation). Post-resource FR-6.2 validators stay untouched as
     the fail-closed backstop for the residual check-to-checkout race.
     """
-    node_id = getattr(args, "node", "") or getattr(args, "stage", "")
-    claim = str(getattr(args, "candidate_sha", None) or "").strip()
-    onto = str(getattr(args, "onto", None) or "").strip()
-    if not claim and not onto:
-        # Fresh-branch launches check out live origin/<base>; nothing to prove.
-        return None
-    from herdr import launch_baseline as _lb
-    probe = _lb.probe_claim_freshness(
-        source_repo, base_branch=base_branch,
-        claim_sha=claim, onto_branch=onto or None,
+    from herdr.task_cli_launch_preflight import preflight_baseline_freshness
+    return preflight_baseline_freshness(
+        args,
+        source_repo,
+        base_branch,
+        get_store=_get_store,
+        record_router_failure=_record_router_failure_task,
     )
-    if probe["status"] in ("fresh", "skipped"):
-        return probe
-    if probe["status"] == "unknown":
-        print(
-            "[BASELINE PREFLIGHT] baseline freshness unknown "
-            f"({probe.get('detail')}); proceeding, FR-6.2 stays fail-closed."
-        )
-        return probe
-    verdict = _lb.decide_baseline_failfast(
-        dev_tip=probe["dev_tip"], claim_sha=probe["claim_sha"],
-        behind_by=probe["behind_by"], claim_label=onto or "candidate",
-    )
-    detail = f"{verdict['message']} {verdict['remediation']}"[:1000]
-    try:
-        _get_store().record_event(
-            "baseline_stale_refused",
-            {
-                "workflow_id": getattr(args, "workflow_id", ""),
-                "task_id": getattr(args, "task_id", ""),
-                "stage": node_id,
-                "failure_code": "baseline_stale",
-                "behind_by": verdict["behind_by"],
-                "dev_tip": verdict["dev_tip"],
-                "claim_sha": verdict["claim_sha"],
-                "detail": detail[:500],
-                "actionable": True,
-                "remediation": verdict["remediation"],
-            },
-            workflow_id=getattr(args, "workflow_id", ""),
-            node_id=node_id, task_id=getattr(args, "task_id", ""),
-            source="herdr-task",
-        )
-    except (OSError, ValueError, RuntimeError, AttributeError,
-            sqlite3.Error) as exc:
-        print(f"[BASELINE EVENT WARN] rejection audit unavailable: {exc}",
-              file=sys.stderr)
-    _record_router_failure_task(
-        args, node_id, detail,
-        reason="baseline_stale",
-        failure_code="baseline_stale",
-        remediation=verdict["remediation"],
-    )
-    print(
-        f"[BASELINE STALE] workflow={getattr(args, 'workflow_id', '')} "
-        f"task={getattr(args, 'task_id', '')}; {detail}; "
-        "launch refused before creating clone/Pane (fail-fast)."
-    )
-    raise SystemExit(2)
 
 
 def _reclaim_unregistered_launch_resources(
@@ -1388,26 +1275,8 @@ def _reclaim_unregistered_launch_resources(
 
 
 def _validate_supersedes_for_launch(args, node_id, store):
-    """Enforce that relaunching / replacing in a node with pending replacement obligations
-    MUST explicitly provide --supersedes <prev_task_id>."""
-    if not getattr(args, "workflow_id", None) or not node_id:
-        return
-    if getattr(args, "supersedes", None):
-        return
-    node_tasks = [
-        t for t in store.list_tasks(workflow_id=args.workflow_id)
-        if (t.get("node") == node_id or t.get("stage") == node_id)
-    ]
-    # Any task in this node that was superseded with replacement_pending: True and no superseded_by
-    unreplaced = [
-        t["task_id"] for t in node_tasks
-        if t.get("status") == "superseded" and t.get("replacement_pending") and not t.get("superseded_by")
-    ]
-    if unreplaced:
-        raise ValueError(
-            f"Node '{node_id}' has pending replacement obligation(s): {', '.join(unreplaced)}. "
-            f"Relaunch must explicitly specify --supersedes <prev_task_id> to close the lineage chain."
-        )
+    from herdr.task_cli_launch_preflight import validate_supersedes_for_launch
+    return validate_supersedes_for_launch(args, node_id, store)
 
 
 def _validate_test_review_baseline(args, baseline_commit, source_repo):
@@ -1418,55 +1287,15 @@ def _validate_test_review_baseline(args, baseline_commit, source_repo):
     verify. Extracted from the launch path so the refusal has one owner and the
     caller's resource-reclaim logic stays readable.
     """
-    from herdr import delivery_record as _dr2
-    from herdr import workflow_docs as _wd2
-
-    node_id = getattr(args, "node", "") or getattr(args, "stage", "")
-    _notes = _wd2.load_notes(args.workflow_id)
-    try:
-        _effective = _dr2.select_effective_delivery(_notes)
-    except _dr2.DeliveryAmbiguityError as exc:
-        print(f"[DELIVERY AMBIGUOUS] {exc}; launch refused")
-        sys.exit(2)
-    if _effective is not None:
-        _base = str(
-            _effective.get("base")
-            or _dr2._body_value(_effective, "base")
-            or _effective.get("base_sha")
-            or ""
-        )
-        _effective = _dr2.select_effective_delivery(
-            _wd2.annotate_notes(_notes, current_base_sha=_base or None)
-        )
-    _claim = str(getattr(args, "candidate_sha", None) or "").strip()
-    if _effective is not None:
-        _cand = str(_effective.get("candidate_sha") or "")
-        if not _cand:
-            _body = _effective.get("body") or ""
-            for _line in _body.splitlines():
-                if _line.startswith("candidate_sha:"):
-                    _cand = _line.split(":", 1)[1].strip()
-                    break
-        if not _cand:
-            _cand = str(_effective.get("base_sha") or "")
-        # Scheduler v1: the dispatch claim must name the same revision as the
-        # delivery identity, otherwise the join gate could certify a revision
-        # no delivery record ever named.
-        if _claim and not _same_commit(_claim, _cand, source_repo):
-            _validate_test_delivery_baseline(
-                args, _cand, "claim_mismatch:" + _claim, source_repo,
-            )
-    else:
-        # No eligible delivery record (none at all, or all invalidated): the
-        # frozen candidate is the identity, and the dispatch claim must prove
-        # it. Never falls back to a bare branch HEAD.
-        _frozen, _source = _resolve_expected_candidate(args.workflow_id, _claim)
-        if _source != "frozen":
-            _validate_test_delivery_baseline(
-                args, "", baseline_commit, source_repo,
-            )
-        _cand = _frozen
-    _validate_test_delivery_baseline(args, _cand, baseline_commit, source_repo)
+    from herdr.task_cli_launch_preflight import validate_test_review_baseline
+    return validate_test_review_baseline(
+        args,
+        baseline_commit,
+        source_repo,
+        get_store=_get_store,
+        resolve_expected_candidate=_resolve_expected_candidate,
+        run=subprocess.run,
+    )
 
 
 def _canonical_commit(sha, source_repo):
@@ -1476,20 +1305,8 @@ def _canonical_commit(sha, source_repo):
     and a clone reporting the full hash name the same commit. Canonicalising
     first keeps the comparison strict without falsely rejecting a match.
     """
-    sha = str(sha or "").strip()
-    if not sha:
-        return ""
-    try:
-        probe = subprocess.run(
-            ["git", "-C", str(source_repo), "rev-parse", "--verify", "--quiet",
-             f"{sha}^{{commit}}"],
-            text=True, capture_output=True, check=False, timeout=30,
-        )
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-        return ""
-    if probe.returncode != 0:
-        return ""
-    return (probe.stdout or "").strip().lower()
+    from herdr.task_cli_launch_preflight import _canonical_commit as canonical_commit
+    return canonical_commit(sha, source_repo, run=subprocess.run)
 
 
 def _same_commit(left, right, source_repo):
@@ -1506,17 +1323,8 @@ def _same_commit(left, right, source_repo):
     Git refused to prove, re-opening a false "same commit" verdict on the
     launch gate.
     """
-    left = str(left or "").strip().lower()
-    right = str(right or "").strip().lower()
-    if not left or not right:
-        return False
-    if left == right:
-        return True
-    full_left = _canonical_commit(left, source_repo)
-    full_right = _canonical_commit(right, source_repo)
-    if not full_left or not full_right:
-        return False
-    return full_left == full_right
+    from herdr.task_cli_launch_preflight import same_commit
+    return same_commit(left, right, source_repo, run=subprocess.run)
 
 
 def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, source_repo):
@@ -1528,35 +1336,15 @@ def _validate_test_delivery_baseline(args, candidate_sha, baseline_commit, sourc
     baseline_commit, while the join gate would claim candidate_sha. Only
     strict equality proves the claim. Empty values fail closed.
     """
-    candidate_sha = str(candidate_sha or "").strip()
-    baseline_commit = str(baseline_commit or "").strip()
-    if candidate_sha and baseline_commit and _same_commit(
-        candidate_sha, baseline_commit, source_repo
-    ):
-        return
-    try:
-        _get_store().record_event(
-            "test_baseline_rejected",
-            {"candidate_sha": candidate_sha, "baseline_commit": baseline_commit,
-             "stage": getattr(args, "node", "") or getattr(args, "stage", ""),
-             "failure_code": "baseline_unproven", "actionable": True,
-             "remediation": "rebase the test/review clone onto the recorded delivery candidate and relaunch"},
-            workflow_id=args.workflow_id,
-            node_id=getattr(args, "node", "") or getattr(args, "stage", ""),
-            task_id=args.task_id,
-            source="herdr-task",
-        )
-    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as event_exc:
-        print(
-            f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
-            file=sys.stderr,
-        )
-    print(
-        f"[BASELINE REJECTED] test/review task {args.task_id} baseline "
-        f"{baseline_commit} does not contain candidate {candidate_sha}; "
-        "launch refused (FR-6.2 fail-closed)."
+    from herdr.task_cli_launch_preflight import validate_test_delivery_baseline
+    return validate_test_delivery_baseline(
+        args,
+        candidate_sha,
+        baseline_commit,
+        source_repo,
+        get_store=_get_store,
+        run=subprocess.run,
     )
-    raise SystemExit(2)
 
 
 def _validate_selective_replacement_baseline(args, candidate_sha, baseline_commit, source_repo):
@@ -1572,36 +1360,15 @@ def _validate_selective_replacement_baseline(args, candidate_sha, baseline_commi
     prevent. Empty values fail closed. Refusal is SystemExit(2), mirroring
     the test/review gate above.
     """
-    candidate_sha = str(candidate_sha or "").strip()
-    baseline_commit = str(baseline_commit or "").strip()
-    if candidate_sha and baseline_commit and _same_commit(
-        candidate_sha, baseline_commit, source_repo
-    ):
-        return
-    try:
-        _get_store().record_event(
-            "selective_baseline_rejected",
-            {"candidate_sha": candidate_sha, "baseline_commit": baseline_commit,
-             "stage": getattr(args, "node", "") or getattr(args, "stage", ""),
-             "onto_branch": str(getattr(args, "onto", None) or ""),
-             "failure_code": "replacement_baseline_mismatch", "actionable": True,
-             "remediation": "re-freeze the candidate and relaunch the replacement onto the frozen branch"},
-            workflow_id=args.workflow_id,
-            node_id=getattr(args, "node", "") or getattr(args, "stage", ""),
-            task_id=args.task_id,
-            source="herdr-task",
-        )
-    except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as event_exc:
-        print(
-            f"[BASELINE EVENT WARN] could not persist rejection: {event_exc}",
-            file=sys.stderr,
-        )
-    print(
-        f"[BASELINE REJECTED] replacement task {args.task_id} baseline "
-        f"{baseline_commit} != claimed candidate {candidate_sha}; "
-        "launch refused (selective-replan fail-closed)."
+    from herdr.task_cli_launch_preflight import validate_selective_replacement_baseline
+    return validate_selective_replacement_baseline(
+        args,
+        candidate_sha,
+        baseline_commit,
+        source_repo,
+        get_store=_get_store,
+        run=subprocess.run,
     )
-    raise SystemExit(2)
 
 
 def cmd_launch_reconcile(args):

@@ -122,7 +122,7 @@ class TestDispatchSupersedeEnforcement(unittest.TestCase):
 
     def test_validate_supersedes_for_launch_rejection(self):
         """Launching in a node with an unreplaced obligation or failed task must reject without --supersedes."""
-        ht = _import_herdr_task()
+        from herdr.task_cli_launch_preflight import validate_supersedes_for_launch
         mock_store = MagicMock()
         mock_store.list_tasks.return_value = [{
             "task_id": "task-old",
@@ -141,7 +141,7 @@ class TestDispatchSupersedeEnforcement(unittest.TestCase):
             dispatch_role="worker",
         )
         with self.assertRaises(ValueError) as ctx:
-            ht._validate_supersedes_for_launch(args_no_supersedes, "review", mock_store)
+            validate_supersedes_for_launch(args_no_supersedes, "review", mock_store)
         self.assertIn("pending replacement obligation", str(ctx.exception))
         self.assertIn("--supersedes", str(ctx.exception))
 
@@ -152,7 +152,7 @@ class TestDispatchSupersedeEnforcement(unittest.TestCase):
             dispatch_role="worker",
         )
         # Should not raise
-        ht._validate_supersedes_for_launch(args_with_supersedes, "review", mock_store)
+        validate_supersedes_for_launch(args_with_supersedes, "review", mock_store)
 
 
 if __name__ == "__main__":

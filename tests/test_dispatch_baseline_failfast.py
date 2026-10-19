@@ -118,6 +118,42 @@ class TestProbeClaimFreshness(GitFixture):
         self.assertEqual(result["dev_tip"], self.dev_tip)
         self.assertEqual(result["claim_sha"], self.stale_claim)
 
+
+class TestBaselineFreshnessPreflight(GitFixture):
+    def test_stale_claim_records_failure_before_launch_resources(self):
+        from types import SimpleNamespace
+        from herdr.state_store import SQLiteStateStore
+        from herdr.task_cli_launch import record_router_failure_task
+        from herdr.task_cli_launch_preflight import preflight_baseline_freshness
+
+        store = SQLiteStateStore(self.tmp / "state.db")
+        args = SimpleNamespace(
+            node="test", stage=None, candidate_sha=self.stale_claim, onto=None,
+            workflow_id="wf-stale", task_id="task-stale", run_id="run-stale",
+        )
+
+        with self.assertRaises(SystemExit) as raised:
+            preflight_baseline_freshness(
+                args,
+                str(self.source),
+                "dev",
+                get_store=lambda: store,
+                record_router_failure=lambda *call_args, **kwargs: record_router_failure_task(
+                    *call_args,
+                    **kwargs,
+                    get_store=lambda: store,
+                    new_run_id=lambda: "run-stale",
+                    now=lambda: 100,
+                    release_agent_reservation=lambda _task_id: None,
+                ),
+            )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(store.get_task("task-stale")["status"], "failed")
+        events = store.list_events(task_id="task-stale", event_type="baseline_stale_refused")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["behind_by"], 2)
+
     def test_fresh_claim_at_dev_tip_is_fresh(self):
         from herdr.launch_baseline import probe_claim_freshness
         result = probe_claim_freshness(
