@@ -277,6 +277,20 @@ def test_numbered_replay_preserves_unmatched_whitespace_prefix():
     assert mapping == {}
 
 
+def test_numbered_replay_does_not_repeat_shifted_whitespace_prefix_on_retry():
+    base = b'## 1. old\nold body\n'
+    incoming = base + (b'\n## 2. shared\nshared body\n'
+                       b'## 3. later\nlater body\n')
+    main = base + b'## 2. shared\nshared body\n'
+
+    first, _ = merge_append_only(base, main, incoming, numbered=True)
+    second, mapping = merge_append_only(base, first, incoming, numbered=True)
+
+    assert second == first
+    assert second.count(b'\n\n') == 1
+    assert mapping == {}
+
+
 def test_numbered_replay_preserves_crlf_as_an_atomic_separator():
     base = b'## 1. old\r\nold body\r\n'
     incoming = base + b'## 2. shared\r\nshared body\r\n'

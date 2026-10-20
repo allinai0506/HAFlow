@@ -83,24 +83,26 @@ def _applied_prefix(main, candidate, candidate_entries):
                        for index in range(len(main_entries))]
     candidate_identities = [_entry_identity(candidate, candidate_entries, index)
                             for index in range(len(candidate_entries))]
-    best = (0, b'', None)
+    best = (0, b'', None, ())
     for start in range(len(main_identities)):
         matched = 0
         pending = []
         first_position = None
+        positions = []
         for main_index in range(start, len(main_identities)):
             identity = main_identities[main_index]
             if (matched < len(candidate_identities)
                     and candidate_identities[matched] == identity):
                 if first_position is None:
                     first_position = main_entries[main_index][1]
+                positions.append(main_entries[main_index][1])
                 pending.append(_unmatched_entry_tail(
                     _entry_block(candidate, candidate_entries, matched),
                     _entry_block(main, main_entries, main_index),
                 ))
                 matched += 1
         if matched > best[0]:
-            best = (matched, b''.join(pending), first_position)
+            best = (matched, b''.join(pending), first_position, tuple(positions))
     return best
 
 
@@ -137,11 +139,16 @@ def merge_append_only(base, main, incoming, *, numbered=False):
         if len(added) != len(set(added)):
             raise ValueError('duplicate new lesson numbers within incoming history')
         prefix = suffix[:candidate_entries[0][1]] if candidate_entries else b''
-        applied, unmatched_separators, first_position = _applied_prefix(
+        applied, unmatched_separators, first_position, matched_positions = _applied_prefix(
             main_suffix, suffix, candidate_entries)
         if applied and prefix:
-            prefix_applied = (first_position >= len(prefix)
-                              and main_suffix[first_position - len(prefix):first_position] == prefix)
+            prefix_applied = any(
+                position >= len(prefix)
+                and main_suffix[position - len(prefix):position] == prefix
+                for position in matched_positions
+            )
+            if prefix.strip() and not prefix_applied:
+                prefix_applied = _contains_append_block(main_suffix, prefix)
         elif prefix.strip():
             prefix_applied = _contains_append_block(main_suffix, prefix)
         else:

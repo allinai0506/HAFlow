@@ -246,7 +246,7 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None,
             except Exception:
                 pass
         elif (clone / "pyproject.toml").exists():
-            lint_cmd = "ruff check ."
+            lint_cmd = "ruff check --output-format json ."
 
     try:
         init_loop(
