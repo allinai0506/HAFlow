@@ -41,7 +41,7 @@ properties:
   name: 默认任务类型
   type: enum
   required: false
-  notes: 文档枚举 explore|plan|code|test|review|docs；与 launch --task-type（fix|feat|...）及 domain 注册表词表不一致（SC-013）
+  notes: 词表统一为 launch choices（fix|feat|refactor|docs|test|chore|perf|ci）；兼容别名 plan/explore/code->docs, review->test（SC-013 已解决）
 - id: default_integration_mode
   name: 默认交付模式
   type: enum

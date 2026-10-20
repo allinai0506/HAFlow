@@ -50,7 +50,7 @@
 | `parallel` | `boolean` | 否 | `false` | 是否允许该节点内部同时并发派发并运行多个 Task。 |
 | `purpose` | `string` | 否 | `""` | 节点的执行目的与职责简述，用于初始化 Coordinator 提示词。 |
 | `default_integration_mode` | `string` | 否 | `"none"` | 产出物的合并模式：`none` (无需合并), `branch` (合并到分支), `commit` (提交)。 |
-| `default_task_type` | `string` | 否 | `"docs"` | 默认任务类型，影响路由倾向：`explore`, `plan`, `code`, `test`, `review`, `docs`。 |
+| `default_task_type` | `string` | 否 | `"docs"` | 默认任务类型，必须属于 launch 技术任务类型枚举：`fix`, `feat`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`（系统对历史别名 `plan`/`explore`/`code` 自动映射为 `docs`，`review` 自动映射为 `test`；业务任务类型通过 `business_task_type` 声明）。 |
 | `agent_policy` | `AgentPolicy` | 否 | `{}` | 该节点专有的 Agent 调度与路由约束配置（同 `worker_policy`）。 |
 | `worker_policy`| `WorkerPolicy` | 否 | 与 `agent_policy` 相同 | 执行者能力与沙盒权限约束配置（支持 `capabilities`, `permissions`）。 |
 | `inputs` | `List[Dict]` | 否 | `[]` | 显式声明的上游输入依赖引用（如 `{"ref": "context.user_goal"}` 或 `{"ref": "nodes.analysis.outputs"}`）。 |

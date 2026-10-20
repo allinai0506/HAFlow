@@ -3194,3 +3194,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `docs/product-specs/agent-policy-spec.md` & `docs/operations/troubleshooting-faq.md`：校准预占锁文件名为 `agent-reservations.json`，并更正默认过期时间说明为 300 秒（5 分钟）（SC-009）。
 - Updated `ontology/mappings/agent_reservation_file_mapping.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-004 与 SC-009 标记为“已解决”。
 - Evidence：`herdr/state_store.py`、`herdr/agent_router.py#RESERVATIONS_FILE`、`docs/architecture/architecture-overview.md`、`docs/product-specs/agent-policy-spec.md`、`docs/operations/troubleshooting-faq.md`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-20] Fix | 任务类型词表与 Schema 对齐收敛 (D4/SC-013)
+
+- Updated `docs/product-specs/workflow-template-schema.md`、`docs/references/cli-reference.md` & `docs/guides/universal-workflow-guide.md`：校准 `default_task_type` 与 CLI `launch --task-type` 技术任务枚举为 `fix/feat/refactor/docs/test/chore/perf/ci`，修正文档示例中无效的 `explore` 为 `docs`，明确业务类型通过 `business_task_type` 传递（SC-013 / D4 落地）。
+- Updated `herdr/domain/registry.py`：`_SOFTWARE_TASK_TYPES` 补充 `feat`、`perf`、`ci`、`chore`，确保领域适配器启发式推断完整覆盖技术任务全集。
+- Updated `ontology/objects/task.yaml`、`ontology/objects/workflow_node.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-013 状态标记为“已解决”。
+- Evidence：`herdr/direct_dispatch.py#TASK_TYPE_CHOICES`、`herdr/domain/registry.py#_SOFTWARE_TASK_TYPES`、`tests/test_task_type_vocabulary.py`、`tests/test_domain_adapters.py`、`ontology/tests/audit_ontology.py`。

@@ -172,7 +172,7 @@ herdr-factory run "处理客户关于退款延迟的严重投诉" --template cus
 herdr-task launch \
   --workflow-id wf-myproject-20260912-160000 \
   --node requirements \
-  --task-type explore \
+  --task-type docs \
   --agent auto \
   --goal "全面分析招标文件中的所有硬性废标条款" \
   --criteria "输出废标条款清单到 docs/bidding/compliance_matrix.md"
