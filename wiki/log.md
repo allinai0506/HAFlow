@@ -3187,3 +3187,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `bin/herdr-task`：彻底删除 `except ImportError:` 下落后的 14 状态兜底字典副本，确立 `herdr/transitions.py:TASK_TRANSITIONS` 为全系统唯一状态机事实源（SC-002）。
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-001、SC-002、SC-014 状态更新为“已解决”。
 - Evidence：`herdr/transitions.py`、`services/herdr-controller.py#FIX_LOOP_SUPERSEDEABLE`、`bin/herdr-task#TRANSITIONS`、`tests/test_d5_fix_loop_supersedeable.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-20] Docs | 存储权威与预占文件名统一收敛 (SC-004/SC-009)
+
+- Updated `docs/architecture/architecture-overview.md`：校准存储架构分层 Mermaid 图与核心职责，确立 SQLite `state.db` 为唯一权威事实源，`tasks.json` / `projects.json` / `workflows.json` 降级为向后兼容与只读导出投影（SC-004）。
+- Updated `docs/product-specs/agent-policy-spec.md` & `docs/operations/troubleshooting-faq.md`：校准预占锁文件名为 `agent-reservations.json`，并更正默认过期时间说明为 300 秒（5 分钟）（SC-009）。
+- Updated `ontology/mappings/agent_reservation_file_mapping.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-004 与 SC-009 标记为“已解决”。
+- Evidence：`herdr/state_store.py`、`herdr/agent_router.py#RESERVATIONS_FILE`、`docs/architecture/architecture-overview.md`、`docs/product-specs/agent-policy-spec.md`、`docs/operations/troubleshooting-faq.md`、`ontology/tests/audit_ontology.py`。

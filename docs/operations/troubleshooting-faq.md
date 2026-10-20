@@ -52,8 +52,8 @@
 ## 3. 并发锁与死锁问题
 
 ### 3.1 提示 `Reservation timeout` 或 Agent 无法获取？
-- **排查**：检查 `~/.herdr-controller/router-reservations.json` 是否存在过期死锁记录。
-- **恢复**：系统在每次路由时会自动根据 60 秒 TTL 剔除失效预占，通常等待 1 分钟后重试即可；或手动重置预占文件：
+- **排查**：检查 `~/.herdr-controller/agent-reservations.json` 是否存在过期死锁记录。
+- **恢复**：系统在每次路由时会自动根据 300 秒 (5分钟) TTL 剔除失效预占（代码默认 `_clean_reservations(..., ttl=300)`）；或手动重置预占文件：
   ```bash
-  echo '{"reservations": {}}' > ~/.herdr-controller/router-reservations.json
+  echo '{"reservations": {}}' > ~/.herdr-controller/agent-reservations.json
   ```
