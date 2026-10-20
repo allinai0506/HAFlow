@@ -142,3 +142,17 @@ def test_identical_numbered_append_between_other_main_appends_is_not_duplicated(
     assert result == main
     assert result.count(b'## 2. shared\n') == 1
     assert mapping == {}
+
+
+def test_retry_deduplicates_a_block_renumbered_by_the_first_replay():
+    base = b'## 1. old\nold body\n'
+    main = base + b'\n## 2. main\nmain body\n'
+    incoming = base + b'\n## 2. incoming\nincoming body\n'
+    first, first_mapping = merge_append_only(base, main, incoming, numbered=True)
+
+    second, second_mapping = merge_append_only(base, first, incoming, numbered=True)
+
+    assert first_mapping == {2: 3}
+    assert second == first
+    assert second.count(b'incoming body\n') == 1
+    assert second_mapping == {}

@@ -1,6 +1,6 @@
 {
   "base": "df4b3cf",
-  "source_sha256": "eb97f433ff44acea2a506246ddeafdc9b94043398f4c7f564ed46c9382629281",
+  "source_sha256": "559a40b0696772728aea315fd6f699e5518850c4927046dddb7848da62a48c87",
   "files": {
     "bin/herdr-loop": "aeea6686c8945d3dde7c003c5b2e4c1febf96a87fe77491d7c2fce00303d8ff0",
     "console/http_server.py": "0c5be5191bc4db3413ed4d1a607572e586b1344eecbf00d8a56b9978d9dc2198",
@@ -10,7 +10,7 @@
     "herdr/kernel.py": "b5136ece0b012cc35dfa9d7f0e8cc64bb8a321134181604549bc6c25e81abee2",
     "herdr/reconciliation.py": "b0c16188418935fc15608a1f12637834879b74ae9e50659e7bf395f3b61110c8",
     "herdr/recovery_store.py": "593db68e70c400b548993892aeca735793080b8e94f1a14398702bae64ec696d",
-    "herdr/replay_append_only.py": "d9e27f8900ef794b1b330d916fd4274228d909f7092b653968238c7347e14e5a",
+    "herdr/replay_append_only.py": "0ccdb67910bd2645f8477133decd3ffbe130e73867cf5c0b0bc644f24b52d617",
     "herdr/state_db.py": "fb06b37b9715b76cf2a32a71fec8618e5e2c5957c1b068369bdbf12fdc4d103a",
     "herdr/task_checkpoint.py": "ae6f1e0fdd4ee831bfec7c54198f10555ee8326aa4c894877aa640d71b4e4235",
     "herdr/task_cli_launch.py": "0303c6aa339ec367e33adf708af3a9be66315b4d8f4288f726371740ffb7375f",
@@ -26,7 +26,7 @@
     "tests/test_impl_fix4_blocker_regression.py": "2afd8c79c17c28a6350191b9c3abaa1caaf910a6590d076175bda685be3b48ad",
     "tests/test_impl_fix4_regression.py": "790d5a91a388d02525005946fcb4ea59e6235c1f84155ed9f011139e8e8997ee",
     "tests/test_impl_fix6_regression.py": "b0f3909e56bbe78d19612a0d1c87d19077b4dffcf040c81bb59164e7eb1d23ca",
-    "tests/test_replay_append_only.py": "9c5e7de27447893bc384a290f14385acc0f7285cf302c9af9f185e65efedb2ac",
+    "tests/test_replay_append_only.py": "11721237cc7aa1687512d5d1a1d5e0a6b4414624ff4d08b495cc501916158d51",
     "tests/test_t3_probes.py": "dca3942a73d5f4cc816445317631731923a0eb956bd80997a24c7ee991710ed2"
   }
 }

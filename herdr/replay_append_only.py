@@ -33,7 +33,14 @@ def merge_append_only(base, main, incoming, *, numbered=False):
     if incoming != base and any(data and not data.endswith(b'\n') for data in (base, main, incoming)):
         raise ValueError('append-only replay requires complete EOF lines')
     suffix = incoming[len(base):]
-    if _contains_append_block(main[len(base):], suffix):
+    main_suffix = main[len(base):]
+    already_applied = _contains_append_block(main_suffix, suffix)
+    if numbered and not already_applied:
+        already_applied = _contains_append_block(
+            _HEADING.sub(b'## N.', main_suffix),
+            _HEADING.sub(b'## N.', suffix),
+        )
+    if already_applied:
         return main, {}
     mapping = {}
     if numbered and suffix:
