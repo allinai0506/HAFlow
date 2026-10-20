@@ -496,6 +496,22 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
             "workflow_configuration_missing",
         )
 
+    def test_invalid_dispatch_contract_falls_back_without_escaping(self):
+        item = self._item()
+        with patch.object(
+            self.ctrl.direct_dispatch_planner,
+            "plan_stage_dispatch",
+            side_effect=ValueError("docs git node requires artifact_mode"),
+        ):
+            result = self.ctrl.try_direct_stage_advance(item)
+
+        self.assertFalse(result)
+        self.assertEqual(
+            item["direct_dispatch_fallback_reason"],
+            "dispatch_contract_invalid",
+        )
+        self.assertEqual(self.commands, [])
+
     def test_untracked_launch_timeout_never_falls_through_to_coordinator(self):
         """Once transport starts, an unknown outcome belongs to recovery."""
         self.commands.clear()

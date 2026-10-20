@@ -168,20 +168,27 @@ def try_direct_stage_advance(ports, item):
                 f"[SELECTIVE REPLAN WARN] workflow={workflow_id} "
                 f"inventory injection skipped: {exc}"
             )
-    plan = ports.direct_dispatch_planner.plan_stage_dispatch(
-        workflow_id,
-        node,
-        ports.load_tasks(),
-        requirement,
-        context_branch=candidate_branch,
-        gate_contract=gate_task,
-        docs_block=docs_block,
-        candidate_sha=candidate_sha,
-        gate_inventory_block=gate_inventory_block,
-        redispatch_blocker_notes=ports._selective_redispatch_blocker_notes(
-            workflow_id, ready_id
-        ),
-    )
+    try:
+        plan = ports.direct_dispatch_planner.plan_stage_dispatch(
+            workflow_id,
+            node,
+            ports.load_tasks(),
+            requirement,
+            context_branch=candidate_branch,
+            gate_contract=gate_task,
+            docs_block=docs_block,
+            candidate_sha=candidate_sha,
+            gate_inventory_block=gate_inventory_block,
+            redispatch_blocker_notes=ports._selective_redispatch_blocker_notes(
+                workflow_id, ready_id
+            ),
+        )
+    except ValueError as exc:
+        print(
+            f"[DIRECT DISPATCH CONTRACT INVALID] workflow={workflow_id} "
+            f"node={ready_id}: {exc}"
+        )
+        return fallback("dispatch_contract_invalid")
 
     if gate_task and plan.get("mode") == "dispatch":
         # 状态目录必须先于 Agent 写入存在(结论文件落 clone 外,交付零污染)。
