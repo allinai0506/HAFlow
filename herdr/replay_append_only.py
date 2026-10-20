@@ -77,16 +77,18 @@ def _unmatched_entry_tail(candidate_block, main_block):
 
 
 def _unmatched_displaced_tail(pending, main):
-    """Consume separators previously appended at EOF after a main-only entry."""
+    """Keep displaced content and consume only separators already present at EOF."""
     if not pending:
         return pending
+    content = pending.rstrip(b'\r\n')
+    pending_tail = pending[len(content):]
     main_tail = main[len(main.rstrip(b'\r\n')):]
     available = re.findall(rb'\r\n|\n|\r', main_tail)[1:]
-    wanted = re.findall(rb'\r\n|\n|\r', pending)
+    wanted = re.findall(rb'\r\n|\n|\r', pending_tail)
     if available and wanted[-len(available):] == available:
-        return b''.join(wanted[:-len(available)])
+        return content + b''.join(wanted[:-len(available)])
     if wanted and available[-len(wanted):] == wanted:
-        return b''
+        return content
     return pending
 
 

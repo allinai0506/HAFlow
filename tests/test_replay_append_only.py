@@ -315,6 +315,17 @@ def test_numbered_replay_deduplicates_combined_displaced_separators():
     assert mapping == {}
 
 
+def test_numbered_replay_preserves_text_prefix_while_deduplicating_eof_separator():
+    base = b'## 1. old\nold body\n'
+    incoming = base + b'NOTE\n## 2. shared\nshared body\n'
+    main = base + b'## 2. shared\nshared body\n\n'
+
+    merged, mapping = merge_append_only(base, main, incoming, numbered=True)
+
+    assert merged == main + b'NOTE'
+    assert mapping == {}
+
+
 def test_non_numbered_replay_matches_newline_terminated_block_before_next_line():
     base = b'old\n'
     incoming = base + b'candidate\n'
