@@ -224,6 +224,19 @@ def test_controller_join_wait_persists_stall_without_acceptance(store, monkeypat
     assert store.list_events(workflow_id='wf', event_type='business_acceptance_recorded') == []
 
 
+def test_controller_join_wait_sqlite_audit_failure_remains_fail_closed(store, monkeypatch):
+    from herdr import gate_wait
+    from services.controller.join_gates import _scheduler_join_gate_allows
+    monkeypatch.setattr(
+        gate_wait, 'record_wait',
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError('locked')),
+    )
+    ports = SimpleNamespace(_get_store=lambda: store)
+    assert not _scheduler_join_gate_allows(
+        ports, 'wf', {'id': 'wrapup'}, store.list_tasks(workflow_id='wf')
+    )
+
+
 def test_preflight_refusal_aborts_real_intent_and_registers_replacement(store):
     from herdr import node_dispatch_store, recovery_store, task_resources
     from herdr.task_cli_launch import record_router_failure_task
@@ -372,6 +385,10 @@ def test_native_eval_rejects_baseline_from_changed_evaluator(tmp_path):
     import subprocess
     import sys
     from pathlib import Path
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=T', '-c',
+                    'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                    'commit', '--allow-empty', '-qm', 'base'], check=True)
     loop = evaluator.init_loop(tmp_path, 'stale contract', test_cmd="printf '1 passed\\n'",
         lint_cmd="printf 'Found 100 errors.'; exit 1", capture_baseline=True)
     script = loop / 'EVALUATOR.sh'

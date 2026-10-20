@@ -234,6 +234,21 @@ def test_numbered_replay_deduplicates_displaced_text_prefix_on_retry():
     assert mapping == {}
 
 
+def test_numbered_replay_strips_displaced_prefix_before_tail_comparison():
+    base = b'## 1. old\nold body\n'
+    incoming = base + (b'NOTE\n## 2. shared\nshared body\n\n'
+                       b'## 3. later\r\nlater body\r\n')
+    main = base + (b'## 2. shared\r\nshared body\r\n'
+                   b'## 3. main only\nmain body\n'
+                   b'## 4. shared\nshared body\n\n')
+
+    first, _ = merge_append_only(base, main, incoming, numbered=True)
+    second, mapping = merge_append_only(base, first, incoming, numbered=True)
+
+    assert second == first
+    assert mapping == {}
+
+
 def test_numbered_replay_deduplicates_prefix_before_new_entries():
     base = b'## 1. old\nold body\n'
     prefix = b'\nIMPORTANT\n\n'

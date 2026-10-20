@@ -250,12 +250,15 @@ def _capture_lint_baseline_unlocked(loop_dir: Path, command: str, cwd: Path) -> 
     if static_check_execution_failed(exit_code):
         raise RuntimeError(f"Lint baseline command failed to execute: exit {exit_code}")
     lint_errors = parse_lint_output(stdout + stderr, exit_code)
+    if not initial_sha or not re.fullmatch(r'[0-9a-fA-F]{40}', initial_sha):
+        raise ValueError('lint baseline requires an available Git HEAD commit')
     if contract != _lint_contract(loop_dir, command):
         raise ValueError('lint contract changed during baseline capture')
     probe = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=cwd, text=True,
                            capture_output=True, check=False, timeout=10)
     fresh_sha = probe.stdout.strip() if probe.returncode == 0 else None
-    if initial_sha != fresh_sha:
+    if (not fresh_sha or not re.fullmatch(r'[0-9a-fA-F]{40}', fresh_sha)
+            or initial_sha != fresh_sha):
         raise ValueError('baseline HEAD changed during capture')
     return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0,
                                          baseline_of_sha=initial_sha, contract=contract)

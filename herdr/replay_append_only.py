@@ -107,10 +107,12 @@ def _applied_prefix(main, candidate, candidate_entries, prefix=b''):
         for main_index in range(start, len(main_identities)):
             identity = main_identities[main_index]
             shifted = False
+            main_block = _entry_block(main, main_entries, main_index)
+            comparison_block = main_block
             if matched < len(candidate_identities) and identity != candidate_identities[matched]:
-                main_block = _entry_block(main, main_entries, main_index)
                 if prefix and main_block.endswith(prefix):
-                    without_prefix = main_block[:-len(prefix)].rstrip(b'\r\n')
+                    comparison_block = main_block[:-len(prefix)]
+                    without_prefix = comparison_block.rstrip(b'\r\n')
                     shifted = (_HEADING_LINE.sub(b'## N.', without_prefix, count=1)
                                == candidate_identities[matched])
             if (matched < len(candidate_identities)
@@ -121,7 +123,7 @@ def _applied_prefix(main, candidate, candidate_entries, prefix=b''):
                 displaced_prefix = displaced_prefix or shifted
                 pending.append(_unmatched_entry_tail(
                     _entry_block(candidate, candidate_entries, matched),
-                    _entry_block(main, main_entries, main_index),
+                    comparison_block,
                 ))
                 matched += 1
         if matched > best[0]:

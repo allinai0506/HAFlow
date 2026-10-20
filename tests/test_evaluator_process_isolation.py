@@ -14,6 +14,10 @@ CLI = ROOT / "bin" / "herdr-loop"
 
 
 def active_evaluation(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=T', '-c',
+                    'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                    'commit', '--allow-empty', '-qm', 'base'], check=True)
     directory = init_loop(tmp_path, "namespace ownership", test_cmd="true")
     script = directory / "EVALUATOR.sh"
     script.write_text("""#!/bin/bash

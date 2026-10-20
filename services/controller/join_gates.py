@@ -2,6 +2,7 @@
 
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
+import sqlite3
 
 def _scheduler_join_gate_allows(ports, workflow_id, node, tasks):
     """汇聚门禁放行判定:非 join 节点一律放行(保持原语义)。
@@ -25,12 +26,12 @@ def _scheduler_join_gate_allows(ports, workflow_id, node, tasks):
                 return False
         elif any(t.get('completion_protocol') == 'receipt-v1' for t in tasks):
             return False
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, sqlite3.Error) as exc:
         print(f'[BUSINESS GATE WAIT] workflow={workflow_id}: {type(exc).__name__}')
         if getattr(store, 'db_path', None):
             try:
                 record_wait(store.db_path, workflow_id, node.get('id'), ['<unknown:' + type(exc).__name__ + '>'])
-            except (OSError, ValueError) as audit_exc:
+            except (OSError, ValueError, sqlite3.Error) as audit_exc:
                 print(f'[BUSINESS GATE AUDIT FAILED] workflow={workflow_id}: {audit_exc}')
         return False
     deps = list(node.get("depends_on") or [])

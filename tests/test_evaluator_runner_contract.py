@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shlex
+import subprocess
 
 import pytest
 
@@ -28,6 +29,11 @@ def loop_cli():
 
 def controlled_runner(tmp_path, *, exit_code=0, receipts=None, repro=False,
                       stale=None, missing=None, lint_output=""):
+    if not (tmp_path / '.git').exists():
+        subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+        subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=T', '-c',
+                        'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                        'commit', '--allow-empty', '-qm', 'base'], check=True)
     directory = init_loop(tmp_path, "execution evidence must belong to this evaluation",
                           test_cmd="true", repro_cmd="true" if repro else "")
     logs = directory / "logs"

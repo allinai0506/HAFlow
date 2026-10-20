@@ -116,3 +116,5 @@ PR 最终复审绑定 `5e6bef4`，Codex 明确返回无 findings、无未决 P1/
 下一轮复审补出 main-only 条目之后的 EOF 分隔符位移及 closing 生命周期。重放在保留 EOF 完整行终止符后消费已经位移到末尾的额外换行单元，避免每次重试继续加空行；gate wait reconciliation 与 `record_wait` 使用同一判断，workflow 只要不再是 running 就 supersede 活动等待。新增两项回归，16 模块专项为 301 passed、10 subtests。
 
 同一 EOF 位移规则也应用于单条目纯空白前缀：首次因 append-only 限制将空行追加到末尾，后续重放从 EOF 的额外换行中确认它已应用。既有空白前缀回归扩展为连续两次重放，16 模块专项仍为 301 passed、10 subtests。
+
+后续复审补齐三项边界：lint baseline 在执行成功并解析输出后仍必须取得前后相同的 40 位 Git HEAD，否则不发布可抵扣债务；已识别的位移前缀先从 main 条目块剥离，再计算条目尾部分隔差量；Controller 的业务 gate 等待审计同时隔离 `sqlite3.Error`，数据库写锁不会让诊断副作用中断调度，原 gate 仍拒绝放行。测试夹具为需要合法 baseline 的场景建立真实空提交身份；18 模块专项为 401 passed、22 subtests。

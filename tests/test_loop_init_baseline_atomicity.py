@@ -16,7 +16,17 @@ from tests.test_task_loop_noninteractive import ROOT, load_cli
 CLI = ROOT / 'bin/herdr-loop'
 
 
+def ensure_git_identity(target):
+    if (Path(target) / '.git').exists():
+        return
+    subprocess.run(['git', 'init', '-q', str(target)], check=True)
+    subprocess.run(['git', '-C', str(target), '-c', 'user.name=T', '-c',
+                    'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                    'commit', '--allow-empty', '-qm', 'base'], check=True)
+
+
 def init_argv(target, goal, lint):
+    ensure_git_identity(target)
     return [sys.executable, str(CLI), 'init', '--dir', str(target),
             '--goal', goal, '--test-cmd', "printf '5 passed in 0.01s\\n'",
             '--lint-cmd', lint]
@@ -72,6 +82,7 @@ def test_native_init_sigterm_cleans_its_baseline_descendants(tmp_path, ignore_te
 
 
 def test_task_publishes_current_baseline_before_first_unlock(tmp_path, monkeypatch):
+    ensure_git_identity(tmp_path)
     loop = init_loop(tmp_path, 'old task', test_cmd='true')
     write_baseline_lint(loop, 5)
     original = evaluator.evaluation_lock
