@@ -174,6 +174,22 @@ def test_retry_appends_only_entries_after_an_already_applied_prefix():
     assert mapping == {3: 4}
 
 
+def test_retry_deduplicates_remainder_after_interleaved_main_append():
+    base = b'## 1. old\nold body\n'
+    incoming_bc = base + (b'\n## 2. incoming B\nB body\n'
+                          b'\n## 3. incoming C\nC body\n')
+    main = base + (b'\n## 2. incoming B\nB body\n'
+                   b'\n## 3. main D\nD body\n')
+    first, _ = merge_append_only(base, main, incoming_bc, numbered=True)
+
+    second, mapping = merge_append_only(base, first, incoming_bc, numbered=True)
+
+    assert second == first
+    assert second.count(b'B body\n') == 1
+    assert second.count(b'C body\n') == 1
+    assert mapping == {}
+
+
 def test_numbered_replay_ignores_headings_inside_fenced_code_blocks():
     base = b'## 100. old\nold body\n'
     incoming = base + (b'\n## 101. incoming\nbefore\n'

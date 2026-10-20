@@ -60,7 +60,7 @@ def _entry_identity(document, entries, index):
 
 
 def _applied_prefix_length(main, candidate, candidate_entries):
-    """Find the longest candidate-entry prefix already contiguous in main."""
+    """Find the longest candidate prefix present in order among main entries."""
     main_entries = _numbered_entries(main)
     main_identities = [_entry_identity(main, main_entries, index)
                        for index in range(len(main_entries))]
@@ -69,10 +69,10 @@ def _applied_prefix_length(main, candidate, candidate_entries):
     longest = 0
     for start in range(len(main_identities)):
         matched = 0
-        while (matched < len(candidate_identities)
-               and start + matched < len(main_identities)
-               and candidate_identities[matched] == main_identities[start + matched]):
-            matched += 1
+        for identity in main_identities[start:]:
+            if (matched < len(candidate_identities)
+                    and candidate_identities[matched] == identity):
+                matched += 1
         longest = max(longest, matched)
     return longest
 
