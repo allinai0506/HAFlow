@@ -160,10 +160,28 @@ def reconcile_workflow_state(
         if t.get("status") in ("dispatched", "working", "rework", "blocked", "paused")
     ]
 
+    inconsistencies = []
+    if db_path:
+        import json
+        conn = state_db.get_readonly_db_connection(db_path)
+        try:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_close_operations'").fetchone():
+                generation = json.dumps([workflow.get('execution_id'), workflow.get('reopened_at')], sort_keys=True)
+                receipt = conn.execute("SELECT operation_id FROM workflow_close_operations "
+                    "WHERE workflow_id=? AND generation=? AND state='completed'", (workflow_id, generation)).fetchone()
+                if receipt and current_status != 'completed':
+                    inconsistencies.append({'reason': 'close_receipt_status_mismatch',
+                        'operation_id': receipt['operation_id'], 'workflow_status': current_status,
+                        'action_required': 'Inspect the current execution and close receipt; explicitly resume/close '
+                                           'the workflow after validating its acceptance. Cleanup alone is not completion.'})
+        finally:
+            conn.close()
+
     return {
         "workflow_id": workflow_id,
         "status": current_status,
         "reconciled": True,
+        "inconsistencies": inconsistencies,
         "nodes": {
             "total": len(nodes),
             "completed": sorted(completed_nodes),

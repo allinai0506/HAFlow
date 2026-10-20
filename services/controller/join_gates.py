@@ -10,13 +10,16 @@ def _scheduler_join_gate_allows(ports, workflow_id, node, tasks):
     判定失败/异常一律拒绝(Fail-Closed)。
     """
     node = node or {}
+    store = None
     try:
         from herdr.recovery_store import read_snapshot
         from herdr.business_gate import business_gate_blockers
+        from herdr.gate_wait import record_wait
         store = ports._get_store()
         if store.get_workflow(workflow_id):
             authority, config, owned_tasks = read_snapshot(store.db_path, workflow_id)
             missing = business_gate_blockers(store, authority, config, owned_tasks, node.get('id'))
+            record_wait(store.db_path, workflow_id, node.get('id'), missing)
             if missing:
                 print(f'[BUSINESS GATE WAIT] workflow={workflow_id} node={node.get("id")} tasks={missing}')
                 return False
@@ -24,6 +27,11 @@ def _scheduler_join_gate_allows(ports, workflow_id, node, tasks):
             return False
     except (OSError, ValueError) as exc:
         print(f'[BUSINESS GATE WAIT] workflow={workflow_id}: {type(exc).__name__}')
+        if getattr(store, 'db_path', None):
+            try:
+                record_wait(store.db_path, workflow_id, node.get('id'), ['<unknown:' + type(exc).__name__ + '>'])
+            except (OSError, ValueError) as audit_exc:
+                print(f'[BUSINESS GATE AUDIT FAILED] workflow={workflow_id}: {audit_exc}')
         return False
     deps = list(node.get("depends_on") or [])
     node_type = str(node.get("node_type") or "")

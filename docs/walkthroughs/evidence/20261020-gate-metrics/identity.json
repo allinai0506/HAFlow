@@ -1,0 +1,18 @@
+{
+  "main_base": "df4b3cf",
+  "main_working_tree": "/Users/user/.sandboxes/haflow-gate-metrics-20261020",
+  "compat_base": "b46b81aa9a109d0acbfd0b0a0e4a4cad7b352f63",
+  "compat_working_tree": "/Users/user/.sandboxes/haflow-gate-metrics-candidate-compat-20261020",
+  "compat_overlay": {
+    "herdr/evaluator.py": "8d94ae1d568dc6a2b8bfb9c66c12150ba3c501509f5c0a856753805a2c86b811",
+    "bin/herdr-loop": "aeea6686c8945d3dde7c003c5b2e4c1febf96a87fe77491d7c2fce00303d8ff0"
+  },
+  "main_metric_sha256": {
+    "herdr/evaluator.py": "8d94ae1d568dc6a2b8bfb9c66c12150ba3c501509f5c0a856753805a2c86b811",
+    "bin/herdr-loop": "aeea6686c8945d3dde7c003c5b2e4c1febf96a87fe77491d7c2fce00303d8ff0"
+  },
+  "G3_pending": [],
+  "probe_final": "119/119",
+  "source_of_evidence": "fresh commands in two explicitly different isolated working trees; not the original gate Run",
+  "status": "PASS: final-source metric overlay matches; main scoped suite 549 passed; candidate compatibility 502 + 11 tests and fresh 119/119 probe passed"
+}

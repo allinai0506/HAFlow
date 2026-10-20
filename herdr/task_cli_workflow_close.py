@@ -54,6 +54,11 @@ def close_workflow(
         get_store(), workflow_id, dry_run=dry_run, options=options
     ) as claim:
         if claim.state == "completed":
+            store = get_store()
+            if hasattr(store, 'get_workflow'):
+                current = store.get_workflow(workflow_id)
+                if current and current.get('status') != 'completed':
+                    raise ValueError('workflow status conflicts with completed close receipt; inspect and reconcile explicitly')
             print(json.dumps(claim.receipt, ensure_ascii=False))
             return claim.receipt
         if claim.state == "in_progress":
@@ -79,7 +84,7 @@ def close_workflow(
             json.dumps(facts, sort_keys=True, ensure_ascii=False).encode()
         ).hexdigest()
         report["execution_mode"] = "dry-run" if dry_run else "execute"
-        return report if dry_run else claim.complete(report)
+        return report if dry_run else claim.complete(report, require_workflow_completed=True)
 
 
 def close_workflow_owned(

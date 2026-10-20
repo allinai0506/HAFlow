@@ -1,0 +1,34 @@
+ROOT=/Users/user/.sandboxes/haflow-gate-metrics-candidate-compat-20261020
+ISOLATION=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-reopen-final-9a5hhegw
+COMMAND=['/opt/homebrew/opt/python@3.14/bin/python3.14', 'scripts/check_state_db_split.py', '--report']
+## state_db split allocation (architecture §4.8)
+
+| # | module | body | est | band | group | owner | symbols | segs | actual |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | `constants.py` | 114 | 139 | BELOW (registered ARCH-4.7-constants) | A | T2 | 15 | 0 | 114 |
+| 2 | `connection.py` | 349 | 374 | OK | A | T2 | 15 | 0 | 348 |
+| 3 | `schema.py` | 272 | 297 | BELOW (registered ARCH-4.7-schema) | A | T2 | 2 | 4 | 284 |
+| 4 | `schema_ddl_txn.py` | 357 | 382 | OK | A | T2 | 0 | 1 | 366 |
+| 5 | `schema_ddl_helpers.py` | 406 | 431 | OK | A | T2 | 10 | 0 | 400 |
+| 6 | `schema_v1.py` | 241 | 266 | BELOW (registered ARCH-4.7-schema-v1) | A | T2 | 1 | 1 | 252 |
+| 7 | `workflow_task_store.py` | 387 | 412 | OK | B | T3-1 | 10 | 0 | 387 |
+| 8 | `transition_task.py` | 461 | 486 | OK | B | T3-1 | 3 | 0 | 470 |
+| 9 | `transition_gate.py` | 541 | 566 | ABOVE (registered ARCH-4.7-transition-gate-port) | B | T3-1 | 5 | 0 | 546 |
+| 10 | `completion.py` | 479 | 504 | ABOVE (registered ARCH-4.7-completion) | D | T3-2 | 8 | 0 | 481 |
+| 11 | `checkpoint.py` | 301 | 326 | OK | D | T3-2 | 6 | 0 | 304 |
+| 12 | `steering.py` | 239 | 264 | BELOW (registered ARCH-4.7-steering) | F | T3-2 | 6 | 0 | 242 |
+| 13 | `intervention.py` | 312 | 337 | OK | F | T3-2 | 9 | 0 | 313 |
+| 14 | `collaboration.py` | 292 | 317 | OK | F | T3-2 | 10 | 0 | 302 |
+| 15 | `events.py` | 445 | 470 | OK | E | T3-3 | 4 | 0 | 450 |
+| 16 | `trajectory.py` | 244 | 269 | BELOW (registered ARCH-4.7-trajectory) | E | T3-3 | 6 | 0 | 246 |
+| 17 | `outcome_route.py` | 403 | 428 | OK | E | T3-3 | 11 | 0 | 407 |
+| 18 | `rollout.py` | 346 | 371 | OK | E | T3-3 | 12 | 0 | 345 |
+| 19 | `observation_finding.py` | 433 | 458 | OK | C | T3-4 | 16 | 0 | 427 |
+| 20 | `context_pack.py` | 314 | 339 | OK | C | T3-4 | 8 | 0 | 315 |
+| 21 | `working_context.py` | 516 | 541 | ABOVE (registered ARCH-4.7-working-context) | C | T3-5 | 8 | 0 | 519 |
+| 22 | `context_source_validation.py` | 677 | 702 | ABOVE (registered ARCH-4.7-context-source-validation) | C | T3-5 | 2 | 0 | 683 |
+
+covered=8129/8169 (99.51%), uncovered=1-40
+note: body = AST span to the next top-level statement; schema.py and schema_v1.py include their registered _ensure_schema segments.
+
+EXIT=0

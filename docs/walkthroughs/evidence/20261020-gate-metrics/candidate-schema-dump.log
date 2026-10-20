@@ -1,0 +1,6 @@
+ROOT=/Users/user/.sandboxes/haflow-gate-metrics-candidate-compat-20261020
+ISOLATION=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-reopen-final-9a5hhegw
+COMMAND=['/opt/homebrew/opt/python@3.14/bin/python3.14', 'scripts/check_state_db_split.py', '--schema-dump', '/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-reopen-final-9a5hhegw/schema.json']
+wrote 93 schema objects to /var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-reopen-final-9a5hhegw/schema.json
+
+EXIT=0

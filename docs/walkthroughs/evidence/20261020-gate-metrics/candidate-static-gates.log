@@ -1,0 +1,36 @@
+ROOT=/Users/user/.sandboxes/haflow-gate-metrics-candidate-compat-20261020
+ISOLATION=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-reopen-final-9a5hhegw
+COMMAND=['/opt/homebrew/opt/python@3.14/bin/python3.14', 'scripts/check_state_db_split.py', '--final']
+STATE_DB SPLIT GATES (baseline a56739e)
+[PASS] G-1: 167/167 baseline bindings present
+[PASS] G-2: G-2a=PASS; G-2b=PASS; G-2c=PASS
+    remaining monolith rewrite inventory: 0 bare patch-function calls + 0 CONTROLLER_DIR reads
+[PASS] G-3: checked 22/22 modules
+    constants: 114 lines (below exception ARCH-4.7-constants)
+    connection: 348 lines (in band)
+    schema: 284 lines (below exception ARCH-4.7-schema)
+    schema_ddl_txn: 366 lines (in band)
+    schema_ddl_helpers: 400 lines (in band)
+    schema_v1: 252 lines (below exception ARCH-4.7-schema-v1)
+    workflow_task_store: 387 lines (in band)
+    transition_task: 470 lines (in band)
+    transition_gate: 546 lines (above exception ARCH-4.7-transition-gate-port)
+    completion: 481 lines (in band)
+    checkpoint: 304 lines (in band)
+    steering: 242 lines (below exception ARCH-4.7-steering)
+    intervention: 313 lines (in band)
+    collaboration: 302 lines (in band)
+    events: 450 lines (in band)
+    trajectory: 246 lines (below exception ARCH-4.7-trajectory)
+    outcome_route: 407 lines (in band)
+    rollout: 345 lines (in band)
+    observation_finding: 427 lines (in band)
+    context_pack: 315 lines (in band)
+    working_context: 519 lines (above exception ARCH-4.7-working-context)
+    context_source_validation: 683 lines (above exception ARCH-4.7-context-source-validation)
+[PASS] G-5: 25 module(s), 74 static edge(s)
+[PASS] G-7: 25 tables / 44 indexes / 24 triggers
+G-4: runtime DDL trace equality -> tests/test_state_db_ddl_sequence.py
+OVERALL: PASS
+
+EXIT=0

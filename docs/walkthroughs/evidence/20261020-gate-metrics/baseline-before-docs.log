@@ -1,0 +1,21 @@
+TASK_CHANGED:
+- [tracked] bin/herdr-loop
+- [tracked] console/http_server.py
+- [tracked] herdr/evaluator.py
+- [tracked] herdr/kernel.py
+- [tracked] herdr/reconciliation.py
+- [tracked] herdr/recovery_store.py
+- [tracked] herdr/state_db.py
+- [tracked] herdr/task_checkpoint.py
+- [tracked] herdr/task_cli_launch.py
+- [tracked] herdr/task_cli_workflow_close.py
+- [tracked] herdr/workflow_close.py
+- [tracked] services/controller/join_gates.py
+- [tracked] tests/test_dispatch_baseline_failfast.py
+- [untracked] docs/plans/2026-10-20-gate-metrics-repair.md
+- [untracked] herdr/gate_wait.py
+- [untracked] herdr/replay_append_only.py
+- [untracked] scripts/replay-append-only.py
+- [untracked] tests/test_gate_metrics_handoff.py
+- [untracked] tests/test_replay_append_only.py
+HERDR_BASELINE_RESULT={"task_id": "local-gate-metrics-verification", "baseline_match": false, "changes": [{"type": "tracked", "path": "bin/herdr-loop", "baseline": "__NOT_PRESENT__", "current": "d3a09a84854dc2b25736bebc9a35a2df627a3f65adace5e67560bf8c81b72898"}, {"type": "tracked", "path": "console/http_server.py", "baseline": "__NOT_PRESENT__", "current": "0c5be5191bc4db3413ed4d1a607572e586b1344eecbf00d8a56b9978d9dc2198"}, {"type": "tracked", "path": "herdr/evaluator.py", "baseline": "__NOT_PRESENT__", "current": "37d4089c24b90d51c4a782c3a4ad105cb40fedc28e0519b992399e0f53278021"}, {"type": "tracked", "path": "herdr/kernel.py", "baseline": "__NOT_PRESENT__", "current": "b5136ece0b012cc35dfa9d7f0e8cc64bb8a321134181604549bc6c25e81abee2"}, {"type": "tracked", "path": "herdr/reconciliation.py", "baseline": "__NOT_PRESENT__", "current": "e2af01b061c4e29ee17cbd2e05bb55a96d9a1d715ea46e04e5d6e86fdb32fdab"}, {"type": "tracked", "path": "herdr/recovery_store.py", "baseline": "__NOT_PRESENT__", "current": "198e41ddcedb19aa5ca4d5c9d19a7fffa0544108eba7d8fec5969a11708d66bd"}, {"type": "tracked", "path": "herdr/state_db.py", "baseline": "__NOT_PRESENT__", "current": "fb06b37b9715b76cf2a32a71fec8618e5e2c5957c1b068369bdbf12fdc4d103a"}, {"type": "tracked", "path": "herdr/task_checkpoint.py", "baseline": "__NOT_PRESENT__", "current": "ae6f1e0fdd4ee831bfec7c54198f10555ee8326aa4c894877aa640d71b4e4235"}, {"type": "tracked", "path": "herdr/task_cli_launch.py", "baseline": "__NOT_PRESENT__", "current": "16d00c4222eb7eae1325d9131c6298d76c93a0c57dc9e0e46068280a769e9dd4"}, {"type": "tracked", "path": "herdr/task_cli_workflow_close.py", "baseline": "__NOT_PRESENT__", "current": "7acb2555225579688f9953cfdc0b28a5b9c20f205f835dc9b53a63cec41d4793"}, {"type": "tracked", "path": "herdr/workflow_close.py", "baseline": "__NOT_PRESENT__", "current": "723ee47474051b818855841d3413dd9ac87edc1e616477f997810d345b0fc66a"}, {"type": "tracked", "path": "services/controller/join_gates.py", "baseline": "__NOT_PRESENT__", "current": "76998271af7d97b69a3ae3ee8f871c51b5776da1790d281e7d548bb885da9c9d"}, {"type": "tracked", "path": "tests/test_dispatch_baseline_failfast.py", "baseline": "__NOT_PRESENT__", "current": "3895332ce0cbfe16cb8a126b2b20b7fc1c1c3bef10332b97019d383d30e901a5"}, {"type": "untracked", "path": "docs/plans/2026-10-20-gate-metrics-repair.md", "baseline": "__NOT_PRESENT__", "current": "dca065264b7d6467d73e7ecf46c55b187ec4fb9c8f8dc667a5de65c6fccbf816"}, {"type": "untracked", "path": "herdr/gate_wait.py", "baseline": "__NOT_PRESENT__", "current": "4f92b3d6b8498fdc58988a46d20a8809886ec5b497943b8dbf157a189440464f"}, {"type": "untracked", "path": "herdr/replay_append_only.py", "baseline": "__NOT_PRESENT__", "current": "53962865451909b9c0be74128644fd35493ddbb2f1c3b1c5b12604932806311b"}, {"type": "untracked", "path": "scripts/replay-append-only.py", "baseline": "__NOT_PRESENT__", "current": "1435eb6a306a9ce29d3faf3c6b2f95ecefd4bee1a75d5db836262416300170dc"}, {"type": "untracked", "path": "tests/test_gate_metrics_handoff.py", "baseline": "__NOT_PRESENT__", "current": "4f18895777c71aa35daa25c26cebf84cc953cfc9158d83200f02d74a8ec16fae"}, {"type": "untracked", "path": "tests/test_replay_append_only.py", "baseline": "__NOT_PRESENT__", "current": "2e9c0c8d203c5900cff89b47bc4b3f5e2650da3e01012b4dfa146f3155ce8796"}], "worktree_changed": true, "commits_ahead": 0, "baseline_commit": "df4b3cfbc6774ad08aae8b7bcc2e365cf5a914ee", "head": "df4b3cfbc6774ad08aae8b7bcc2e365cf5a914ee", "basis": "baseline_commit"}

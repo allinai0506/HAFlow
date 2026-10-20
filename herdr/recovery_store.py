@@ -80,8 +80,19 @@ def read_snapshot(db_path, workflow_id):
         conn.close()
 
 
+def _human_wait_detail(payload, status, detail):
+    if status != 'waiting_human' or payload.get('kind') != 'fix_loop':
+        return detail
+    return {**detail, 'target_requires_explicit_replacement': True,
+            'replacement': {'operation_type': 'fix_loop', 'retry_node': payload.get('retry_node'),
+                            'affected_task_ids': payload.get('affected_task_ids') or []},
+            'decision_needed': 'Resolve ' + str(detail.get('reason') or payload.get('reason')) +
+                '; inspect recovery-status, then use recovery-decide with the current '
+                'operation id/version. A started repair requires verify before replacement.'}
+
+
 def ensure_obligations(conn, workflow, config, tasks, now=None):
-    from herdr.workflow_progress import assess_workflow, recovery_identity
+    from herdr.workflow_progress import _generation, assess_workflow, recovery_identity
     now = time.time() if now is None else now
     assessment = assess_workflow(workflow, config, tasks)
     identities = set()
@@ -102,11 +113,29 @@ def ensure_obligations(conn, workflow, config, tasks, now=None):
             conn.execute('UPDATE workflow_recovery_operations SET payload_json=?,status=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?', (payload, changed_status, now, row['id']))
             _event(conn, _get(conn, row['id']), 'facts_changed', now)
         op = _get(conn, row['id'])
+        if op['status'] == 'waiting_human' and facts.get('kind') == 'fix_loop':
+            detail = _human_wait_detail(facts, op['status'], op['detail'])
+            if detail != op['detail']:
+                conn.execute('UPDATE workflow_recovery_operations SET detail_json=?,version=version+1,updated_at=? WHERE id=?',
+                             (json.dumps(detail), now, op['id']))
+                op = _get(conn, op['id'])
         if cur.rowcount:
             _event(conn, op, 'registered', now)
         result.append(op)
     for row in conn.execute("SELECT * FROM workflow_recovery_operations WHERE workflow_id=? AND status NOT IN ('superseded','resolved')", (workflow['workflow_id'],)).fetchall():
-        if json.loads(row['payload_json']).get('kind') == 'node_dispatch':
+        facts = json.loads(row['payload_json'])
+        if facts.get('kind') == 'business_gate_wait':
+            # Completion metadata survives canonical reopen; current status is authoritative.
+            terminal = workflow.get('status') in {'completed', 'failed', 'halted', 'abandoned', 'closed'}
+            stale = (facts.get('generation') != _generation(workflow)
+                     or any(facts.get(key) != workflow.get(key) for key in
+                         ('execution_id', 'candidate_sha', 'candidate_episode_id'))
+                     or facts.get('node_id') not in {node.get('id') for node in config.get('nodes') or []})
+            if terminal or stale:
+                conn.execute("UPDATE workflow_recovery_operations SET status='superseded',version=version+1,updated_at=? WHERE id=?", (now, row['id']))
+                _event(conn, _get(conn, row['id']), 'gate_wait_obsolete', now)
+            continue
+        if facts.get('kind') == 'node_dispatch':
             continue  # Its independent dispatch lifecycle owns reconciliation.
         if row['identity_key'] not in identities:
             if (row['status'] == 'awaiting_result' or (row['started'] and row['status'] == 'running')
@@ -344,7 +373,7 @@ def finish_operation(db_path, operation_id, owner, status, detail, now):
         raise ValueError('invalid recovery status')
     with _transaction(db_path) as conn:
         current = _owned(conn, operation_id, owner, now)
-        detail = {**current['detail'], **detail}
+        detail = _human_wait_detail(current['payload'], status, {**current['detail'], **detail})
         conn.execute('UPDATE workflow_recovery_operations SET status=?,detail_json=?,next_due_at=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?', (status, json.dumps(detail), detail.get('next_due_at', now), now, operation_id))
         op = _get(conn, operation_id)
         _event(conn, op, 'finished', now, detail)
@@ -358,6 +387,8 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
         raise ValueError('future hold deadline required')
     with _transaction(db_path) as conn:
         original = _get(conn, operation_id)
+        if original['payload'].get('kind') == 'business_gate_wait':
+            raise ValueError('business gate waits resolve only after fresh acceptance evidence; relaunch the gate')
         if original['version'] != expected_version:
             raise ValueError('stale recovery version')
         ensure_for_workflow(conn, original['workflow_id'], now)
@@ -452,7 +483,7 @@ def settle_result(db_path, operation_id, expected_version, now):
         status, detail = outcome if isinstance(outcome, tuple) else (outcome, {})
         if status not in ('resolved', 'waiting_human'):
             raise ValueError('invalid recovery result status')
-        receipt = {**op['detail'], **detail}
+        receipt = _human_wait_detail(op['payload'], status, {**op['detail'], **detail})
         conn.execute('UPDATE workflow_recovery_operations SET status=?,detail_json=?,version=version+1,updated_at=? WHERE id=? AND version=?', (status, json.dumps(receipt), now, operation_id, expected_version))
         result = _get(conn, operation_id)
         _event(conn, result, 'result', now, receipt)

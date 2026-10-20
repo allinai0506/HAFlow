@@ -306,6 +306,8 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
     task_id = getattr(args, "task_id", "")
     workflow_id = getattr(args, "workflow_id", "")
     detail = str(error)[:1000]
+    launch_refused = reason == "baseline_stale"
+    status = "superseded" if launch_refused else "failed"
     task = {
         "task_id": task_id,
         "workflow_id": workflow_id,
@@ -313,7 +315,8 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
         "node": node_id,
         "stage": node_id,
         "agent": getattr(args, "agent", None) or "auto",
-        "status": "failed",
+        "status": status,
+        "blocker": detail if not remediation or remediation in detail else f"{detail} {remediation}"[:2000],
         "pane_id": "",
         "clone_path": "",
         "integration_mode": getattr(args, "integration_mode", "none"),
@@ -327,13 +330,15 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
         "updated_at": timestamp,
         "status_history": [{
             "from": "pending",
-            "to": "failed",
+            "to": status,
             "reason": reason,
             "source": "herdr-task",
             "timestamp": timestamp,
             "detail": detail,
         }],
     }
+    if launch_refused:
+        task.update(launch_not_started=True, replacement_pending=True)
     store = get_store()
     launch_intent = getattr(args, "_launch_intent", None)
     if launch_intent:
@@ -353,8 +358,11 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
         )
     store.save_task(task)
     if launch_intent:
-        from herdr.task_resources import finish_launch_intent
-        finish_launch_intent(store, launch_intent)
+        from herdr.task_resources import abort_launch_intent, finish_launch_intent
+        if launch_refused:
+            abort_launch_intent(store, launch_intent, reason=reason)
+        else:
+            finish_launch_intent(store, launch_intent)
     try:
         release_agent_reservation(task_id)
     except (OSError, ValueError, RuntimeError, AttributeError):

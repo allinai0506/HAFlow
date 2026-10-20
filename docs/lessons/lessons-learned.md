@@ -7501,3 +7501,23 @@ pytest -q tests/test_wrapup_candidate_delivery.py tests/test_wrapup_review_closu
 ```
 
 Evidence：`tests/test_wrapup_candidate_delivery.py` 的真实 Git/CLI/SQLite 默认模板回归；外部 Agent、forge 使用替身，不代表生产工作流或真实远端发布已经验证。
+
+
+## 179. 完成凭证分层与 append-only 文档重放的失败边界（2026-10-20）
+
+### 问题背景
+
+业务汇聚读取 acceptance 事件，人工放行却只写 stage_verdict。基线拒绝的未启动任务占据 failed 派发语义；未知 lint 输出还能被历史基线抵消。并行分支追加知识时则会生成相同编号。
+
+### 经验教训
+
+状态字段不能代替另一契约的凭证：无业务 acceptance 时应明确拒绝无效人工放行；未启动与执行失败应保留不同派发语义。等待责任必须同时具有升级和退役边界。静态输出不可解析必须 unavailable，不能变成可抵消的数字。文档三路追加需要校验完整原文前缀、完整末行以及 Git 文件存在性，内容为空不等于文件不存在。
+
+### 操作规范
+
+由门禁 Run 自签 acceptance-record。基线拒绝保留事件和 blocker，launch intent 记 resources_absent，沿既有 replacement 链补派。显式 rebaseline 留原因、旧值和 SHA。追加文档工具只顺延新增条目编号，保持 onto 原字节不动；历史重复编号不在本次重写范围，删除、历史改写和不完整末行明确拒绝。
+
+### 验证命令 / 守护测试
+
+`pytest -q tests/test_gate_metrics_handoff.py tests/test_replay_append_only.py tests/test_dispatch_baseline_failfast.py`。
+Evidence：`herdr/task_checkpoint.py#reject_verdict_only_override`、`herdr/gate_wait.py#record_wait`、`herdr/evaluator.py#rebaseline_lint`、`herdr/replay_append_only.py#merge_append_only`。隔离测试不代表生产工作流已解除阻断。
