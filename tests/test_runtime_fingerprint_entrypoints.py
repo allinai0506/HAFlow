@@ -42,6 +42,13 @@ def test_main_logs_actual_import_fingerprint_before_work(relative,service,tmp_pa
     assert records[0]['running_import_root']==str(ROOT.resolve())
     assert records[0]['running_sha']=='unknown' # workspace is not release evidence
     assert str(path.resolve()) in records[0]['component_versions']
+    if service == 'com.user.herdr-controller':
+        import hashlib
+        expected = [*sorted((ROOT/'services/controller').glob('*.py')),
+                    ROOT/'herdr/completion_controller.py',
+                    *sorted((ROOT/'herdr').glob('coordinator_*.py'))]
+        for component in expected:
+            assert records[0]['component_versions'][str(component.resolve())] == hashlib.sha256(component.read_bytes()).hexdigest()
     assert 'fake-secret-do-not-log' not in output
     # Executable hermeticity guard: executing real entrypoint code must not
     # create the default collector database (or anything else) under HOME.
