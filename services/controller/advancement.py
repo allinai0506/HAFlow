@@ -295,7 +295,10 @@ def check_workflow_stage_advance(ports, workflow_id):
                 continue
             attention_key = f"{workflow_id}:stage_advance:{ready_id}"
             attention = ports.attention_get(attention_key) or {}
-            if attention.get("reason") == "human_decision_required":
+            if attention.get("reason") in (
+                "human_decision_required",
+                "direct_dispatch_delivery_unknown",
+            ):
                 continue
             if ports.attention_blocks_retry(attention_key):
                 continue
@@ -395,7 +398,14 @@ def check_workflow_stage_advance(ports, workflow_id):
             ports.handle_fix_loop(workflow_id, stage_key, gate_cfg, workflow_cfg)
             continue
 
-        if ports.attention_blocks_retry(f"{workflow_id}:stage_advance:{next_stage}"):
+        attention_key = f"{workflow_id}:stage_advance:{next_stage}"
+        attention = ports.attention_get(attention_key) or {}
+        if attention.get("reason") in (
+            "human_decision_required",
+            "direct_dispatch_delivery_unknown",
+        ):
+            continue
+        if ports.attention_blocks_retry(attention_key):
             continue
 
         if ports._fix_loop_latch_blocks(workflow_id, stage_key):
