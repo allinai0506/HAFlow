@@ -92,6 +92,22 @@ def test_business_wait_escalates_once_and_resolves(store):
                 if op['payload'].get('kind') == 'business_gate_wait')['status'] == 'resolved'
 
 
+@pytest.mark.parametrize('status', ['paused', 'completed'])
+def test_record_wait_retires_same_identity_when_workflow_is_inactive(store, status):
+    from herdr import gate_wait, recovery_store
+    for now in (10, 40, 70):
+        active = gate_wait.record_wait(store.db_path, 'wf', 'wrapup', ['t'], now=now)
+    workflow = store.get_workflow('wf')
+    workflow['status'] = status
+    store.save_workflow(workflow)
+
+    assert gate_wait.record_wait(store.db_path, 'wf', 'wrapup', ['t'], now=100) is None
+
+    retired = next(item for item in recovery_store.list_operations(store.db_path, 'wf')
+                   if item['id'] == active['id'])
+    assert retired['status'] == 'superseded'
+
+
 def test_rejected_launch_is_actionable_and_redispatchable(store):
     from herdr.task_cli_launch import record_router_failure_task
     from herdr.task_lineage import lineage_redispatch_candidates

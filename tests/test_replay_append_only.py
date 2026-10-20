@@ -253,3 +253,37 @@ def test_numbered_replay_does_not_append_tail_covered_by_main():
 
     assert first == second == main
     assert first_mapping == second_mapping == {}
+
+
+def test_non_numbered_replay_matches_newline_terminated_block_before_next_line():
+    base = b'old\n'
+    incoming = base + b'candidate\n'
+    main = base + b'candidate\nmain-only\n'
+
+    merged, mapping = merge_append_only(base, main, incoming)
+
+    assert merged == main
+    assert mapping == {}
+
+
+def test_numbered_replay_preserves_unmatched_whitespace_prefix():
+    base = b'## 1. old\nold body\n'
+    incoming = base + b'\n## 2. shared\nshared body\n'
+    main = base + b'## 2. shared\nshared body\n'
+
+    merged, mapping = merge_append_only(base, main, incoming, numbered=True)
+
+    assert merged == main + b'\n'
+    assert mapping == {}
+
+
+def test_numbered_replay_preserves_crlf_as_an_atomic_separator():
+    base = b'## 1. old\r\nold body\r\n'
+    incoming = base + b'## 2. shared\r\nshared body\r\n'
+    main = base + b'## 2. shared\r\nshared body\n'
+
+    merged, mapping = merge_append_only(base, main, incoming, numbered=True)
+
+    assert merged == main + b'\r\n'
+    assert not merged.endswith(b'\r')
+    assert mapping == {}

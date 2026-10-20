@@ -19,18 +19,20 @@ def record_wait(db_path, workflow_id, node_id, missing, *, now=None):
                  'candidate_episode_id': workflow.get('candidate_episode_id'),
                  'missing': missing, 'responsible': 'human'}
         identity = 'business_gate_wait:' + _hash(facts)
+        inactive = (workflow.get('status') != 'running'
+                    or node_id not in {node.get('id') for node in config.get('nodes') or []})
         rows = conn.execute("SELECT * FROM workflow_recovery_operations WHERE workflow_id=? "
                             "AND identity_key LIKE 'business_gate_wait:%' "
                             "AND status NOT IN ('resolved','superseded')", (workflow_id,)).fetchall()
         for row in rows:
             old = rs._decode(row)
-            if old['payload'].get('node_id') == node_id and (not missing or old['identity_key'] != identity):
+            if (old['payload'].get('node_id') == node_id
+                    and (not missing or inactive or old['identity_key'] != identity)):
                 state = 'superseded' if missing else 'resolved'
                 conn.execute("UPDATE workflow_recovery_operations SET status=?, "
                              "version=version+1,updated_at=? WHERE id=?", (state, now, row['id']))
                 rs._event(conn, rs._get(conn, row['id']), 'gate_wait_resolved', now)
-        if (not missing or workflow.get('status') != 'running'
-                or node_id not in {node.get('id') for node in config.get('nodes') or []}):
+        if not missing or inactive:
             return None
         detail = {'reason': 'business_acceptance_missing', 'missing': missing,
                   'decision_needed': 'Rebase/relaunch the blocked gate on the current candidate; '

@@ -20,7 +20,8 @@ def _contains_append_block(history, block):
             return False
         end = position + len(block)
         starts_on_boundary = position == 0 or history[position - 1:position] == b'\n'
-        ends_on_boundary = end == len(history) or history[end:end + 1] == b'\n'
+        ends_on_boundary = (end == len(history) or block.endswith(b'\n')
+                            or history[end:end + 1] == b'\n')
         if starts_on_boundary and ends_on_boundary:
             return True
         offset = position + 1
@@ -66,9 +67,11 @@ def _entry_identity(document, entries, index):
 def _unmatched_entry_tail(candidate_block, main_block):
     candidate_tail = candidate_block[len(candidate_block.rstrip(b'\r\n')):]
     main_tail = main_block[len(main_block.rstrip(b'\r\n')):]
-    if main_tail and candidate_tail.endswith(main_tail):
-        return candidate_tail[:-len(main_tail)]
-    if candidate_tail and main_tail.endswith(candidate_tail):
+    candidate_lines = re.findall(rb'\r\n|\n|\r', candidate_tail)
+    main_lines = re.findall(rb'\r\n|\n|\r', main_tail)
+    if main_lines and candidate_lines[-len(main_lines):] == main_lines:
+        return b''.join(candidate_lines[:-len(main_lines)])
+    if candidate_lines and main_lines[-len(candidate_lines):] == candidate_lines:
         return b''
     return candidate_tail if candidate_tail != main_tail else b''
 
@@ -80,21 +83,24 @@ def _applied_prefix(main, candidate, candidate_entries):
                        for index in range(len(main_entries))]
     candidate_identities = [_entry_identity(candidate, candidate_entries, index)
                             for index in range(len(candidate_entries))]
-    best = (0, b'')
+    best = (0, b'', None)
     for start in range(len(main_identities)):
         matched = 0
         pending = []
+        first_position = None
         for main_index in range(start, len(main_identities)):
             identity = main_identities[main_index]
             if (matched < len(candidate_identities)
                     and candidate_identities[matched] == identity):
+                if first_position is None:
+                    first_position = main_entries[main_index][1]
                 pending.append(_unmatched_entry_tail(
                     _entry_block(candidate, candidate_entries, matched),
                     _entry_block(main, main_entries, main_index),
                 ))
                 matched += 1
         if matched > best[0]:
-            best = (matched, b''.join(pending))
+            best = (matched, b''.join(pending), first_position)
     return best
 
 
@@ -131,15 +137,20 @@ def merge_append_only(base, main, incoming, *, numbered=False):
         if len(added) != len(set(added)):
             raise ValueError('duplicate new lesson numbers within incoming history')
         prefix = suffix[:candidate_entries[0][1]] if candidate_entries else b''
-        prefix_pending = (prefix if prefix.strip()
-                          and not _contains_append_block(main_suffix, prefix) else b'')
-        applied, unmatched_separators = _applied_prefix(
+        applied, unmatched_separators, first_position = _applied_prefix(
             main_suffix, suffix, candidate_entries)
+        if applied and prefix:
+            prefix_applied = (first_position >= len(prefix)
+                              and main_suffix[first_position - len(prefix):first_position] == prefix)
+        elif prefix.strip():
+            prefix_applied = _contains_append_block(main_suffix, prefix)
+        else:
+            prefix_applied = False
+        prefix_pending = b'' if prefix_applied else prefix
         if applied == len(candidate_entries) and candidate_entries:
             return main + prefix_pending + unmatched_separators, {}
         if applied or prefix_pending != prefix:
-            separator = prefix if not prefix.strip() else prefix_pending
-            suffix = (separator + unmatched_separators
+            suffix = (prefix_pending + unmatched_separators
                       + suffix[candidate_entries[applied][1]:])
             candidate_entries = _numbered_entries(suffix)
         existing = [entry[0] for entry in _numbered_entries(main)]
