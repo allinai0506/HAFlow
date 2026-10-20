@@ -38,5 +38,5 @@ verification:
 evidence:
 - kind: implemented
   source: herdr/task_cli_delivery.py
-  locator: cleanup_task L340-371（logical cleanup only）
+  locator: cleanup_task L361-392（logical cleanup only）
   confidence: high

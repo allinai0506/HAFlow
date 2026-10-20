@@ -100,3 +100,5 @@ GitHub 全量 CI 同时暴露 9 个旧测试夹具与新合同不一致：close 
 后续复审补出两项 P2。初次 lint baseline 捕获现在与显式 rebaseline 一样在命令前后读取 HEAD，期间提交变化会拒绝发布，避免把旧或混合工作树输出绑定到新 SHA。编号文档去重现单独保留首个真实标题前的非空字节；即使全部标题条目已存在，也不会静默丢弃前置正文，重复重放则按完整行边界去重该前缀。两项回归先失败后通过，16 模块专项更新为 236 passed、10 subtests。远端上一轮全量的单一失败位于未受本次变更影响的 wrapup 测试，原因是并行现场 `clone_git_inventory_unknown`；同一精确参数本地重跑通过，保留远端失败记录并在新 head 重跑全量。
 
 下一轮复审发现前置正文已经落地、编号条目尚未落地的局部状态仍会复制前缀。suffix 重建现无论已应用条目数是否为零，都使用独立计算后的待追加前缀；新增 prefix-only partial application 回归，编号条目仍正常追加且 `IMPORTANT` 只保留一次。16 模块专项更新为 237 passed、10 subtests。
+
+PR 最终复审绑定 `5e6bef4`，Codex 明确返回无 findings、无未决 P1/P2，远端 pytest、tests-required 与 P1 Gate 全部通过。随后为解除 GitHub `DIRTY`，将最新 `origin/main` 合入同一 PR 分支；唯一内容冲突位于 append-only `wiki/log.md`，解决结果完整保留双方追加段落。合并后专项额外覆盖 main 新增的 D5 状态与 wrapup 交付路径，共 334 passed、2 skipped、10 subtests。

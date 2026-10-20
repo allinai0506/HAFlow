@@ -5,14 +5,14 @@
 > **产品：HAFlow**  
 > **一句话：让人和多个 AI Agent 一起把事情做完**  
 > *Human + Agent, in Flow*  
-> **任务 11 状态机、CoW 克隆隔离与基线快照验收**  
+> **任务 15 状态机、CoW 克隆隔离与基线快照验收**
 > 关联索引: [[index]] | [[system-overview]] | [[domain-model]] | [[dag-workflow-engine]]
 
 ---
 
 ## 1. 任务状态机 (Task State Machine)
 
-`FACT` HAFlow 任务生命周期严格由 11 个离散状态及其状态转换矩阵（`TRANSITIONS`）定义，任何越权状态变更将被 CLI 直接拦截。
+`FACT` HAFlow 任务生命周期严格由 15 个离散状态及其状态转换矩阵（`TRANSITIONS`，权威定义见 `herdr/transitions.py`）定义，任何越权状态变更将被 CLI 直接拦截。
 
 ```mermaid
 stateDiagram-v2
@@ -22,22 +22,46 @@ stateDiagram-v2
 
     dispatched --> working: Agent 在 Pane 中启动
     dispatched --> blocked
+    dispatched --> paused
+    dispatched --> interrupted
+    dispatched --> agent_done
     dispatched --> failed
+    dispatched --> superseded
 
     working --> agent_done: Agent 完成产出
     working --> blocked: 等待外部输入/卡死
+    working --> rework
+    working --> paused
+    working --> interrupted
     working --> failed
+    working --> superseded
 
     blocked --> working: 恢复执行
+    blocked --> rework
+    blocked --> paused
+    blocked --> interrupted
+    blocked --> agent_done
     blocked --> failed
+    blocked --> superseded
+
+    paused --> working
+    paused --> superseded
+
+    interrupted --> working
+    interrupted --> superseded
 
     agent_done --> completed: verify-baseline 验收通过
     agent_done --> rework: 验收未通过打回重做
     agent_done --> failed
+    agent_done --> superseded
 
     rework --> working: 重新进入工位执行
     rework --> blocked
+    rework --> paused
+    rework --> interrupted
+    rework --> agent_done
     rework --> failed
+    rework --> superseded
 
     completed --> committed: herdr-task commit 提交分支
     completed --> cleanup_ready: 直接跳过提交准备清理
@@ -46,8 +70,9 @@ stateDiagram-v2
     integrated --> cleanup_ready: 准备工位与克隆清理
 
     cleanup_ready --> cleaned: herdr-task cleanup 资源释放
-    cleaned --> [*]
-    failed --> [*]
+    cleaned --> superseded: 终态归档
+    failed --> superseded: 终态归档
+    superseded --> [*]
 ```
 
 Evidence:

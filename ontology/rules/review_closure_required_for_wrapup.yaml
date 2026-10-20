@@ -9,7 +9,7 @@ logic_ref: herdr/review_closure.py:check_completion_allowed
 evidence:
 - kind: implemented
   source: herdr/review_closure.py
-  locator: check_completion_allowed L1082-1109
+  locator: check_completion_allowed L1109-1145
   confidence: high
 - kind: implemented
   source: herdr/kernel.py

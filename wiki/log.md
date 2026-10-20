@@ -3179,8 +3179,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - UNKNOWN：隔离测试使用外部 Agent/forge 替身，未部署或修改生产工作流。
 
 - 2026-10-20（工作流自动化优化，PR #287 复验）：补齐旧 pin 的新候选独立路由合同，派发前拒绝与最终发布矛盾的软降级；同步模板/技能 canonical hash 守护，保留旧非闭环调度路径。
-
-
 ## [2026-10-20] Fix | 门禁等待、基线拒绝与追加文档重放
 
 - Updated [[task-lifecycle]]：receipt-v1 无效人工放行明确拒绝；未启动任务沿 replacement 链补派，等待责任可升级和退役。
@@ -3188,3 +3186,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 文档三路导出保持 onto 原前缀并顺延新增 lessons 编号；正文改写和不完整末行拒绝。不将追加文档视为完整候选零成本重放。
 - Evidence：`tests/test_gate_metrics_handoff.py`、`tests/test_replay_append_only.py`、`docs/walkthroughs/20261020-gate-metrics-repair.md`。
 - UNKNOWN：未部署、未重启，未改写 wf-haflow-1020-02 的业务状态或验收凭证。
+
+## [2026-10-20] Fix | D5 fix-loop 可作废状态补齐与状态矩阵单一来源收敛 (SC-001/SC-002/SC-014)
+
+- Updated [[domain-model]], [[index]], [[task-lifecycle]]：将历史“11 状态机”定义全面对齐为源码事实 15 状态机，更新 Mermaid 状态图，显式覆盖 `paused`、`interrupted`、`superseded` 终态流转。
+- Updated `services/herdr-controller.py`：`FIX_LOOP_SUPERSEDEABLE` 补齐 `paused` 与 `interrupted`，解决 fix-loop 回流作废时挂起/中断任务被错误跳过（SC-014 / D5 落地）。
+- Updated `bin/herdr-task`：彻底删除 `except ImportError:` 下落后的 14 状态兜底字典副本，确立 `herdr/transitions.py:TASK_TRANSITIONS` 为全系统唯一状态机事实源（SC-002）。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-001、SC-002、SC-014 状态更新为“已解决”。
+- Evidence：`herdr/transitions.py`、`services/herdr-controller.py#FIX_LOOP_SUPERSEDEABLE`、`bin/herdr-task#TRANSITIONS`、`tests/test_d5_fix_loop_supersedeable.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-20] Docs | 存储权威与预占文件名统一收敛 (SC-004/SC-009)
+
+- Updated `docs/architecture/architecture-overview.md`：校准存储架构分层 Mermaid 图与核心职责，确立 SQLite `state.db` 为唯一权威事实源，`tasks.json` / `projects.json` / `workflows.json` 降级为向后兼容与只读导出投影（SC-004）。
+- Updated `docs/product-specs/agent-policy-spec.md` & `docs/operations/troubleshooting-faq.md`：校准预占锁文件名为 `agent-reservations.json`，并更正默认过期时间说明为 300 秒（5 分钟）（SC-009）。
+- Updated `ontology/mappings/agent_reservation_file_mapping.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-004 与 SC-009 标记为“已解决”。
+- Evidence：`herdr/state_store.py`、`herdr/agent_router.py#RESERVATIONS_FILE`、`docs/architecture/architecture-overview.md`、`docs/product-specs/agent-policy-spec.md`、`docs/operations/troubleshooting-faq.md`、`ontology/tests/audit_ontology.py`。
