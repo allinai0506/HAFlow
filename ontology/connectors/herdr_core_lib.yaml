@@ -36,5 +36,5 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/projects.py
-  locator: ensure_project L1302 / register_workflow L551
+  locator: ensure_project L1332 / register_workflow L551
   confidence: high

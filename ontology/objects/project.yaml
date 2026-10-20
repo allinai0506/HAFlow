@@ -66,7 +66,7 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/projects.py
-  locator: provision_project L877-949
+  locator: provision_project L907-979
   confidence: high
 - kind: intended
   source: docs/product-specs/workflow-template-schema.md

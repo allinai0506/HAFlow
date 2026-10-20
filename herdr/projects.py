@@ -600,7 +600,26 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
         wf_entry["execution"] = execution
     if context:
         wf_entry["context"] = context
-    store.save_workflow(wf_entry)
+
+    event_payload = {
+        "workflow_id": workflow_id,
+        "title": title,
+        "project_id": project.get("project_id"),
+        "status": "running",
+        "requirement": requirement,
+        "workflow_file": resolved_workflow_file,
+    }
+    if hasattr(store, "register_workflow"):
+        store.register_workflow(wf_entry, event_payload=event_payload)
+    else:
+        store.save_workflow(wf_entry)
+        if hasattr(store, "record_event"):
+            store.record_event(
+                event_type="workflow_created",
+                payload=event_payload,
+                workflow_id=workflow_id,
+                source="register_workflow",
+            )
     try:
         from .state_store import sync_workflows_projection
     except ImportError:

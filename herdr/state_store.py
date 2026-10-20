@@ -121,6 +121,15 @@ class StateStore(ABC):
     """Abstract StateStore interface governing all Herdr system state."""
 
     # Workflows
+    def register_workflow(
+        self,
+        workflow: Dict[str, Any],
+        event_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Atomically upsert a workflow record and persist its authoritative workflow_created event."""
+        self.save_workflow(workflow)
+        return {"ok": True, "workflow_id": workflow.get("workflow_id")}
+
     @abstractmethod
     def save_workflow(self, workflow: Dict[str, Any]) -> None:
         """Upsert a workflow record."""
@@ -672,8 +681,24 @@ class SQLiteStateStore(StateStore):
             pass
 
     # Workflows
-    def save_workflow(self, workflow: Dict[str, Any]) -> None:
-        state_db.save_workflow(workflow, db_path=self.db_path)
+    def register_workflow(
+        self,
+        workflow: Dict[str, Any],
+        event_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return state_db.register_workflow(
+            workflow,
+            event_payload=event_payload,
+            db_path=self.db_path,
+            save_workflow_fn=self.save_workflow,
+        )
+
+    def save_workflow(
+        self,
+        workflow: Dict[str, Any],
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        state_db.save_workflow(workflow, db_path=self.db_path, conn=conn)
 
     def get_workflow(self, workflow_id: str) -> Optional[Dict[str, Any]]:
         return state_db.get_workflow(workflow_id, db_path=self.db_path)
