@@ -25,7 +25,15 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
         )
         sys.exit(2)
 
-    if task["status"] == "integrated":
+    from herdr import wrapup_delivery
+    workflow = get_store().get_workflow(task["workflow_id"]) or {}
+    wrapup_phase = task.get("wrapup_delivery") or {}
+    wrapup_pending = (wrapup_delivery.enabled(task, workflow.get("config") or {})
+                      and task.get("status") in wrapup_delivery.ACTIVE
+                      and wrapup_phase.get("phase") in {"committed", "integrated"}
+                      and wrapup_phase.get("run_id") == task.get("run_id")
+                      and wrapup_phase.get("execution_id") == workflow.get("execution_id"))
+    if task["status"] == "integrated" or (wrapup_pending and wrapup_delivery.integrated(task, workflow)):
         if task.get("commit") and task.get("integration_ref"):
             clear_finalize_escalation(task_id)
             publish_integrated_task(task_id)
@@ -49,7 +57,7 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
         )
         sys.exit(2)
 
-    if task["status"] != "committed":
+    if task["status"] != "committed" and not wrapup_pending:
         print(
             f"Task cannot integrate from status: "
             f"{task['status']}"
@@ -272,6 +280,10 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
             )
             sys.exit(4)
 
+    integration_base_sha = subprocess.check_output(
+        ['git', '-C', clone, 'rev-parse', base_ref], text=True).strip()
+    if wrapup_pending:
+        task = wrapup_delivery.prepare_rebase(get_store(), task, integration_base_sha)
     integration_head_before_rebase = git_head_sha(clone)
 
     rebase = subprocess.run(
@@ -280,7 +292,7 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
             "-C",
             clone,
             "rebase",
-            base_ref
+            integration_base_sha
         ],
         text=True,
         capture_output=True,
@@ -321,7 +333,7 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
             "rev-list",
             "--left-right",
             "--count",
-            f"{base_ref}...HEAD"
+            f"{integration_base_sha}...HEAD"
         ],
         text=True
     ).strip().split()
@@ -350,10 +362,11 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
     # the immutable result before transport; retry uses this new commit.
     from herdr import kernel
     integrated_commit = git_head_sha(clone)
-    kernel.update_task_metadata(task_id, {
+    task = kernel.update_task_metadata(task_id, {
         'commit': integrated_commit,
         'integration_head_before_rebase': integration_head_before_rebase,
-    }, store=get_store())
+        'integration_base_sha': integration_base_sha,
+    }, store=get_store(), expected_version=task.get('version') if wrapup_pending else None)
     herdr_ref = f"refs/herdr/tasks/{task_id}"
 
     subprocess.run(
@@ -385,6 +398,10 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
         check=True,
     )
 
+    if wrapup_pending:
+        subprocess.run(['git', '-C', main_repo, 'update-ref',
+            'refs/heads/' + wrapup_delivery.publication_branch(task, integrated_commit), integrated_commit], check=True)
+
     from herdr import kernel
     integrated_commit = git_head_sha(clone)
     kernel.update_task_metadata(task_id, {
@@ -395,12 +412,12 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
         "integrated_commit": integrated_commit,
         "commit": integrated_commit,
         "integration_head_before_rebase": integration_head_before_rebase,
-    }, store=get_store())
+    }, store=get_store(), expected_version=task.get('version') if wrapup_pending else None)
 
-    set_status(
-        task_id,
-        "integrated"
-    )
+    if wrapup_pending:
+        wrapup_delivery.finish_integration(get_store(), task_id)
+    else:
+        set_status(task_id, "integrated")
 
     clear_finalize_escalation(task_id)
     publish_integrated_task(task_id)

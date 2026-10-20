@@ -176,6 +176,11 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
         episode = conn.execute("SELECT id FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source='critical-path-scheduler' AND timestamp>=? ORDER BY id DESC LIMIT 1", (workflow_id, epoch)).fetchone()
     finally:
         conn.close()
+    if publication:
+        published_task = next((t for t in delivery_tasks if t['task_id'] == publication['task_id']), {})
+        from herdr.wrapup_delivery import integrated
+        if integrated(published_task, workflow):
+            source_node = 'wrapup'
     git_deliveries = [t for t in delivery_tasks
         if (t.get('node') or t.get('stage')) == source_node
         and (not t.get('execution_id') or t['execution_id'] == workflow.get('execution_id'))

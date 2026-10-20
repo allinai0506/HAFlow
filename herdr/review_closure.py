@@ -637,6 +637,9 @@ def delivery_identity(store, task: Any) -> Tuple[List[str], str, str, str]:
             payload = event.get("payload") if isinstance(event, dict) else None
             if not isinstance(payload, dict):
                 continue
+            workflow = store.get_workflow(workflow_id) or {}
+            if payload.get("execution_id") and payload["execution_id"] != workflow.get("execution_id"):
+                continue
             parsed = parse_pr_url(payload.get("url"))
             if parsed:
                 _host, owner, repo, number = parsed
@@ -677,6 +680,25 @@ def identity_mismatch(store, task: Any, pr_url: Any, head_sha: Any) -> Optional[
     the gate, even when its head SHA matches (e.g. a fork or a second
     repository hosting the same commit) — Codex review P1.
     """
+    if task.get('wrapup_delivery'):
+        from .pr_delivery import _publication
+        from . import workflow_docs
+        try:
+            from .wrapup_delivery import has_worktree_output
+            if has_worktree_output(task):
+                return 'wrapup worktree changed after certification; register a new candidate'
+            sha, _, _ = _publication(task, workflow_docs.load_notes(task['workflow_id']), store)
+            workflow = store.get_workflow(task['workflow_id']) or {}
+            if sha != head_sha or workflow.get('candidate_sha') != sha:
+                return 'wrapup candidate is not the currently certified delivery'
+            events = store.list_events(workflow_id=task['workflow_id'], event_type='pull_request_created', desc=True, limit=1)
+            publication = (events[0].get('payload') or {}) if events else {}
+            if (publication.get('candidate_sha') != sha
+                    or publication.get('execution_id') != workflow.get('execution_id')
+                    or publication.get('candidate_episode_id') != workflow.get('candidate_episode_id')):
+                return 'wrapup candidate has no current platform PR publication'
+        except ValueError as exc:
+            return 'wrapup certification unavailable: ' + str(exc)
     parsed = parse_pr_url(pr_url)
     if not parsed:
         return "unrecognized PR URL"
@@ -943,6 +965,11 @@ def _execute_with_head_guard(tid: str, orig_fn, self, *args, **kwargs):
                     f"(expected {exp_head[:12]}, found {(now_head or 'unavailable')[:12]}); "
                     "re-record the receipt on the current head."
                 )
+            current_task = self.get_task(tid) or {}
+            if current_task.get('wrapup_delivery'):
+                from .wrapup_delivery import has_worktree_output
+                if has_worktree_output(current_task):
+                    raise ValueError('[REVIEW CLOSURE REQUIRED] wrapup worktree changed before completion CAS')
             return orig_fn(self, *args, **kwargs)
     finally:
         with _HEAD_GUARDS_LOCK:
@@ -1101,6 +1128,12 @@ def check_completion_allowed(store, task: Any, bind_guard: bool = True) -> Tuple
             '--skip-review-closure --note "<reason>".'
         )
     else:
+        if task.get('wrapup_delivery'):
+            workflow = store.get_workflow(task['workflow_id']) or {}
+            if (not task.get('run_id') or payload.get('run_id') != task.get('run_id')
+                    or payload.get('execution_id') != task.get('execution_id')
+                    or payload.get('candidate_episode_id') != workflow.get('candidate_episode_id')):
+                return False, 'review-closure receipt belongs to another Run/execution/candidate episode'
         ok, why = validate_receipt_payload(payload)
         if not ok:
             receipt_refusal = (

@@ -156,7 +156,7 @@ def adopt_head_if_attributable(
         target_status = (
             task["status"] if task.get("status") in preserve_status else "committed"
         )
-        if task.get("status") != target_status:
+        if not task.get("wrapup_delivery") and task.get("status") != target_status:
             set_status(task_id, target_status)
         short_base = str(detail.get("baseline") or "")[:8]
         print(

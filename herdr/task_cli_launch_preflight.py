@@ -111,6 +111,13 @@ def preflight_delivery_identity(
             "delivery candidate was invalidated and no matching frozen "
             "candidate exists for this dispatch claim",
         )
+    candidate, source = resolve_expected_candidate(workflow_id, claim)
+    from .wrapup_delivery import is_current_round
+    if (source == 'frozen' and is_current_round(get_store(), workflow_id, candidate)
+            and candidate != delivery_record._body_value(effective, 'candidate_sha')):
+        # A newly frozen candidate is being certified; the previous delivery
+        # remains history until the fresh gates establish its replacement.
+        return {'candidate_sha': candidate, 'identity_source': 'frozen'}
     return effective
 
 
@@ -346,7 +353,6 @@ def validate_test_review_baseline(
 ):
     from herdr import delivery_record, workflow_docs
 
-    node_id = getattr(args, "node", "") or getattr(args, "stage", "")
     notes = workflow_docs.load_notes(args.workflow_id)
     try:
         effective = delivery_record.select_effective_delivery(notes)
@@ -365,6 +371,9 @@ def validate_test_review_baseline(
         )
 
     claim = str(getattr(args, "candidate_sha", None) or "").strip()
+    from .wrapup_delivery import is_current_round
+    if claim and is_current_round(get_store(), args.workflow_id, claim):
+        effective = None
     if effective is not None:
         candidate = str(effective.get("candidate_sha") or "")
         if not candidate:

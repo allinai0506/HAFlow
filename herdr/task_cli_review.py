@@ -122,6 +122,10 @@ def record_review_closure(
         "unresolved_p1": unresolved_p1,
         "unresolved_p2": unresolved_p2,
     }
+    if task.get('wrapup_delivery'):
+        workflow = _get_store().get_workflow(task['workflow_id']) or {}
+        payload.update(run_id=task.get('run_id'), execution_id=task.get('execution_id'),
+                       candidate_episode_id=workflow.get('candidate_episode_id'))
     ok, why = review_closure.validate_receipt_payload(
         payload, require_verification=False
     )
