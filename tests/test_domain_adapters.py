@@ -93,6 +93,8 @@ FAILED tests/test_a.py::test_legacy - AssertionError: expected True
         # 2. Task inference
         self.assertIsInstance(get_domain_adapter(task_type="code"), SoftwareDomainAdapter)
         self.assertIsInstance(get_domain_adapter(task_type="bugfix"), SoftwareDomainAdapter)
+        self.assertIsInstance(get_domain_adapter(task_type="feat"), SoftwareDomainAdapter)
+        self.assertIsInstance(get_domain_adapter(task_type="perf"), SoftwareDomainAdapter)
         self.assertIsInstance(get_domain_adapter(task_type="docs"), GenericDomainAdapter)
         self.assertIsInstance(get_domain_adapter(task_type="tender"), GenericDomainAdapter)
 

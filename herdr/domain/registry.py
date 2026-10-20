@@ -23,7 +23,8 @@ _ADAPTER_CLASSES: Dict[str, Type[BaseDomainAdapter]] = {
 }
 
 _SOFTWARE_TASK_TYPES = frozenset({
-    "code", "test", "fix", "bugfix", "hotfix", "refactor", "impl", "craft"
+    "code", "test", "fix", "bugfix", "hotfix", "refactor", "impl", "craft",
+    "feat", "perf", "ci", "chore",
 })
 
 _SOFTWARE_TEMPLATE_PREFIXES = ("software-", "code-", "tdd-")

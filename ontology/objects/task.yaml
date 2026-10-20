@@ -69,7 +69,7 @@ properties:
   name: 任务类型
   type: enum
   required: false
-  notes: launch --task-type 取值 fix|feat|refactor|docs|test|chore|perf|ci，默认 feat（bin/herdr-task L8823-8835）；与 node.default_task_type 词表不同（SC-013）
+  notes: launch --task-type 取值 fix|feat|refactor|docs|test|chore|perf|ci，默认 feat；与 node.default_task_type 词表已对齐统一（SC-013 已解决）
 - id: payload.branch
   name: 独占分支
   type: string

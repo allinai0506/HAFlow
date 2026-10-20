@@ -55,7 +55,7 @@ herdr-task launch \
   --node <node_id> \
   --goal "<任务目标>" \
   --criteria "<验收标准>" \
-  [--task-type explore|plan|code|test|review|docs] \
+  [--task-type fix|feat|refactor|docs|test|chore|perf|ci] \
   [--agent auto|<agent_name>] \
   [--source <project_root>]
 ```

@@ -3195,6 +3195,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/mappings/agent_reservation_file_mapping.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-004 与 SC-009 标记为“已解决”。
 - Evidence：`herdr/state_store.py`、`herdr/agent_router.py#RESERVATIONS_FILE`、`docs/architecture/architecture-overview.md`、`docs/product-specs/agent-policy-spec.md`、`docs/operations/troubleshooting-faq.md`、`ontology/tests/audit_ontology.py`。
 
+## [2026-10-20] Fix | 任务类型词表与 Schema 对齐收敛 (D4/SC-013)
+
+- Updated `docs/product-specs/workflow-template-schema.md`、`docs/references/cli-reference.md` & `docs/guides/universal-workflow-guide.md`：校准 `default_task_type` 与 CLI `launch --task-type` 技术任务枚举为 `fix/feat/refactor/docs/test/chore/perf/ci`，修正文档示例中无效的 `explore` 为 `docs`，明确业务类型通过 `business_task_type` 传递（SC-013 / D4 落地）。
+- Updated `herdr/domain/registry.py`：`_SOFTWARE_TASK_TYPES` 补充 `feat`、`perf`、`ci`、`chore`，确保领域适配器启发式推断完整覆盖技术任务全集。
+- Updated `ontology/objects/task.yaml`、`ontology/objects/workflow_node.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-013 状态标记为“已解决”。
+- Evidence：`herdr/direct_dispatch.py#TASK_TYPE_CHOICES`、`herdr/domain/registry.py#_SOFTWARE_TASK_TYPES`、`tests/test_task_type_vocabulary.py`、`tests/test_domain_adapters.py`、`ontology/tests/audit_ontology.py`。
+
 ### 2026-10-20：执行轨迹的窗口外回执与候选冻结归属
 
 - FACT：超过 2000 条存储事件窗口时，轨迹按同一 Task / Run 范围补读 `verification_completed`、`task_artifact_checkpoint`、`candidate_published` 和 `tool_execution`，按事件类型分别限流、每类最多 2000 条，按事件 ID 去重后按时间排序；不改成无界查询。

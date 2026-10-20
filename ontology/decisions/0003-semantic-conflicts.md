@@ -17,7 +17,7 @@
 | SC-010 | 门禁豁免审批 | 设计意图为人工例外通道 | herdr/kernel.py L850-857 仅校验 reason；operator 为自由字符串；无二次审批；控制台写路由无鉴权 | — | 确认 |
 | SC-011 | 工作流初始状态 | herdr/transitions.py L89-97 以 pending 为起点 | herdr/projects.py L593 直接写 running；herdr/state_db.py L1617 占位工作流写 pending | — | **已裁决**（ADR-0007 / OEP-0002） |
 | SC-012 | 门禁身份与权威 | 文档：门禁为节点级 GateSpec | 结论按任务：tasks.stage_verdict；verdict 文件按 task_id（kernel 写 gate_verdict_path(task_id)）；覆盖（force-pass）按节点 | — | **已裁决**（ADR-0006 / OEP-0002） |
-| SC-013 | 任务类型词表 | schema L53：default_task_type = explore/plan/code/test/review/docs | launch --task-type = fix/feat/refactor/docs/test/chore/perf/ci（bin/herdr-task L8823-8835）；domain 注册表 `_SOFTWARE_TASK_TYPES` 另含 bugfix、hotfix、impl、craft | — | 部分确认（模板取值未核对） |
+| SC-013 | 任务类型词表 | schema L53 历史版本称 explore/plan/code/test/review/docs | launch --task-type 取值 fix/feat/refactor/docs/test/chore/perf/ci；schema 与文档已同步校准，兼容别名自动映射为 docs/test，业务类型走 business_task_type | — | **已解决**（D4 落地） |
 | SC-014 | fix-loop 可作废集合 | controller 注释要求与矩阵“→ superseded”一致 | FIX_LOOP_SUPERSEDEABLE 已补齐 paused 与 interrupted，与 TASK_TRANSITIONS 完全对齐 | — | **已解决**（D5 落地） |
 | SC-015 | 门禁豁免守卫 | 控制台 force-pass 带 expected_version（console/control_api.py L409） | CLI 与 factory 的 force-pass 不带 expected_version（bin/herdr-factory L652-656）；bypass 亦不带 | — | 确认（控制台确认提示未核对） |
 | SC-016 | resume 目标 | 矩阵：paused 不可达 dispatched、blocked | bin/herdr-task L8000-8010 按 status_history 回退到 dispatched 或 blocked；set 对非法边的实际行为未验证 | — | 未验证 |
@@ -34,5 +34,5 @@
 5. SC-008：为不同含义使用不同术语（路由负载、生命周期活跃、容量活跃），禁止同名合并。
 6. SC-010、SC-015、SC-019：把豁免与人工覆盖纳入权限模型，统一守卫，并为控制台写路由增加鉴权（代码变更）。
 7. SC-011、SC-012 已由 ADR-0006、ADR-0007 与 OEP-0002 裁决：工作流初始状态定案为 running（pending 为未装配/草稿态）；门禁解耦为 gate_spec 与 gate_verdict，DB 为调度第一事实源，文件为不可变快照。
-8. SC-013、SC-014：统一任务类型词表；补齐 fix-loop 可作废集合（D4、D5）。
+8. SC-013、SC-014 已解决：任务类型词表统一对齐为 CLI choices；补齐 fix-loop 可作废集合（D4、D5）。
 9. SC-018 已由 ADR-0005 与 OEP-0002 裁决：状态机外写入显式收敛为 privileged_transitions 特权流转契约，严禁直写 SQL/save_task 绕过网关。
