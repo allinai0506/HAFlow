@@ -3136,3 +3136,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - 补充 PR #283 评审 P2：工作区运行的 component_versions 覆盖 controller 包、completion_controller 和 coordinator helpers，避免实现变化后指纹保持不变。
 - Evidence：`services/herdr-controller.py#main`、`tests/test_runtime_fingerprint_entrypoints.py`。
+
+## [2026-10-20] correction | Console 同源 POST 可由 Origin 满足来源校验
+
+- 更正：前一条 Console 请求边界记录中“所有 POST 必须带 `X-HAFlow-Console-Request: 1`”不再准确。POST 带本地 Console 的同源 Origin 时可通过来源校验；无 Origin 的 POST 仍需该请求头，外部 Origin 仍被拒绝。该请求头是浏览器预检机制，不是身份认证凭据。
+- 原因：页面启动请求未带自定义头，导致本地同源操作被误拒为 `console_request_header_required`；PR #281 修复请求守卫并添加真实 HTTP/SQLite endpoint 回归。
+- Evidence：`console/common.py#console_request_rejection`、`tests/test_console_request_guard.py#test_local_console_post_with_origin_without_header_is_applied`、`tests/test_console_request_guard.py#test_dns_rebinding_host_is_rejected_even_for_reads`。
