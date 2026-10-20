@@ -69,14 +69,14 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         policy = node.get("agent_policy", {})
         self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertFalse(node.get("parallel"))
-        self.assertEqual(policy.get("exclude_stage_agents"), ["implementation"])
+        self.assertEqual(policy.get("exclude_stage_agents"), ["implementation", "wrapup"])
 
     def test_review_stage_exclusion_and_single_pane(self):
         node = self.node_map["review"]
         policy = node.get("agent_policy", {})
         self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertFalse(node.get("parallel"))
-        self.assertEqual(policy.get("exclude_stage_agents"), ["implementation"])
+        self.assertEqual(policy.get("exclude_stage_agents"), ["implementation", "wrapup"])
 
     def test_wrapup_stage_exclusion_and_single_pane(self):
         node = self.node_map["wrapup"]
@@ -94,8 +94,10 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         """
         rules = "\n".join(self.node_map["wrapup"].get("rules", []))
         self.assertIn("交付 PR 前置", rules)
-        self.assertIn("npm run pr:create", rules)
-        self.assertIn("严禁自动合并", rules)
+        self.assertIn("herdr-task create-pr", rules)
+        self.assertIn("herdr-task commit", rules)
+        self.assertIn("herdr-task integrate", rules)
+        self.assertIn("严禁在收尾中自动执行 PR 合并", rules)
         self.assertIn("PR URL", rules)
         # 六步执行规则的未合入分支必须携带 PR URL 指引
         self.assertIn("已建 PR 但未合入", rules)

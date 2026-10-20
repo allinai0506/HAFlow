@@ -69,7 +69,9 @@ def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
                 workflow_id, workflow_cfg, project_root, rotated_from,
                 frozen_sha, episode_id)
     from herdr.wrapup_delivery import reconcile_verifiers
-    if reconcile_verifiers(ports._get_store(), workflow_id):
+    wrapup_closure = any(node.get('id') == 'wrapup' and node.get('review_closure_required')
+                         for node in workflow_cfg.get('nodes', []))
+    if wrapup_closure and reconcile_verifiers(ports._get_store(), workflow_id):
         ports.reconcile_node_dispatches(workflow_id)
     return frozen_sha, False
 

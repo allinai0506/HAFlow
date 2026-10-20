@@ -21,7 +21,7 @@ Architecture: the wrapup Task owns additional Git output; its delivery phase is 
 - [x] Exercise CLI artifacts/acceptance/verdict, PR and receipt; cover prior PR, failures, stale identity, Z and crash replay.
 - [x] Wire both actual default templates and finish instructions, fix report ordering.
 - [x] Cleanup and independent source reviews complete; user approved the narrow rebase recovery repair after the three-round escalation.
-- [x] Final affected-suite evidence: 430 passed, 2 skipped, 9 subtests; independent reviews found no remaining confirmed blocker.
+- [x] Final affected-suite evidence after PR CI fixes: 608 passed, 2 skipped, 21 subtests; independent reviews found no remaining confirmed blocker.
 Delivery target: code commit and reviewable PR. Remote merge-result CI remains separate from isolated test proof; delivery URL and final CI state are reported in the PR session.
 
 Rejected: mode-only change leaves completion ring; rewriting X evidence fabricates certification; ancestor-based receipt matching weakens identity; a new generic recovery framework expands scope. Old asynchronous results must remain tied to retired tasks and old episode. Each round has maximum existing verifier budget and wrapup rotation cap three. Conflicts/missing identity fail closed; unknown external publication is recovered via existing branch/PR inventory, never blind repeat effects.

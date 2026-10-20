@@ -3157,3 +3157,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 知识与报告正文先固定再认证，最终运行证据使用 clone 外 checkpoint；重复命令恢复并沿用有限预算。
 - Evidence：`herdr/wrapup_delivery.py`、`services/controller/advancement.py`、`herdr/pr_delivery.py`、`tests/test_wrapup_candidate_delivery.py`、工程教训 §178。
 - UNKNOWN：隔离测试使用外部 Agent/forge 替身，未部署或修改生产工作流。
+
+- 2026-10-20（工作流自动化优化，PR #287 复验）：补齐旧 pin 的新候选独立路由合同，派发前拒绝与最终发布矛盾的软降级；同步模板/技能 canonical hash 守护，保留旧非闭环调度路径。

@@ -1316,3 +1316,71 @@ def test_rebase_recovery_rejects_unregistered_result(scene):
         result = cli(scene, entry, "wrap", ok=False)
         assert result.returncode != 0
     assert scene.store.get_task("wrap")["wrapup_delivery"]["phase"] == "committed"
+
+
+@pytest.mark.parametrize("requested", ["auto", "wrap-agent"])
+@pytest.mark.parametrize("independent_available", [False, True])
+@pytest.mark.parametrize("opt_out", [False, True])
+@pytest.mark.parametrize("legacy_pin", [False, True], ids=["current-pin", "legacy-pin"])
+def test_wrapup_verifier_router_refuses_degradation_before_launch(
+    scene,
+    controller,
+    monkeypatch,
+    requested,
+    independent_available,
+    opt_out,
+    legacy_pin,
+):
+    from herdr import agent_router as router
+
+    add_output(scene)
+    controller.check_workflow_stage_advance("wf")
+    pool = ["wrap-agent"] + (["independent-agent"] if independent_available else [])
+    record = dict(
+        scene.store.get_workflow("wf"),
+        project_id="fixture-project",
+        healthy_agents=pool,
+    )
+    import copy
+
+    config = copy.deepcopy(scene.cfg)
+    if legacy_pin:
+        for node in config["nodes"]:
+            if node["id"] in {"test", "review"}:
+                node["agent_policy"].pop("exclude_stage_agents", None)
+    if opt_out:
+        for node in config["nodes"]:
+            if node["id"] in {"test", "review"}:
+                node["agent_policy"].update(
+                    allow_reuse_implementation_agents=True,
+                    reuse_reason="must not waive fresh wrapup independence",
+                )
+    monkeypatch.setattr(router, "_get_store", lambda: scene.store)
+    monkeypatch.setattr(router, "workflow_record", lambda _: record)
+    monkeypatch.setattr(router, "workflow_config_for", lambda _: config)
+    monkeypatch.setattr(
+        router, "ensure_pool_for_project", lambda _: {"allowed_agents": pool}
+    )
+    monkeypatch.setattr(router, "_candidate_order", lambda *args: pool)
+    monkeypatch.setattr(router, "preflight_snapshot_fresh", lambda _: True)
+    monkeypatch.setattr(router, "_active_agent_loads", lambda _: {})
+    monkeypatch.setattr(router, "_load_canary_module", lambda: None)
+    monkeypatch.setattr(router, "_record_shadow_best_effort", lambda *args: None)
+    monkeypatch.setattr(
+        router, "RESERVATIONS_FILE", scene.root / "router-reservations.json"
+    )
+    monkeypatch.setattr(router, "ROUTER_LOCK_FILE", scene.root / "router.lock")
+    monkeypatch.setenv("HERDR_ROUTER_SOFT_DEGRADE", "1")
+    for node in ("test", "review"):
+        if independent_available and requested == "auto":
+            selected, context = router._choose_agent_impl(
+                "wf", node, "test", requested=requested
+            )
+            assert selected == "independent-agent"
+            assert context["wrapup_candidate_sha"] == record["candidate_sha"]
+        else:
+            with pytest.raises(router.RouterIsolationRejection):
+                router._choose_agent_impl("wf", node, "test", requested=requested)
+    assert not scene.store.list_events(
+        workflow_id="wf", event_type="router_isolation_degraded"
+    )

@@ -728,3 +728,5 @@ Evidence:
 `UNKNOWN` 本地隔离测试不代表部署后的生产工作流、真实付费 Agent 或实际 forge 审核已跑通。
 
 `FACT` 重基前持久记录固定 input/base。Git 已生成 S 而状态库尚登记 Y 时，正常 commit/integrate 通过临时无网络、禁 hooks 的 Git 重放树证明后 CAS 收编，source_sha 仍为原 Y。错误树、身份或 episode 不匹配不恢复；测试覆盖主干在中断期间再次前进。
+
+`FACT` 当前默认 wrapup 候选的 test/review 路由在准入即执行独立性合同：保留 pin 原排除项，强制排除 implementation/wrapup，禁止软降级或 opt-out。此约束适用于缺少新模板字段的旧 pin；上游轮次和其他模板的既有降级政策不变。未启用 wrapup review closure 的模板不进入收尾退役恢复事务。

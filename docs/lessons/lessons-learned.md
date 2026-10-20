@@ -7482,6 +7482,7 @@ python3 bin/herdr-task --help
 | --- | --- | --- |
 | 把 Git 交付就绪与任务完成混为一体 | 收尾任务可以尚未完成，同时合法拥有集成产物 | 明确 run/execution/父 episode 绑定的交付阶段，不临时改 completed，也不放宽通用状态机 |
 | 只改候选 SHA，旧 verifier 仍视为完成 | 发布、冻结、验证派发是不同生命周期 | 新冻结轮次退役旧验证，保留旧结论；从正常派发入口重跑 test/review，SPEC 再做 acceptance |
+| 只更新模板排除配置，已有 pin 仍可软降级 | 新轮次与最终发布必须执行同一独立性合同 | 当前 wrapup 冻结轮次在 Router 准入保留旧排除项并强制排除 implementation/wrapup，禁用 soft degrade 与 opt-out；有独立池正常派发，无则派发前拒绝 |
 | 旧 PR 分支拒绝不同 head | 新候选必须有明确发布身份 | 使用候选专属分支及替代 PR，保留原校验与前驱 URL；未知外部结果先查库存再重试 |
 | Git 已成功但状态库尚未记账 | HEAD 与数据库可能分属重基前后 | 副作用前持久化固定 input/base；中断恢复需正常 Git 重放及完整树证明，再按版本 CAS 收编，不接受任意 HEAD |
 | 回执之后再提交最终报告 | 认证后的提交会再次使回执过期 | PR 内容认证前固定，最终运行报告发布到 clone 外的 checkpoint Artifact |

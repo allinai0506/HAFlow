@@ -475,6 +475,20 @@ def _choose_agent_locked(
             if node:
                 node_policy = node.get("agent_policy", {})
 
+    # This delivery contract requires independent fresh gates. Reject reuse at
+    # routing admission instead of spending work that publication must refuse.
+    from .wrapup_delivery import TEMPLATES, is_current_round
+    strict_wrapup = bool(stage in {"test", "review"} and wf_cfg
+        and wf_cfg.get("name") in TEMPLATES and record.get("candidate_sha")
+        and is_current_round(_get_store(), workflow_id, record["candidate_sha"]))
+    if strict_wrapup:
+        exclusions = node_policy.get("exclude_stage_agents") or node_policy.get("disallow_from_stages") or []
+        if isinstance(exclusions, str):
+            exclusions = [exclusions]
+        node_policy = dict(node_policy, allow_soft_degrade=False,
+                           allow_reuse_implementation_agents=False, opt_out_isolation=False,
+                           exclude_stage_agents=sorted(set(exclusions) | {"implementation", "wrapup"}))
+
     node_val = node_policy.get("allow_soft_degrade")
     if node_val is None:
         node_val = node_policy.get("soft_degrade")
@@ -832,6 +846,8 @@ def _choose_agent_locked(
         "task_id": reservation_key or "",
         "isolation_degraded": bool(is_degraded),
     }
+    if strict_wrapup:
+        result_ctx["wrapup_candidate_sha"] = record["candidate_sha"]
     if is_degraded:
         result_ctx["degraded_reason"] = degrade_reason
     if canary_plan is not None:

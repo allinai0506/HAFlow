@@ -65,10 +65,44 @@ git diff --check
 
 每行均有：冻结 SHA = 新 test/review 的 candidate_sha = verified_candidate_sha = 有效交付身份 = 平台 PR head = forge 替身实证 head = 审核回执 head = 完成时 clone HEAD = S；SPEC 还包括同 episode 的新 `old-acceptance-r2` pass/业务证据。test/review 分别为新 Run 的 `old-test-r2`、`old-review-r2`，不是重写旧任务。运行记录完整 SHA 与事件 payload 保存在本地 `.omc/wrapup-candidate-evidence/`；PR 中只保存说明，临时运行产物不混入交付候选。
 
-## 最终本地结果与独立审查
+## 首轮本地结果与独立审查
 
 上述 18 文件集中专项：**430 passed，2 skipped，9 subtests passed，458.15 秒，exit 0**。两个 skip 为 software 模板不配置 acceptance 的 SPEC 专属用例。`ruff check --select F`（所有本次 Python 改动）、`compileall`、无扩展名 CLI `--help`、`git diff --check` 均通过。
 
 精确重基落库中断新增回归在修复前 **4 failed**；修复后恢复/错误树/非法回退专项 **8 passed**。独立评审另以原反例确认正常重试退出序列 `[1,0,0,0]`，并运行扩展专项 **16 passed，2 skipped**。Standards/Google 与 Spec、独立不同会话复审均未发现剩余确认阻塞；没有把自审称为独立审查。
 
 缺少可调用的 health/interrogate 工具已在开工门禁记录明确替代方式：静态检查、真实失败回归、受影响专项与独立审查；没有虚构评分。当前完成的是本地隔离调用链验证，真实 GitHub 变更 PR 的合并结果全量 CI 另行核对；没有生产任务、付费 Agent 或上线验证。
+
+## PR 首轮 CI 与复验修复
+
+代码提交 `5362d6f` 创建真实代码交付 PR #287 后，全量 CI 报告 **6 failed、5143 passed、5 skipped、225 subtests passed**。五项与本次关联：旧无 wrapup-closure 模板被无条件恢复事务误触发；技能 canonical hash 登记未随受控修订更新；两个模板排除列表断言与平台 PR 入口断言仍指向旧契约。已逐项修复并在本地复现，不放宽功能门禁。
+
+另一项为未改动 `bounded_tools` 的进程组 `EPERM`，本地及独立同用例通过，未据此虚报远端通过，也未扩围修改该模块；以新 head CI 复验为准。
+
+Codex P1 指出软降级可让收尾作者执行验证，直到 create-pr 才被独立门禁拒绝。修复保留发布端严格标准，在当前默认 wrapup 冻结轮次的正常 Router 准入中合并原排除项并强制 implementation/wrapup、禁止 soft degrade/opt-out；独立池可用时正常派发，无可用独立 Agent 时前置拒绝。已经运行的旧 pin 同样受控，不依赖新模板追溯生效。该问题先得 **4 RED**，旧 pin 漏口另得 **16 RED**；最终矩阵涵盖当前/旧 pin、自动/指定、独立池有无及 opt-out 共 32 组合。
+
+## PR 修复后的最新本地验证
+
+源码固定后，以三个互不重叠的隔离 pytest 进程执行，共覆盖 29 个文件：
+
+```bash
+pytest -q tests/test_wrapup_candidate_delivery.py -k software
+# 44 passed, 2 skipped, 46 deselected (168.78s)
+pytest -q tests/test_wrapup_candidate_delivery.py -k 'not software'
+# 46 passed, 46 deselected (204.79s)
+pytest -q \
+  tests/test_wrapup_review_closure.py tests/test_fix_1017_pr_delivery_joint_candidate.py \
+  tests/test_fix_bug1002_delivery.py tests/test_task_cli_delivery.py tests/test_task_cli_integration.py \
+  tests/test_task_cli_launch_preflight.py tests/test_reverification_controller.py tests/test_reverification_core.py \
+  tests/test_reverification_v1.py tests/test_scheduler_facts.py tests/test_auto_acceptance.py \
+  tests/test_task_cli_workflow_close.py tests/test_workflow_close_claim.py tests/test_delivery_lifecycle.py \
+  tests/test_task_delivery.py tests/test_delivery_rework.py tests/test_controller_modularity.py \
+  tests/test_scheduler_dispatch_e2e.py tests/test_six_step_skill_provenance.py \
+  tests/test_software_development_v1_template.py tests/test_agent_router_soft_degrade.py \
+  tests/test_agent_router_stage_exclusion.py tests/test_task_cli_launch_context.py tests/test_agent_router_loads.py \
+  tests/test_router_health_and_defects_remedy.py tests/test_agent_router_preflight.py \
+  tests/test_adaptive_router.py tests/test_bounded_tools.py
+# 518 passed, 21 subtests passed (145.06s)
+```
+
+合计 **608 passed、2 skipped、21 subtests passed**，各进程 exit 0。静态检查、CLI 与差异检查通过。独立 Router 新旧 pin 全矩阵 **32 passed**；Standards/Google、Spec 与独立正确性复审无剩余确认阻塞，支持追加提交。远端验收须重新绑定追加后的新 head，不以这份本地结果替代 CI。
