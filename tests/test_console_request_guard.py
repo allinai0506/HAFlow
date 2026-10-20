@@ -65,6 +65,7 @@ def _title(db):
     ('POST', {'Host': '127.0.0.1:8765', HEADER: '1'}, None),
     ('POST', {'Host': '127.0.0.1:8765'}, 'console_request_header_required'),
     ('POST', {'Host': '127.0.0.1:8765', HEADER: '0'}, 'console_request_header_required'),
+    ('POST', {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}, None),
     ('POST', {'Host': '127.0.0.1:8765', HEADER: '1', 'Origin': 'http://127.0.0.1:8765'}, None),
     ('POST', {'Host': '127.0.0.1:8765', HEADER: '1', 'Origin': 'http://evil.example'}, 'origin_not_allowed'),
     ('POST', {'Host': '127.0.0.1:8765', HEADER: '1', 'Origin': 'null'}, 'origin_not_allowed'),
@@ -108,6 +109,15 @@ def test_local_console_post_with_header_is_applied(server):
     status, body = _send(port, 'POST', RENAME, RENAME_BODY, {
         **JSON_HEADERS, HEADER: '1', 'Host': f'127.0.0.1:{port}',
         'Origin': f'http://127.0.0.1:{port}'})
+    assert status == 200
+    assert json.loads(body)['data']['title'] == '被改写'
+    assert _title(db) == '被改写'
+
+
+def test_local_console_post_with_origin_without_header_is_applied(server):
+    port, db = server
+    status, body = _send(port, 'POST', RENAME, RENAME_BODY, {
+        **JSON_HEADERS, 'Host': f'127.0.0.1:{port}', 'Origin': f'http://127.0.0.1:{port}'})
     assert status == 200
     assert json.loads(body)['data']['title'] == '被改写'
     assert _title(db) == '被改写'
