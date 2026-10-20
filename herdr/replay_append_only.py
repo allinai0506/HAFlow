@@ -52,29 +52,48 @@ def _numbered_entries(document):
     return entries
 
 
-def _entry_identity(document, entries, index):
+def _entry_block(document, entries, index):
     start = entries[index][1]
     end = entries[index + 1][1] if index + 1 < len(entries) else len(document)
-    block = document[start:end].strip(b'\r\n')
+    return document[start:end]
+
+
+def _entry_identity(document, entries, index):
+    block = _entry_block(document, entries, index).rstrip(b'\r\n')
     return _HEADING_LINE.sub(b'## N.', block, count=1)
 
 
-def _applied_prefix_length(main, candidate, candidate_entries):
-    """Find the longest candidate prefix present in order among main entries."""
+def _unmatched_entry_tail(candidate_block, main_block):
+    candidate_tail = candidate_block[len(candidate_block.rstrip(b'\r\n')):]
+    main_tail = main_block[len(main_block.rstrip(b'\r\n')):]
+    if main_tail and candidate_tail.endswith(main_tail):
+        return candidate_tail[:-len(main_tail)]
+    return candidate_tail if candidate_tail != main_tail else b''
+
+
+def _applied_prefix(main, candidate, candidate_entries):
+    """Find the longest applied candidate prefix and its unmatched separators."""
     main_entries = _numbered_entries(main)
     main_identities = [_entry_identity(main, main_entries, index)
                        for index in range(len(main_entries))]
     candidate_identities = [_entry_identity(candidate, candidate_entries, index)
                             for index in range(len(candidate_entries))]
-    longest = 0
+    best = (0, b'')
     for start in range(len(main_identities)):
         matched = 0
-        for identity in main_identities[start:]:
+        pending = []
+        for main_index in range(start, len(main_identities)):
+            identity = main_identities[main_index]
             if (matched < len(candidate_identities)
                     and candidate_identities[matched] == identity):
+                pending.append(_unmatched_entry_tail(
+                    _entry_block(candidate, candidate_entries, matched),
+                    _entry_block(main, main_entries, main_index),
+                ))
                 matched += 1
-        longest = max(longest, matched)
-    return longest
+        if matched > best[0]:
+            best = (matched, b''.join(pending))
+    return best
 
 
 def _renumber_entries(document, entries, start_number):
@@ -112,12 +131,14 @@ def merge_append_only(base, main, incoming, *, numbered=False):
         prefix = suffix[:candidate_entries[0][1]] if candidate_entries else b''
         prefix_pending = (prefix if prefix.strip()
                           and not _contains_append_block(main_suffix, prefix) else b'')
-        applied = _applied_prefix_length(main_suffix, suffix, candidate_entries)
+        applied, unmatched_separators = _applied_prefix(
+            main_suffix, suffix, candidate_entries)
         if applied == len(candidate_entries) and candidate_entries:
-            return main + prefix_pending, {}
+            return main + prefix_pending + unmatched_separators, {}
         if applied or prefix_pending != prefix:
             separator = prefix if not prefix.strip() else prefix_pending
-            suffix = separator + suffix[candidate_entries[applied][1]:]
+            suffix = (separator + unmatched_separators
+                      + suffix[candidate_entries[applied][1]:])
             candidate_entries = _numbered_entries(suffix)
         existing = [entry[0] for entry in _numbered_entries(main)]
         suffix, mapping = _renumber_entries(suffix, candidate_entries,

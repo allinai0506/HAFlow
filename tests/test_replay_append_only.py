@@ -228,3 +228,15 @@ def test_numbered_replay_deduplicates_prefix_before_new_entries():
     assert merged == main + b'## 2. new\nnew body\n'
     assert merged.count(b'IMPORTANT\n') == 1
     assert mapping == {}
+
+
+def test_numbered_replay_preserves_unmatched_trailing_blank_lines():
+    base = b'## 1. old\nold body\n'
+    main = base + b'\n## 2. shared\nshared body\n'
+    incoming = base + b'\n## 2. shared\nshared body\n\n'
+
+    merged, mapping = merge_append_only(base, main, incoming, numbered=True)
+
+    assert merged == main + b'\n'
+    assert merged.count(b'shared body\n') == 1
+    assert mapping == {}

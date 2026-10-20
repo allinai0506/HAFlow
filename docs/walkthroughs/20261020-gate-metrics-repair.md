@@ -102,3 +102,5 @@ GitHub 全量 CI 同时暴露 9 个旧测试夹具与新合同不一致：close 
 下一轮复审发现前置正文已经落地、编号条目尚未落地的局部状态仍会复制前缀。suffix 重建现无论已应用条目数是否为零，都使用独立计算后的待追加前缀；新增 prefix-only partial application 回归，编号条目仍正常追加且 `IMPORTANT` 只保留一次。16 模块专项更新为 237 passed、10 subtests。
 
 PR 最终复审绑定 `5e6bef4`，Codex 明确返回无 findings、无未决 P1/P2，远端 pytest、tests-required 与 P1 Gate 全部通过。随后为解除 GitHub `DIRTY`，将最新 `origin/main` 合入同一 PR 分支；唯一内容冲突位于 append-only `wiki/log.md`，解决结果完整保留双方追加段落。合并后专项额外覆盖 main 新增的 D5 状态与 wrapup 交付路径，共 334 passed、2 skipped、10 subtests。
+
+合并提交复审新增 P2：条目身份为容忍重编号而忽略末尾换行时，候选比 main 多出的空行会被误判为已应用。匹配现同时计算每个已应用条目尚未保留的尾部分隔字节，并将其带入待追加结果；候选正文仍按归一化编号外的字节精确匹配。新增尾部空行回归，16 模块专项为 238 passed、10 subtests。
