@@ -365,3 +365,107 @@ def test_ledger_reports_dispatch_artifacts_and_candidate_without_native_session(
     assert result['availability'] == 'recorded_actions'
     assert any(n['code'] == 'native_unsupported' for n in result['degradation'])
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_issue261_api_surfaces_execution_receipts_past_the_stored_window(tmp_path, monkeypatch):
+    """Issue #261: receipts written after the 2000-row window must reach the
+    real trajectory API, scoped to their own task/run only."""
+    from herdr.execution_trace import STORED_LIMIT
+
+    task = _task()
+    db = tmp_path / "state.db"
+    _db(db, [task, _task("task-b", "run-b")])
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        "INSERT INTO events (task_id,agent_id,event_type,payload_json,timestamp,source,run_id,sequence)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        [("task-a", "codex", "task_started", "{}", 10 + i, "trajectory", "run-a", i + 2)
+         for i in range(STORED_LIMIT)],
+    )
+    conn.executemany(
+        "INSERT INTO events (task_id,agent_id,event_type,payload_json,timestamp,source,run_id,sequence)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        [
+            ("task-a", "codex", "task_artifact_checkpoint",
+             json.dumps({"summary": "TAIL_REPORT", "step": 9}), 100_001, "checkpoint", "run-a", 5_001),
+            ("task-a", "codex", "candidate_published",
+             json.dumps({"candidate_sha": "b" * 40}), 100_002, "checkpoint", "run-a", 5_002),
+            ("task-a", "codex", "tool_execution",
+             json.dumps({"status": "ok", "exit_code": 0}), 100_003, "checkpoint", "run-a", 5_003),
+            # Same task, different run: must stay out of this run's trace.
+            ("task-a", "codex", "task_artifact_checkpoint",
+             json.dumps({"summary": "OTHER_RUN_REPORT"}), 100_004, "checkpoint", "run-other", 5_004),
+            # Other task in the same run scope: must not leak in.
+            ("task-b", "codex", "task_artifact_checkpoint",
+             json.dumps({"summary": "OTHER_TASK_REPORT"}), 100_005, "checkpoint", "run-a", 5_005),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HERDR_STATE_DB", str(db))
+
+    kinds = set()
+    cursor = None
+    for _ in range(50):
+        page = console.api_task_trajectory("task-a", "200", cursor)
+        kinds.update(event["kind"] for event in page["events"])
+        if not page["has_more"]:
+            break
+        cursor = page["next_cursor"]
+    assert {"progress_report", "candidate", "tool_receipt"} <= kinds
+    encoded = json.dumps(page, ensure_ascii=False)
+    assert "TAIL_REPORT" in encoded
+    assert "OTHER_RUN_REPORT" not in encoded
+    assert "OTHER_TASK_REPORT" not in encoded
+
+
+def test_issue262_api_shows_the_freeze_only_on_the_publishing_task(tmp_path, monkeypatch):
+    """Issue #262: a workflow-level candidate_frozen reaches the trajectory of
+    the task that published it, through the real publish/freeze chain."""
+    import subprocess
+
+    from herdr import scheduler_facts
+    from herdr.state_store import SQLiteStateStore
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def _git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              text=True, capture_output=True).stdout.strip()
+
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "fixture@example.invalid")
+    _git("config", "user.name", "fixture")
+    (repo / "f").write_text("candidate")
+    _git("add", ".")
+    _git("commit", "-qm", "candidate", "--no-gpg-sign")
+    sha = _git("rev-parse", "HEAD")
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-262", "status": "running",
+                         "execution_id": "exec-262", "project_root": str(repo)})
+    for name in ("task-pub", "task-other"):
+        store.save_task({
+            "task_id": name, "workflow_id": "wf-262", "node": "implementation",
+            "execution_id": "exec-262", "run_id": "run-" + name, "status": "cleaned",
+            "integration_mode": "git", "commit": sha, "integrated_commit": sha,
+            "integration_ref": f"refs/herdr/tasks/{name}",
+            "integration_publication_episode_id": 0,
+        })
+    _git("update-ref", "refs/herdr/tasks/task-pub", sha)
+    publication = scheduler_facts.publish_integrated_candidate(store, "task-pub")
+    frozen = scheduler_facts.record_candidate_frozen(
+        "wf-262", sha, source_node="implementation", db_path=store.db_path,
+        expected_episode_id=0, publication_event_id=publication["id"])
+    assert frozen["status"] == "created"
+
+    monkeypatch.setenv("HERDR_STATE_DB", str(store.db_path))
+    published = console.api_task_trajectory("task-pub", "200", None)
+    assert any(event["kind"] == "candidate" and event.get("title") == "候选版本已冻结"
+               and sha in (event.get("detail") or "")
+               for event in published["events"]), "publishing task must show the freeze"
+    other = console.api_task_trajectory("task-other", "200", None)
+    assert not any(event["kind"] == "candidate" and event.get("title") == "候选版本已冻结"
+                   and sha in (event.get("detail") or "")
+                   for event in other["events"]), "freeze must not leak to other tasks"

@@ -829,6 +829,160 @@ def test_stored_event_cap_keeps_the_current_run_row(tmp_path):
     assert notes == []
 
 
+def test_issue261_window_tail_execution_receipts_still_surface(tmp_path):
+    """Issue #261 RED: task_artifact_checkpoint / candidate_published /
+    tool_execution written past the 2000-row window must still surface
+    in the real task trajectory (bounded supplement, not unbounded)."""
+    import json as _json
+
+    from herdr.execution_trace import STORED_LIMIT, query_task_trace, read_trace_tasks
+    from herdr.state_db import save_task
+
+    db = tmp_path / "state.db"
+    task = task_doc(commit=None)
+    save_task(dict(task), db_path=db)
+    conn = sqlite3.connect(db)
+    filler = [
+        ("task-a", "codex", "task_started", "{}", 10 + index, "trajectory", "run-a", index + 2)
+        for index in range(STORED_LIMIT)
+    ]
+    conn.executemany(
+        """
+        INSERT INTO events (task_id, agent_id, event_type, payload_json, timestamp, source, run_id, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        filler
+        + [
+            ("task-a", "codex", "task_artifact_checkpoint",
+             _json.dumps({"summary": "tail report", "step": 9}), 100_001, "checkpoint", "run-a", 5_001),
+            ("task-a", "codex", "candidate_published",
+             _json.dumps({"candidate_sha": "b" * 40}), 100_002, "checkpoint", "run-a", 5_002),
+            ("task-a", "codex", "tool_execution",
+             _json.dumps({"status": "ok", "exit_code": 0}), 100_003, "checkpoint", "run-a", 5_003),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    found = read_trace_tasks(db, "task-a")
+    kinds = set()
+    cursor = None
+    pages = 0
+    while True:
+        page = query_task_trace(found[0], found, db_path=db, limit=200, cursor=cursor)
+        kinds.update(event["kind"] for event in page["events"])
+        pages += 1
+        assert pages < 50, "pagination must terminate"
+        if not page["has_more"]:
+            break
+        cursor = page["next_cursor"]
+    assert "progress_report" in kinds
+    assert "candidate" in kinds
+    assert "tool_receipt" in kinds
+
+
+def test_issue262_workflow_freeze_links_back_to_publishing_task(tmp_path):
+    """Issue #262 RED: a workflow-level candidate_frozen written through the
+    real publish/freeze chain must show in the publishing task's trajectory
+    via its publication identity — without attributing it to other tasks."""
+    import subprocess as _subprocess
+
+    from herdr import scheduler_facts
+    from herdr.execution_trace import query_task_trace, read_trace_tasks
+    from herdr.state_store import SQLiteStateStore
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    def _git(*args):
+        return _subprocess.run(["git", "-C", str(repo), *args], check=True,
+                               text=True, capture_output=True).stdout.strip()
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "fixture@example.invalid")
+    _git("config", "user.name", "fixture")
+    (repo / "f").write_text("candidate")
+    _git("add", ".")
+    _git("commit", "-qm", "candidate", "--no-gpg-sign")
+    sha = _git("rev-parse", "HEAD")
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-262", "status": "running",
+                         "execution_id": "exec-262", "project_root": str(repo)})
+    for name in ("task-pub", "task-other"):
+        store.save_task({
+            "task_id": name, "workflow_id": "wf-262", "node": "implementation",
+            "execution_id": "exec-262", "run_id": "run-" + name, "status": "cleaned",
+            "integration_mode": "git", "commit": sha, "integrated_commit": sha,
+            "integration_ref": f"refs/herdr/tasks/{name}",
+            "integration_publication_episode_id": 0,
+        })
+    _git("update-ref", "refs/herdr/tasks/task-pub", sha)
+    publication = scheduler_facts.publish_integrated_candidate(store, "task-pub")
+    frozen = scheduler_facts.record_candidate_frozen(
+        "wf-262", sha, source_node="implementation", db_path=store.db_path,
+        expected_episode_id=0, publication_event_id=publication["id"])
+    assert frozen["status"] == "created"
+
+    pub_found = read_trace_tasks(store.db_path, "task-pub")
+    pub_page = query_task_trace(pub_found[0], pub_found, db_path=store.db_path, limit=200)
+    assert any(event["kind"] == "candidate" and event.get("title") == "候选版本已冻结"
+               and sha in (event.get("detail") or "")
+               for event in pub_page["events"]), "publishing task must show the freeze"
+    other_found = read_trace_tasks(store.db_path, "task-other")
+    other_page = query_task_trace(other_found[0], other_found, db_path=store.db_path, limit=200)
+    assert not any(event["kind"] == "candidate" and event.get("title") == "候选版本已冻结"
+                   and sha in (event.get("detail") or "")
+                   for event in other_page["events"]), "freeze must not leak to other tasks"
+
+
+def test_issue262_freeze_without_publication_identity_stays_unattributed(tmp_path):
+    """Issue #262: a workflow freeze whose publication identity is missing or
+    unknown must stay unattributed rather than being guessed onto a task."""
+    from herdr.execution_trace import read_stored_events
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id TEXT, node_id TEXT, task_id TEXT, agent_id TEXT,
+            event_type TEXT, payload_json TEXT, timestamp REAL,
+            source TEXT, run_id TEXT, sequence INTEGER
+        )
+        """
+    )
+    sha = "a" * 40
+    conn.executemany(
+        """
+        INSERT INTO events (workflow_id, task_id, agent_id, event_type, payload_json, timestamp, source, run_id, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            # Freeze with no publication identity at all.
+            ("wf-a", None, "scheduler", "candidate_frozen",
+             json.dumps({"candidate_sha": sha}), 100, "critical-path-scheduler", None, 1),
+            # Freeze pointing at a publication event that does not exist.
+            ("wf-a", None, "scheduler", "candidate_frozen",
+             json.dumps({"candidate_sha": sha, "publication_event_id": 9999}),
+             101, "critical-path-scheduler", None, 2),
+            # Freeze pointing at a publication owned by a different task,
+            # in the same run, so only the task boundary can exclude it.
+            ("wf-a", None, "scheduler", "candidate_frozen",
+             json.dumps({"candidate_sha": sha, "publication_event_id": 4}),
+             102, "critical-path-scheduler", None, 3),
+            ("wf-a", "task-other", "codex", "candidate_published",
+             json.dumps({"candidate_sha": sha}), 99, "herdr-task", "run-a", 4),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    task = task_doc(commit=None)
+    rows, notes = read_stored_events(task, db)
+    assert not any(row["event_type"] == "candidate_frozen" for row in rows), \
+        "a freeze without a resolvable publication must not be attributed"
+    assert notes == []
+
+
 def test_stored_event_cap_keeps_a_receipt_beyond_the_window(tmp_path):
     from herdr.execution_trace import STORED_LIMIT, read_stored_events
 

@@ -7501,3 +7501,54 @@ pytest -q tests/test_wrapup_candidate_delivery.py tests/test_wrapup_review_closu
 ```
 
 Evidence：`tests/test_wrapup_candidate_delivery.py` 的真实 Git/CLI/SQLite 默认模板回归；外部 Agent、forge 使用替身，不代表生产工作流或真实远端发布已经验证。
+
+---
+
+## 179. 升序有界窗口吞掉最新回执，workflow 级事件靠类型白名单无法归属（2026-10-20）
+
+### 问题背景
+
+Issue #261 / #262（来源 PR #260 评审 P2）暴露两类独立的读侧缺陷，都发生在 `herdr/execution_trace.py` 的任务轨迹读取链上：
+
+1. `read_stored_events()` 按 `timestamp ASC` 取最多 2000 条，窗口因此保留**最早**的 2000 条，事件量越大的任务其**最新**的权威回执越落在窗口外。`task_artifact_checkpoint`、`candidate_published`、`tool_execution` 全部丢失，用户在轨迹里看不到实际执行与产出。
+2. `scheduler_facts.record_candidate_frozen()` 把 `candidate_frozen` 写成 **workflow 级**事件（无 `task_id`），而轨迹按 `task_id` 查询。把该事件类型加入可投影白名单**完全无效**——白名单只决定类型是否可投影，不能凭空造出任务归属。
+
+同类形态第 1 类此前已在 `herdr/quality_sources.py` 出现过一次（issue #234 P2-1，同样是 `ASC` + `LIMIT` 窗口吞掉后写入的 `verification_completed` 回执），本条是该形态第二次实弹，也是首次被写进通用教训。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| `ORDER BY ts ASC LIMIT N` 的窗口保留**最旧**的行 | 有界窗口不等于"最近 N 条"；升序取上限时新写入的证据必然最先被挤出 | 需要"最新证据"语义时用降序取窗口再反序输出，或显式补读；升序窗口必须配一条有界补读路径 |
+| 补读查询与主查询范围不一致 | 同一份账本读两次，范围漂移即跨任务/跨运行串证据 | 补读复用主查询的同一 scope 谓词与参数（同一函数生成），只换事件类型与上限 |
+| 补读从"事件类型少"角度看 | 权威回执不是 filler，不会因为类型不在旧白名单里就不重要 | 补读覆盖全部权威回执类型（验收/产物检查点/候选发布/工具执行），每类各自有界 |
+| 事件类型白名单被当成归属能力 | 白名单只回答"能不能投影"，不回答"属于谁" | workflow 级事件必须靠**持久化身份指针**归属：冻结行的 `publication_event_id` 指向引发它的 `candidate_published`，后者才是 task 级 |
+| 关联时只校验 workflow 一致 | 同 workflow 多任务时，跨任务串号 | 归属必须同时校验 workflow / task / run 三者，publication 侧 run 范围与任务 run 范围一致才算归因 |
+| 归属查不到就退化成"属于每个任务" | 把不确定摊给所有任务 = 制造幽灵归因（§95 同源） | 身份缺失/未知/跨任务/跨运行一律**不归因**，不猜测；"无法归因"必须能显式表达 |
+| 截断提示改写为"已读取 N 条" | 提示应描述**原生窗口**的事实，不是补读后的行数 | 截断注记绑定原生窗口是否饱和，补读行数不参与判定 |
+| 用测试替身补 `task_id` 掩盖缺陷 | 手写 `task_id` 的冻结事件让缺陷消失，也让验收失去意义 | 回归测试必须走真实发布/冻结写入链，产出真实的 workflow 级行 |
+| 轨迹尾部回执可能落在首页之后 | 只断言第一页会漏掉尾部证据 | API 回归必须翻页遍历，直到 `has_more` 为假 |
+
+### 操作规范（已固化到 `herdr/execution_trace.py`）
+
+1. 窗口按 `timestamp ASC` 取满 `STORED_LIMIT` 时，触发有界补读：同一 Task / Run scope 下按事件类型分别补读，每类上限 `STORED_LIMIT`，绝不改成无界查询。
+2. 补读行按事件 ID 与窗口行去重，再按时间排序输出；补读不改变原生窗口的截断判定。
+3. workflow 级 `candidate_frozen` 只能通过 `publication_event_id` → `candidate_published` 的 task 级行归属；publication 侧的 workflow / task / run 必须与目标任务一致，否则不归因。
+4. 任何身份不足的冻结保持不归因；归属查询失败（sqlite 错误）降级为无补读，不抛错、不猜测。
+5. 补读 scope 谓词由同一函数生成（`_run_scope_sql`），主查询与关联查询不得各写一份范围条件。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_execution_trace.py tests/test_execution_trace_api.py
+```
+
+关键回归验证：窗口外回执仍可读且按时间排序；窗口内回执不重复；跨任务 / 跨运行隔离；workflow 级冻结只出现在发布它的任务上；身份缺失 / 未知 / 跨任务 / 跨运行的冻结保持不归因；真实轨迹 API 翻页可遍历到尾部回执。
+
+### 相关文档 / 关联证据
+
+- `herdr/execution_trace.py` — `_execution_receipts_for_scope` / `_linked_freezes_for_task` / `_run_scope_sql`
+- `tests/test_execution_trace.py` — 窗口补读与冻结归属单测
+- `tests/test_execution_trace_api.py` — 真实 Console API 回归（含翻页）
+- `wiki/execution-trace.md` — 窗口补读与冻结归属事实
+- Issue #261 / #262（PR #260 评审 P2）
