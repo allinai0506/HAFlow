@@ -9,7 +9,7 @@
 | SC-002 | 状态矩阵单一来源 | wiki 以 herdr/transitions.py 为证据 | bin/herdr-task 已删除历史兜底副本，统一直接引用 herdr/transitions.py | — | **已解决**（单一来源确立） |
 | SC-003 | 预占注册后清理 | wiki/agent-routing-and-pools.md L81：注册后从 reservations 移除 | herdr/agent_router.py L272-274 同样移除（continue 丢弃） | — | **撤回**：文档与代码一致（评审 X-01） |
 | SC-004 | 存储权威 | docs/architecture/architecture-overview.md L40-47 历史版本将 tasks/projects/workflows.json 列为存储层 | herdr/state_store.py L7-10：JSON 仅 export 与 compat，权威为 state.db；architecture-overview 已更新校准 | — | **已解决**（文档校准为 SQLite 权威、JSON 兼容投影） |
-| SC-005 | 门禁打回字段 | docs/product-specs/workflow-template-schema.md L96 与 authoring guide 使用 `retry_target` | 运行时读取 `retry_node`（controller L946-973）；`retry_target` 仅被校验；shipped 模板 business-research-v1.yaml L67 使用 `retry_target` | not_collected | 确认 |
+| SC-005 | 门禁打回字段 | docs/product-specs/workflow-template-schema.md 历史上使用 `retry_target` | 运行时与 Controller 原只读取 `retry_node`；已收敛统一为 `retry_node`（标准推荐）与 `retry_target`（等价兼容别名），DAG 校验与调度策略均双向支持 | — | **已解决**（双向透明兼容） |
 | SC-006 | Run 快照失败行为 | schema L38 称告警并回退共享文件 | herdr/projects.py L573-577：源文件可读时直接拒绝注册，仅源缺失时回退 | — | 确认 |
 | SC-007 | 状态事件命名 | wiki/task-lifecycle.md L119 称 `task_status_changed` 在真实变化时写入 | 权威事件为同事务 `task_transition`（state_db.py L6820-6833）；`task_status_changed` 为 best-effort 轨迹事件（kernel.py L203-222），可能缺失 | — | 确认 |
 | SC-008 | “active”集合 | 同一词面 | 路由 active = {pending, dispatched, working, blocked, agent_done, rework}（agent_router.py L304-307）；状态机 ACTIVE 含 paused、interrupted，不含 pending（transitions.py L37-45） | — | 确认（同名不等于同义） |
@@ -30,7 +30,7 @@
 1. SC-001、SC-002：以 herdr/transitions.py 为唯一事实源，删除 CLI 兜底副本或由生成器产出；同步 wiki。
 2. SC-003 已撤回：无需处置。
 3. SC-004、SC-009 已解决：架构文档已补充“SQLite 为权威、JSON 为导出/只读投影”设计原则；预占文件名与 TTL 已统一为 agent-reservations.json。
-4. SC-005、SC-006：确认产品意图是 `retry_node` 还是 `retry_target`；快照失败时失败关闭还是降级。
+4. SC-005 已解决：规范定案为 `retry_node` 为标准推荐字段，`retry_target` 为完全等价兼容别名；DAG 校验与 Controller 调度均双向容错解析，消除打回降级隐患。SC-006：快照失败时失败关闭还是降级。
 5. SC-008：为不同含义使用不同术语（路由负载、生命周期活跃、容量活跃），禁止同名合并。
 6. SC-010、SC-015、SC-019：把豁免与人工覆盖纳入权限模型，统一守卫，并为控制台写路由增加鉴权（代码变更）。
 7. SC-011、SC-012 已由 ADR-0006、ADR-0007 与 OEP-0002 裁决：工作流初始状态定案为 running（pending 为未装配/草稿态）；门禁解耦为 gate_spec 与 gate_verdict，DB 为调度第一事实源，文件为不可变快照。

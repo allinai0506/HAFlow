@@ -64,6 +64,7 @@ nodes:
       type: hybrid
       requires_human_approval: true
       auto_criteria: "len(artifacts) >= 3"
+      retry_node: data_extraction
       retry_target: data_extraction
     required_outputs:
       - docs/executive_summary.md

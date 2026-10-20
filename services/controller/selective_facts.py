@@ -161,7 +161,7 @@ def _blocked_gate_tasks_for(ports, workflow_id, gate_node_id):
 
 def _retry_node_for_gate(ports, workflow_cfg, gate_cfg, gate_node_id):
     """解析 fix-loop 的 retry_node(含历史 fallback,与 handle 一致)。"""
-    retry_node = (gate_cfg or {}).get("retry_node", "implementation")
+    retry_node = (gate_cfg or {}).get("retry_node") or (gate_cfg or {}).get("retry_target") or "implementation"
     nodes_by_id = {n["id"]: n for n in (workflow_cfg or {}).get("nodes", [])}
     if nodes_by_id and retry_node not in nodes_by_id:
         gate_deps = nodes_by_id.get(gate_node_id, {}).get("depends_on", [])

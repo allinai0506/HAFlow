@@ -93,7 +93,8 @@ stage advance 事件头部的 `base_branch` 字段获取，controller 对 rules
 | `type` | `string` | 否 | `"auto"` | 门禁类型：`auto` (自动判定), `human` (人工核验), `hybrid` (自动+人工会签)。 |
 | `auto_criteria` | `string` | 否 | `""` | 自动化评估准则表达式（如 `len(artifacts) >= 3`）。 |
 | `requires_human_approval` | `boolean` | 否 | `false` | 是否强制需要人类总指挥在控制台签署通过。 |
-| `retry_target` | `string` | 否 | `null` | 门禁验收失败或打回时，指定重置回退的目标节点 ID。 |
+| `retry_node` | `string` | 否 | `null` | 门禁验收失败或打回时，指定重置回退的目标节点 ID（标准字段）。 |
+| `retry_target` | `string` | 否 | `null` | `retry_node` 的完全等价兼容别名，指定门禁打回回退目标节点 ID。 |
 
 ---
 
@@ -103,5 +104,5 @@ stage advance 事件头部的 `base_branch` 字段获取，controller 对 rules
 1. **唯一性校验**：所有节点的 `id` 必须全图唯一，不允许重名。
 2. **合法依赖引用校验**：所有 `depends_on` 中的节点 ID 必须在当前模板的 `nodes` 中存在。
 3. **输入引用合法性校验**：若 `inputs` 声明了以 `nodes.<node_id>` 开头的引用，引用的 `<node_id>` 必须存在于图中。
-4. **门禁回退目标校验**：若 `gate.retry_target` 非空，指定的重试节点必须在 `nodes` 中存在。
+4. **门禁回退目标校验**：若 `gate.retry_node` 或 `gate.retry_target` 非空，指定的重试节点必须在 `nodes` 中存在。
 5. **无环图拓扑校验 (Acyclic)**：基于 Kahn 算法进行拓扑检测，不能存在循环依赖（如 A ➔ B ➔ C ➔ A）。

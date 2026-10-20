@@ -3223,3 +3223,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - FACT：补读共用单一额度会重新制造"看不到最新回执"的问题——某类写满 2000 条后，更晚的 `candidate_published` / `tool_execution` 仍落在窗口外。
 - FACT：发布事件缺少 `run_id` 时无法证明属于哪一次运行，接受它会让冻结出现在该任务的每一次后续运行里。
 - Evidence：`herdr/execution_trace.py#_execution_receipts_for_scope/_latest_bounded_type_rows/_linked_freezes_for_task`、`tests/test_execution_trace.py`、`tests/test_execution_trace_api.py`、PR #291 评审 P2。
+
+## [2026-10-20] Fix | 门禁打回字段统一收敛 (SC-005)
+
+- Updated `herdr/workflow.py`：`validate_workflow_dag` 同时校验 `retry_target` 与 `retry_node` 引用的目标节点合法性，确保两种字段形式均受拓扑完整性校验。
+- Updated `herdr/workflow_progress.py`：`_gate` 与 `gate_retry_node` 双向兼容解析 `gate.get('retry_node') or gate.get('retry_target') or 'implementation'`，消除非软件模板误降级为 `implementation` 导致的 `gate_unknown` 异常。
+- Updated `services/controller/node_policy.py` & `services/controller/selective_facts.py`：`resolve_gate_config` 与 `_retry_node_for_gate` 统一容错解析 `retry_node` 与 `retry_target`。
+- Updated `workflow_templates/business-research-v1.yaml`：显式补充 `retry_node: data_extraction` 标准字段并保留 `retry_target` 兼容别名。
+- Updated `docs/product-specs/workflow-template-schema.md` & `docs/guides/template-authoring-guide.md`：明确 `retry_node` 为标准字段，`retry_target` 为完全等价的兼容别名。
+- Updated `ontology/objects/gate_spec.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-005 状态标记为“已解决”。
+- Evidence：`herdr/workflow.py`、`herdr/workflow_progress.py`、`services/controller/node_policy.py`、`tests/test_gate_retry_node_target.py`、`ontology/tests/audit_ontology.py`。

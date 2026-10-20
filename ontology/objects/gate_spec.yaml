@@ -27,12 +27,12 @@ properties:
   name: 打回目标节点
   type: string
   required: false
-  notes: 运行时 fix-loop 实际读取该字段
+  notes: 标准字段，运行时 fix-loop 与 DAG 校验统一支持
 - id: retry_target
-  name: 打回目标（文档字段）
+  name: 打回目标（兼容别名）
   type: string
   required: false
-  notes: schema 校验存在，但运行时 fix-loop 未消费（冲突 SC-005）
+  notes: retry_node 的等价别名，Schema 校验与运行时调度透明兼容（SC-005 已解决）
 - id: max_loops
   name: 最大循环次数
   type: int
