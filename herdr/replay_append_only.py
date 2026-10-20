@@ -7,7 +7,8 @@ import subprocess
 from pathlib import Path
 
 DOCUMENTS = ('wiki/log.md', 'docs/lessons/lessons-learned.md', 'wiki/task-lifecycle.md')
-_HEADING = re.compile(rb'^## (\d+)\.', re.MULTILINE)
+_HEADING_LINE = re.compile(rb'^## (\d+)\.')
+_FENCE_LINE = re.compile(rb'^ {0,3}(`{3,}|~{3,})')
 
 
 def _contains_append_block(history, block):
@@ -26,6 +27,71 @@ def _contains_append_block(history, block):
     return True
 
 
+def _numbered_entries(document):
+    """Return real lesson headings, excluding heading-shaped fenced examples."""
+    entries = []
+    offset = 0
+    fence = None
+    for line in document.splitlines(keepends=True):
+        fence_match = _FENCE_LINE.match(line)
+        if fence is None and fence_match:
+            marker = fence_match[1]
+            fence = (marker[:1], len(marker))
+        elif fence is not None and fence_match:
+            marker = fence_match[1]
+            remainder = line[fence_match.end():].strip(b'\r\n')
+            if (marker[:1] == fence[0] and len(marker) >= fence[1]
+                    and not remainder.strip(b' \t')):
+                fence = None
+        elif fence is None:
+            heading = _HEADING_LINE.match(line)
+            if heading:
+                entries.append((int(heading[1]), offset, offset + heading.start(1),
+                                offset + heading.end(1)))
+        offset += len(line)
+    return entries
+
+
+def _entry_identity(document, entries, index):
+    start = entries[index][1]
+    end = entries[index + 1][1] if index + 1 < len(entries) else len(document)
+    block = document[start:end].strip(b'\r\n')
+    return _HEADING_LINE.sub(b'## N.', block, count=1)
+
+
+def _applied_prefix_length(main, candidate, candidate_entries):
+    """Find the longest candidate-entry prefix already contiguous in main."""
+    main_entries = _numbered_entries(main)
+    main_identities = [_entry_identity(main, main_entries, index)
+                       for index in range(len(main_entries))]
+    candidate_identities = [_entry_identity(candidate, candidate_entries, index)
+                            for index in range(len(candidate_entries))]
+    longest = 0
+    for start in range(len(main_identities)):
+        matched = 0
+        while (matched < len(candidate_identities)
+               and start + matched < len(main_identities)
+               and candidate_identities[matched] == main_identities[start + matched]):
+            matched += 1
+        longest = max(longest, matched)
+    return longest
+
+
+def _renumber_entries(document, entries, start_number):
+    mapping = {}
+    replacements = []
+    cursor = start_number
+    for number, _, number_start, number_end in entries:
+        assigned = max(number, cursor + 1)
+        if assigned != number:
+            mapping[number] = assigned
+            replacements.append((number_start, number_end, str(assigned).encode()))
+        cursor = assigned
+    for start, end, replacement in reversed(replacements):
+        document = document[:start] + replacement + document[end:]
+    return document, mapping
+
+
 def merge_append_only(base, main, incoming, *, numbered=False):
     """Keep main byte-for-byte; only incoming appended headings may change."""
     if not main.startswith(base) or not incoming.startswith(base):
@@ -35,26 +101,23 @@ def merge_append_only(base, main, incoming, *, numbered=False):
     suffix = incoming[len(base):]
     main_suffix = main[len(base):]
     already_applied = _contains_append_block(main_suffix, suffix)
-    if numbered and not already_applied:
-        already_applied = _contains_append_block(
-            _HEADING.sub(b'## N.', main_suffix),
-            _HEADING.sub(b'## N.', suffix),
-        )
     if already_applied:
         return main, {}
     mapping = {}
     if numbered and suffix:
-        existing = [int(match[1]) for match in _HEADING.finditer(main)]
-        added = [int(match[1]) for match in _HEADING.finditer(suffix)]
+        candidate_entries = _numbered_entries(suffix)
+        added = [entry[0] for entry in candidate_entries]
         if len(added) != len(set(added)):
             raise ValueError('duplicate new lesson numbers within incoming history')
-        cursor = max(existing, default=0)
-        for number in added:
-            assigned = max(number, cursor + 1)
-            if assigned != number:
-                mapping[number] = assigned
-            cursor = assigned
-        suffix = _HEADING.sub(lambda match: b'## ' + str(mapping.get(int(match[1]), int(match[1]))).encode() + b'.', suffix)
+        applied = _applied_prefix_length(main_suffix, suffix, candidate_entries)
+        if applied == len(candidate_entries) and candidate_entries:
+            return main, {}
+        if applied:
+            suffix = suffix[:candidate_entries[0][1]] + suffix[candidate_entries[applied][1]:]
+            candidate_entries = _numbered_entries(suffix)
+        existing = [entry[0] for entry in _numbered_entries(main)]
+        suffix, mapping = _renumber_entries(suffix, candidate_entries,
+                                            max(existing, default=0))
     return main + suffix, mapping
 
 

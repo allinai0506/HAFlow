@@ -156,3 +156,33 @@ def test_retry_deduplicates_a_block_renumbered_by_the_first_replay():
     assert second == first
     assert second.count(b'incoming body\n') == 1
     assert second_mapping == {}
+
+
+def test_retry_appends_only_entries_after_an_already_applied_prefix():
+    base = b'## 1. old\nold body\n'
+    main = base + b'\n## 2. main\nmain body\n'
+    incoming_b = base + b'\n## 2. incoming B\nB body\n'
+    first, _ = merge_append_only(base, main, incoming_b, numbered=True)
+    incoming_bc = base + (b'\n## 2. incoming B\nB body\n'
+                          b'\n## 3. incoming C\nC body\n')
+
+    second, mapping = merge_append_only(base, first, incoming_bc, numbered=True)
+
+    assert second.count(b'B body\n') == 1
+    assert second.count(b'C body\n') == 1
+    assert b'## 4. incoming C\n' in second
+    assert mapping == {3: 4}
+
+
+def test_numbered_replay_ignores_headings_inside_fenced_code_blocks():
+    base = b'## 100. old\nold body\n'
+    incoming = base + (b'\n## 101. incoming\nbefore\n'
+                       b'```md\n## 999. sample\n```\n'
+                       b'\n## 102. next\nbody\n')
+
+    merged, mapping = merge_append_only(base, base, incoming, numbered=True)
+
+    assert b'```md\n## 999. sample\n```\n' in merged
+    assert b'## 101. incoming\n' in merged
+    assert b'## 102. next\n' in merged
+    assert mapping == {}
