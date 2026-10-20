@@ -181,12 +181,10 @@ def merge_append_only(base, main, incoming, *, numbered=False):
             prefix_applied = False
         prefix_pending = b'' if prefix_applied else prefix
         if applied == len(candidate_entries) and candidate_entries:
-            if not prefix_pending.strip():
-                prefix_pending = _unmatched_displaced_tail(prefix_pending, main_suffix)
-            unmatched_separators = _unmatched_displaced_tail(
-                unmatched_separators, main_suffix
+            pending_suffix = _unmatched_displaced_tail(
+                prefix_pending + unmatched_separators, main_suffix
             )
-            return main + prefix_pending + unmatched_separators, {}
+            return main + pending_suffix, {}
         if applied or prefix_pending != prefix:
             suffix = (prefix_pending + unmatched_separators
                       + suffix[candidate_entries[applied][1]:])

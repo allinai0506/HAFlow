@@ -301,6 +301,20 @@ def test_numbered_replay_deduplicates_separator_displaced_after_main_entry():
     assert mapping == {}
 
 
+def test_numbered_replay_deduplicates_combined_displaced_separators():
+    base = b'## 1. old\nold body\n'
+    incoming = base + b'\n## 2. shared\nshared body\r\n'
+    main = base + (b'## 2. shared\nshared body\n'
+                   b'## 3. main only\nmain body\n')
+
+    first, _ = merge_append_only(base, main, incoming, numbered=True)
+    second, mapping = merge_append_only(base, first, incoming, numbered=True)
+
+    assert first.endswith(b'main body\n\n\r\n')
+    assert second == first
+    assert mapping == {}
+
+
 def test_non_numbered_replay_matches_newline_terminated_block_before_next_line():
     base = b'old\n'
     incoming = base + b'candidate\n'
