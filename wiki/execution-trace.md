@@ -22,6 +22,10 @@ Pane ID 会回收，也不能当作历史归属。
 
 Claude 先按已记录的会话文件名直接打开。找不到时才逐个查看，并在时间预算或 8 个文件处停下，不先排序整个目录。Codex 也先按已记录的会话 ID 定位，再套用最多 800 个文件的扫描上限。`events` 先按当前运行（没有 `run_id` 的旧行仍保留；旧任务再加 `run_<task_id>`）和可投影的事件类型过滤，再取最多 2000 条。
 
+超过 2000 条窗口时，窗口只保留最早的 2000 条，之后的权威回执会落在窗口外。此时按同一 Task / Run 范围补读 `verification_completed`、`task_artifact_checkpoint`、`candidate_published` 和 `tool_execution`，不改成无界查询。补读的行按事件 ID 去重，再按时间排序输出。
+
+补读按事件类型分别限流：`task_artifact_checkpoint`、`candidate_published`、`tool_execution` 三类各自最多 2000 条，额度互不共用。共用一个额度会让某一类写满后仍然把更晚的其他类型挤到补读范围外，重新制造"看不到最新回执"的问题。这三类先取该类最新的 2000 条，再按时间正序还原，因此同类中最新的证据一定可见。`verification_completed` 走独立的单类补读查询，额度同样独立于其他三类。
+
 打开一条轨迹时只解码该任务，以及 `clone_path` 规范化后与它相同的其他任务。其余任务的完整载荷留在库里。
 
 同一次状态变化会同时写进状态历史和 `task_transition`。相同任务、目标状态和时间合成一条轨迹。
@@ -39,6 +43,10 @@ Claude 先按已记录的会话文件名直接打开。找不到时才逐个查�
 ## 已保存的执行报告与产物回执
 
 `FACT` 轨迹读取同一 Task / Run 的 `task_artifact_checkpoint`、`candidate_published` / `candidate_frozen` 和 `tool_execution`。阶段报告展示执行摘要、下一步、Observation ID 和 SHA-256；摘要复用现有脱敏能力。报告里的“测试通过”是执行者陈述，不转换为验收通过。派发事件展示任务目标与执行者，不返回完整提示词或完成凭据。
+
+`FACT` 候选冻结写成 workflow 级事件，没有 `task_id`。轨迹按 `publication_event_id` 关联到引发冻结的 `candidate_published` 事件，再回到该发布事件所属的 Task / Run；只有发布任务看得到这次冻结。同一个 workflow 的其他任务、其他运行的发布事件，以及身份不足（缺少或指向未知发布事件）的冻结，都保持不归因，不猜测归属。
+
+关联的发布事件必须带有与当前 Task 相同的 `run_id`。缺少 `run_id` 或为空的发布事件无法证明属于哪一次运行，接受它会让这次冻结出现在该任务的每一次后续运行里，因此同样保持不归因。
 
 `FACT` 无原生工具适配（包括 Qoder）时明确提示缺口，已有报告仍可展示；`recorded_actions` 与原生 `agent_actions` 分开。存在具体操作或报告时，无详情的生命周期记录折叠保留。轨迹页的“本任务产出”复用产物页及其可读性、归属与失败语义。
 

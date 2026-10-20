@@ -3208,3 +3208,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `herdr/domain/registry.py`：`_SOFTWARE_TASK_TYPES` 补充 `feat`、`perf`、`ci`、`chore`，确保领域适配器启发式推断完整覆盖技术任务全集。
 - Updated `ontology/objects/task.yaml`、`ontology/objects/workflow_node.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-013 状态标记为“已解决”。
 - Evidence：`herdr/direct_dispatch.py#TASK_TYPE_CHOICES`、`herdr/domain/registry.py#_SOFTWARE_TASK_TYPES`、`tests/test_task_type_vocabulary.py`、`tests/test_domain_adapters.py`、`ontology/tests/audit_ontology.py`。
+
+### 2026-10-20：执行轨迹的窗口外回执与候选冻结归属
+
+- FACT：超过 2000 条存储事件窗口时，轨迹按同一 Task / Run 范围补读 `verification_completed`、`task_artifact_checkpoint`、`candidate_published` 和 `tool_execution`，按事件类型分别限流、每类最多 2000 条，按事件 ID 去重后按时间排序；不改成无界查询。
+- FACT：workflow 级 `candidate_frozen` 没有 `task_id`，轨迹按 `publication_event_id` 关联到 `candidate_published` 事件再回到该发布事件的 Task / Run，只有发布任务看得到这次冻结；身份不足（含发布事件缺少 `run_id`）时保持不归因。
+- Evidence：`herdr/execution_trace.py#read_stored_events/_execution_receipts_for_scope/_linked_freezes_for_task`、`tests/test_execution_trace.py`、`tests/test_execution_trace_api.py`、Issue #261 / #262。
+- 教训：`docs/lessons/lessons-learned.md` §180（升序有界窗口吞掉最新回执；workflow 级事件靠类型白名单无法归属）。
+- UNKNOWN：仅在本地隔离环境验证，未部署或修改生产工作流。
+
+### 2026-10-20：执行轨迹补读按类型分流与冻结运行身份收紧
+
+- Updated [[execution-trace]]：补读改为按事件类型分别限流，每类各自最多 2000 条并先取该类最新的 2000 条再按时间正序还原，避免某一类写满后挤掉更晚的其他类型；关联的发布事件必须带与任务相同的 `run_id`，缺失时保持不归因。
+- FACT：补读共用单一额度会重新制造"看不到最新回执"的问题——某类写满 2000 条后，更晚的 `candidate_published` / `tool_execution` 仍落在窗口外。
+- FACT：发布事件缺少 `run_id` 时无法证明属于哪一次运行，接受它会让冻结出现在该任务的每一次后续运行里。
+- Evidence：`herdr/execution_trace.py#_execution_receipts_for_scope/_latest_bounded_type_rows/_linked_freezes_for_task`、`tests/test_execution_trace.py`、`tests/test_execution_trace_api.py`、PR #291 评审 P2。

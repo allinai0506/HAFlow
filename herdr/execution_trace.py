@@ -22,6 +22,11 @@ from .trajectory import run_id_for_task
 MAX_LIMIT = 200
 DEFAULT_LIMIT = 100
 STORED_LIMIT = 2000
+_EXECUTION_RECEIPT_TYPES = (
+    "task_artifact_checkpoint",
+    "candidate_published",
+    "tool_execution",
+)
 _CORRUPT_SAMPLE_CAP = 8
 _MISSING = object()
 _PROJECTABLE_EVENT_TYPES = (
@@ -555,12 +560,7 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
             if not task_run and task.get("task_id"):
                 task_run = run_id_for_task(task)
             type_marks = ",".join("?" for _ in _PROJECTABLE_EVENT_TYPES)
-            if task_run:
-                run_sql = "(run_id IS NULL OR run_id = '' OR run_id = ?)"
-                run_params = (task_run,)
-            else:
-                run_sql = "(run_id IS NULL OR run_id = '')"
-                run_params = ()
+            run_sql, run_params = _run_scope_sql(task_run)
             rows = conn.execute(
                 f"""
                 SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
@@ -573,12 +573,33 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
                 """,
                 (task.get("task_id"), *_PROJECTABLE_EVENT_TYPES, *run_params, STORED_LIMIT),
             ).fetchall()
-            if len(rows) >= STORED_LIMIT:
-                seen = {row["id"] for row in rows}
-                rows = list(rows) + [
-                    row for row in _receipts_for_scope(conn, task.get("task_id"), run_sql, run_params)
-                    if row["id"] not in seen
-                ]
+            window_full = len(rows) >= STORED_LIMIT
+            seen = {row["id"] for row in rows}
+            supplements = []
+            # Workflow-level candidate freezes carry no task_id. Attribute them
+            # by publication identity, so the publishing task sees the freeze
+            # it caused without every task inheriting every workflow freeze.
+            linked_freezes = _linked_freezes_for_task(conn, task, task_run)
+            for row in linked_freezes:
+                if row["id"] in seen:
+                    continue
+                seen.add(row["id"])
+                supplements.append(row)
+            if window_full:
+                # The window keeps the oldest rows, so later authoritative
+                # receipts fall outside it. Re-read them with the same bounded
+                # scope; never widen the main query into an unbounded read.
+                for row in _receipts_for_scope(conn, task.get("task_id"), run_sql, run_params):
+                    if row["id"] in seen:
+                        continue
+                    seen.add(row["id"])
+                    supplements.append(row)
+                for row in _execution_receipts_for_scope(conn, task.get("task_id"), run_sql, run_params):
+                    if row["id"] in seen:
+                        continue
+                    seen.add(row["id"])
+                    supplements.append(row)
+            rows = list(rows) + supplements
         except sqlite3.Error:
             return [], [{"code": "trajectory_unavailable", "message": "任务轨迹数据库暂不可用。"}]
     finally:
@@ -604,7 +625,7 @@ def read_stored_events(task: Dict[str, Any], db_path) -> Tuple[List[Dict[str, An
     notes = []
     if corrupt_ids:
         notes.append(_corrupt_payload_note(corrupt_ids))
-    if len(rows) >= STORED_LIMIT:
+    if window_full:
         notes.append({"code": "native_truncated", "message": "执行轨迹已截断，仅显示已读取的部分。"})
     return events, notes
 
@@ -628,6 +649,117 @@ def _receipts_for_scope(conn, task_id, run_sql: str, run_params: Sequence[Any]) 
         """,
         (task_id, *run_params, STORED_LIMIT),
     ).fetchall()
+
+
+def _latest_bounded_type_rows(
+    conn, task_id, event_type: str, run_sql: str, run_params: Sequence[Any],
+) -> List[Any]:
+    """Read the newest bounded tail of one receipt type, oldest-first again.
+
+    The stored window keeps the *oldest* rows, so a receipt type that appears
+    many times would hide its own newest rows behind the same ascending
+    limit. Selecting the newest bounded tail first and restoring the
+    chronological order afterwards keeps the newest evidence visible while
+    the read stays bounded.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
+        FROM events
+        WHERE task_id = ?
+          AND event_type = ?
+          AND {run_sql}
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?
+        """,
+        (task_id, event_type, *run_params, STORED_LIMIT),
+    ).fetchall()
+    return list(reversed(rows))
+
+
+def _execution_receipts_for_scope(conn, task_id, run_sql: str, run_params: Sequence[Any]) -> List[Any]:
+    """Read execution/output receipts for the same scope, past the stored window.
+
+    The window keeps the oldest rows, so later ``task_artifact_checkpoint``,
+    ``candidate_published`` and ``tool_execution`` evidence can fall outside
+    it. These rows are evidence, not filler, so they get the same bounded
+    supplement treatment as ``verification_completed`` receipts.
+
+    Each receipt type is limited on its own. A single combined ``IN`` query
+    would let one prolific type consume the whole budget and hide a later
+    receipt of another type, recreating the missing-latest-receipt bug this
+    supplement exists to fix. The tail of every type is read newest-first and
+    restored to chronological order, so the newest evidence of each type
+    survives. One bounded query per receipt type at most.
+    """
+    rows: List[Any] = []
+    for event_type in _EXECUTION_RECEIPT_TYPES:
+        rows.extend(_latest_bounded_type_rows(conn, task_id, event_type, run_sql, run_params))
+    rows.sort(key=lambda row: (row["timestamp"] if row["timestamp"] is not None else 0.0, row["id"]))
+    return rows
+
+
+def _run_scope_sql(run_id) -> Tuple[str, Tuple[Any, ...]]:
+    """Run-scope predicate and its parameters for event reads.
+
+    ``run_id`` identifies the execution attempt. Events written without one
+    (workflow-level facts) stay visible to every run of that workflow.
+    """
+    if run_id:
+        return (
+            "(run_id IS NULL OR run_id = '' OR run_id = ?)",
+            (run_id,),
+        )
+    return ("(run_id IS NULL OR run_id = '')", ())
+
+
+def _linked_freezes_for_task(conn, task, task_run) -> List[Any]:
+    """Attribute workflow-level ``candidate_frozen`` events back to the task.
+
+    ``record_candidate_frozen`` writes a workflow-scoped row (no ``task_id``)
+    whose payload carries ``publication_event_id`` pointing at the
+    ``candidate_published`` row that caused the freeze. That publication row
+    is task-scoped, so joining on it attributes the freeze without guessing
+    and without assigning every workflow freeze to every task. Rows whose
+    publication identity is missing or unknown stay unattributed.
+
+    The publication must also carry the task's own run id exactly. A
+    publication written without a run id cannot prove which run it belongs
+    to, so accepting it would project its freeze into every later run of the
+    same task. Insufficient run identity stays unattributed.
+    """
+    task_id = task.get("task_id")
+    if not task_id:
+        return []
+    try:
+        return conn.execute(
+            """
+            SELECT f.id, f.task_id, f.agent_id, f.event_type, f.timestamp, f.source, f.run_id, f.sequence, f.payload_json
+            FROM events f
+            JOIN events p ON p.id = CASE
+                WHEN json_valid(f.payload_json)
+                THEN json_extract(f.payload_json, '$.publication_event_id')
+                ELSE NULL END
+            WHERE f.workflow_id = ?
+              AND f.task_id IS NULL
+              AND f.event_type = 'candidate_frozen'
+              AND f.source = 'critical-path-scheduler'
+              AND CASE WHEN json_valid(f.payload_json)
+                       THEN json_extract(f.payload_json, '$.publication_event_id') ELSE 0 END > 0
+              AND p.event_type = 'candidate_published'
+              AND p.source = 'herdr-task'
+              AND p.task_id = ?
+              AND p.workflow_id = f.workflow_id
+              AND p.run_id IS NOT NULL
+              AND p.run_id != ''
+              AND p.run_id = ?
+            ORDER BY f.timestamp ASC, f.id ASC
+            LIMIT ?
+            """,
+            (task.get("workflow_id"), task_id, task_run, STORED_LIMIT),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
 
 
 def _classify_action(action: Dict[str, Any]) -> Dict[str, Any]:
