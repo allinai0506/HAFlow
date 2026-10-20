@@ -81,6 +81,8 @@ def _unmatched_displaced_tail(pending, main):
     if not pending:
         return pending
     content = pending.rstrip(b'\r\n')
+    if content:
+        return pending
     pending_tail = pending[len(content):]
     main_tail = main[len(main.rstrip(b'\r\n')):]
     available = re.findall(rb'\r\n|\n|\r', main_tail)[1:]

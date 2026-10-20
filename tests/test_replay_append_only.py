@@ -321,9 +321,12 @@ def test_numbered_replay_preserves_text_prefix_while_deduplicating_eof_separator
     main = base + b'## 2. shared\nshared body\n\n'
 
     merged, mapping = merge_append_only(base, main, incoming, numbered=True)
+    retried, retry_mapping = merge_append_only(base, merged, incoming, numbered=True)
 
-    assert merged == main + b'NOTE'
+    assert merged == main + b'NOTE\n'
+    assert retried == merged
     assert mapping == {}
+    assert retry_mapping == {}
 
 
 def test_non_numbered_replay_matches_newline_terminated_block_before_next_line():
