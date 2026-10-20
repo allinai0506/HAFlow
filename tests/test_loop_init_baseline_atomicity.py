@@ -120,6 +120,34 @@ def test_native_initialization_preserves_legitimate_existing_lint_debt(tmp_path)
     assert evaluate.returncode == 0, evaluate.stdout + evaluate.stderr
 
 
+def test_initial_baseline_rejects_head_change_during_lint(tmp_path, monkeypatch):
+    subprocess.run(['git', 'init', '-b', 'main'], cwd=tmp_path, check=True,
+                   capture_output=True)
+    subprocess.run(['git', 'config', 'user.name', 'T'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@example.invalid'], cwd=tmp_path,
+                   check=True)
+    tracked = tmp_path / 'tracked.txt'
+    tracked.write_text('before\n')
+    subprocess.run(['git', 'add', 'tracked.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-m', 'before'], cwd=tmp_path, check=True,
+                   capture_output=True)
+    loop = init_loop(tmp_path, 'stable baseline identity', test_cmd='true')
+    original = evaluator.run_evaluation_command
+
+    def advance_head(*args, **kwargs):
+        result = original(*args, **kwargs)
+        tracked.write_text('after\n')
+        subprocess.run(['git', 'commit', '-am', 'advance'], cwd=tmp_path, check=True,
+                       capture_output=True)
+        return result
+
+    monkeypatch.setattr(evaluator, 'run_evaluation_command', advance_head)
+
+    with pytest.raises(ValueError, match='HEAD.*changed'):
+        evaluator.capture_lint_baseline(loop, 'true', tmp_path)
+    assert not (loop / 'BASELINE_LINT.json').exists()
+
+
 
 def test_native_init_timeout_is_unsuccessful_and_cannot_reuse_old_debt(tmp_path):
     loop = init_loop(tmp_path, 'old contract', test_cmd='true')

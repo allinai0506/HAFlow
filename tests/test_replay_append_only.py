@@ -202,3 +202,16 @@ def test_numbered_replay_ignores_headings_inside_fenced_code_blocks():
     assert b'## 101. incoming\n' in merged
     assert b'## 102. next\n' in merged
     assert mapping == {}
+
+
+def test_numbered_replay_preserves_unheaded_prefix_when_entries_exist():
+    base = b'## 1. old\nold body\n'
+    shared = b'\n## 2. shared\nshared body\n'
+    incoming = base + b'\nIMPORTANT\n' + shared
+    main = base + shared
+
+    merged, mapping = merge_append_only(base, main, incoming, numbered=True)
+
+    assert merged == main + b'\nIMPORTANT\n\n'
+    assert merged.count(b'shared body\n') == 1
+    assert mapping == {}

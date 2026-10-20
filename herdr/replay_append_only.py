@@ -109,11 +109,15 @@ def merge_append_only(base, main, incoming, *, numbered=False):
         added = [entry[0] for entry in candidate_entries]
         if len(added) != len(set(added)):
             raise ValueError('duplicate new lesson numbers within incoming history')
+        prefix = suffix[:candidate_entries[0][1]] if candidate_entries else b''
+        prefix_pending = (prefix if prefix.strip()
+                          and not _contains_append_block(main_suffix, prefix) else b'')
         applied = _applied_prefix_length(main_suffix, suffix, candidate_entries)
         if applied == len(candidate_entries) and candidate_entries:
-            return main, {}
+            return main + prefix_pending, {}
         if applied:
-            suffix = suffix[:candidate_entries[0][1]] + suffix[candidate_entries[applied][1]:]
+            separator = prefix if not prefix.strip() else prefix_pending
+            suffix = separator + suffix[candidate_entries[applied][1]:]
             candidate_entries = _numbered_entries(suffix)
         existing = [entry[0] for entry in _numbered_entries(main)]
         suffix, mapping = _renumber_entries(suffix, candidate_entries,

@@ -239,6 +239,9 @@ def _lint_contract(loop_dir, command):
 
 def _capture_lint_baseline_unlocked(loop_dir: Path, command: str, cwd: Path) -> Path:
     contract = _lint_contract(loop_dir, command)
+    initial_probe = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=cwd, text=True,
+                                   capture_output=True, check=False, timeout=10)
+    initial_sha = initial_probe.stdout.strip() if initial_probe.returncode == 0 else None
     exit_code, stdout, stderr = run_evaluation_command(
         ["/bin/sh", "-c", command], cwd, timeout=120,
     )
@@ -251,8 +254,11 @@ def _capture_lint_baseline_unlocked(loop_dir: Path, command: str, cwd: Path) -> 
         raise ValueError('lint contract changed during baseline capture')
     probe = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=cwd, text=True,
                            capture_output=True, check=False, timeout=10)
+    fresh_sha = probe.stdout.strip() if probe.returncode == 0 else None
+    if initial_sha != fresh_sha:
+        raise ValueError('baseline HEAD changed during capture')
     return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0,
-                                         baseline_of_sha=probe.stdout.strip() if probe.returncode == 0 else None, contract=contract)
+                                         baseline_of_sha=initial_sha, contract=contract)
 
 
 def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors: int = 0, *, baseline_of_sha=None, contract=None) -> Path:
