@@ -113,12 +113,14 @@ def _applied_prefix(main, candidate, candidate_entries, prefix=b''):
             shifted = False
             main_block = _entry_block(main, main_entries, main_index)
             comparison_block = main_block
-            if matched < len(candidate_identities) and identity != candidate_identities[matched]:
-                if prefix and main_block.endswith(prefix):
-                    comparison_block = main_block[:-len(prefix)]
-                    without_prefix = comparison_block.rstrip(b'\r\n')
-                    shifted = (_HEADING_LINE.sub(b'## N.', without_prefix, count=1)
-                               == candidate_identities[matched])
+            if (matched < len(candidate_identities)
+                    and identity != candidate_identities[matched]
+                    and prefix
+                    and main_block.endswith(prefix)):
+                comparison_block = main_block[:-len(prefix)]
+                without_prefix = comparison_block.rstrip(b'\r\n')
+                shifted = (_HEADING_LINE.sub(b'## N.', without_prefix, count=1)
+                           == candidate_identities[matched])
             if (matched < len(candidate_identities)
                     and (candidate_identities[matched] == identity or shifted)):
                 if first_position is None:
@@ -169,7 +171,7 @@ def merge_append_only(base, main, incoming, *, numbered=False):
         if len(added) != len(set(added)):
             raise ValueError('duplicate new lesson numbers within incoming history')
         prefix = suffix[:candidate_entries[0][1]] if candidate_entries else b''
-        (applied, unmatched_separators, first_position, matched_positions,
+        (applied, unmatched_separators, _first_position, matched_positions,
          displaced_prefix) = _applied_prefix(main_suffix, suffix, candidate_entries, prefix)
         if applied and prefix:
             prefix_applied = displaced_prefix or any(
