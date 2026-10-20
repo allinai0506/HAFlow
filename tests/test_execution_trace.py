@@ -983,6 +983,108 @@ def test_issue262_freeze_without_publication_identity_stays_unattributed(tmp_pat
     assert notes == []
 
 
+def test_issue261_receipt_supplement_limits_each_event_type_independently(tmp_path):
+    """Issue #261 P2: one receipt type must not consume the whole supplement
+    and hide a later ``candidate_published`` / ``tool_execution``.
+
+    A saturated window plus a full type of ``task_artifact_checkpoint``
+    rows recreates the missing-latest-receipt bug unless every receipt type
+    is limited on its own.
+    """
+    from herdr.execution_trace import STORED_LIMIT, read_stored_events
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id TEXT, node_id TEXT, task_id TEXT, agent_id TEXT,
+            event_type TEXT, payload_json TEXT, timestamp REAL,
+            source TEXT, run_id TEXT, sequence INTEGER
+        )
+        """
+    )
+    filler = [
+        ("task-a", "codex", "task_started", "{}", 10 + index, "trajectory", "run-a", index + 2)
+        for index in range(STORED_LIMIT)
+    ]
+    checkpoints = [
+        ("task-a", "codex", "task_artifact_checkpoint",
+         json.dumps({"summary": f"checkpoint {index}", "step": index}),
+         10_000 + index, "checkpoint", "run-a", 3_000 + index)
+        for index in range(STORED_LIMIT)
+    ]
+    conn.executemany(
+        """
+        INSERT INTO events (task_id, agent_id, event_type, payload_json, timestamp, source, run_id, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        filler
+        + checkpoints
+        + [
+            ("task-a", "codex", "candidate_published",
+             json.dumps({"candidate_sha": "c" * 40}), 100_000, "herdr-task", "run-a", 9_000),
+            ("task-a", "codex", "tool_execution",
+             json.dumps({"status": "ok", "exit_code": 0}), 100_001, "checkpoint", "run-a", 9_001),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    rows, _notes = read_stored_events(task_doc(commit=None), db)
+    kinds = {row["event_type"] for row in rows}
+    assert "task_artifact_checkpoint" in kinds
+    assert "candidate_published" in kinds, \
+        "a full checkpoint type must not hide the later publication"
+    assert "tool_execution" in kinds, \
+        "a full checkpoint type must not hide the later tool receipt"
+
+
+def test_issue262_freeze_with_runless_publication_stays_unattributed(tmp_path):
+    """Issue #262 P2: a publication without a run identity cannot prove it
+    belongs to the current run, so its freeze must stay unattributed.
+
+    A permissive run scope would project this legacy publication's freeze
+    into every later run of the same task.
+    """
+    from herdr.execution_trace import read_stored_events
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id TEXT, node_id TEXT, task_id TEXT, agent_id TEXT,
+            event_type TEXT, payload_json TEXT, timestamp REAL,
+            source TEXT, run_id TEXT, sequence INTEGER
+        )
+        """
+    )
+    sha = "a" * 40
+    conn.executemany(
+        """
+        INSERT INTO events (workflow_id, task_id, agent_id, event_type, payload_json, timestamp, source, run_id, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("wf-a", None, "scheduler", "candidate_frozen",
+             json.dumps({"candidate_sha": sha, "publication_event_id": 2}),
+             100, "critical-path-scheduler", None, 1),
+            # Publication of the right task and workflow, but without a run id.
+            ("wf-a", "task-a", "codex", "candidate_published",
+             json.dumps({"candidate_sha": sha}), 99, "herdr-task", None, 2),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    rows, _notes = read_stored_events(task_doc(commit=None), db)
+    assert not any(row["event_type"] == "candidate_frozen" for row in rows), \
+        "a publication without run identity must not attribute its freeze"
+
+
 def test_stored_event_cap_keeps_a_receipt_beyond_the_window(tmp_path):
     from herdr.execution_trace import STORED_LIMIT, read_stored_events
 

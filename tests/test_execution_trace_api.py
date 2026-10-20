@@ -419,6 +419,55 @@ def test_issue261_api_surfaces_execution_receipts_past_the_stored_window(tmp_pat
     assert "OTHER_TASK_REPORT" not in encoded
 
 
+def test_issue261_api_surfaces_latest_receipt_of_each_type(tmp_path, monkeypatch):
+    """Issue #261 P2: a saturated checkpoint type must not hide the later
+    publication and tool receipt in the real Console trajectory API."""
+    from herdr.execution_trace import STORED_LIMIT
+
+    task = _task()
+    db = tmp_path / "state.db"
+    _db(db, [task])
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        "INSERT INTO events (task_id,agent_id,event_type,payload_json,timestamp,source,run_id,sequence)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        [("task-a", "codex", "task_started", "{}", 10 + i, "trajectory", "run-a", i + 2)
+         for i in range(STORED_LIMIT)],
+    )
+    conn.executemany(
+        "INSERT INTO events (task_id,agent_id,event_type,payload_json,timestamp,source,run_id,sequence)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        [("task-a", "codex", "task_artifact_checkpoint",
+          json.dumps({"summary": f"checkpoint {i}", "step": i}),
+          10_000 + i, "checkpoint", "run-a", 3_000 + i)
+         for i in range(STORED_LIMIT)],
+    )
+    conn.executemany(
+        "INSERT INTO events (task_id,agent_id,event_type,payload_json,timestamp,source,run_id,sequence)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        [
+            ("task-a", "codex", "candidate_published",
+             json.dumps({"candidate_sha": "d" * 40}), 100_000, "herdr-task", "run-a", 9_000),
+            ("task-a", "codex", "tool_execution",
+             json.dumps({"status": "ok", "exit_code": 0}), 100_001, "checkpoint", "run-a", 9_001),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HERDR_STATE_DB", str(db))
+
+    kinds = set()
+    cursor = None
+    for _ in range(80):
+        page = console.api_task_trajectory("task-a", "200", cursor)
+        kinds.update(event["kind"] for event in page["events"])
+        if not page["has_more"]:
+            break
+        cursor = page["next_cursor"]
+    assert {"progress_report", "candidate", "tool_receipt"} <= kinds, \
+        "a full checkpoint type must not hide the later publication and tool receipt"
+
+
 def test_issue262_api_shows_the_freeze_only_on_the_publishing_task(tmp_path, monkeypatch):
     """Issue #262: a workflow-level candidate_frozen reaches the trajectory of
     the task that published it, through the real publish/freeze chain."""

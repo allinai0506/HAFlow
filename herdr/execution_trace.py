@@ -651,44 +651,66 @@ def _receipts_for_scope(conn, task_id, run_sql: str, run_params: Sequence[Any]) 
     ).fetchall()
 
 
+def _latest_bounded_type_rows(
+    conn, task_id, event_type: str, run_sql: str, run_params: Sequence[Any],
+) -> List[Any]:
+    """Read the newest bounded tail of one receipt type, oldest-first again.
+
+    The stored window keeps the *oldest* rows, so a receipt type that appears
+    many times would hide its own newest rows behind the same ascending
+    limit. Selecting the newest bounded tail first and restoring the
+    chronological order afterwards keeps the newest evidence visible while
+    the read stays bounded.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
+        FROM events
+        WHERE task_id = ?
+          AND event_type = ?
+          AND {run_sql}
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?
+        """,
+        (task_id, event_type, *run_params, STORED_LIMIT),
+    ).fetchall()
+    return list(reversed(rows))
+
+
 def _execution_receipts_for_scope(conn, task_id, run_sql: str, run_params: Sequence[Any]) -> List[Any]:
     """Read execution/output receipts for the same scope, past the stored window.
 
     The window keeps the oldest rows, so later ``task_artifact_checkpoint``,
     ``candidate_published`` and ``tool_execution`` evidence can fall outside
     it. These rows are evidence, not filler, so they get the same bounded
-    supplement treatment as ``verification_completed`` receipts. One extra
-    ``STORED_LIMIT``-capped query at most; the caller only runs it when the
-    window is already full.
+    supplement treatment as ``verification_completed`` receipts.
+
+    Each receipt type is limited on its own. A single combined ``IN`` query
+    would let one prolific type consume the whole budget and hide a later
+    receipt of another type, recreating the missing-latest-receipt bug this
+    supplement exists to fix. The tail of every type is read newest-first and
+    restored to chronological order, so the newest evidence of each type
+    survives. One bounded query per receipt type at most.
     """
-    marks = ",".join("?" for _ in _EXECUTION_RECEIPT_TYPES)
-    return conn.execute(
-        f"""
-        SELECT id, task_id, agent_id, event_type, timestamp, source, run_id, sequence, payload_json
-        FROM events
-        WHERE task_id = ?
-          AND event_type IN ({marks})
-          AND {run_sql}
-        ORDER BY timestamp ASC, id ASC
-        LIMIT ?
-        """,
-        (task_id, *_EXECUTION_RECEIPT_TYPES, *run_params, STORED_LIMIT),
-    ).fetchall()
+    rows: List[Any] = []
+    for event_type in _EXECUTION_RECEIPT_TYPES:
+        rows.extend(_latest_bounded_type_rows(conn, task_id, event_type, run_sql, run_params))
+    rows.sort(key=lambda row: (row["timestamp"] if row["timestamp"] is not None else 0.0, row["id"]))
+    return rows
 
 
-def _run_scope_sql(run_id, alias: str = "") -> Tuple[str, Tuple[Any, ...]]:
+def _run_scope_sql(run_id) -> Tuple[str, Tuple[Any, ...]]:
     """Run-scope predicate and its parameters for event reads.
 
     ``run_id`` identifies the execution attempt. Events written without one
     (workflow-level facts) stay visible to every run of that workflow.
     """
-    prefix = f"{alias}." if alias else ""
     if run_id:
         return (
-            f"({prefix}run_id IS NULL OR {prefix}run_id = '' OR {prefix}run_id = ?)",
+            "(run_id IS NULL OR run_id = '' OR run_id = ?)",
             (run_id,),
         )
-    return (f"({prefix}run_id IS NULL OR {prefix}run_id = '')", ())
+    return ("(run_id IS NULL OR run_id = '')", ())
 
 
 def _linked_freezes_for_task(conn, task, task_run) -> List[Any]:
@@ -700,14 +722,18 @@ def _linked_freezes_for_task(conn, task, task_run) -> List[Any]:
     is task-scoped, so joining on it attributes the freeze without guessing
     and without assigning every workflow freeze to every task. Rows whose
     publication identity is missing or unknown stay unattributed.
+
+    The publication must also carry the task's own run id exactly. A
+    publication written without a run id cannot prove which run it belongs
+    to, so accepting it would project its freeze into every later run of the
+    same task. Insufficient run identity stays unattributed.
     """
     task_id = task.get("task_id")
     if not task_id:
         return []
-    pub_run_sql, pub_run_params = _run_scope_sql(task_run, alias="p")
     try:
         return conn.execute(
-            f"""
+            """
             SELECT f.id, f.task_id, f.agent_id, f.event_type, f.timestamp, f.source, f.run_id, f.sequence, f.payload_json
             FROM events f
             JOIN events p ON p.id = CASE
@@ -724,11 +750,13 @@ def _linked_freezes_for_task(conn, task, task_run) -> List[Any]:
               AND p.source = 'herdr-task'
               AND p.task_id = ?
               AND p.workflow_id = f.workflow_id
-              AND {pub_run_sql}
+              AND p.run_id IS NOT NULL
+              AND p.run_id != ''
+              AND p.run_id = ?
             ORDER BY f.timestamp ASC, f.id ASC
             LIMIT ?
             """,
-            (task.get("workflow_id"), task_id, *pub_run_params, STORED_LIMIT),
+            (task.get("workflow_id"), task_id, task_run, STORED_LIMIT),
         ).fetchall()
     except sqlite3.Error:
         return []
