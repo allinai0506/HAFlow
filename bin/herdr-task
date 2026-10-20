@@ -126,56 +126,13 @@ except Exception:
 
 KNOWN_AGENTS = [a for a in DEFAULT_ALLOWED if a]
 
-try:
-    from herdr.transitions import (
-        TASK_TRANSITIONS as TRANSITIONS,
-        ACTIVE_TASK_STATUSES,
-        COMPLETED_TASK_STATUSES,
-        TERMINAL_TASK_STATUSES as TERMINAL_STATUSES,
-        InvalidTransitionError,
-    )
-except ImportError:
-    TRANSITIONS = {
-        "pending": {"dispatched", "failed"},
-        "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
-        "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded", "interrupted"},
-        "blocked": {"working", "agent_done", "paused", "failed", "superseded", "interrupted"},
-        "paused": {"working", "rework", "agent_done", "failed", "superseded", "interrupted"},
-        "agent_done": {"completed", "rework", "failed", "superseded", "interrupted"},
-        "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
-        "interrupted": {"working", "rework", "paused", "failed", "superseded"},
-        "completed": {"committed", "cleanup_ready"},
-        "committed": {"integrated"},
-        "integrated": {"cleanup_ready"},
-        "cleanup_ready": {"cleaned"},
-        "cleaned": {"superseded"},
-        "failed": {"superseded"},
-        "superseded": set(),
-    }
-
-    ACTIVE_TASK_STATUSES = {
-        "dispatched",
-        "working",
-        "blocked",
-        "agent_done",
-        "rework",
-        "paused",
-        "interrupted",
-    }
-
-    COMPLETED_TASK_STATUSES = {
-        "completed",
-        "committed",
-        "integrated",
-        "cleanup_ready",
-        "cleaned",
-    }
-
-    TERMINAL_STATUSES = {
-        *COMPLETED_TASK_STATUSES,
-        "failed",
-        "superseded",
-    }
+from herdr.transitions import (
+    TASK_TRANSITIONS as TRANSITIONS,
+    ACTIVE_TASK_STATUSES,
+    COMPLETED_TASK_STATUSES,
+    TERMINAL_TASK_STATUSES as TERMINAL_STATUSES,
+    InvalidTransitionError,
+)
 
 CONTROLLER_ROOT = os.path.expanduser("~/.herdr-controller")
 WORKFLOWS_FILE = os.environ.get("WORKFLOWS_FILE")

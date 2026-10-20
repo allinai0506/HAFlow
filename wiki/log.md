@@ -3179,3 +3179,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - UNKNOWN：隔离测试使用外部 Agent/forge 替身，未部署或修改生产工作流。
 
 - 2026-10-20（工作流自动化优化，PR #287 复验）：补齐旧 pin 的新候选独立路由合同，派发前拒绝与最终发布矛盾的软降级；同步模板/技能 canonical hash 守护，保留旧非闭环调度路径。
+
+## [2026-10-20] Fix | D5 fix-loop 可作废状态补齐与状态矩阵单一来源收敛 (SC-001/SC-002/SC-014)
+
+- Updated [[domain-model]], [[index]], [[task-lifecycle]]：将历史“11 状态机”定义全面对齐为源码事实 15 状态机，更新 Mermaid 状态图，显式覆盖 `paused`、`interrupted`、`superseded` 终态流转。
+- Updated `services/herdr-controller.py`：`FIX_LOOP_SUPERSEDEABLE` 补齐 `paused` 与 `interrupted`，解决 fix-loop 回流作废时挂起/中断任务被错误跳过（SC-014 / D5 落地）。
+- Updated `bin/herdr-task`：彻底删除 `except ImportError:` 下落后的 14 状态兜底字典副本，确立 `herdr/transitions.py:TASK_TRANSITIONS` 为全系统唯一状态机事实源（SC-002）。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-001、SC-002、SC-014 状态更新为“已解决”。
+- Evidence：`herdr/transitions.py`、`services/herdr-controller.py#FIX_LOOP_SUPERSEDEABLE`、`bin/herdr-task#TRANSITIONS`、`tests/test_d5_fix_loop_supersedeable.py`、`ontology/tests/audit_ontology.py`。

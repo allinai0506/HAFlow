@@ -178,12 +178,14 @@ GATE_DEFAULTS = {
 }
 FIX_LOOP_MAX = int(os.environ.get("HERDR_FIX_LOOP_MAX", "3"))
 
-# 可作废状态集合,必须与 bin/herdr-task TRANSITIONS 中
+# 可作废状态集合,必须与 herdr/transitions.py TASK_TRANSITIONS 中
 # 允许 → superseded 的状态保持一致(pending/committed/integrated 除外)。
 FIX_LOOP_SUPERSEDEABLE = {
     "dispatched",
     "working",
     "blocked",
+    "paused",
+    "interrupted",
     "agent_done",
     "rework",
     "cleaned",

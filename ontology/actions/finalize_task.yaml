@@ -56,5 +56,5 @@ evidence:
   confidence: high
 - kind: implemented
   source: bin/herdr-task
-  locator: FINALIZE_ADVANCE L191-195
+  locator: FINALIZE_ADVANCE L148-152
   confidence: high
