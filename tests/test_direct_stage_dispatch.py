@@ -463,6 +463,25 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("--agent", cmd)
         self.assertIn("auto", cmd)
 
+    def test_previous_execution_task_does_not_block_current_launch(self):
+        old = _task("wf-1-test-old", "working")
+        old["execution_id"] = "previous-execution"
+        with patch.object(
+            self.ctrl,
+            "project_for_workflow",
+            return_value={
+                "startup_ready": True,
+                "project_root": "/tmp/proj",
+                "requirement": "优化摘要展示",
+                "execution_id": "current-execution",
+            },
+        ), patch.object(self.ctrl, "load_tasks", return_value=[old]):
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
+        self.assertEqual(len(self.commands), 1)
+
     def test_direct_dispatch_does_not_require_coordinator_pane(self):
         """A fully specified Worker launch must not depend on coordinator liveness."""
         with patch.object(

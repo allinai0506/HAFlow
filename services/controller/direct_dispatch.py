@@ -31,6 +31,15 @@ def try_direct_stage_advance(ports, item):
         return fallback("workflow_configuration_missing")
 
     requirement = (project_ctx.get("requirement") or "").strip()
+    tasks = ports.load_tasks() or []
+    execution_id = project_ctx.get("execution_id")
+    if execution_id:
+        tasks = [
+            task for task in tasks
+            if task.get("workflow_id") != workflow_id
+            or not task.get("execution_id")
+            or task.get("execution_id") == execution_id
+        ]
 
     # 历史 workflow.json 的节点字段可能为空(旧模板快照),
     # 与总指挥路径一致回退 stage-policies 后再做规则化决策。
@@ -68,7 +77,7 @@ def try_direct_stage_advance(ports, item):
     # - 判定异常:Fail-Closed,回落总指挥(原 fallback 语义)。
     try:
         join_node = node if isinstance(node, dict) else {"id": ready_id}
-        if not ports._scheduler_join_gate_allows(workflow_id, join_node, ports.load_tasks()):
+        if not ports._scheduler_join_gate_allows(workflow_id, join_node, tasks):
             return True
     except Exception as exc:
         print(
@@ -96,7 +105,7 @@ def try_direct_stage_advance(ports, item):
     # agent/opencode/feat-impl-t7-integration-gates-r2",任务在 pending 阶段
     # 即被判 router_isolation_rejected,从未真正执行。详见 lessons §110。
     candidate_branch = ports.direct_dispatch_planner.candidate_branch_for_node(
-        ports.load_tasks(), workflow_id, ready_id, dep_ids, delivered_in_base=True
+        tasks, workflow_id, ready_id, dep_ids, delivered_in_base=True
     )
     candidate_sha = ports._scheduler_expected_candidate_sha(
         workflow_id, project_root, dep_ids, candidate_branch
@@ -121,7 +130,7 @@ def try_direct_stage_advance(ports, item):
         try:
             from herdr import direct_dispatch as _dd
             _node_tasks = [
-                t for t in (ports.load_tasks() or [])
+                t for t in tasks
                 if isinstance(t, dict)
                 and str(t.get("workflow_id") or "") == workflow_id
                 and str(t.get("node") or t.get("stage") or "") == ready_id
@@ -172,7 +181,7 @@ def try_direct_stage_advance(ports, item):
         plan = ports.direct_dispatch_planner.plan_stage_dispatch(
             workflow_id,
             node,
-            ports.load_tasks(),
+            tasks,
             requirement,
             context_branch=candidate_branch,
             gate_contract=gate_task,
