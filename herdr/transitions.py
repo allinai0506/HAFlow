@@ -128,8 +128,11 @@ def validate_task_transition(
 
 
 # ============================================================
-# Workflow Lifecycle State Machine
+# Workflow Lifecycle State Machine (ADR-0007 / OEP-0002)
 # ============================================================
+
+INITIAL_WORKFLOW_STATUS: str = "running"
+UNPROVISIONED_WORKFLOW_STATUS: str = "pending"
 
 WORKFLOW_TRANSITIONS: Dict[str, Set[str]] = {
     "pending": {"running", "in_progress", "paused", "failed"},

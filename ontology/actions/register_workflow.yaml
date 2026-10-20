@@ -54,7 +54,7 @@ verification:
 evidence:
 - kind: implemented
   source: herdr/projects.py
-  locator: register_workflow L551-603 / freeze_run_definition L510-577
+  locator: register_workflow L551-638 / freeze_run_definition L510-577
   confidence: high
 - kind: implemented
   source: bin/herdr-factory
