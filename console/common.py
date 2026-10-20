@@ -66,15 +66,17 @@ def console_allowed_hosts(port):
 def console_request_rejection(method,headers,port):
     """Return why a request is refused, or None when it comes from the local console UI.
 
-    Host blocks DNS rebinding; Origin blocks cross-site POSTs; the custom header forces
-    a browser POST through a CORS preflight, which the console never answers.
+    Host blocks DNS rebinding; Origin blocks cross-site POSTs. Same-origin browser POSTs
+    can rely on Origin, while callers that omit Origin must send the custom header.
     """
     seen={str(k).lower():str(v).strip() for k,v in headers.items()}
     if seen.get('host','').lower() not in console_allowed_hosts(port): return 'host_not_allowed'
     if method=='POST':
-        if seen.get(CONSOLE_REQUEST_HEADER.lower())!='1': return 'console_request_header_required'
         origin=seen.get('origin','').lower()
-        if origin and origin not in {f'http://{h}' for h in console_allowed_hosts(port)}: return 'origin_not_allowed'
+        allowed_origins={f'http://{h}' for h in console_allowed_hosts(port)}
+        if origin and origin not in allowed_origins: return 'origin_not_allowed'
+        if seen.get(CONSOLE_REQUEST_HEADER.lower())!='1' and origin not in allowed_origins:
+            return 'console_request_header_required'
     return None
 PRODUCT_NAME='HAFlow'; PRODUCT_TAGLINE='让人和多个 AI Agent 一起把事情做完'
 HERDR_TASK=HERDR_ROOT/'bin'/'herdr-task'
