@@ -59,7 +59,7 @@ class TestWorkflowStartSync(unittest.TestCase):
         self.assertIn("mark_workflow_startup_ready", body)
 
     def test_controller_checks_startup_gate_in_queue_consumer(self):
-        source = (ROOT / "services" / "herdr-controller.py").read_text(encoding="utf-8")
+        source = (ROOT / "services" / "controller" / "stage_delivery.py").read_text(encoding="utf-8")
         self.assertIn('startup_record.get("startup_ready") is False', source)
         self.assertIn('queued event held until request is ready', source)
 

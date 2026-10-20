@@ -44,7 +44,7 @@ evidence:
   locator: choose_agent L1063 / _choose_agent_locked L430 / 预占写入 L809-819
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: recover_router_isolation_tasks L1651-1672（调用 choose_agent 但不传 reservation_key，故不写预占）
+  source: services/controller/infra_recovery.py
+  locator: recover_router_isolation_tasks L132-191（调用 choose_agent 但不传 reservation_key，故不写预占）
   confidence: high
 notes: r1 修正：控制器路径调用 choose_agent 不写预占，因此 controller 未被授权（F-20）。

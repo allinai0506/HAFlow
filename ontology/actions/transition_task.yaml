@@ -62,6 +62,6 @@ evidence:
   locator: set_task_status L9-130 / set 子命令 parser L13
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: try_auto_accept L8159-8202
+  source: services/controller/auto_acceptance.py
+  locator: try_auto_accept L42-85
   confidence: high

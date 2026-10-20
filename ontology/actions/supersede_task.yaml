@@ -50,7 +50,7 @@ evidence:
   locator: transition_task replacement_pending L6741-6744
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: recover_router_isolation_tasks L1651-1680（调用 supersede --allow-pending）
+  source: services/controller/infra_recovery.py
+  locator: recover_router_isolation_tasks L132-191（调用 supersede --allow-pending）
   confidence: high
 notes: r1 新增：原模型缺失 supersede 写路径（F-08 与控制器调用）。

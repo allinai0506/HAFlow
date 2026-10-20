@@ -58,6 +58,6 @@ evidence:
   locator: bypass_task_gate L832-957
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: try_auto_verdict L8460-8501
+  source: services/controller/auto_verdict.py
+  locator: try_auto_verdict L99-165
   confidence: high

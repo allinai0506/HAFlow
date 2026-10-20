@@ -7,11 +7,11 @@ inputs:
 - task
 - artifact
 returns: boolean
-logic_ref: services/herdr-controller.py:check_task_deliverables_ready
+logic_ref: services/controller/auto_acceptance.py:check_task_deliverables_ready
 evidence:
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: L8377-8432
+  source: services/controller/auto_acceptance.py
+  locator: check_task_deliverables_ready L87-124
   confidence: high
 outputs:
 - present

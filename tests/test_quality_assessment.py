@@ -1461,6 +1461,10 @@ class QualityReadTest(unittest.TestCase):
 
     def test_settlement_and_experience_paths_do_not_call_the_assessor(self):
         controller = (ROOT / "services" / "herdr-controller.py").read_text(encoding="utf-8")
+        controller += "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "services" / "controller").glob("*.py")
+        )
         outcome = (ROOT / "herdr" / "execution_outcome.py").read_text(encoding="utf-8")
         experience = (ROOT / "herdr" / "experience" / "models.py").read_text(encoding="utf-8")
         self.assertNotIn("quality_assessment", controller)

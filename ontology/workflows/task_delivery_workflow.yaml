@@ -49,8 +49,8 @@ evidence:
   locator: run / start 路径 L403-623
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: check_workflow_stage_advance L4918 / get_ready_nodes 调用 L5080
+  source: services/controller/advancement.py
+  locator: check_workflow_stage_advance L69-424
   confidence: high
 - kind: implemented
   source: herdr/task_cli_workflow_close.py

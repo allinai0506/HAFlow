@@ -500,9 +500,10 @@ class TestRedispatchLinksSupersedes(unittest.TestCase):
     """
 
     def test_controller_passes_supersedes_for_redispatch_specs(self):
+        import inspect
+
         ctrl = _load_controller("herdr_controller_supersedes_probe")
-        src = HERDR_ROOT / "services" / "herdr-controller.py"
-        text = src.read_text(encoding="utf-8")
+        text = inspect.getsource(inspect.unwrap(ctrl.try_direct_stage_advance))
         # launch argv 的构造块：redispatch_of 必须被翻译成 --supersedes
         self.assertIn("spec.get(\"redispatch_of\")", text,
                       "补派 spec 的 redispatch_of 未被消费")

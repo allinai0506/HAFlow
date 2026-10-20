@@ -34,8 +34,8 @@ policies:
 exclude_by_default: true
 evidence:
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: 任务提示词注入 required_outputs L7524-7548（r1 修正：原误指 bin/herdr-task）
+  source: herdr/coordinator_messages.py
+  locator: build_stage_advance_context L199-296 / build_stage_advance_message L299-444（r1 修正：原误指 bin/herdr-task）
   confidence: high
 - kind: implemented
   source: herdr/workflow.py

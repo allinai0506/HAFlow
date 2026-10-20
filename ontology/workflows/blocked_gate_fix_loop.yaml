@@ -25,8 +25,20 @@ steps:
   ref: required_task_ids_satisfied
 evidence:
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: handle_fix_loop L2481-2551 / invalidate_for_fix_loop L1224-1259 / 耗尽升级 L2352-2374
+  source: services/controller/fix_loop.py
+  locator: handle_fix_loop L6-280
+  confidence: high
+- kind: implemented
+  source: services/controller/fix_invalidation.py
+  locator: invalidate_for_fix_loop L148-374
+  confidence: high
+- kind: implemented
+  source: services/controller/merged_fix_loop.py
+  locator: _handle_merged_fix_loops L165-365
+  confidence: high
+- kind: implemented
+  source: services/controller/fix_delivery.py
+  locator: _record_fix_loop_exhaustion L37-52
   confidence: high
 - kind: implemented
   source: herdr/fix_loop.py

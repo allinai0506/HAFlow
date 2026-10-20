@@ -23,7 +23,7 @@ evidence:
   locator: gate_verdict_path L158-185
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: try_auto_verdict L8460-8501
+  source: services/controller/auto_verdict.py
+  locator: try_auto_verdict L99-165
   confidence: high
 notes: SC-012 冲突解决：明确主从权威，排除双重权威风险（ADR-0006）。

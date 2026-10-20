@@ -91,6 +91,56 @@ def test_successful_notification_without_task_has_deadline_and_responsibility(sc
     assert len(scene.sent) == 1
 
 
+def test_stage_admission_claims_real_dispatch_lease(scene):
+    from herdr.coordinator_stage_admission import admit_stage_dispatch
+
+    stage_item, admitted_node, dispatch_op, owner = admit_stage_dispatch(
+        scene.item,
+        scene.item["node"],
+        "implementation",
+        get_store=lambda: scene.store,
+        coordinator_intake_enabled=lambda: True,
+        reconcile_node_dispatches=scene.ctrl.reconcile_node_dispatches,
+        find_node=scene.ctrl.find_node,
+        scheduler_join_gate_allows=lambda *_: True,
+        load_tasks=scene.store.list_tasks,
+        clear_stage_advance=scene.ctrl.clear_stage_advance,
+    )
+
+    assert dispatch_op["status"] == "running"
+    assert not dispatch_op["started"]
+    assert dispatch_op["owner"] == owner
+    assert stage_item["dispatch_operation_id"] == dispatch_op["id"]
+    assert stage_item["dispatch_owner"] == owner
+    assert admitted_node["id"] == "implementation"
+
+
+def test_stage_admission_defers_and_clears_when_join_gate_blocks(scene):
+    from herdr.coordinator_stage_admission import admit_stage_dispatch
+
+    cleared = []
+
+    def clear_after_defer(workflow_id, node_id):
+        operation = dispatch_operations(scene)[0]
+        cleared.append((workflow_id, node_id, operation["status"], operation["detail"]["reason"]))
+
+    result = admit_stage_dispatch(
+        scene.item,
+        scene.item["node"],
+        "implementation",
+        get_store=lambda: scene.store,
+        coordinator_intake_enabled=lambda: True,
+        reconcile_node_dispatches=scene.ctrl.reconcile_node_dispatches,
+        find_node=scene.ctrl.find_node,
+        scheduler_join_gate_allows=lambda *_: False,
+        load_tasks=scene.store.list_tasks,
+        clear_stage_advance=clear_after_defer,
+    )
+
+    assert result is None
+    assert cleared == [("wf", "implementation", "pending", "join_gate_blocked")]
+
+
 def test_zero_task_workflow_without_coordinator_is_not_an_unowned_running_state(scene, monkeypatch):
     monkeypatch.setattr(scene.ctrl, 'coordinator_pane_for_workflow', lambda _: None)
     scene.ctrl.check_workflow_stage_advance('wf')

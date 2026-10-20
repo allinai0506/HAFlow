@@ -8,6 +8,10 @@ cardinality: one_to_zero_or_one
 object_backed: false
 evidence:
 - kind: implemented
+  source: services/controller/node_policy.py
+  locator: resolve_gate_config L6-24
+  confidence: high
+- kind: implemented
   source: services/herdr-controller.py
-  locator: resolve_gate_config L946-973 / GATE_DEFAULTS L938-944
+  locator: GATE_DEFAULTS L174-178
   confidence: high

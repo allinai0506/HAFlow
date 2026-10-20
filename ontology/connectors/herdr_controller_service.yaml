@@ -17,6 +17,14 @@ retry:
   note: 未在候选中核对超时与重试配置
 evidence:
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: try_auto_accept L8159 / try_auto_verdict L8460 / maybe_close_completed_workflow L844
+  source: services/controller/auto_acceptance.py
+  locator: try_auto_accept L42-85
+  confidence: high
+- kind: implemented
+  source: services/controller/auto_verdict.py
+  locator: try_auto_verdict L99-165
+  confidence: high
+- kind: implemented
+  source: services/controller/workflow_close.py
+  locator: maybe_close_completed_workflow L79-166
   confidence: high

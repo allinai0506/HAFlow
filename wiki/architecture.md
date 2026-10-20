@@ -58,9 +58,30 @@ Evidence:
 ## 2. 后台常驻守护进程详解
 
 ### 2.1 Herdr Controller (`services/herdr-controller.py`)
+
+- `FACT` **服务装配与模块职责**：入口保留配置、运行资源、兼容绑定和 `main`；实现按职责位于 `services/controller/`。`bindings.py` 将各操作声明的依赖绑定到同一入口实例，保留旧函数名、签名、配置替换和共享对象身份。实现模块可以独立注入其所需依赖，不反向导入服务入口。
+
+  | 职责 | 实现模块 |
+  | --- | --- |
+  | 权威读取、状态转换与完成样本 | `persistence.py`、`task_state.py` |
+  | 阶段、候选和规则化派发 | `stage_state.py`、`candidate.py`、`reverification.py`、`join_gates.py`、`direct_dispatch.py`、`advancement.py` |
+  | 返工、作废和选择性补派 | `fix_loop.py`、`fix_invalidation.py`、`merged_fix_loop.py`、`selective_plan.py`、`selective_facts.py`、`fix_delivery.py` |
+  | 协调器队列、投递和提示词 | `coordinator_queue.py`、`stage_delivery.py`、`task_events.py`、`coordinator_transport.py`、`coordinator_prompts.py` |
+  | 验收和 Git 终化 | `auto_acceptance.py`、`auto_verdict.py`、`verdict_evidence.py`、`git_finalize.py`、`finalize_retry.py`、`finalize_support.py` |
+  | 监督与旁路证据 | `supervisor_actions.py`、`supervisor_evidence.py`、`supervisor_execution.py`、`supervisor_checkpoints.py`、`done_events.py` |
+  | 协作、监听与恢复 | `collaboration.py`、`handoffs.py`、`task_listener.py`、`runtime_reconciliation.py`、`registry.py`、`workflow_recovery.py` |
+
+  Evidence:
+  - `services/controller/README.md`
+  - `services/controller/bindings.py#Dependencies`
+  - `services/controller/coordinator_queue.py#_handle_coordinator_item`
+  - `services/controller/stage_delivery.py#_handle_stage_advance_item`
+  - `services/controller/task_events.py#_handle_task_event`
+  - `tests/test_controller_modularity.py`
+
 - `FACT` **核心职能**:
   1. **状态流转监听**: 维护与 Herdr Unix Domain Socket (`~/.config/herdr/herdr.sock`) 的持久连接，接收各 Pane 的实时 Agent 状态（如 `agent_done`, `error`）。
-  2. **DAG 依赖推进**: 周期性扫描 `tasks.json`。当某节点的所有 Task 完成（状态到达 `cleaned` 或 `completed`）时，计算后续就绪节点（[[dag-workflow-engine]]）。
+  2. **DAG 依赖推进**: 通过 StateStore 周期性读取权威任务状态；`tasks.json` 是兼容投影。当某节点的所有 Task 完成（状态到达 `cleaned` 或 `completed`）时，计算后续就绪节点（[[dag-workflow-engine]]）。
   3. **协调器注入**: 向项目总指挥 Pane (`coordinator_pane_id`) 输入结构化文本提示，指导总指挥 Agent 发起下一阶段 Task 派发。**2026-09-16 起降级为异常路径**：常规推进会优先走规则化直接派发（见下方 Direct Stage Dispatch），仅配置不足/需求缺失/launch 失败才回落总指挥。
   4. **重复防抖**: 利用 `stage-state.json` 记录 `queued` / `notified`，杜绝重复向总指挥发送推进指令。
 - `FACT` **终态闸门（2026-09-13 幽灵推进事故后引入）**: 推进扫描只遍历注册表**非终态**条目（`herdr.projects.non_terminal_workflow_ids`，`status=="completed"` 视为终态）；`check_workflow_stage_advance` 对已关闭工作流早退；stage_advance 消费线程在**每次等待迭代**重新校验终态/注销，已入队事件在工作流关闭后被丢弃（`[STAGE ADVANCE DROP]`）。背景：零任务工作流对 `is_node_complete` 真空成立，无此闸门会被逐阶段"真空推进"并向共享协调者 Pane 注入幽灵提示，诱导其派发真实任务（wf-…-111426 事故，见 lessons §12）。

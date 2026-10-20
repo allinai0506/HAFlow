@@ -50,6 +50,6 @@ evidence:
   locator: close-workflow preflight L119-128 / closing 迁移 L345-355 / mark_workflow_completed L588-615 / completed 调用 L512-518
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: maybe_close_completed_workflow L844-905（dispatch L901）
+  source: services/controller/workflow_close.py
+  locator: maybe_close_completed_workflow L79-166（dispatch 由该函数发起）
   confidence: high
