@@ -7469,3 +7469,35 @@ python3 bin/herdr-task --help
 - `herdr/task_cli_entry.py`
 - `herdr/task_cli_*_bindings.py`
 - `tests/test_task_cli_entry.py`
+
+## 178. 收尾提交必须进入新的候选轮次，不能借完成状态突破认证依赖环（2026-10-20）
+
+### 问题背景
+
+已认证 X 后，默认 wrapup 会继续追加知识、Wiki、文档或审核修复 Y。原 `commit` 要求 completed，`integrate` 要求 committed，PR 要求 integrated；wrapup completed 又要求当前 HEAD 的有效交付 PR/审核回执。于是 X 回执与 Y HEAD 不匹配，Y 又没有认证及发布身份。真实 CLI 回归在两个默认模板上得到 `Task cannot commit from status: working`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 把 Git 交付就绪与任务完成混为一体 | 收尾任务可以尚未完成，同时合法拥有集成产物 | 明确 run/execution/父 episode 绑定的交付阶段，不临时改 completed，也不放宽通用状态机 |
+| 只改候选 SHA，旧 verifier 仍视为完成 | 发布、冻结、验证派发是不同生命周期 | 新冻结轮次退役旧验证，保留旧结论；从正常派发入口重跑 test/review，SPEC 再做 acceptance |
+| 只更新模板排除配置，已有 pin 仍可软降级 | 新轮次与最终发布必须执行同一独立性合同 | 当前 wrapup 冻结轮次在 Router 准入保留旧排除项并强制排除 implementation/wrapup，禁用 soft degrade 与 opt-out；有独立池正常派发，无则派发前拒绝 |
+| 旧 PR 分支拒绝不同 head | 新候选必须有明确发布身份 | 使用候选专属分支及替代 PR，保留原校验与前驱 URL；未知外部结果先查库存再重试 |
+| Git 已成功但状态库尚未记账 | HEAD 与数据库可能分属重基前后 | 副作用前持久化固定 input/base；中断恢复需正常 Git 重放及完整树证明，再按版本 CAS 收编，不接受任意 HEAD |
+| 回执之后再提交最终报告 | 认证后的提交会再次使回执过期 | PR 内容认证前固定，最终运行报告发布到 clone 外的 checkpoint Artifact |
+
+### 操作规范（已固化到 `herdr/wrapup_delivery.py` 与默认模板）
+
+1. 在原 wrapup 中用正常 `commit` / `integrate` 登记与集成新增产物，保持任务执行状态。
+2. Controller 消费集成 publication 并冻结候选；按当前 episode 退役旧验证，禁止把 X 的 pass 改写成新候选证明。
+3. 本轮独立门禁及业务证据齐备后，用显式 supersedes 的 `record-delivery` 与平台 `create-pr` 发布；回执绑定当前 Run/execution/episode 和精确 HEAD。
+4. 中断重复同一入口恢复；沿用累积 verifier 预算并限制收尾候选最多三轮，未知身份和失败保持阻断。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_wrapup_candidate_delivery.py tests/test_wrapup_review_closure.py tests/test_fix_1017_pr_delivery_joint_candidate.py
+```
+
+Evidence：`tests/test_wrapup_candidate_delivery.py` 的真实 Git/CLI/SQLite 默认模板回归；外部 Agent、forge 使用替身，不代表生产工作流或真实远端发布已经验证。

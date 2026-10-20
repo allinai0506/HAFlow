@@ -143,6 +143,9 @@ nodes:
     max_concurrency: 1
     parallel: false
     allow_soft_degrade: true
+    exclude_stage_agents:
+    - implementation
+    - wrapup
   required_outputs:
   - 冻结候选与实际装载记录
   - 测试范围、执行日志与退出码
@@ -192,6 +195,9 @@ nodes:
     max_concurrency: 1
     parallel: false
     allow_soft_degrade: true
+    exclude_stage_agents:
+    - implementation
+    - wrapup
   required_outputs:
   - ai-slop-cleaner --review 报告
   - google-code-review 报告（LGTM / Comments / Request Change）
@@ -299,8 +305,9 @@ nodes:
   - 派发失败先核对 state.db 中 Task/Run、候选、派发记录及现场身份；补派按平台 supersedes/recovery 协议保留不可变历史。未知结果不得重复发送，不手改 verdict 或绕过门禁。
   - 必须使用目标项目适用 six-step-finish 或优先级更高的项目收尾脚本，逐步记录步骤/执行者/命令/结果/证据。
   - 只在 acceptance 放行、同 SHA test/review 及两项强制技能报告齐全时进入收尾；核对当前候选和业务验收，不用旧 head 的证据放行新版本。
-  - 按项目要求完成知识沉淀、Wiki 检查并提交；新增提交会改变候选，必须由主控重新冻结并完成必要门禁或平台认可的选择性复用，再发布交付。
-  - 首选 herdr-task create-pr 创建交付 PR，记录 URL、base、head。平台因缺候选或门禁拒绝时应补齐证明，禁止换 forge 入口绕过门禁。真正的平台入口不可用按目标项目授权流程处理并记录原因。
+  - "收尾候选更新：知识/Wiki/文档以及审核修复属于交付内容，必须先固定这些内容，再运行 herdr-task commit <wrapup-task-id> --message <说明> 和 herdr-task integrate <wrapup-task-id>；此时 wrapup 保持 working/agent_done，不先申报 completed。Controller 消费集成发布，冻结新 candidate_sha，退役旧 test/review 并按正常事件重新派发二者（文档也不复用旧 pass）。用 herdr-task get <task-id> 与 note-list <workflow-id> 查看进度；中断后重复同一命令恢复，不改状态或数据库。"
+  - "交付 PR 前置：无新增提交时沿用已认证上游任务。新增提交时等待本轮独立 test/review 及重新派发的 acceptance 对同一冻结 SHA 的 pass、业务验收及 Artifact 回执齐备，再运行 herdr-task record-delivery --workflow-id <workflow-id> --delivery-branch <wrapup_delivery.publication_branch> --candidate-sha <最终集成SHA> --review-task <本轮review> --test-gate <本轮test> --base <base_branch> --supersedes <旧delivery_id>，然后 herdr-task create-pr <wrapup-task-id> --title <标题> --body-file <说明文件>。平台在候选专属分支创建或恢复替代 PR，记录前驱 PR，保留旧 PR 校验且不覆盖旧分支。禁止自行 push/建 PR、人工改状态、deferred 绕过或自动合并。"
+  - "报告顺序：属于 PR 的代码、知识和报告正文在最终认证前提交固定。等待验证期间保留唯一 wrapup；不得完成它或新建第二个 wrapup。PR/CI/findings 与最终运行状态追加到 clone 外 checkpoint-publish/checkpoint-aggregate 产物，再记录同 head 的 record-review-closure 并正常申报完成；不得在回执后提交报告。审核修复形成 Z 时重复上述受控路径，最多三轮并受现有 verifier 累积预算约束，耗尽或失败按现有阻断/返工政策处理。"
   - 建 PR 后完成审核闭环：等待必要 CI 与外部审核实际完成，核验当前 head 的检查和 findings 逐项处置；仅有早先绿色 CI 不等于异步审核完成。未决阻塞不得宣称交付完成。
   - CI/外部审核故障或等待交主控恢复；正确性/安全性问题回 implementation 形成新候选并重走受影响验收。连续两轮复核发现停表、三轮未收敛升级人工。
   - 六步状态表固定包含 PR URL / CI 状态 / 审核 findings 状态（未决数量及处置）；合并未授权时明确待确认，不自动合并，不使用 --force/--yes 或改写分支历史。

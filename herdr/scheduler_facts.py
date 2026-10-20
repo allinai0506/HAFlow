@@ -105,6 +105,7 @@ def record_candidate_frozen(
     Scheduler consumption additionally binds a durable integration publication.
     """
     from . import recovery_store, state_db
+    from .wrapup_delivery import integrated
     sha = str(candidate_sha or "").strip()
     if not re.fullmatch(r'[0-9a-fA-F]{40}', sha):
         raise ValueError('candidate_sha must be a full commit SHA')
@@ -146,7 +147,8 @@ def record_candidate_frozen(
                     or value.get('execution_id') != workflow['execution_id']
                     or task.get('run_id') != pub['run_id'] or task.get('execution_id') != workflow['execution_id']
                     or task.get('integrated_commit') != published_sha or task.get('superseded_by')
-                    or task.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}):
+                    or (task.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}
+                        and not integrated(task, workflow))):
                 raise ValueError('candidate publication identity unknown')
             if publication_event_id <= prior.get('publication_event_id', 0):
                 return {'status': 'exists', 'event': dict(row)}
@@ -171,7 +173,8 @@ def publish_integrated_candidate(store, task_id):
         wid = task.get('workflow_id')
         workflow, _, _ = recovery_store._snapshot(conn, wid)
         sha = task.get('integrated_commit')
-        if (task.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}
+        from .wrapup_delivery import integrated
+        if (not integrated(task, workflow) and task.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}
                 or not re.fullmatch(r'[0-9a-f]{40}', sha or '') or task.get('commit') != sha
                 or not task.get('run_id') or not workflow.get('execution_id')
                 or task.get('execution_id') != workflow['execution_id'] or not task.get('integration_ref')):

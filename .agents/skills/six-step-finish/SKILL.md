@@ -16,6 +16,18 @@ description: Use when implementation is complete and a development branch needs 
 本技能不创建 PR、不做合入；若发现分支未推送或无 PR，先执行项目的 PR 流程
 再运行本技能。知识沉淀（步骤 1-2）必须先于 PR 创建，保证 PR 包含知识提交。
 
+**HAFlow 默认模板的候选更新入口**：完成步骤 1–2 后，若 wrapup 新增提交，先执行
+`herdr-task commit <wrapup-task-id> --message <说明>`、`herdr-task integrate <wrapup-task-id>`。
+wrapup 保持执行状态；Controller 通过持久发布与冻结事件自动退役旧 test/review、重新派发两支验证，文档改动也必须 fresh。
+用 `herdr-task get <task-id>` / `note-list <workflow-id>` 读取本轮进度。等待同 SHA 的独立门禁与业务证据齐备（SPEC 还须等待本轮新 acceptance），
+用 `record-delivery` 显式 supersedes 旧身份，发布分支取 wrapup Task 的 `wrapup_delivery.publication_branch`，
+再执行 `create-pr <wrapup-task-id>`。平台按候选创建/恢复替代 PR，记录 `replaces_pr_url`，不覆盖原 PR 分支。
+中断重复原命令恢复；不自行 push/建 PR、不改数据库、不以 deferred 绕过。审核修复 Z 走同一路径，最多三轮，既有 verifier 预算仍生效。
+无新增提交则沿用原已认证任务的发布路径。
+属于 PR 的报告内容必须在认证前固定；认证后的 CI/findings 与最终报告使用 clone 外
+`checkpoint-publish` / `checkpoint-aggregate` 产物，回执之后不再提交报告。
+作者决定是否合并，未合并不得执行步骤 3–6 的同步删除操作。
+
 **前置条件（步骤 0.5：PR 审核闭环）**：PR 创建后必须在申报完成前抓取并处理
 机器审核结果——CI/必过检查 + 评审 findings（GitHub：`gh pr checks`、
 `gh api --paginate repos/<owner>/<repo>/pulls/<n>/reviews`、

@@ -53,17 +53,26 @@ def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
         # SHA did not change). Facts are bound to it, not to the SHA, so a
         # rollback onto an already-frozen SHA starts a new episode and cannot
         # inherit the previous round's reuse.
+        freezes = []
         try:
             freezes = ports.scheduler_facts_store.list_candidate_frozen_events(
                 workflow_id)
             episode_id = str(freezes[-1].get("id") or "") if freezes else ""
         except Exception:
             episode_id = ""
+        if freezes and (freezes[-1].get('payload') or {}).get('source_node') == 'wrapup':
+            # Post-wrapup certification always executes both independent gates.
+            workflow_cfg = dict(workflow_cfg, reverification={})
         if episode_id and not ports._reverification_episode_settled(
                 workflow_id, rotated_from, frozen_sha, episode_id):
             ports._reverification_plan_for_rotation(
                 workflow_id, workflow_cfg, project_root, rotated_from,
                 frozen_sha, episode_id)
+    from herdr.wrapup_delivery import reconcile_verifiers
+    wrapup_closure = any(node.get('id') == 'wrapup' and node.get('review_closure_required')
+                         for node in workflow_cfg.get('nodes', []))
+    if wrapup_closure and reconcile_verifiers(ports._get_store(), workflow_id):
+        ports.reconcile_node_dispatches(workflow_id)
     return frozen_sha, False
 
 def check_workflow_stage_advance(ports, workflow_id):
@@ -425,7 +434,7 @@ def check_workflow_stage_advance(ports, workflow_id):
 
 
 DEPENDENCIES = {'enqueue_stage_advance': ('check_workflow_stage_advance',),
- '_scheduler_resolve_candidate_and_plan': ('_reverification_episode_settled',
+ '_scheduler_resolve_candidate_and_plan': ('_get_store', 'reconcile_node_dispatches', '_reverification_episode_settled',
                                            '_reverification_plan_for_rotation',
                                            '_scheduler_freeze_candidate',
                                            '_scheduler_previous_candidate_sha', 'is_node_complete',

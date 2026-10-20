@@ -122,7 +122,10 @@ def _is_joint_candidate_covering(store, task, sha, note_sha):
 
 
 def _publication(task, notes, store):
-    if task.get('status') not in {'integrated','cleanup_ready','cleaned'}:
+    from .wrapup_delivery import integrated, publication_branch
+    workflow = store.get_workflow(task['workflow_id']) or {}
+    wrapup = integrated(task, workflow)
+    if task.get('status') not in {'integrated','cleanup_ready','cleaned'} and not wrapup:
         raise ValueError('task must be integrated before PR publication')
     note = select_effective_delivery(wd.annotate_notes(notes))
     if not note:
@@ -138,10 +141,11 @@ def _publication(task, notes, store):
     note_branch = _body_value(note, 'delivery_branch')
 
     if note_sha == sha:
-        if not note_branch or note_branch != branch:
+        expected_branch = publication_branch(task, sha) if wrapup else branch
+        if not note_branch or note_branch != expected_branch:
             raise ValueError('delivery identity does not bind the integrated candidate')
         effective_sha = sha
-        effective_branch = branch
+        effective_branch = expected_branch
     elif _is_joint_candidate_covering(store, task, sha, note_sha):
         if not note_branch:
             raise ValueError('delivery identity does not bind the integrated candidate')
@@ -164,8 +168,25 @@ def _publication(task, notes, store):
         if (gate.get('workflow_id') != task['workflow_id'] or gate.get('stage_verdict') != 'pass'
                 or gate.get('candidate_sha') != effective_sha or gate.get('verified_candidate_sha') != effective_sha or gate.get('status') not in {'completed','committed','integrated','cleanup_ready','cleaned'}):
             raise ValueError('delivery gate does not certify this workflow candidate')
+        if wrapup and (gate.get('execution_id') != workflow.get('execution_id')
+                or gate.get('candidate_episode_id') != workflow.get('candidate_episode_id')
+                or gate.get('superseded_by') or gate.get('status') == 'superseded'
+                or gate.get('completion_protocol') != 'receipt-v1'
+                or not gate.get('agent') or gate.get('agent') == task.get('agent')):
+            raise ValueError('wrapup delivery requires fresh independent gates in the current episode')
         gates.append(gate)
-    from .business_gate import business_gates_blockers
+    from .business_gate import business_gates_blockers, _eligible
+    if wrapup and any(node.get('id') == 'acceptance'
+                      for node in (workflow.get('config') or {}).get('nodes', [])):
+        from .workflow_progress import active_tasks
+        acceptance = [gate for gate in active_tasks(workflow, store.list_tasks(workflow_id=task['workflow_id']))
+                      if (gate.get('node') or gate.get('stage')) == 'acceptance']
+        if not acceptance or any(not _eligible(workflow, gate)
+                                 or gate.get('completion_protocol') != 'receipt-v1'
+                                 or gate.get('candidate_episode_id') != workflow.get('candidate_episode_id')
+                                 for gate in acceptance):
+            raise ValueError('wrapup delivery requires current candidate acceptance gate')
+        gates.extend(acceptance)
     if business_gates_blockers(store, store.get_workflow(task['workflow_id']) or {}, gates,
                                {g.get('node') or g.get('stage') for g in gates}):
         raise ValueError('delivery gate business acceptance unavailable')
@@ -193,7 +214,13 @@ def create_task_pr(store, task_id, *, title, body='', draft=False, client=None):
         raise ValueError('task not found')
     with workflow_launch_lock(store.db_path, f"pr:{initial['workflow_id']}"):
         task = store.get_task(task_id)
+        publication_workflow = store.get_workflow(task['workflow_id']) or {}
         sha, branch, base = _publication(task, wd.load_notes(task['workflow_id']), store)
+        from .wrapup_delivery import has_worktree_output
+        if task.get('wrapup_delivery') and (
+                _git(task['clone_path'], 'rev-parse', 'HEAD') != sha
+                or has_worktree_output(task)):
+            raise ValueError('wrapup clone advanced after certification; register a new candidate')
         repo = Path(task.get('source_repo') or '').expanduser()
         if not repo.is_dir():
             raise ValueError('integrated source repository missing')
@@ -231,10 +258,27 @@ def create_task_pr(store, task_id, *, title, body='', draft=False, client=None):
         verified = _matching_pr([row],branch,base,sha)
         if not verified or not verified.get('number') or not verified.get('html_url'):
             raise ValueError('provider did not attest an open PR for the candidate')
-        receipt = {'number':verified['number'],'url':verified['html_url'],'candidate_sha':sha,
+        final_task = store.get_task(task_id) or {}
+        if final_task.get('version') != task.get('version'):
+            raise ValueError('delivery changed during publication; reconcile the external result')
+        workflow = publication_workflow
+        previous = store.list_events(workflow_id=task['workflow_id'], event_type='pull_request_created', desc=True, limit=1)
+        replaced = (previous[0].get('payload') or {}).get('url') if previous else None
+        receipt = {'execution_id': workflow.get('execution_id'), 'candidate_episode_id': workflow.get('candidate_episode_id'),
+                   'replaces_pr_url': replaced if replaced != verified['html_url'] else None,
+                   'number':verified['number'],'url':verified['html_url'],'candidate_sha':sha,
                    'branch':branch,'base':base,'state':'open','provider':identity[0]}
-        store.record_event('pull_request_created',receipt,task_id=task_id,
-                           workflow_id=task['workflow_id'],source='herdr-task')
+        if previous:
+            old = previous[0].get('payload') or {}
+            if all(old.get(key) == receipt.get(key) for key in
+                   ('candidate_sha', 'branch', 'base', 'url', 'execution_id', 'candidate_episode_id')):
+                return old
+        if task.get('wrapup_delivery'):
+            from .wrapup_delivery import record_pr_receipt
+            record_pr_receipt(store, task, workflow, receipt)
+        else:
+            store.record_event('pull_request_created',receipt,task_id=task_id,
+                               workflow_id=task['workflow_id'],source='herdr-task')
         return receipt
 
 

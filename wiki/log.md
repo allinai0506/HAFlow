@@ -3169,3 +3169,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - FACT：补充 326 个原函数对象基线、CSS/DOM 哈希、私有生命周期数据隔离及页签装饰/日志停止专项。
 - Evidence：`console/page.py#compose_template`、`console/static/console/scripts/`、`tests/test_console_ui_modules.py`、`docs/plans/2026-10-20-console-ui-modules.md`。
 - UNKNOWN：本地工作树未部署，不能据此推断当前生产 Console 已切换。
+
+## [2026-10-20] Fix | 收尾新增提交的候选认证与 PR 回执闭环
+
+- Updated [[task-lifecycle]]：默认开发模板的 wrapup 交付阶段与任务完成分离，内部 publication、候选冻结及远端 PR 发布分别留证。
+- 新冻结轮次从正常派发重跑独立 test/review，SPEC 重新汇聚 acceptance；候选专属分支保留旧 PR 身份校验，回执绑定精确 head 与 Run/execution/episode。
+- 知识与报告正文先固定再认证，最终运行证据使用 clone 外 checkpoint；重复命令恢复并沿用有限预算。
+- Evidence：`herdr/wrapup_delivery.py`、`services/controller/advancement.py`、`herdr/pr_delivery.py`、`tests/test_wrapup_candidate_delivery.py`、工程教训 §178。
+- UNKNOWN：隔离测试使用外部 Agent/forge 替身，未部署或修改生产工作流。
+
+- 2026-10-20（工作流自动化优化，PR #287 复验）：补齐旧 pin 的新候选独立路由合同，派发前拒绝与最终发布矛盾的软降级；同步模板/技能 canonical hash 守护，保留旧非闭环调度路径。

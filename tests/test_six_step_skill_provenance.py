@@ -1,6 +1,6 @@
 """Verify six-step-finish skill vendoring integrity (AC1, T2 §7).
 
-Guards that the repository copy exists, keeps the upstream sha256 registered
+Guards that the repository copy exists, keeps the canonical sha256 registered
 in PROVENANCE.md, stays executable, and that the vendored script's --help
 smoke test succeeds.
 """
@@ -16,7 +16,7 @@ EXPECTED_SHA256 = {
     "scripts/finish-task.sh":
         "51c73e5bd8b91b3132b20158b13f26511b3d209ba9735de49084f8bf4da835b6",
     "SKILL.md":
-        "ae606b2bbe7349167c2d68e1bb8d970da115be5bdd0baf52bae69835281084c3",
+        "a40dbadc623bbcd26ba1e49886e1c7ec1023527cc47a686bc12400e0460a67bc",
 }
 
 

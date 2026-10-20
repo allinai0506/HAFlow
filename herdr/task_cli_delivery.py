@@ -34,7 +34,23 @@ def commit_task(
         )
         sys.exit(2)
 
-    if task["status"] != "completed":
+    from herdr import wrapup_delivery
+    wrapup_task = wrapup_delivery.begin(get_store(), task) if (task.get("node") or task.get("stage")) == "wrapup" else None
+    if wrapup_task:
+        task = wrapup_task
+        if not task.get("wrapup_delivery"):
+            print("[COMMITTED] " + task_id + " (no candidate change)")
+            return
+        if ((task.get("wrapup_delivery") or {}).get("phase") == "committed"
+                and subprocess.check_output(["git", "-C", task["clone_path"], "rev-parse", "HEAD"], text=True).strip() == task.get("commit")
+                and not wrapup_delivery.has_worktree_output(task)):
+            print("[COMMITTED] " + task_id + " (already registered)")
+            return
+        if (task.get("wrapup_delivery") or {}).get("phase") == "integrated":
+            print("[COMMITTED] " + task_id + " (already integrated)")
+            return
+
+    if task["status"] != "completed" and not wrapup_task:
         existing = task.get("commit")
         status = task.get("status")
 
@@ -276,7 +292,10 @@ def commit_task(
     if staged.returncode == 0:
         # 空 index:可能是 Agent 直接提交后的干净工作区,尝试收编 HEAD。
         # 真空任务仍 exit 3,无法归属的推进 exit 4,状态一律不变(除收编成功)。
-        adopt_head_if_attributable(task_id, task, clone, allow_rebase=allow_rebase)
+        adoption_task = dict(task, baseline_commit=task["wrapup_delivery"]["parent_sha"]) if wrapup_task else task
+        adopt_head_if_attributable(task_id, adoption_task, clone, allow_rebase=allow_rebase)
+        if wrapup_task:
+            wrapup_delivery.committed(get_store(), task_id)
         return
 
     if message is None:
@@ -318,7 +337,9 @@ def commit_task(
     target_status = (
         task["status"] if task.get("status") in preserve_status else "committed"
     )
-    if task.get("status") != target_status:
+    if wrapup_task:
+        wrapup_delivery.committed(get_store(), task_id)
+    elif task.get("status") != target_status:
         set_status(task_id, target_status)
 
     print(f"[COMMITTED] {task_id}")

@@ -705,3 +705,28 @@ Evidence:
 - `herdr/workspace_fingerprint.py`
 - `tests/test_task_cli_entry.py`
 - `tests/test_task_cli_workflow.py`
+
+## 收尾新增提交的交付阶段（默认开发模板）
+
+`FACT` `software-development-v1` / `spec-development-v1` 的闭环 wrapup 可以在保持 working/agent_done/rework 时执行正常 `commit` / `integrate`。`wrapup_delivery` 在 Task payload 内记录 registered → committed → integrated，绑定原 Task/Run、execution、父候选 episode、源 SHA 与最终集成 SHA；不新增 Task 状态或平行状态库。
+
+`FACT` 集成产生 task-owned refs 与内部 `candidate_published`；Controller 消费后才生成新 `candidate_frozen`。新轮次用普通生命周期边退役旧 test/review，以及存在时的 acceptance；旧 verdict 不改写，正常 dispatch obligation 补派。收尾轮次强制 fresh test/review，最多三次并继续受节点累计预算限制。
+
+`FACT` 新验证和业务验收齐备后，`record-delivery --supersedes` 建立新身份。`create-pr` 使用 `wrapup_delivery.publication_branch` 的候选专属分支，创建或恢复替代 PR，记录 `replaces_pr_url`，不覆盖原分支或删除旧 PR。完成依旧检查精确 HEAD、无新增交付工作树改动、交付身份、同轮业务证据（SPEC 包括新 acceptance）、实时 forge CI/审核状态及 Run/execution/episode 回执。
+
+`FACT` 属于 PR 的知识/报告正文在认证前提交；认证后运行报告使用 clone 外 checkpoint Artifact，不在落审核回执后追加提交。无新增提交时沿用原有效候选。集成、冻结、派发和远端发布各有独立幂等记录；外部创建响应丢失先按 branch/base/head 查询，不重复创建。
+
+Evidence:
+- `herdr/wrapup_delivery.py#begin/reconcile_verifiers`
+- `herdr/task_cli_integration.py#integrate_task`
+- `services/controller/candidate.py#_scheduler_freeze_candidate`
+- `services/controller/advancement.py#_scheduler_resolve_candidate_and_plan`
+- `herdr/pr_delivery.py#_publication/create_task_pr`
+- `herdr/review_closure.py#identity_mismatch/check_completion_allowed`
+- `tests/test_wrapup_candidate_delivery.py`
+
+`UNKNOWN` 本地隔离测试不代表部署后的生产工作流、真实付费 Agent 或实际 forge 审核已跑通。
+
+`FACT` 重基前持久记录固定 input/base。Git 已生成 S 而状态库尚登记 Y 时，正常 commit/integrate 通过临时无网络、禁 hooks 的 Git 重放树证明后 CAS 收编，source_sha 仍为原 Y。错误树、身份或 episode 不匹配不恢复；测试覆盖主干在中断期间再次前进。
+
+`FACT` 当前默认 wrapup 候选的 test/review 路由在准入即执行独立性合同：保留 pin 原排除项，强制排除 implementation/wrapup，禁止软降级或 opt-out。此约束适用于缺少新模板字段的旧 pin；上游轮次和其他模板的既有降级政策不变。未启用 wrapup review closure 的模板不进入收尾退役恢复事务。
