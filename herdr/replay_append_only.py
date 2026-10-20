@@ -115,7 +115,7 @@ def merge_append_only(base, main, incoming, *, numbered=False):
         applied = _applied_prefix_length(main_suffix, suffix, candidate_entries)
         if applied == len(candidate_entries) and candidate_entries:
             return main + prefix_pending, {}
-        if applied:
+        if applied or prefix_pending != prefix:
             separator = prefix if not prefix.strip() else prefix_pending
             suffix = separator + suffix[candidate_entries[applied][1]:]
             candidate_entries = _numbered_entries(suffix)

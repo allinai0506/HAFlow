@@ -215,3 +215,16 @@ def test_numbered_replay_preserves_unheaded_prefix_when_entries_exist():
     assert merged == main + b'\nIMPORTANT\n\n'
     assert merged.count(b'shared body\n') == 1
     assert mapping == {}
+
+
+def test_numbered_replay_deduplicates_prefix_before_new_entries():
+    base = b'## 1. old\nold body\n'
+    prefix = b'\nIMPORTANT\n\n'
+    incoming = base + prefix + b'## 2. new\nnew body\n'
+    main = base + prefix
+
+    merged, mapping = merge_append_only(base, main, incoming, numbered=True)
+
+    assert merged == main + b'## 2. new\nnew body\n'
+    assert merged.count(b'IMPORTANT\n') == 1
+    assert mapping == {}
