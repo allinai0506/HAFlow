@@ -41,7 +41,7 @@ verification:
 evidence:
 - kind: implemented
   source: herdr/agent_router.py
-  locator: choose_agent L1063 / _choose_agent_locked L430 / 预占写入 L809-819
+  locator: choose_agent L1103 / _choose_agent_locked L454 / 预占写入 L847-857
   confidence: high
 - kind: implemented
   source: services/controller/infra_recovery.py

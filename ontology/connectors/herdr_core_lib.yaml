@@ -32,7 +32,7 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/agent_router.py
-  locator: choose_agent L1063 / release_agent_reservation L283
+  locator: choose_agent L1103 / release_agent_reservation L283
   confidence: high
 - kind: implemented
   source: herdr/projects.py

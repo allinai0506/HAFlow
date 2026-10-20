@@ -81,6 +81,18 @@ Evidence:
 - `herdr/state_db.py:transition_task, transition_workflow`
 - `bin/herdr-task:set_status, supersede_task`
 
+`FACT` **状态集合语义解耦（SC-008）**：
+系统内存在两个容易被误认为同义的“活跃/占用”状态集合，已在架构和代码上显式解耦：
+1. **任务生命周期活跃状态集 (`ACTIVE_TASK_STATUSES`)**：
+   - 权威定义：`herdr/transitions.py:ACTIVE_TASK_STATUSES`；
+   - 集合成员：`{"dispatched", "working", "blocked", "agent_done", "rework", "paused", "interrupted"}`；
+   - 业务语义：表示任务已被 launch 启动进入生命周期执行管线，尚未进入归档终态。它包含 `paused` 与 `interrupted`（管线已启动但处于暂停管理态），不包含 `pending`（刚创建尚未启动的草稿态）。
+2. **路由负载占用状态集 (`ROUTER_OCCUPIED_STATUSES`)**：
+   - 权威定义：`herdr/agent_router.py:ROUTER_OCCUPIED_STATUSES`；
+   - 集合成员：`{"pending", "dispatched", "working", "blocked", "agent_done", "rework"}`；
+   - 业务语义：表示 Agent 工位与任务排队容量的占用情况（用于路由负载均衡与 Least Loaded 选人）。它包含 `pending`（已指派给 Agent 的待处理任务占用了该 Agent 的排队并发配额），不包含 `paused` 与 `interrupted`（任务已休眠停止执行，不消耗 Agent 活跃执行算力）。
+3. **架构解耦原则**：“同名不等于同义”。生命周期管理关注管线进展（Pipeline Active），路由调度关注工位容量（Capacity Occupied），二者正交，禁止混用。
+
 `FACT` 当前内循环耗尽的blocked是等待仲裁的持久事实，Agent working/idle/done不能代替明确恢复决策。实时事件保留该状态；重启在已知运行信号下恢复仲裁队列。最新blocked转换reason优先于可遗留的sentinel_reason；历史缺失时保留legacy行为。证据：`tests/test_inner_loop_arbitration_recovery.py`。旧屏幕跨恢复epoch（C03c）仍单独待修。仲裁卡及人工升级提示使用现有合法blocked→working命令，不增状态边或force；真实CLI参数执行回归见`tests/test_blocked_recovery_command_contract.py`（C30）。
 
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop

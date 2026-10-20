@@ -53,14 +53,18 @@ Evidence:
 ## 2. 负载均衡与最少活跃优先 (Least Loaded)
 
 当产生多个合规候选 Agent 时，系统通过最小负载评分进行排序：
-- `FACT` **活跃任务负载 (`active_loads`)**: 统计 `tasks.json` 中属于该项目且状态为未终结（`pending` 到 `cleanup_ready` 之间）的各 Agent 任务总数。
-- `FACT` **锁预占负载 (`reserved_loads`)**: 统计 `agent-reservations.json` 中当前被预占但尚未落盘到 `tasks.json` 的各 Agent 数量。
+- `FACT` **Agent 占用负载 (`active_loads` / `ROUTER_OCCUPIED_STATUSES`)**: 统计底层存储（SQLite `state.db`）中属于该项目且处于路由占用状态集（`ROUTER_OCCUPIED_STATUSES = {"pending", "dispatched", "working", "blocked", "agent_done", "rework"}`）的各 Agent 任务总数。
+  - **SC-008 状态解耦说明**：不同于状态机生命周期活跃态 `ACTIVE_TASK_STATUSES`（`{"dispatched", "working", "blocked", "agent_done", "rework", "paused", "interrupted"}`），路由负载状态关注 **Agent 的工作容量与排队槽位占用**：
+    - 包含 `pending`：任务已指定该 Agent，即便处于待调度队列，也占用该 Agent 的排队并发配额；
+    - 排除 `paused` 与 `interrupted`：被暂停或打断的任务已停止执行，不消耗 Agent 活跃并发槽位。
+- `FACT` **锁预占负载 (`reserved_loads`)**: 统计 `agent-reservations.json` 中当前被预占但尚未落盘到存储层的各 Agent 数量。
 - `FACT` **综合评分**:
   $$\text{Score}(Agent) = \text{ActiveTasks}(Agent) + \text{ReservedTasks}(Agent)$$
   具有最低综合得分的候选 Agent 将被优先选中；当得分相同时，维持候选顺序中靠前的 Agent。
 
 Evidence:
-- `herdr/agent_router.py#_active_agent_loads`
+- `herdr/agent_router.py#_active_agent_loads` (`ROUTER_OCCUPIED_STATUSES`)
+- `herdr/transitions.py#ACTIVE_TASK_STATUSES` (生命周期活跃态解耦)
 - `herdr/agent_router.py#choose_agent` (排序键: `active_loads + reserved_loads, item[0]`)
 
 ---
