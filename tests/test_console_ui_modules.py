@@ -37,7 +37,7 @@ def test_all_original_function_bodies_survive_encapsulation():
     for owner in {entry['owner'] for entry in baseline.values()}:
         source = (STATIC / 'console/scripts' / (owner + '.js')).read_text()
         names = [name for name, entry in baseline.items() if entry['owner'] == owner]
-        capture = '\n'.join('__captured[' + json.dumps(name) + ']=' + name + '.toString();' for name in names)
+        capture = '\n'.join('if(Object.hasOwn(__captured,' + json.dumps(name) + '))throw new Error("duplicate function: "+' + json.dumps(name) + ');__captured[' + json.dumps(name) + ']=' + name + '.toString();' for name in names)
         if owner == 'bootstrap':
             replacement = source + '\n' + capture
         else:
@@ -99,3 +99,15 @@ if(JSON.stringify(stopped)!=='[10]')throw new Error('log timer must stop exactly
 """
     result=subprocess.run(['node','-e',setup+main+enhancement+probe],text=True,capture_output=True,timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_each_capability_and_style_is_composed_exactly_once():
+    import re
+    from collections import Counter
+
+    source = (STATIC / 'console.html').read_text()
+    paths = re.findall(r'<!-- console:include (.*?) -->', source)
+    assert [name for name, count in Counter(paths).items() if count != 1] == []
+    assets = {str(path.relative_to(STATIC)) for path in (STATIC / 'console').rglob('*')
+              if path.suffix in {'.css', '.js'}}
+    assert set(paths) == assets
