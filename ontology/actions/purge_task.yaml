@@ -42,7 +42,7 @@ verification:
 evidence:
 - kind: implemented
   source: herdr/task_cli_delivery.py
-  locator: purge_task L373-424
+  locator: purge_task L394-440
   confidence: high
 - kind: implemented
   source: herdr/task_cli_teardown.py

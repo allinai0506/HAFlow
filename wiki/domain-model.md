@@ -136,7 +136,7 @@ Evidence:
 - `FACT` **定义**: 针对具体某个 Node 派发的一次独立 Agent 执行单元。
 - `FACT` **核心字段**:
   - `task_id`: 工单唯一标识（如 `TASK-001`）。
-  - `status`: 任务当前在 11 状态机中所处的状态（[[task-lifecycle]]）。
+  - `status`: 任务当前在 15 状态机中所处的状态（[[task-lifecycle]]）。
   - `pane_id`: 运行该 Task 的 Herdr 终端窗格。
   - `clone_path`: 该 Task 独占的 CoW Git 克隆物理目录（`~/.herdr-controller/clones/<task_id>`）。
   - `branch`: 独占 Git 分支名（格式为 `agent/{agent}/{task_type}-{task_id}`）。
