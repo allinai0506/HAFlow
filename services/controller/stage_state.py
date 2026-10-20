@@ -70,7 +70,9 @@ def mark_stage_advance_queued(ports,
 
 def mark_stage_advance_notified(ports,
     workflow_id,
-    target_node_id
+    target_node_id,
+    *,
+    clear_attention=True,
 ):
     key = ports.stage_advance_key(
         workflow_id,
@@ -82,14 +84,15 @@ def mark_stage_advance_notified(ports,
         state[key] = "notified"
         ports.save_stage_state(state)
 
-    try:
-        ports.attention_clear(f"{workflow_id}:stage_advance:{target_node_id}")
-    except Exception as exc:
-        print(
-            f"[STAGE ADVANCE ATTENTION CLEAR ERROR] "
-            f"workflow={workflow_id} "
-            f"node={target_node_id}: {exc}"
-        )
+    if clear_attention:
+        try:
+            ports.attention_clear(f"{workflow_id}:stage_advance:{target_node_id}")
+        except Exception as exc:
+            print(
+                f"[STAGE ADVANCE ATTENTION CLEAR ERROR] "
+                f"workflow={workflow_id} "
+                f"node={target_node_id}: {exc}"
+            )
 
 def clear_stage_advance(ports,
     workflow_id,

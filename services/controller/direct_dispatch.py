@@ -397,7 +397,9 @@ def try_direct_stage_advance(ports, item):
                     attempts=int(episode.get("attempts") or 0) + 1,
                     detail=(output or "launch transport timed out")[:500],
                 )
-                ports.mark_stage_advance_notified(workflow_id, ready_id)
+                ports.mark_stage_advance_notified(
+                    workflow_id, ready_id, clear_attention=False
+                )
                 print(
                     f"[DIRECT DISPATCH UNKNOWN] workflow={workflow_id} "
                     f"node={ready_id}: manual reconciliation required"

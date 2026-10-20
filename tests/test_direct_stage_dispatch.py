@@ -429,7 +429,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
             patch.object(
                 self.ctrl,
                 "mark_stage_advance_notified",
-                side_effect=lambda wf, node: self.notified.append(node),
+                side_effect=lambda wf, node, **kwargs: self.notified.append(node),
             ),
             # 阶段边界的总指挥 /compact 注入有独立契约测试;
             # 这里打桩,保证本组测试只观察派发行为。
@@ -510,6 +510,9 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(self.notified, ["test"])
         self.assertEqual(note.call_args.kwargs["reason"], "direct_dispatch_delivery_unknown")
+        self.ctrl.mark_stage_advance_notified.assert_called_once_with(
+            "wf-1", "test", clear_attention=False
+        )
 
     def test_direct_advance_triggers_coordinator_compaction(self):
         # 2026-09-17 效率优化:阶段推进成功即触发总指挥 /compact 注入

@@ -497,6 +497,27 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
         finally:
             self.controller.attention_clear(key)
 
+    def test_mark_stage_advance_notified_can_preserve_unknown_delivery_attention(self):
+        workflow_id = "wf-unknown-delivery"
+        target_node = "node1"
+        key = f"{workflow_id}:stage_advance:{target_node}"
+        self.controller.attention_note(
+            key,
+            {"task_id": f"stage_advance:{target_node}", "workflow_id": workflow_id},
+            "stage_advance",
+            reason="direct_dispatch_delivery_unknown",
+        )
+        try:
+            self.controller.mark_stage_advance_notified(
+                workflow_id, target_node, clear_attention=False
+            )
+            self.assertEqual(
+                self.controller.attention_get(key)["reason"],
+                "direct_dispatch_delivery_unknown",
+            )
+        finally:
+            self.controller.attention_clear(key)
+
     def test_mark_stage_advance_notified_handles_clear_error_gracefully(self):
         """Verify that an exception in attention_clear does not crash mark_stage_advance_notified or leave silent failure."""
         workflow_id = "wf-clear-err"
