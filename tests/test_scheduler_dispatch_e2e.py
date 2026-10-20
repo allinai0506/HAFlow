@@ -589,6 +589,31 @@ class P1LatchRecoveryTest(unittest.TestCase):
         queued.assert_called()
         put.assert_called()
 
+    def test_human_decision_attention_blocks_until_explicit_clear(self):
+        """A manual node decision must not become a timer-driven retry loop."""
+        wf_id, ctx = self._sweep_patches(
+            _scheduler_join_gate_allows=True,
+            _scheduler_freeze_candidate="b" * 40,
+        )
+        ctx.append(patch.object(
+            _ctl,
+            "attention_get",
+            return_value={"reason": "human_decision_required", "last_attempt_at": 1},
+        ))
+        with patch.object(
+            _ctl, "mark_stage_advance_queued", return_value=True
+        ) as queued, patch.object(_ctl.coordinator_queue, "put") as put:
+            for c in ctx:
+                c.start()
+            try:
+                _ctl.check_workflow_stage_advance(wf_id)
+            finally:
+                for c in reversed(ctx):
+                    c.stop()
+
+        queued.assert_not_called()
+        put.assert_not_called()
+
 
 class FrozenCandidateFactTest(unittest.TestCase):
     """P1(第 3 轮)回归:冻结 Candidate 与 Final Delivery Record 是两种事实。

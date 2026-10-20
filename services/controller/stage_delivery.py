@@ -29,7 +29,6 @@ def _handle_stage_advance_item(ports, item):
                 "stage_advance",
                 reason="human_decision_required",
                 attempts=int(episode.get("attempts") or 0) + 1,
-                next_retry_at=ports.time.time() + ports.liveness.attention_retry_interval(),
                 detail=f"node_type={node.get('node_type')}; native executor unavailable",
             )
             ports.clear_stage_advance(workflow_id, target_node_id)

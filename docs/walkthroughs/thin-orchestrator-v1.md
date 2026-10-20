@@ -35,7 +35,7 @@ pytest -q tests/test_direct_stage_dispatch.py \
   tests/test_coordinator_auto_heal.py \
   tests/test_node_dispatch_contract.py
 
-320 passed, 44 subtests passed
+321 passed, 44 subtests passed
 ```
 
 关键合同：
@@ -47,7 +47,7 @@ pytest -q tests/test_direct_stage_dispatch.py \
 - `test_launch_timeout_is_bounded_and_falls_back`、`test_partial_launch_timeout_reports_partial`：暂时失败与副作用不确定保持有界且不二次派发。
 - `test_join_gate_refuses_mismatched_sha`、`test_empty_evidence_fails_closed`、`test_set_status_refuses_verdict_without_completion_evidence`：验收失败不推进。
 - `test_missing_coordinator_pane_accumulates_bounded_fallback_attempts`：无法确定性处理时产生有界等待，而非伪造完成。
-- `test_non_agent_stage_event_blocks_all_agent_paths`：human/tool/gate 等无原生执行器节点写入 `human_decision_required` attention、清除阶段闩；人工清除 decision attention 后可从原节点重评。
+- `test_non_agent_stage_event_blocks_all_agent_paths` 与 `test_human_decision_attention_blocks_until_explicit_clear`：human/tool/gate 等无原生执行器节点写入 `human_decision_required` attention、清除阶段闩并持续阻塞；只有人工显式清除 decision attention 后才从原节点重评。
 - `tests/test_dispatch_idempotency.py` 全模块：重复事件、operation ownership 与重启恢复保持幂等。
 
 ## 真实运行尝试

@@ -293,7 +293,11 @@ def check_workflow_stage_advance(ports, workflow_id):
                         "-> awaiting adjudication"
                     )
                 continue
-            if ports.attention_blocks_retry(f"{workflow_id}:stage_advance:{ready_id}"):
+            attention_key = f"{workflow_id}:stage_advance:{ready_id}"
+            attention = ports.attention_get(attention_key) or {}
+            if attention.get("reason") == "human_decision_required":
+                continue
+            if ports.attention_blocks_retry(attention_key):
                 continue
 
             deps = ready_node.get("depends_on", [])
