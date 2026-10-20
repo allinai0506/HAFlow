@@ -60,9 +60,10 @@ def _handle_stage_advance_item(ports, item):
     workflow_id = item["workflow_id"]
     coord_pane = ports.coordinator_pane_for_workflow(workflow_id)
     if not coord_pane:
+        fallback_reason = item.get("direct_dispatch_fallback_reason") or "coordinator_missing"
         if dispatch_op:
             from herdr.node_dispatch_store import defer
-            defer(ports._get_store().db_path, dispatch_op['id'], 'coordinator_missing', owner=dispatch_owner)
+            defer(ports._get_store().db_path, dispatch_op['id'], fallback_reason, owner=dispatch_owner)
             ports.clear_stage_advance(workflow_id, target_node_id)
         else:
             ports.clear_stage_advance(workflow_id, target_node_id)
@@ -73,10 +74,10 @@ def _handle_stage_advance_item(ports, item):
             key,
             {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
             "stage_advance",
-            reason="coordinator_stalled",
+            reason=fallback_reason,
             attempts=attempts,
             next_retry_at=ports.time.time() + ports.liveness.attention_retry_interval(),
-            detail="coordinator pane missing",
+            detail=f"coordinator pane missing after {fallback_reason}",
         )
         print(
             f"[STAGE ADVANCE SKIP] "

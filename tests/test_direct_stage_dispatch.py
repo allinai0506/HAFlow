@@ -481,6 +481,21 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertIn("launch", self.commands[0])
 
+    def test_direct_dispatch_records_configuration_failure_reason(self):
+        item = self._item()
+        with patch.object(
+            self.ctrl,
+            "project_for_workflow",
+            return_value={"startup_ready": True},
+        ):
+            result = self.ctrl.try_direct_stage_advance(item)
+
+        self.assertFalse(result)
+        self.assertEqual(
+            item["direct_dispatch_fallback_reason"],
+            "workflow_configuration_missing",
+        )
+
     def test_direct_advance_triggers_coordinator_compaction(self):
         # 2026-09-17 效率优化:阶段推进成功即触发总指挥 /compact 注入
         # (上下文卫生,压长回合耗时)。

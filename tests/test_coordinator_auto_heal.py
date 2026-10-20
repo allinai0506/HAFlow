@@ -144,8 +144,12 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
         self.controller.attention_clear(key)
 
         try:
+            def refuse_direct(event):
+                event["direct_dispatch_fallback_reason"] = "worker_candidate_unavailable"
+                return False
+
             with patch.object(self.controller, "coordinator_intake_enabled", return_value=True), \
-                 patch.object(self.controller, "try_direct_stage_advance", return_value=False) as mock_direct, \
+                 patch.object(self.controller, "try_direct_stage_advance", side_effect=refuse_direct) as mock_direct, \
                  patch.object(self.controller, "coordinator_pane_for_workflow", return_value=None):
 
                 # Each delivery first checks the deterministic planner, then records fallback failure.
@@ -153,7 +157,7 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
                 ep1 = self.controller.attention_get(key)
                 self.assertIsNotNone(ep1)
                 self.assertEqual(ep1["attempts"], 1)
-                self.assertEqual(ep1["reason"], "coordinator_stalled")
+                self.assertEqual(ep1["reason"], "worker_candidate_unavailable")
                 self.assertEqual(mock_direct.call_count, 1)
 
                 self.controller._handle_coordinator_item(item)

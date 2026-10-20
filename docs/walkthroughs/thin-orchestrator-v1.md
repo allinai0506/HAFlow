@@ -1,7 +1,7 @@
 # Thin Orchestrator V1 验证记录
 
-日期：2026-10-21  
-基线：`1ddffd1c13f69d4ffd7bc357c1020280bdca4642`  
+日期：2026-10-21
+基线：`1ddffd1c13f69d4ffd7bc357c1020280bdca4642`
 模板：`general-task-v1`（未修改）
 
 ## 结论
@@ -35,7 +35,7 @@ pytest -q tests/test_direct_stage_dispatch.py \
   tests/test_coordinator_auto_heal.py \
   tests/test_node_dispatch_contract.py
 
-319 passed, 44 subtests passed
+320 passed, 44 subtests passed
 ```
 
 关键合同：
@@ -50,6 +50,8 @@ pytest -q tests/test_direct_stage_dispatch.py \
 - `tests/test_dispatch_idempotency.py` 全模块：重复事件、operation ownership 与重启恢复保持幂等。
 
 ## 真实运行尝试
+
+以下是执行时观察记录，不是保留现场的独立验收凭证；隔离现场已在失败后注销。因此它们只能说明阻塞与 fail-closed 行为，不能作为完整 E2E 或精确调用量指标。
 
 ### 尝试 1：独立 StateStore 环境变量
 
@@ -80,7 +82,7 @@ pytest -q tests/test_direct_stage_dispatch.py \
 | 完整三节点真实自动推进 | 未验证（Agent 真实预检阻塞） |
 | 自动化三节点/依赖/门禁路径 | 通过现有 Controller 集成测试验证 |
 | 缺少 coordinator Pane 的真实首节点派发 | 1 次成功进入真实 Worker |
-| 完整流程 coordinator LLM 调用次数 | 无完整流程可计量；所有隔离尝试为 0 |
+| 完整流程 coordinator LLM 调用次数 | 无完整流程可计量；未验证 |
 | 验收失败与身份不一致 | fail closed，无后续虚假推进 |
 | 重复事件与恢复 | 自动化专项通过（含 operation lease 恢复复用）；真实重启链未完成 |
 

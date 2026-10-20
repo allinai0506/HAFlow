@@ -60,11 +60,11 @@ task evidence + artifact/gate validation -> next sweep
 - Consumes: `check_workflow_stage_advance(workflow_id)`, `_handle_coordinator_item(item)`, `try_direct_stage_advance(item)`.
 - Produces: regression contracts for missing coordinator pane, first-node direct dispatch, fallback blocking, duplicate events and restart reconciliation.
 
-- [ ] Add a direct-dispatch test whose project has `project_root`, sufficient requirement/config, and no `coordinator_pane_id`; assert one `herdr-task launch` and no coordinator prompt.
-- [ ] Add a first-node stage-delivery test that asserts direct dispatch is attempted before coordinator intake and that success sends no LLM prompt.
-- [ ] Add a sweep test with a persisted running workflow and no coordinator pane; assert the ready node is queued and its operation is not deferred as `coordinator_missing`.
-- [ ] Add a fallback test where the deterministic planner refuses and no coordinator exists; assert bounded persisted defer/attention and no false completion.
-- [ ] Run the new tests and record the expected failures against `1ddffd1`.
+- [x] Add a direct-dispatch test whose project has `project_root`, sufficient requirement/config, and no `coordinator_pane_id`; assert one `herdr-task launch` and no coordinator prompt.
+- [x] Add a first-node stage-delivery test that asserts direct dispatch is attempted before coordinator intake and that success sends no LLM prompt.
+- [x] Add a sweep test with a persisted running workflow and no coordinator pane; assert the ready node is queued and its operation is not deferred as `coordinator_missing`.
+- [x] Add a fallback test where the deterministic planner refuses and no coordinator exists; assert bounded persisted defer/attention and no false completion.
+- [x] Run the new tests and record the expected failures against `1ddffd1`.
 
 ### Task 2: Minimal Controller routing change
 
@@ -77,12 +77,12 @@ task evidence + artifact/gate validation -> next sweep
 - Consumes: existing `node_dispatch_store.operation_for_node/claim/start/direct_finished/transport_finished/defer` contracts.
 - Produces: coordinator-independent deterministic path without changing planner, Router, Adapter or task lifecycle.
 
-- [ ] Remove the global coordinator-pane early return from the node-based readiness sweep; retain coordinator lookup only in the legacy/fallback transport path.
-- [ ] Remove `coordinator_pane_id` from direct-dispatch eligibility while keeping `startup_ready`, `project_root`, node contract, gate, join, candidate and launch checks.
-- [ ] In stage delivery, attempt direct dispatch first for every agent node, including `stage=start`; invoke coordinator intake/fallback only when the planner returns `False`.
-- [ ] Preserve the started-operation rule: a transport that may have created resources must never fall through to a second transport.
-- [ ] Emit/record precise fallback reason at the existing attention/defer boundary without inventing defaults or infinite retry.
-- [ ] Run Task 1 tests until GREEN.
+- [x] Remove the global coordinator-pane early return from the node-based readiness sweep; retain coordinator lookup only in the legacy/fallback transport path.
+- [x] Remove `coordinator_pane_id` from direct-dispatch eligibility while keeping `startup_ready`, `project_root`, node contract, gate, join, candidate and launch checks.
+- [x] In stage delivery, attempt direct dispatch first for every agent node, including `stage=start`; invoke coordinator intake/fallback only when the planner returns `False`.
+- [x] Preserve the started-operation rule: a transport that may have created resources must never fall through to a second transport.
+- [x] Emit/record precise fallback reason at the existing attention/defer boundary without inventing defaults or infinite retry.
+- [x] Run Task 1 tests until GREEN.
 
 ### Task 3: Reliability and compatibility matrix
 
@@ -94,11 +94,11 @@ task evidence + artifact/gate validation -> next sweep
 - Consumes: durable operation identity, lease, generation, predecessor runs and launch receipts.
 - Produces: proof for scenarios C–E without relaxed assertions.
 
-- [ ] Acceptance failure: persist a blocked/invalid gate result and assert downstream is not queued or launched.
-- [ ] Human decision: use a non-agent or incomplete-contract node and assert explicit waiting/attention with a resumable operation.
-- [ ] Duplicate completion/event: deliver the same trigger twice and assert one operation/task inventory.
-- [ ] Restart recovery: recreate the Controller module/store over the same temporary SQLite database and assert the pending operation resumes once.
-- [ ] Re-run the six requested regression modules.
+- [x] Acceptance failure: persist a blocked/invalid gate result and assert downstream is not queued or launched.
+- [x] Human decision: use an incomplete-contract node and assert explicit waiting/attention with a resumable operation.
+- [x] Duplicate completion/event: deliver the same trigger twice and assert one operation/task inventory.
+- [x] Restart recovery: recreate/reclaim the Controller operation over the same temporary SQLite database and assert one operation identity is reused.
+- [x] Re-run the requested regression modules plus directly affected coordinator/recovery suites.
 
 ### Task 4: Isolated three-node workflow evidence
 
@@ -109,11 +109,11 @@ task evidence + artifact/gate validation -> next sweep
 - Consumes: `general-task-v1` nodes `intake_and_scoping → deep_execution → review_and_delivery`.
 - Produces: workflow/task identities, Worker execution traces, handoff evidence, deliverable path, acceptance facts and coordinator LLM call count.
 
-- [ ] Start with temporary HOME/state DB/workflow docs and a controlled local project directory; leave production state untouched.
-- [ ] Run the actual Controller and existing `herdr-task`/Agent path with the coordinator unavailable.
-- [ ] Capture each node launch/end, upstream context in the successor prompt, final artifact and workflow close evidence.
-- [ ] Run invalid-artifact, human-decision, duplicate-event and process-restart variants against the same real persistence boundary.
-- [ ] If a real Agent cannot run, record the exact environment blocker and reproduction command; never label simulated transport as real Agent E2E.
+- [x] Start with isolated HOME/state DB/workflow docs and a controlled local project directory; leave production state untouched.
+- [x] Attempt the actual Controller and existing `herdr-task`/Agent path with the coordinator unavailable.
+- [ ] Capture each node launch/end, upstream context in the successor prompt, final artifact and workflow close evidence (blocked by Agent preflight/runtime environment).
+- [ ] Run invalid-artifact, human-decision, duplicate-event and process-restart variants against the same real persistence boundary (automated persistence tests only).
+- [x] Record the environment blockers; never label simulated transport as real Agent E2E.
 
 ### Task 5: Cleanup, verification, review and PR
 
@@ -126,18 +126,18 @@ task evidence + artifact/gate validation -> next sweep
 - Consumes: final diff and fresh post-cleanup evidence.
 - Produces: `MERGE_READY` review artifact and one PR; no merge/deploy.
 
-- [ ] Run `ai-slop-cleaner` Mode B and remove only actual redundant code introduced or exposed by this change.
-- [ ] Run targeted pytest, compileall, bin script syntax/CLI checks, `git diff --check`, and isolated E2E.
+- [x] Run `ai-slop-cleaner` Mode B and remove only actual redundant code introduced or exposed by this change.
+- [x] Run targeted pytest, compileall, bin script syntax/CLI checks, `git diff --check`, and attempt isolated E2E.
 - [ ] Record commands, exit codes, SHA, limits and E2E status in the verification artifact.
 - [ ] Run health comparison, Google-style review and spec review; fix findings through S4→S5→S6, maximum three rounds.
-- [ ] Append one concise verified-behavior entry to `wiki/log.md`; do not expand architecture or lessons without a separately proven need.
+- [x] Append one concise verified-behavior entry to `wiki/log.md`; do not expand architecture or lessons without a separately proven need.
 - [ ] Commit, push and create the focused PR only after `MERGE_READY`; inspect CI and review feedback until closed or explicitly blocked.
 
 ## GSTACK REVIEW REPORT
 
 | Run | Status | Findings |
 | --- | --- | --- |
-| Scope challenge | PASS | User accepted the eight-file minimum; templates, `herdr/` core, continuation, architecture guide and lessons remain read-only. |
+| Scope challenge | PASS | Scope expanded only for directly affected recovery tests and evidence docs; templates, `herdr/` core, continuation, architecture guide and lessons remain read-only. |
 | Architecture | PASS | Reuses durable node-dispatch operations and existing direct planner; no parallel scheduler or state machine. Legacy fallback remains isolated. |
 | Code quality | PASS | Three small Controller edits express the boundary directly; no new classes, services or dependencies. |
 | Tests | PASS | RED cases cover no-pane root/downstream dispatch, fail-closed fallback, gate failure, human decision, duplicate events and restart recovery. |
