@@ -114,3 +114,5 @@ PR 最终复审绑定 `5e6bef4`，Codex 明确返回无 findings、无未决 P1/
 该提交的完整复审继续发现非空白前缀在全部条目已存在时被移到最后条目之后，重试会把前缀误算进条目身份。匹配器现只在 main 条目确实以候选前缀结尾、移除该前缀后身份逐字相同时识别这一 append-only 位移，并同步标记前缀已应用。新增 `NOTE + B + C` 连续重放回归，16 模块专项为 299 passed、10 subtests。
 
 下一轮复审补出 main-only 条目之后的 EOF 分隔符位移及 closing 生命周期。重放在保留 EOF 完整行终止符后消费已经位移到末尾的额外换行单元，避免每次重试继续加空行；gate wait reconciliation 与 `record_wait` 使用同一判断，workflow 只要不再是 running 就 supersede 活动等待。新增两项回归，16 模块专项为 301 passed、10 subtests。
+
+同一 EOF 位移规则也应用于单条目纯空白前缀：首次因 append-only 限制将空行追加到末尾，后续重放从 EOF 的额外换行中确认它已应用。既有空白前缀回归扩展为连续两次重放，16 模块专项仍为 301 passed、10 subtests。

@@ -303,9 +303,12 @@ def test_numbered_replay_preserves_unmatched_whitespace_prefix():
     main = base + b'## 2. shared\nshared body\n'
 
     merged, mapping = merge_append_only(base, main, incoming, numbered=True)
+    retried, retry_mapping = merge_append_only(base, merged, incoming, numbered=True)
 
     assert merged == main + b'\n'
+    assert retried == merged
     assert mapping == {}
+    assert retry_mapping == {}
 
 
 def test_numbered_replay_does_not_repeat_shifted_whitespace_prefix_on_retry():
