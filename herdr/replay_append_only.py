@@ -77,16 +77,20 @@ def _unmatched_entry_tail(candidate_block, main_block):
 
 
 def _unmatched_displaced_tail(pending, main):
-    """Consume separators previously appended at EOF after a main-only entry."""
+    """Keep displaced content and consume only separators already present at EOF."""
     if not pending:
         return pending
+    content = pending.rstrip(b'\r\n')
+    if content:
+        return pending
+    pending_tail = pending[len(content):]
     main_tail = main[len(main.rstrip(b'\r\n')):]
     available = re.findall(rb'\r\n|\n|\r', main_tail)[1:]
-    wanted = re.findall(rb'\r\n|\n|\r', pending)
+    wanted = re.findall(rb'\r\n|\n|\r', pending_tail)
     if available and wanted[-len(available):] == available:
-        return b''.join(wanted[:-len(available)])
+        return content + b''.join(wanted[:-len(available)])
     if wanted and available[-len(wanted):] == wanted:
-        return b''
+        return content
     return pending
 
 
@@ -181,12 +185,10 @@ def merge_append_only(base, main, incoming, *, numbered=False):
             prefix_applied = False
         prefix_pending = b'' if prefix_applied else prefix
         if applied == len(candidate_entries) and candidate_entries:
-            if not prefix_pending.strip():
-                prefix_pending = _unmatched_displaced_tail(prefix_pending, main_suffix)
-            unmatched_separators = _unmatched_displaced_tail(
-                unmatched_separators, main_suffix
+            pending_suffix = _unmatched_displaced_tail(
+                prefix_pending + unmatched_separators, main_suffix
             )
-            return main + prefix_pending + unmatched_separators, {}
+            return main + pending_suffix, {}
         if applied or prefix_pending != prefix:
             suffix = (prefix_pending + unmatched_separators
                       + suffix[candidate_entries[applied][1]:])
