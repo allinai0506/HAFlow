@@ -23,7 +23,7 @@ def try_direct_stage_advance(ports, item):
         return False
 
     project_root = project_ctx.get("project_root") or ""
-    if not project_root or not project_ctx.get("coordinator_pane_id"):
+    if not project_root:
         return False
 
     requirement = (project_ctx.get("requirement") or "").strip()

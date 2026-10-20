@@ -141,14 +141,14 @@ def test_stage_admission_defers_and_clears_when_join_gate_blocks(scene):
     assert cleared == [("wf", "implementation", "pending", "join_gate_blocked")]
 
 
-def test_zero_task_workflow_without_coordinator_is_not_an_unowned_running_state(scene, monkeypatch):
+def test_zero_task_workflow_without_coordinator_claims_one_dispatch(scene, monkeypatch):
     monkeypatch.setattr(scene.ctrl, 'coordinator_pane_for_workflow', lambda _: None)
     scene.ctrl.check_workflow_stage_advance('wf')
     operations = dispatch_operations(scene)
     assert len(operations) == 1
-    assert operations[0]['status'] == 'pending'
-    assert operations[0]['detail']['reason'] == 'coordinator_missing'
-    assert operations[0]['next_due_at'] == 1030
+    assert operations[0]['status'] == 'running'
+    assert operations[0]['payload']['node_id'] == 'implementation'
+    assert scene.ctrl.coordinator_queue.qsize() == 1
 
 
 def started_operation(scene):
@@ -315,18 +315,16 @@ def test_legacy_notified_migrates_to_bounded_unknown_wait(scene):
     assert scene.sent == []
 
 
-def test_missing_coordinator_exhausts_bounded_preflight_then_human_can_retry(scene, monkeypatch):
+def test_missing_coordinator_lease_recovery_reuses_dispatch_operation(scene, monkeypatch):
     monkeypatch.setattr(scene.ctrl, 'coordinator_pane_for_workflow', lambda _: None)
     for tick in (1000, 1030, 1060, 2000):
         scene.clock[0] = tick
         scene.ctrl.check_workflow_stage_advance('wf')
     op = dispatch_operations(scene)[0]
-    assert op['status'] == 'waiting_human'
-    assert op['attempts'] == 3
-    retried = recovery_store.decide_operation(scene.store.db_path, op['id'], op['version'],
-        'operator', 'retry', 'coordinator repaired', 2000)
-    assert retried['status'] == 'pending'
-    assert retried['attempts'] == 0
+    assert op['status'] == 'running'
+    assert op['attempts'] == 2
+    assert len(dispatch_operations(scene)) == 1
+    assert scene.store.list_tasks(workflow_id='wf') == []
 
 
 def test_zero_task_projection_exposes_wait_and_expired_human_decision(scene):

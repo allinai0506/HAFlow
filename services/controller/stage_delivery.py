@@ -43,28 +43,13 @@ def _handle_stage_advance_item(ports, item):
     if admission is None:
         return
     item, node, dispatch_op, dispatch_owner = admission
-    # 总指挥接单:新工作流首个节点(start -> first)默认交总指挥理解
-    # 需求后再派发;HERDR_COORDINATOR_INTAKE=0 或非首节点保持直派。
-    # 当总指挥持续异常/停滞时(例如 Agent 无法拉活或反复失败), 回退到直派快路径避免死锁。
-    intake_key = f"{item['workflow_id']}:stage_advance:{target_node_id}"
-    intake_stalled = False
-    if item.get("stage") in (None, "", "start"):
-        ep = ports.attention_get(intake_key) or {}
-        last_attempt = float(ep.get("last_attempt_at") or 0)
-        is_recent = last_attempt == 0 or (ports.time.time() - last_attempt) <= ports.liveness.task_stall_after()
-        if int(ep.get("attempts") or 0) >= 2 and ep.get("reason") == "coordinator_stalled" and is_recent:
-            intake_stalled = True
-            print(
-                f"[COORDINATOR INTAKE FALLBACK] "
-                f"workflow={item['workflow_id']} "
-                f"node={target_node_id}: coordinator stalled {ep.get('attempts')} times, falling back to direct dispatch"
-            )
+    # Deterministic agent nodes use the persisted direct-dispatch contract for
+    # roots and downstream stages alike. Coordinator intake remains the
+    # compatibility fallback when the planner cannot prove a safe launch.
+    if ports.try_direct_stage_advance(item):
+        return
 
-    if (
-        item.get("stage") in (None, "", "start")
-        and ports.coordinator_intake_enabled()
-        and not intake_stalled
-    ):
+    if item.get("stage") in (None, "", "start") and ports.coordinator_intake_enabled():
         item = dict(item, intake=True)
         print(
             f"[COORDINATOR INTAKE] "
@@ -72,11 +57,6 @@ def _handle_stage_advance_item(ports, item):
             f"node={target_node_id} "
             "-> dispatch via coordinator"
         )
-    # 常规推进会:优先规则化直接派发(不再等待总指挥 LLM 回合);
-    # 配置不足/需求缺失/launch 失败时回落既有总指挥路径。
-    elif ports.try_direct_stage_advance(item):
-        return
-
     workflow_id = item["workflow_id"]
     coord_pane = ports.coordinator_pane_for_workflow(workflow_id)
     if not coord_pane:

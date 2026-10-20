@@ -463,6 +463,24 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("--agent", cmd)
         self.assertIn("auto", cmd)
 
+    def test_direct_dispatch_does_not_require_coordinator_pane(self):
+        """A fully specified Worker launch must not depend on coordinator liveness."""
+        with patch.object(
+            self.ctrl,
+            "project_for_workflow",
+            return_value={
+                "startup_ready": True,
+                "project_root": "/tmp/proj",
+                "requirement": "优化摘要展示",
+            },
+        ):
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
+        self.assertEqual(len(self.commands), 1)
+        self.assertIn("launch", self.commands[0])
+
     def test_direct_advance_triggers_coordinator_compaction(self):
         # 2026-09-17 效率优化:阶段推进成功即触发总指挥 /compact 注入
         # (上下文卫生,压长回合耗时)。
@@ -793,9 +811,14 @@ class CoordinatorIntakeTest(unittest.TestCase):
             self.ctrl._handle_coordinator_item(self._item(stage))
         return direct_mock
 
-    def test_first_stage_routes_to_coordinator_intake(self):
+    def test_first_stage_prefers_deterministic_direct_dispatch(self):
         direct_mock = self._run_item("start")
-        direct_mock.assert_not_called()
+        direct_mock.assert_called_once()
+        self.assertEqual(self.prompts, [])
+
+    def test_first_stage_falls_back_to_coordinator_for_incomplete_contract(self):
+        direct_mock = self._run_item("start", direct_result=False)
+        direct_mock.assert_called_once()
         self.assertEqual(len(self.prompts), 1)
         self.assertIn("HERDR_WORKFLOW_INTAKE_EVENT", self.prompts[0])
         self.assertIn("总指挥接单机制", self.prompts[0])
@@ -813,7 +836,7 @@ class CoordinatorIntakeTest(unittest.TestCase):
                 title="全局决策 MARKER",
                 node="requirements",
             )
-            self._run_item("start")
+            self._run_item("start", direct_result=False)
 
         self.assertEqual(len(self.prompts), 1)
         self.assertIn("共享文档区", self.prompts[0])

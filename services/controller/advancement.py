@@ -98,14 +98,6 @@ def check_workflow_stage_advance(ports, workflow_id):
         if not assessment['can_advance']:
             return
 
-    pane = ports.coordinator_pane_for_workflow(workflow_id)
-    if not pane:
-        from herdr.node_dispatch_store import defer
-        for op in recovery_store.list_operations(ports._get_store().db_path, workflow_id):
-            if op['payload'].get('kind') == 'node_dispatch':
-                defer(ports._get_store().db_path, op['id'], 'coordinator_missing')
-        return
-
     workflow_cfg = ports.workflow_config_for(workflow_id)
     if not workflow_cfg:
         return
@@ -448,7 +440,7 @@ DEPENDENCIES = {'enqueue_stage_advance': ('check_workflow_stage_advance',),
                                   'attention_blocks_retry', 'attention_get', 'attention_note',
                                   'blocked_gate_dependency', 'blocked_verdict_dep',
                                   'clear_stage_advance', 'coordinator_intake_enabled',
-                                  'coordinator_pane_for_workflow', 'coordinator_queue',
+                                  'coordinator_queue',
                                   'gate_verdict', 'get_ready_nodes', 'handle_fix_loop',
                                   'is_node_complete', 'is_workflow_completed', 'liveness',
                                   'load_tasks', 'mark_stage_advance_queued',
