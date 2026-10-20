@@ -17,11 +17,16 @@ from console import herdr_factory_console as console
 from herdr import state_db
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE_SHA256 = 'd993b30b154a72eb1a6a0839553469bd119852f8cb2a3644c0550773d670a994'  # console.html api() now sends X-HAFlow-Console-Request (CSRF guard)
 
 
-def test_page_template_is_byte_identical_to_pre_split_baseline():
-    assert hashlib.sha256(console.HTML_TEMPLATE.encode()).hexdigest() == TEMPLATE_SHA256
+def test_composed_page_preserves_pre_split_dom_css_and_branding():
+    # DOM and styles retain their pre-migration hashes; function objects have a separate baseline.
+    import re
+    baseline = json.loads((ROOT / 'tests/fixtures/console-ui-baseline.json').read_text())['metadata']
+    styles = re.findall(r'<style>(.*?)</style>', console.HTML_TEMPLATE, re.S)
+    assert [hashlib.sha256(s.encode()).hexdigest() for s in styles] == baseline['styles']
+    skeleton = re.sub(r'(<style>|<script>).*?(</style>|</script>)', r'\1\2', console.HTML_TEMPLATE, flags=re.S)
+    assert hashlib.sha256(skeleton.encode()).hexdigest() == baseline['dom_sha256']
     assert console.HTML == console.HTML_TEMPLATE.replace(
         '__PRODUCT_NAME__', console.PRODUCT_NAME,
     ).replace('__PRODUCT_TAGLINE__', console.PRODUCT_TAGLINE)
@@ -116,3 +121,14 @@ def test_direct_entrypoint_serves_same_page_from_another_cwd(tmp_path):
         stdout, stderr = process.communicate(timeout=5)
     assert 'HERDR_RUNTIME_FINGERPRINT=' in stdout
     assert not stderr
+
+
+def test_direct_static_console_url_keeps_the_executable_template(server):
+    # /static/console.html was already served before the split; do not return
+    # unresolved source directives to old bookmarks or callers.
+    with urllib.request.urlopen(server[0] + '/static/console.html', timeout=5) as response:
+        raw = response.read()
+        assert response.headers['Content-Type'] == 'text/html; charset=utf-8'
+        assert int(response.headers['Content-Length']) == len(raw)
+        assert raw == console.HTML_TEMPLATE.encode()
+        assert b'console:include' not in raw

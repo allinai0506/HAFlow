@@ -114,6 +114,7 @@ function loadWorkflow(id) {{
   if (!state.openWorkflowTabIds.includes(id)) state.openWorkflowTabIds.push(id);
   renderWorkflowTabs();
 }}
+function stopLogAutoRefresh() {{}}
 function clearWorkflow() {{
   state.workflowId = null;
   renderWorkflowTabs();

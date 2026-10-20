@@ -81,7 +81,8 @@ globalThis.CSS = { escape: function(v){ return String(v); } };
 
 
 def _script() -> str:
-    src = CONSOLE_SRC.read_text(encoding="utf-8")
+    from console.page import HTML_TEMPLATE
+    src = HTML_TEMPLATE
     match = re.search(r"<script>(.*?)</script>", src, re.DOTALL)
     assert match, "<script> block not found in console HTML_TEMPLATE"
     return match.group(1)

@@ -1,0 +1,130 @@
+
+.exp-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  margin: 16px 0 8px 0;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #e2e8f0;
+}
+.exp-section-header:first-child {
+  margin-top: 0;
+}
+.exp-section-lesson {
+  color: #b45309;
+  border-bottom-color: #fde68a;
+}
+.exp-section-rule {
+  color: #047857;
+  border-bottom-color: #a7f3d0;
+}
+.exp-section-icon {
+  font-size: 16px;
+}
+.exp-table-wrapper {
+  overflow-x: auto;
+  margin: 12px 0 16px 0;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
+}
+.exp-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 12px;
+  table-layout: auto;
+}
+.exp-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 700;
+  padding: 8px 16px;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+.exp-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: top;
+  line-height: 1.6;
+}
+.exp-table tr:last-child td {
+  border-bottom: none;
+}
+.exp-table tr:hover td {
+  background: #fafbfc;
+}
+.exp-col-issue {
+  color: #991b1b;
+  font-weight: 600;
+  background: #fff5f5;
+  width: 22%;
+  min-width: 140px;
+  border-right: 1px solid #fee2e2;
+}
+.exp-col-lesson {
+  color: #334155;
+  width: 42%;
+}
+.exp-col-solution {
+  color: #14532d;
+  background: #f0fdf4;
+  width: 36%;
+  border-left: 1px solid #dcfce7;
+}
+.exp-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: #f1f5f9;
+  color: #0f172a;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  border: 1px solid #e2e8f0;
+}
+.exp-list {
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.exp-list-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: #f8fafc;
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: 1px solid #f1f5f9;
+}
+.exp-list-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 12px;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 0;
+}
+.exp-list-body {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.exp-card-footer {
+  padding: 8px 20px;
+  background: #f8fafc;
+  border-top: 1px solid #f1f5f9;
+  font-size: 12px;
+  color: #64748b;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
