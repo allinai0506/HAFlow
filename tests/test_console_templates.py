@@ -1,4 +1,5 @@
 """Acceptance tests for the console workflow template library and page-based authoring."""
+from tests.test_console_execution_trace import _extract
 
 import importlib.machinery
 import importlib.util
@@ -446,8 +447,7 @@ async function api(){return {template:{id:'alpha',label:'Alpha'},nodes:[{id:'n1'
         block = (source[source.index('function projectTemplateId('):
                         source.index('function ensureTplCardShape(')]
                  + '\n'
-                 + source[source.index('async function saveTemplate('):
-                          source.index('async function populateTemplateSelect(')])
+                 + _extract(source, 'saveTemplate'))
         self.run_js(block, r'''
 const state={spaceId:'wA',templateSelections:{},templates:[{id:'my-tpl',label:'My',node_count:2}],currentTemplateDetail:null,project:null};
 const nodes={};
@@ -486,8 +486,7 @@ async function api(url,opts){
     def test_stale_template_select_population_does_not_override_new_modal(self):
         """弹窗重开时,旧弹窗迟到的模板填充不得覆盖新弹窗的选择(Codex P2)。"""
         source = self.html
-        block = source[source.index('async function populateTemplateSelect('):
-                       source.index('let opsTimer=')]
+        block = _extract(source, 'populateTemplateSelect')
         self.run_js(block, r'''
 const state={spaceId:'w1'};
 const nodes={};
@@ -544,8 +543,7 @@ function toast(){}
 
     def test_populate_template_select_prefers_requested_template(self):
         source = self.html
-        block = source[source.index('async function populateTemplateSelect('):
-                       source.index('let opsTimer=')]
+        block = _extract(source, 'populateTemplateSelect')
         self.run_js(block, r'''
 const state={spaceId:'w1'};
 const elements={newTemplate:{value:'',innerHTML:''}};

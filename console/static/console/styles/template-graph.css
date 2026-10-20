@@ -1,0 +1,111 @@
+
+/* Keep graph geometry aligned with the HTML card dimensions. */
+.tpl-node-card {
+  width: 280px; height: 188px; box-sizing: border-box;
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  border-radius: var(--radius-md); padding: 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  box-shadow: var(--shadow-sm); cursor: pointer; font-family: var(--font-sans);
+}
+.tpl-node-card:hover, .tpl-node-card.selected { border-color: var(--primary); }
+.tpl-node-card.selected { box-shadow: 0 0 0 2px var(--primary); }
+.tpl-node-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tpl-node-kind { flex-shrink: 0; white-space: nowrap; font-size: 11px; color: var(--primary); background: var(--primary-subtle); padding: 2px 8px; border-radius: 4px; }
+.tpl-node-agents { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-secondary); }
+.tpl-node-title { font-size: 14px; font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-node-purpose { font-size: 12px; color: var(--text-secondary); line-height: 20px; min-height: 60px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.tpl-node-footer { margin-top: auto; display: flex; justify-content: space-between; gap: 8px; border-top: 1px solid var(--border-subtle); padding-top: 8px; font-size: 11px; line-height: 16px; color: var(--text-tertiary); }
+.tpl-node-footer strong { color: var(--primary); font-weight: 500; }
+.tpl-node-drawer {
+  width: min(800px, calc(100vw - 48px)); max-height: calc(100dvh - 64px);
+  padding: 0; margin: auto; color: var(--text-primary); background: var(--bg-surface);
+  border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.tpl-node-drawer::backdrop { background: rgba(18, 19, 22, .4); }
+.tpl-node-drawer[open] { display: flex; flex-direction: column; }
+.tpl-node-drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px; border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; }
+.tpl-node-drawer-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; font-size: 16px; font-weight: 600; }
+#tplDrawerTitle { overflow-wrap: anywhere; }
+.tpl-node-details { overflow: auto; min-height: 0; padding: 24px 24px 32px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; overscroll-behavior: contain; }
+.tpl-node-field { min-width: 0; }
+.tpl-node-field.wide { grid-column: 1 / -1; }
+.tpl-node-field label { display: block; margin-bottom: 8px; font-size: 12px; color: var(--text-secondary); }
+.tpl-node-field > div { font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 600px) {
+  .tpl-node-drawer { width: calc(100vw - 32px); max-height: calc(100dvh - 32px); }
+  .tpl-node-drawer-head { padding: 16px; }
+  .tpl-node-details { grid-template-columns: minmax(0, 1fr); padding: 20px 16px 32px; }
+}
+.tpl-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(18, 19, 22, 0.4);
+  backdrop-filter: blur(2px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.tpl-modal-card {
+  width: 920px;
+  max-width: 95vw;
+  height: 84vh;
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tpl-modal-header {
+  height: 52px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  background: var(--bg-sidebar);
+}
+.tpl-modal-tabs {
+  display: flex;
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+}
+.tpl-modal-tab-btn {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.tpl-modal-tab-btn.active {
+  background: var(--bg-surface);
+  color: var(--primary);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+.tpl-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+}
+.tpl-modal-footer {
+  height: 54px;
+  padding: 0 20px;
+  border-top: 1px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  background: var(--bg-sidebar);
+  flex-shrink: 0;
+}

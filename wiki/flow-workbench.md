@@ -229,3 +229,21 @@ Evidence:
 - `tests/test_console_delivery_pipeline.py` — 服务端真实 SQLite + 事件账本读链、`workflow_detail` / `api_workflow_controller_actions`、Node 渲染断言
 - `tests/test_controller_progress_actions.py` — 调度器接管不产出人工 integrate，其余链路动作保留
 - PR: https://github.com/allinai0506/HAFlow/pull/264
+
+## Console 页面组合与能力边界
+
+**FACT**：`console/static/console.html` 是页面组合入口；`console/page.py#compose_template` 在服务进程加载时展开仓库内 `console:include`，再做品牌替换。浏览器仍收到完整 DOM、原顺序的两段 CSS、一个主内联脚本和一个增强脚本，安装脚本继续递归同步 `static/`。没有增加异步模块下载或构建依赖。原有 `/static/console.html` 路径也返回已组合模板。
+
+**FACT**：样式按组件及原覆盖层存放于 `console/static/console/styles/`；脚本按能力存放于 `console/static/console/scripts/`。每个能力闭包用参数声明依赖，用返回列表暴露跨区/HTML 事件入口。请求去重 Map、运维/仪表盘/日志定时器、自检结果与归档查询是能力私有数据。页面共享 `state` 保留现有选中项和后端投影语义，SQLite 仍是工作流事实来源。
+
+**FACT**：`workspace.js` 负责页面导航/项目水合，`workflow-reader.js` 负责选中工作流读取，`task-board.js` 负责列表/关注/交互，`task-detail.js` 负责抽屉和轨迹，`flow-canvas.js` 负责画布/Inspector，`controller-cockpit.js` 负责控制/决策/恢复。模板、运维、仪表盘、成果、经验中心、日志、归档各有完整能力入口。完整职责与迁移顺序见 `docs/plans/2026-10-20-console-ui-modules.md`。
+
+**FACT**：页签关闭通过 `logs.js#stopLogAutoRefresh` 停止日志轮询；后置增强通过 `sidebar-tabs.js#setWorkflowTabsRenderer` 接回原页签渲染装饰。修改这两个边界时应运行完整装配的生命周期测试，不能只单独提取渲染函数。
+
+Evidence:
+- `console/page.py#compose_template`
+- `console/static/console.html`
+- `console/static/console/scripts/sidebar-tabs.js#setWorkflowTabsRenderer`
+- `console/static/console/scripts/logs.js#stopLogAutoRefresh`
+- `tests/test_console_ui_modules.py`
+- `tests/test_console_module_boundaries.py#test_composed_page_preserves_pre_split_dom_css_and_branding`

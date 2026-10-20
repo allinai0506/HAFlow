@@ -3142,3 +3142,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 更正：前一条 Console 请求边界记录中“所有 POST 必须带 `X-HAFlow-Console-Request: 1`”不再准确。POST 带本地 Console 的同源 Origin 时可通过来源校验；无 Origin 的 POST 仍需该请求头，外部 Origin 仍被拒绝。该请求头是浏览器预检机制，不是身份认证凭据。
 - 原因：页面启动请求未带自定义头，导致本地同源操作被误拒为 `console_request_header_required`；PR #281 修复请求守卫并添加真实 HTTP/SQLite endpoint 回归。
 - Evidence：`console/common.py#console_request_rejection`、`tests/test_console_request_guard.py#test_local_console_post_with_origin_without_header_is_applied`、`tests/test_console_request_guard.py#test_dns_rebinding_host_is_rejected_even_for_reads`。
+
+### 2026-10-20：Console 静态页面按能力封装
+
+- FACT：入口组合职责与私有状态边界更新至 [[flow-workbench]]。CSS 级联及 DOM 不变；脚本按能力闭包收敛依赖/输出，保留同一内联执行模型。
+- FACT：补充 326 个原函数对象基线、CSS/DOM 哈希、私有生命周期数据隔离及页签装饰/日志停止专项。
+- Evidence：`console/page.py#compose_template`、`console/static/console/scripts/`、`tests/test_console_ui_modules.py`、`docs/plans/2026-10-20-console-ui-modules.md`。
+- UNKNOWN：本地工作树未部署，不能据此推断当前生产 Console 已切换。

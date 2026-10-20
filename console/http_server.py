@@ -6,7 +6,7 @@ from herdr import projects as herdr_projects
 from herdr.kernel import state_db_path
 from herdr import deliverables as herdr_deliverables
 from console import common, control_api, inventory, read_api, runtime, task_api, workflow_api
-from console.page import HTML
+from console.page import HTML, HTML_TEMPLATE
 
 def _get_console_hub_client(token=None):
     from herdr.experience.client import ExperienceClient
@@ -106,7 +106,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(404,error='Not Found')
         suffix=target.suffix.lower()
         ctype='text/html; charset=utf-8' if suffix in ('.html', '.htm') else 'application/javascript; charset=utf-8' if suffix=='.js' else 'text/css; charset=utf-8' if suffix=='.css' else 'application/octet-stream'
-        raw=target.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-cache' if target.name.startswith('simple.') or target.name=='console-tokens.css' else 'public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
+        raw=HTML_TEMPLATE.encode() if target == Path(__file__).resolve().parent/'static'/'console.html' else target.read_bytes()
+        self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(raw))); self.send_header('Cache-Control','no-cache' if target.name.startswith('simple.') or target.name=='console-tokens.css' else 'public, max-age=3600'); self.end_headers(); self.wfile.write(raw)
     def reject_untrusted(self,method):
         reason=common.console_request_rejection(method,self.headers,self.server.server_port)
         if reason:

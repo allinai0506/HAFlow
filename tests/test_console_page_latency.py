@@ -1,4 +1,6 @@
 """Behavior regressions for bounded Console reads and refresh orchestration."""
+from tests.test_console_execution_trace import _extract
+from tests.support.console_source import module_body
 import subprocess
 from pathlib import Path
 
@@ -12,11 +14,11 @@ def run_js(block, script):
 
 
 def test_same_get_is_shared_but_writes_and_new_auth_are_not():
-    source = c.HTML
+    source = module_body('transport')
     start = source.find('const apiReads=')
     if start < 0:
         start = source.index('async function api(')
-    block = source[start:source.index('function friendlyErrorChinese', start)]
+    block = source[start:]
     run_js(block, r'''
 const pending=[];let token='';
 const sessionStorage={getItem:()=>token};const document={getElementById:()=>null};
@@ -36,10 +38,10 @@ function release(){for(const p of pending.splice(0))p.resolve({ok:true,json:asyn
 
 
 def test_page_reads_keep_only_latest_waiting_scope_and_recover_from_failure():
-    source = c.HTML
+    source = module_body('transport')
     start = source.find('const pageReads=')
     assert start >= 0, 'page refresh requests need a shared bounded scheduler'
-    block = source[start:source.index('function friendlyErrorChinese', start)]
+    block = source[start:]
     # This block follows api(), so only pageRead is under test here.
     run_js(block, r'''
 const pending=[];function api(path){return new Promise((resolve,reject)=>pending.push({path,resolve,reject}));}
@@ -88,7 +90,7 @@ def test_lightweight_project_does_not_probe_runtime_or_global_inventory(tmp_path
 
 def test_project_metadata_paints_without_waiting_for_runtime():
     source=c.HTML
-    block=source[source.index('async function loadProject('):source.index('function workflowSubject(')]
+    block=_extract(source, 'loadProject')+'\n'+_extract(source, 'loadProjectRuntime')
     run_js(block,r'''
 const state={shellView:'workbench',workflowId:'wf',openWorkflowTabIds:[]};
 const document={getElementById:()=>({style:{}})};
@@ -206,7 +208,7 @@ def test_project_detail_reads_only_its_own_workflows(tmp_path,monkeypatch):
 
 def test_runtime_result_is_discarded_when_project_object_is_removed():
     source=c.HTML
-    block=source[source.index('async function loadProjectRuntime('):source.index('function workflowSubject(')]
+    block=_extract(source, 'loadProjectRuntime')
     run_js(block,r'''
 const state={projectId:'p',projectLoadSequence:1,project:{project:{project_id:'p'}},shellView:'slots'};
 let release;const pageRead=()=>new Promise(r=>release=r);const renderSlots=()=>{},paintShellPage=()=>{};
