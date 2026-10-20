@@ -16,7 +16,7 @@ fields:
 authority:
   read: file
   write: herdr.agent_router.choose_agent / release_agent_reservation
-notes: 文档中出现的 router-reservations.json 为过期命名（冲突 SC-009）
+notes: 文档中历史出现的 router-reservations.json 已统一校准为 agent-reservations.json（SC-009 已解决）
 evidence:
 - kind: implemented
   source: herdr/agent_router.py

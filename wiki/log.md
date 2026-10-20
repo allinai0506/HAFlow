@@ -3188,6 +3188,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-001、SC-002、SC-014 状态更新为“已解决”。
 - Evidence：`herdr/transitions.py`、`services/herdr-controller.py#FIX_LOOP_SUPERSEDEABLE`、`bin/herdr-task#TRANSITIONS`、`tests/test_d5_fix_loop_supersedeable.py`、`ontology/tests/audit_ontology.py`。
 
+## [2026-10-20] Docs | 存储权威与预占文件名统一收敛 (SC-004/SC-009)
+
+- Updated `docs/architecture/architecture-overview.md`：校准存储架构分层 Mermaid 图与核心职责，确立 SQLite `state.db` 为唯一权威事实源，`tasks.json` / `projects.json` / `workflows.json` 降级为向后兼容与只读导出投影（SC-004）。
+- Updated `docs/product-specs/agent-policy-spec.md` & `docs/operations/troubleshooting-faq.md`：校准预占锁文件名为 `agent-reservations.json`，并更正默认过期时间说明为 300 秒（5 分钟）（SC-009）。
+- Updated `ontology/mappings/agent_reservation_file_mapping.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-004 与 SC-009 标记为“已解决”。
+- Evidence：`herdr/state_store.py`、`herdr/agent_router.py#RESERVATIONS_FILE`、`docs/architecture/architecture-overview.md`、`docs/product-specs/agent-policy-spec.md`、`docs/operations/troubleshooting-faq.md`、`ontology/tests/audit_ontology.py`。
+
 ### 2026-10-20：执行轨迹的窗口外回执与候选冻结归属
 
 - FACT：超过 2000 条存储事件窗口时，轨迹按同一 Task / Run 范围补读 `verification_completed`、`task_artifact_checkpoint`、`candidate_published` 和 `tool_execution`，按事件类型分别限流、每类最多 2000 条，按事件 ID 去重后按时间排序；不改成无界查询。

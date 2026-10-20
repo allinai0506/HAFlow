@@ -1367,9 +1367,9 @@ def test_wrapup_verifier_router_refuses_degradation_before_launch(
     monkeypatch.setattr(router, "_load_canary_module", lambda: None)
     monkeypatch.setattr(router, "_record_shadow_best_effort", lambda *args: None)
     monkeypatch.setattr(
-        router, "RESERVATIONS_FILE", scene.root / "router-reservations.json"
+        router, "RESERVATIONS_FILE", scene.root / "agent-reservations.json"
     )
-    monkeypatch.setattr(router, "ROUTER_LOCK_FILE", scene.root / "router.lock")
+    monkeypatch.setattr(router, "ROUTER_LOCK_FILE", scene.root / "agent-router.lock")
     monkeypatch.setenv("HERDR_ROUTER_SOFT_DEGRADE", "1")
     for node in ("test", "review"):
         if independent_available and requested == "auto":
