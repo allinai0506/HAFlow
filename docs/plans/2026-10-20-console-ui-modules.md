@@ -2,7 +2,7 @@
 
 目标：入口和迁出源码均不超过 500 行，降低全局状态及函数暴露，保持现有工作流行为。
 基线：207e60802c170d2d41c06d51d11676c5df6b6543；403 passed、2 skipped、82 subtests passed。
-授权：本地工作树；不提交、推送、合并、部署或操作真实 Agent。
+授权：初次为本地工作树；用户后续授权提交、推送和创建 PR，仍不合并、部署或操作真实 Agent。
 
 ## 依赖分析
 
@@ -79,18 +79,18 @@ CSS 位于 `console/styles/`：基础、侧栏、控件、进度、选择器、�
 
 Console 专项包含真实 HTTP → Kernel / StateStore → 临时 SQLite → HTTP 读取。浏览器用 `tests/support/console_ui_fixture.py`，仅替换物理终端清单和健康探针，不启动 Agent、不调用模型、不访问生产数据库。
 
-这是本地工作树交付。全量 CI、真实 Agent 派发执行和生产部署不在本次验收范围。Google 标准自审单独记录，不能当作独立评审；当前没有 health / codehealth / interrogate 工具，结构检查用明确的基线差分和作用域分析补证。
+初次交付范围为本地工作树，用户后续已授权创建 PR。全量 CI、真实 Agent 派发执行和生产部署不在本次验收范围。Google 标准自审单独记录；PR 前新增两项只读独立评审，不能将原自审当作独立评审；当前没有 health / codehealth / interrogate 工具，结构检查用明确的基线差分和作用域分析补证。
 
 静态直访兼容：`Handler.send_static` 对原有 `/static/console.html` 返回同一已组合 `HTML_TEMPLATE`，保留旧路径可执行性；其他静态文件保持原读取方式。
 
 ## 本地交付证据
 
 - 入口 421 行，23 个职责脚本与 19 个样式资源；所有迁出源文件不超过 500 行，最大 495 行。输入/输出声明展开后仍满足上限，没有压缩原逻辑来隐藏行数。
-- 最终 Console 专项：409 passed、2 skipped、82 subtests passed。两个跳过项为临时 HOME 中未安装的 LaunchAgent 检查。
+- 最终 Console 及四项调用方专项：462 passed、3 skipped、82 subtests passed（19.47s）。跳过项为临时 HOME 中未安装的 LaunchAgent 与可选外部依赖检查。
 - 语法/编译、F821/F822/F823、diff 检查通过；全局绑定从 350 降至 235，没有新增未解析名字或绕过参数的同级引用。
 - 最终浏览器真实点击验证暂停/恢复、持久改名、跨工作流切换、DAG/滑动指示器及日志轮询停止；HTTP 与独立只读 SQLite 查询一致，旁侧工作流保持 running。交互期间未捕获页面异常。
 - 原 DOM/CSS 哈希和 326 个函数对象基线通过。后端调度和业务 API 实现没有修改；HTTP 唯一兼容改动为旧静态页面路径组合。
-- 生产源码聚合 SHA256：`ba08e667ff904dd8253fd46a0178e30d1f74ea2e7b88981eca54ae22980b2560`。
-- 本地自审未发现范围内阻塞缺陷；独立评审、全量 CI、真实 Agent 执行与生产部署尚未进行。初次本地交付未提交、推送或创建 PR；用户随后已授权创建 PR。
+- 生产源码聚合 SHA256：`d2794f5682ec2333c526a4cfa52aa1b602410358151bfc11b1aa3bc562569ea0`。
+- 本地自审及 PR 前两项独立审查均未发现剩余阻塞缺陷（独立审查绑定 634db36，Standards 49 passed、Spec 65 passed）。全量 CI、真实 Agent 执行与生产部署尚未进行。
 
 PR 前独立评审发现导航/工作流读取模块重复装配；已删除重复 include，新增全部资源恰好装配一次的验收，并让函数对象基线记录器遇到重复定义即失败。
