@@ -126,9 +126,7 @@ def ensure_obligations(conn, workflow, config, tasks, now=None):
         facts = json.loads(row['payload_json'])
         if facts.get('kind') == 'business_gate_wait':
             # Completion metadata survives canonical reopen; current status is authoritative.
-            terminal = workflow.get('status') in {
-                'paused', 'completed', 'failed', 'halted', 'abandoned', 'closed'
-            }
+            terminal = workflow.get('status') != 'running'
             stale = (facts.get('generation') != _generation(workflow)
                      or any(facts.get(key) != workflow.get(key) for key in
                          ('execution_id', 'candidate_sha', 'candidate_episode_id'))

@@ -112,3 +112,5 @@ PR 最终复审绑定 `5e6bef4`，Codex 明确返回无 findings、无未决 P1/
 当前 HEAD 的完整 Codex 复审再补出三个边界。Python 仓库自动选择 Ruff 时显式请求 JSON，确保 evaluator 的结构化解析合同与默认命令一致；编号文档前缀若因 append-only 约束移到后续已匹配条目前，重试会识别该位置而不再追加分隔字节；reconciliation 将 paused 与其他非活动状态一并视为业务门禁等待失效。三项回归均先失败后通过，扩展后的 16 模块专项为 298 passed、10 subtests。
 
 该提交的完整复审继续发现非空白前缀在全部条目已存在时被移到最后条目之后，重试会把前缀误算进条目身份。匹配器现只在 main 条目确实以候选前缀结尾、移除该前缀后身份逐字相同时识别这一 append-only 位移，并同步标记前缀已应用。新增 `NOTE + B + C` 连续重放回归，16 模块专项为 299 passed、10 subtests。
+
+下一轮复审补出 main-only 条目之后的 EOF 分隔符位移及 closing 生命周期。重放在保留 EOF 完整行终止符后消费已经位移到末尾的额外换行单元，避免每次重试继续加空行；gate wait reconciliation 与 `record_wait` 使用同一判断，workflow 只要不再是 running 就 supersede 活动等待。新增两项回归，16 模块专项为 301 passed、10 subtests。

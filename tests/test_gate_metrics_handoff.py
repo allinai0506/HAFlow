@@ -285,7 +285,7 @@ def test_nonzero_exit_without_diagnostics_remains_unavailable(output):
     assert metrics.details['lint_status'] == 'unavailable'
 
 
-@pytest.mark.parametrize('change', ['completed', 'paused', 'execution', 'removed-node'])
+@pytest.mark.parametrize('change', ['completed', 'paused', 'closing', 'execution', 'removed-node'])
 def test_obsolete_gate_wait_is_superseded_during_reconcile(store, change):
     from herdr import gate_wait, recovery_store
     store.save_workflow({**store.get_workflow('wf'), 'config': {'nodes': [
@@ -293,7 +293,7 @@ def test_obsolete_gate_wait_is_superseded_during_reconcile(store, change):
     for now in (10, 40, 70):
         op = gate_wait.record_wait(store.db_path, 'wf', 'wrapup', ['t'], now=now)
     workflow = store.get_workflow('wf')
-    if change in {'completed', 'paused'}:
+    if change in {'completed', 'paused', 'closing'}:
         workflow['status'] = change
     elif change == 'execution':
         workflow['execution_id'] = 'new-execution'

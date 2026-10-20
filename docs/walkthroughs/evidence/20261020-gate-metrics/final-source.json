@@ -1,6 +1,6 @@
 {
   "base": "df4b3cf",
-  "source_sha256": "573e29ce59ccd82569d8d86cc37fc8f0694c4409b5568543a6295ee5303fc17b",
+  "source_sha256": "ed4b467ad994f523d0cbb4d375de32ab1f6a49a9460571927cb6b3caebfe0429",
   "files": {
     "bin/herdr-loop": "aeea6686c8945d3dde7c003c5b2e4c1febf96a87fe77491d7c2fce00303d8ff0",
     "console/http_server.py": "0c5be5191bc4db3413ed4d1a607572e586b1344eecbf00d8a56b9978d9dc2198",
@@ -9,8 +9,8 @@
     "herdr/gate_wait.py": "9a5d70abce5c1874bca38fb3cb2fecda7fd91b0a03d4ea298be44f38db0878d2",
     "herdr/kernel.py": "b5136ece0b012cc35dfa9d7f0e8cc64bb8a321134181604549bc6c25e81abee2",
     "herdr/reconciliation.py": "b0c16188418935fc15608a1f12637834879b74ae9e50659e7bf395f3b61110c8",
-    "herdr/recovery_store.py": "d4322a815407774dd00ae8e8f039ccec817734bc798a98b7ee60b9a511c8d9a5",
-    "herdr/replay_append_only.py": "14b437793a18b07070515304247fe72fb2b6f9cf8b87b2ceeb009405ede3dfa9",
+    "herdr/recovery_store.py": "1f5aff157a9c156766c546d2152ab2d6f0c9a74d0b1b91ff2858a8c6b122e31d",
+    "herdr/replay_append_only.py": "fd4c81e4e1c9177c3dbb257d2b2be5219d02fc5ea65a50e3a710ac017c2580a8",
     "herdr/state_db.py": "fb06b37b9715b76cf2a32a71fec8618e5e2c5957c1b068369bdbf12fdc4d103a",
     "herdr/task_checkpoint.py": "ae6f1e0fdd4ee831bfec7c54198f10555ee8326aa4c894877aa640d71b4e4235",
     "herdr/task_cli_launch.py": "fefa120c3f53958d0e21c87cb064968d994798691baae2dee8521dfe38e69cda",
@@ -22,13 +22,13 @@
     "tests/test_dispatch_baseline_failfast.py": "3895332ce0cbfe16cb8a126b2b20b7fc1c1c3bef10332b97019d383d30e901a5",
     "tests/test_evaluator_process_isolation.py": "35f56f8f36bff932308a95811c8f3d72188a011505564236bd01054c06773ff2",
     "tests/test_evaluator_runner_contract.py": "e80cd162920bd4cfca55129db08f4b618cd85b8a8b5e3c01dac5b64f9556e7ed",
-    "tests/test_gate_metrics_handoff.py": "524d03f70ebed2c60e7d7b2c84effbecc751ccb18460aa2200bd1e696d3c8143",
+    "tests/test_gate_metrics_handoff.py": "21640559f0f36d237d09713b78ee6fd7f4e798d399630b6fb815aa920f7f01fc",
     "tests/test_impl_fix1_regression.py": "16d2ef7cb9473814e67095ed4e751dd0d3f0a499881bdbcf918b59c76caf56bb",
     "tests/test_impl_fix4_blocker_regression.py": "2afd8c79c17c28a6350191b9c3abaa1caaf910a6590d076175bda685be3b48ad",
     "tests/test_impl_fix4_regression.py": "790d5a91a388d02525005946fcb4ea59e6235c1f84155ed9f011139e8e8997ee",
     "tests/test_impl_fix6_regression.py": "b0f3909e56bbe78d19612a0d1c87d19077b4dffcf040c81bb59164e7eb1d23ca",
     "tests/test_loop_init_baseline_atomicity.py": "be2e7f9951cd418b1ac6e1d533e2dbe99912120af1447da369fa28d90691dc92",
-    "tests/test_replay_append_only.py": "9a24d6b232ce02697b6c7a03bce3b3e4b0a2004aad65ce31bf4b83af1937a8f7",
+    "tests/test_replay_append_only.py": "df9670623b8d928770985121e15e40f14d5d3faf90c8660284e8b37bab7aaabb",
     "tests/test_t3_probes.py": "dca3942a73d5f4cc816445317631731923a0eb956bd80997a24c7ee991710ed2"
   }
 }

@@ -76,6 +76,20 @@ def _unmatched_entry_tail(candidate_block, main_block):
     return candidate_tail if candidate_tail != main_tail else b''
 
 
+def _unmatched_displaced_tail(pending, main):
+    """Consume separators previously appended at EOF after a main-only entry."""
+    if not pending:
+        return pending
+    main_tail = main[len(main.rstrip(b'\r\n')):]
+    available = re.findall(rb'\r\n|\n|\r', main_tail)[1:]
+    wanted = re.findall(rb'\r\n|\n|\r', pending)
+    if available and wanted[-len(available):] == available:
+        return b''.join(wanted[:-len(available)])
+    if wanted and available[-len(wanted):] == wanted:
+        return b''
+    return pending
+
+
 def _applied_prefix(main, candidate, candidate_entries, prefix=b''):
     """Find the longest applied candidate prefix and its unmatched separators."""
     main_entries = _numbered_entries(main)
@@ -165,6 +179,9 @@ def merge_append_only(base, main, incoming, *, numbered=False):
             prefix_applied = False
         prefix_pending = b'' if prefix_applied else prefix
         if applied == len(candidate_entries) and candidate_entries:
+            unmatched_separators = _unmatched_displaced_tail(
+                unmatched_separators, main_suffix
+            )
             return main + prefix_pending + unmatched_separators, {}
         if applied or prefix_pending != prefix:
             suffix = (prefix_pending + unmatched_separators
