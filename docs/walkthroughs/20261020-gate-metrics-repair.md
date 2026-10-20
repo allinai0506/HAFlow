@@ -87,4 +87,6 @@ python3 scripts/replay-append-only.py --repo <repo> --base <共同基线SHA> \
 
 Codex P1 指出升级数据库仍可能保留不含 `generation` 的旧版 `workflow_close_operations`。原 reconcile 只检查表存在便按新列查询，会以 `no such column: generation` 中断 Controller/CLI。修复后的只读路径先读取列集合：新表按当前 generation 精确匹配，旧表按 workflow/status 读取历史 completed receipt 并继续报告状态不一致，不在 reconcile 中执行迁移。
 
-GitHub 全量 CI 同时暴露 9 个旧测试夹具与新合同不一致：close 测试 mock 掉了完成状态持久化，却仍要求发布 completed receipt；evaluator 测试直接写未绑定 baseline，却仍要求抵扣 lint 债。测试现保留原关注点，同时执行真实状态副作用或通过真实 lint capture 绑定命令/evaluator 合同。没有放宽生产门禁。审查修复专项覆盖 16 个相关模块，229 passed、10 subtests；CI 报出的 10 个失败与新增 legacy schema 回归合计 13 项单独通过。最终源码指纹已更新，等待新提交对应的 GitHub 全量 CI 与 Codex 复审。
+GitHub 全量 CI 同时暴露 9 个旧测试夹具与新合同不一致：close 测试 mock 掉了完成状态持久化，却仍要求发布 completed receipt；evaluator 测试直接写未绑定 baseline，却仍要求抵扣 lint 债。测试现保留原关注点，同时执行真实状态副作用或通过真实 lint capture 绑定命令/evaluator 合同。没有放宽生产门禁。首轮审查修复专项覆盖 16 个相关模块，229 passed、10 subtests；CI 报出的 10 个失败与新增 legacy schema 回归合计 13 项单独通过。
+
+新 head 的 Codex 复审另报 P2：主线后缀为 `A + B (+ C)`、候选后缀为已存在的完整 `B` 时，原去重只检查主线后缀开头，会重复追加并重编号。现在仅在完整行边界匹配候选追加块，可识别其位于主线后缀开头、中部或末尾；正文中的非边界片段不作为已应用。新增编号文档中部幂等回归，更新后的 16 模块专项为 230 passed、10 subtests。最终源码指纹已再次更新，等待新提交对应的 GitHub 全量 CI 与 Codex 复审。

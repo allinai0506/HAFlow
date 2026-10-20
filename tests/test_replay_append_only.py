@@ -130,3 +130,15 @@ def test_identical_append_already_on_main_is_not_duplicated(numbered):
                                         base + appended, numbered=numbered)
     assert result.count(b'shared') == 1
     assert mapping == {}
+
+
+def test_identical_numbered_append_between_other_main_appends_is_not_duplicated():
+    base = b'## 1. old\nold body\n'
+    shared = b'\n## 2. shared\nsame body\n'
+    main = base + b'\n## 2. earlier main\nfirst body\n' + shared + b'\n## 4. later main\nlast body\n'
+
+    result, mapping = merge_append_only(base, main, base + shared, numbered=True)
+
+    assert result == main
+    assert result.count(b'## 2. shared\n') == 1
+    assert mapping == {}

@@ -10,6 +10,22 @@ DOCUMENTS = ('wiki/log.md', 'docs/lessons/lessons-learned.md', 'wiki/task-lifecy
 _HEADING = re.compile(rb'^## (\d+)\.', re.MULTILINE)
 
 
+def _contains_append_block(history, block):
+    """Match an exact block only at complete-line append boundaries."""
+    offset = 0
+    while block:
+        position = history.find(block, offset)
+        if position < 0:
+            return False
+        end = position + len(block)
+        starts_on_boundary = position == 0 or history[position - 1:position] == b'\n'
+        ends_on_boundary = end == len(history) or history[end:end + 1] == b'\n'
+        if starts_on_boundary and ends_on_boundary:
+            return True
+        offset = position + 1
+    return True
+
+
 def merge_append_only(base, main, incoming, *, numbered=False):
     """Keep main byte-for-byte; only incoming appended headings may change."""
     if not main.startswith(base) or not incoming.startswith(base):
@@ -17,7 +33,7 @@ def merge_append_only(base, main, incoming, *, numbered=False):
     if incoming != base and any(data and not data.endswith(b'\n') for data in (base, main, incoming)):
         raise ValueError('append-only replay requires complete EOF lines')
     suffix = incoming[len(base):]
-    if main[len(base):].startswith(suffix):
+    if _contains_append_block(main[len(base):], suffix):
         return main, {}
     mapping = {}
     if numbered and suffix:
