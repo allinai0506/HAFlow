@@ -231,7 +231,17 @@ def capture_lint_baseline(loop_dir: Path, command: str, cwd: Path) -> Path:
         return _capture_lint_baseline_unlocked(loop_dir, command, cwd)
 
 
+def _lint_contract(loop_dir, command):
+    path = Path(loop_dir) / 'EVALUATOR.sh'
+    return {'lint_command_sha256': hashlib.sha256(command.encode()).hexdigest(),
+            'evaluator_sha256': hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None}
+
+
 def _capture_lint_baseline_unlocked(loop_dir: Path, command: str, cwd: Path) -> Path:
+    contract = _lint_contract(loop_dir, command)
+    initial_probe = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=cwd, text=True,
+                                   capture_output=True, check=False, timeout=10)
+    initial_sha = initial_probe.stdout.strip() if initial_probe.returncode == 0 else None
     exit_code, stdout, stderr = run_evaluation_command(
         ["/bin/sh", "-c", command], cwd, timeout=120,
     )
@@ -240,10 +250,21 @@ def _capture_lint_baseline_unlocked(loop_dir: Path, command: str, cwd: Path) -> 
     if static_check_execution_failed(exit_code):
         raise RuntimeError(f"Lint baseline command failed to execute: exit {exit_code}")
     lint_errors = parse_lint_output(stdout + stderr, exit_code)
-    return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0)
+    if not initial_sha or not re.fullmatch(r'[0-9a-fA-F]{40}', initial_sha):
+        raise ValueError('lint baseline requires an available Git HEAD commit')
+    if contract != _lint_contract(loop_dir, command):
+        raise ValueError('lint contract changed during baseline capture')
+    probe = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=cwd, text=True,
+                           capture_output=True, check=False, timeout=10)
+    fresh_sha = probe.stdout.strip() if probe.returncode == 0 else None
+    if (not fresh_sha or not re.fullmatch(r'[0-9a-fA-F]{40}', fresh_sha)
+            or initial_sha != fresh_sha):
+        raise ValueError('baseline HEAD changed during capture')
+    return _write_baseline_lint_unlocked(loop_dir, lint_errors, 0,
+                                         baseline_of_sha=initial_sha, contract=contract)
 
 
-def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors: int = 0) -> Path:
+def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors: int = 0, *, baseline_of_sha=None, contract=None) -> Path:
     """Persist pre-edit lint baseline once at loop init (best-effort)."""
     loop_dir = Path(loop_dir)
     loop_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +273,8 @@ def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors:
         "lint_errors": int(lint_errors or 0),
         "type_errors": int(type_errors or 0),
         "captured_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "baseline_of_sha": baseline_of_sha,
+        **(contract or {}),
     }
     tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -259,14 +282,60 @@ def _write_baseline_lint_unlocked(loop_dir: Path, lint_errors: int, type_errors:
     return path
 
 
-def read_baseline_lint(loop_dir: Path) -> Tuple[int, int]:
+def rebaseline_lint(loop_dir: Path, command: str, cwd: Path, *, reason: str) -> Path:
+    """Explicit intake boundary; failed capture leaves the previous baseline intact."""
+    reason = str(reason or '').strip()
+    if not reason or len(reason) > 1024:
+        raise ValueError('bounded rebaseline reason required')
+    with evaluation_lock(loop_dir):
+        path = Path(loop_dir) / BASELINE_LINT_FILENAME
+        previous = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(previous, dict):
+            raise TypeError('invalid previous baseline')
+        contract = _lint_contract(loop_dir, command)
+        if (not contract['evaluator_sha256']
+                or any(previous.get(key) != value for key, value in contract.items())):
+            raise ValueError('rebaseline lint contract mismatch or missing; reinitialize the loop explicitly')
+        sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=cwd, text=True,
+                             capture_output=True, check=True, timeout=10).stdout.strip()
+        code, stdout, stderr = run_evaluation_command(['/bin/sh', '-c', command], cwd, timeout=120)
+        if static_check_execution_failed(code):
+            raise ValueError('rebaseline command unavailable')
+        count = parse_lint_output(stdout + stderr, code)
+        fresh_sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=cwd, text=True,
+                                   capture_output=True, check=True, timeout=10).stdout.strip()
+        if sha != fresh_sha or contract != _lint_contract(loop_dir, command):
+            raise ValueError('baseline HEAD or lint contract changed during capture')
+        history = list(previous.get('history') or [])
+        if len(history) >= 100:
+            raise ValueError('baseline history budget exhausted; preserve and archive before reinitializing')
+        history.append({k: v for k, v in previous.items() if k != 'history'})
+        payload = {'lint_errors': count, 'type_errors': 0, 'baseline_of_sha': sha,
+                   'reason': reason, 'captured_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                   'history': history, **contract}
+        temp = path.with_suffix(path.suffix + f'.tmp.{os.getpid()}')
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        temp.replace(path)
+        return path
+
+
+def read_baseline_lint(loop_dir: Path, *, require_contract=False) -> Tuple[int, int]:
     """Return (baseline_lint, baseline_type); (0, 0) when absent/corrupt."""
     try:
         data = json.loads((Path(loop_dir) / BASELINE_LINT_FILENAME).read_text(encoding="utf-8"))
     except Exception:
+        if require_contract and (Path(loop_dir) / BASELINE_LINT_FILENAME).exists():
+            raise ValueError('lint baseline contract unreadable') from None
         return 0, 0
     if not isinstance(data, dict):
+        if require_contract:
+            raise ValueError('lint baseline contract invalid')
         return 0, 0
+    if require_contract:
+        script = Path(loop_dir) / 'EVALUATOR.sh'
+        if (not data.get('lint_command_sha256') or not script.is_file()
+                or data.get('evaluator_sha256') != hashlib.sha256(script.read_bytes()).hexdigest()):
+            raise ValueError('lint baseline contract mismatch or unbound')
     try:
         lint_errors = int(data.get("lint_errors") or 0)
     except (TypeError, ValueError):
@@ -820,23 +889,25 @@ def parse_lint_output(output: str, exit_code: int) -> int:
         
     # Check ESLint format: "X problems (Y errors, Z warnings)"
     eslint_match = re.search(r"(\d+)\s+problems?\s*\((\d+)\s+errors?", output)
-    if eslint_match:
+    if eslint_match and int(eslint_match.group(2)) > 0:
         return int(eslint_match.group(2))
         
     # Check TypeScript tsc format: "Found X errors"
     tsc_match = re.search(r"Found\s+(\d+)\s+errors?", output)
-    if tsc_match:
+    if tsc_match and int(tsc_match.group(1)) > 0:
         return int(tsc_match.group(1))
 
-    # Count lines containing "error:" or "Error:"
-    count = 0
-    for line in output.splitlines():
-        if re.search(r"\b(?:error|Error|ERROR)\b", line) and not re.search(r"\b(?:0 error|0 errors)\b", line):
-            count += 1
-            
-    if count == 0 and exit_code != 0:
-        count = 1
-    return count
+    # Ruff's JSON diagnostic array is preferable to human-facing summaries.
+    try:
+        diagnostics = json.loads(output)
+    except (ValueError, TypeError):
+        diagnostics = None
+    if (isinstance(diagnostics, list) and diagnostics
+            and all(isinstance(item, dict) and item.get('code') and item.get('message')
+                    and item.get('filename') and isinstance(item.get('location'), dict)
+                    for item in diagnostics)):
+        return len(diagnostics)
+    raise ValueError('static check output unavailable: unrecognized nonzero result')
 
 
 def calculate_metrics(
@@ -876,8 +947,15 @@ def calculate_metrics(
         has_test_defects = (test_exit_code != 0 or bool(failing))
 
 
-    lint_errs = parse_lint_output(lint_output, lint_exit_code)
-    type_errs = parse_lint_output(type_output, type_exit_code)
+    counts, statuses = [], []
+    for output, code in ((lint_output, lint_exit_code), (type_output, type_exit_code)):
+        try:
+            counts.append(parse_lint_output(output, code))
+            statuses.append('unavailable' if static_check_execution_failed(code) else 'available')
+        except ValueError:
+            counts.append(0)  # Numeric compatibility; status is the authority for availability.
+            statuses.append('unavailable')
+    lint_errs, type_errs = counts
 
     # Baseline-aware quality: pre-existing debt is recorded but only new
     # defects penalize quality and gate convergence.
@@ -928,8 +1006,7 @@ def calculate_metrics(
         weights["repro"] * repro_val
     )
     
-    static_execution_failed = (static_check_execution_failed(lint_exit_code) or
-                               static_check_execution_failed(type_exit_code))
+    static_execution_failed = "unavailable" in statuses
 
     # Absolute zero-defect rule: cannot score 100.0 if any NEW failures exist.
     # Pre-existing baseline debt is transparent in lint_errors/type_errors/failing_tests
@@ -962,6 +1039,8 @@ def calculate_metrics(
             "business_acceptance": "unknown",
             "evaluation_exit_code": evaluation_exit_code,
             "evaluation_errors": list(evaluation_errors or []),
+            "lint_status": statuses[0],
+            "type_status": statuses[1],
             "lint_exit_code": lint_exit_code,
             "type_exit_code": type_exit_code,
             "repro_exit_code": repro_exit_code,
@@ -978,6 +1057,8 @@ def calculate_metrics(
 
 def is_converged(metrics: MetricVector) -> bool:
     """True if the configured generic scoring conditions are met."""
+    if any(metrics.details.get(key) == "unavailable" for key in ("lint_status", "type_status")):
+        return False
     if metrics.details.get("evaluation_exit_code", 0) != 0 or metrics.details.get("evaluation_errors"):
         return False
     if any(static_check_execution_failed(metrics.details.get(key, 0))
@@ -1022,6 +1103,10 @@ def render_metrics_markdown(metrics: MetricVector, iteration: int, max_iteration
     else:
         quality_cell = f"`{metrics.quality}%` (Lint: {metrics.lint_errors}, Type: {metrics.type_errors})"
 
+    unavailable = [name for name in ('lint', 'type') if metrics.details.get(name + '_status') == 'unavailable']
+    if unavailable:
+        quality_cell = 'unavailable (' + ', '.join(unavailable) + ')'
+
     return f"""# 量化评估指标卡 (Metrics Scorecard)
 
 > 轮次: {iteration} / {max_iterations}  
@@ -1033,7 +1118,7 @@ def render_metrics_markdown(metrics: MetricVector, iteration: int, max_iteration
 | 指标维度 | 当前值 | 目标值 | 判定 |
 |---|---|---|---|
 | 所选测试通过率 (Correctness) | `{metrics.correctness}%` ({metrics.passed_tests}/{metrics.total_tests}) | `100.0%` | {'✅' if metrics.correctness == 100 else '❌'} |
-| 代码质量 (Quality) | {quality_cell} | `100.0%` | {'✅' if metrics.quality == 100 else '❌'} |
+| 代码质量 (Quality) | {quality_cell} | `100.0%` | {'✅' if metrics.quality == 100 and not unavailable else '❌'} |
 | 边界控制 (Scope) | `{metrics.scope}%` | `100.0%` | {'✅' if metrics.scope == 100 else '❌'} |
 {repro_line}
 
@@ -1045,6 +1130,9 @@ def render_metrics_markdown(metrics: MetricVector, iteration: int, max_iteration
 
 def _execution_failure_block(metrics: MetricVector) -> str:
     errors = list(metrics.details.get("evaluation_errors") or [])
+    for name in ('lint', 'type'):
+        if metrics.details.get(name + '_status') == 'unavailable':
+            errors.append(name + '_unavailable:exit=' + str(metrics.details.get(name + '_exit_code')))
     exit_code = metrics.details.get("evaluation_exit_code", 0)
     exit_error = f"evaluator_exit:{exit_code}"
     if exit_code != 0 and exit_error not in errors:
@@ -1092,6 +1180,11 @@ def render_evaluation_markdown(
         lint_block = f"- Lint 错误数: `{metrics.lint_errors}`"
         type_block = f"- 类型检查错误数: `{metrics.type_errors}`"
     
+    if metrics.details.get('lint_status') == 'unavailable':
+        lint_block = '- Lint: unavailable (exit ' + str(metrics.details.get('lint_exit_code')) + ')'
+    if metrics.details.get('type_status') == 'unavailable':
+        type_block = '- Type: unavailable (exit ' + str(metrics.details.get('type_exit_code')) + ')'
+
     snippet_block = ""
     if raw_error_snippet.strip():
         snippet_block = f"""

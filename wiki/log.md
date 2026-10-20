@@ -3179,6 +3179,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - UNKNOWN：隔离测试使用外部 Agent/forge 替身，未部署或修改生产工作流。
 
 - 2026-10-20（工作流自动化优化，PR #287 复验）：补齐旧 pin 的新候选独立路由合同，派发前拒绝与最终发布矛盾的软降级；同步模板/技能 canonical hash 守护，保留旧非闭环调度路径。
+## [2026-10-20] Fix | 门禁等待、基线拒绝与追加文档重放
+
+- Updated [[task-lifecycle]]：receipt-v1 无效人工放行明确拒绝；未启动任务沿 replacement 链补派，等待责任可升级和退役。
+- 未知非零静态结果 unavailable；rebaseline 留原因、旧值与 SHA。完成收编凭证在发布事务确认 workflow 已完成，历史漂移可诊断。
+- 文档三路导出保持 onto 原前缀并顺延新增 lessons 编号；正文改写和不完整末行拒绝。不将追加文档视为完整候选零成本重放。
+- Evidence：`tests/test_gate_metrics_handoff.py`、`tests/test_replay_append_only.py`、`docs/walkthroughs/20261020-gate-metrics-repair.md`。
+- UNKNOWN：未部署、未重启，未改写 wf-haflow-1020-02 的业务状态或验收凭证。
 
 ## [2026-10-20] Fix | D5 fix-loop 可作废状态补齐与状态矩阵单一来源收敛 (SC-001/SC-002/SC-014)
 

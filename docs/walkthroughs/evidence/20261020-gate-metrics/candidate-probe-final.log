@@ -1,0 +1,26 @@
+ROOT=/Users/user/.sandboxes/haflow-gate-metrics-candidate-compat-20261020
+ISOLATION=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-reopen-final-9a5hhegw
+COMMAND=['/opt/homebrew/opt/python@3.14/bin/python3.14', '-m', 'pytest', '-q', '-p', 'tests.state_db_patch_probe', 'tests/test_blocker_queue_episode.py', 'tests/test_blocker_resample_discipline.py', 'tests/test_collaboration_store.py', 'tests/test_context_compact.py', 'tests/test_context_compiler.py', 'tests/test_critical_reads_fail_closed.py', 'tests/test_d1_privileged_transitions.py', 'tests/test_dispatch_recovery_ui.py', 'tests/test_eval.py', 'tests/test_eval_engine.py', 'tests/test_execution_outcome.py', 'tests/test_experience_collector.py', 'tests/test_impl_fix1_regression.py', 'tests/test_impl_fix2_regression.py', 'tests/test_impl_fix3_regression.py', 'tests/test_impl_fix4_blocker_regression.py', 'tests/test_impl_fix5_regression.py', 'tests/test_impl_fix6_regression.py', 'tests/test_intervention_store.py', 'tests/test_kernel_control_primitives.py', 'tests/test_observation.py', 'tests/test_recovery_entrypoints.py', 'tests/test_replay.py', 'tests/test_rollout_policy.py', 'tests/test_shadow_evaluation.py', 'tests/test_stall_recovery_signal.py', 'tests/test_state_db_characterization_context_source.py', 'tests/test_state_db_ddl_sequence.py', 'tests/test_state_db_patch_interception.py', 'tests/test_state_db_real_patch_paths.py', 'tests/test_state_db_split_intent_baseline.py', 'tests/test_state_db_v2.py', 'tests/test_state_projection_namespace.py', 'tests/test_state_store.py', 'tests/test_state_transition_gateway.py', 'tests/test_supervisor_delivery.py', 'tests/test_task_checkpoint.py', 'tests/test_trajectory_observer.py', 'tests/test_workflow_repair_contracts.py', 'tests/test_d3_workflow_initial_state.py', '-k', 'not real_path_receipt_covers_current_implementation and not register_port and not freeze_run_definition_and_register_workflow and not end_to_end_single_source_of_truth_without_workflows_json and not fail_closed_prevents_silent_write_loss_when_statestore_fails and not workflow_writes_never_touch_real_projection_without_global_patch']
+........................................................................ [  5%]
+........................................................................ [ 11%]
+........................................................................ [ 16%]
+........................................................................ [ 22%]
+........................................................................ [ 28%]
+........................................................................ [ 33%]
+........................................................................ [ 39%]
+........................................................................ [ 45%]
+.................................................................. [ 50%]
+........................................................................ [ 56%]
+.................................................................. [ 61%]
+........................................................................ [ 66%]
+........................................................................ [ 72%]
+........................................................................ [ 78%]
+........................................................................ [ 83%]
+........................................................................ [ 89%]
+........................................................................ [ 95%]
+...............................................................          [100%]
+REAL_PATCH_SITES 119/119
+
+1275 passed, 7 deselected, 12 subtests passed in 219.98s (0:03:39)
+
+EXIT=0

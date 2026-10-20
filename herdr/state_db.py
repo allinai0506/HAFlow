@@ -7555,6 +7555,10 @@ def force_pass_gate(
                         )
             tasks_to_update = matching_tasks
 
+        from .task_checkpoint import reject_verdict_only_override
+        for task in tasks_to_update:
+            reject_verdict_only_override(task)
+
         now = time.time()
         updated_tasks = []
         for t in tasks_to_update:

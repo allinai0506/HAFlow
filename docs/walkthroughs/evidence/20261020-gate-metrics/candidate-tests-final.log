@@ -1,0 +1,14 @@
+ROOT=/Users/user/.sandboxes/haflow-gate-metrics-candidate-compat-20261020
+ISOLATION=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-reopen-final-9a5hhegw
+COMMAND=['/opt/homebrew/opt/python@3.14/bin/python3.14', '-m', 'pytest', '-q', 'tests/test_state_db_facade_compat.py', 'tests/test_state_db_patch_interception.py', 'tests/test_state_db_ddl_sequence.py', 'tests/test_state_db_characterization_context_source.py', 'tests/test_state_db_real_patch_paths.py', 'tests/test_state_db_split_source_equivalence.py', 'tests/test_state_db_split_intent_baseline.py', 'tests/test_task_checkpoint.py', 'tests/test_lint_execution_failure_gate.py', 'tests/test_loop_init_baseline_atomicity.py', 'tests/test_loop_evaluator.py']
+........................................................................ [ 14%]
+........................................................................ [ 28%]
+........................................................................ [ 43%]
+........................................................................ [ 57%]
+........................................................................ [ 71%]
+........................................................................ [ 86%]
+................................................................ [ 98%]
+......                                                                 [100%]
+502 passed, 10 subtests passed in 23.64s
+
+EXIT=0

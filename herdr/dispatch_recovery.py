@@ -166,7 +166,14 @@ def list_operations(db_path, workflow_id):
         snapshot = nd._snapshot(conn, workflow_id) if any(o['payload'].get('kind') == 'node_dispatch' and o['status'] != 'superseded' for o in operations) else None
         contexts = {}
         for op in operations:
-            if op['payload'].get('kind') == 'node_dispatch' and op['status'] != 'superseded':
+            if op['payload'].get('kind') == 'business_gate_wait':
+                op['recovery'] = {'summary': '业务验收凭证尚未齐备',
+                    'node_label': op['payload'].get('node_id'),
+                    'explanation': '任务 verdict 不能代替本轮业务验收；这里不能代签放行。',
+                    'next_step': op['detail'].get('decision_needed'),
+                    'candidate_sha': op['payload'].get('candidate_sha'), 'actions': [],
+                    'resource_checks': []}
+            if op['payload'].get('kind') == 'node_dispatch'  and op['status'] != 'superseded':
                 node_id = op['payload']['node_id']
                 if node_id not in contexts:
                     contexts[node_id] = _context(conn, op, snapshot)

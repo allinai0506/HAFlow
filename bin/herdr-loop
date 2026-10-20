@@ -29,8 +29,10 @@ from herdr.evaluator import (
     init_loop,
     is_converged,
     read_baseline_lint,
+    rebaseline_lint,
     read_baseline_test,
     BASELINE_TEST_FILENAME,
+    BASELINE_LINT_FILENAME,
     read_repro_requirement,
     resolve_evaluation_timeout,
     run_evaluation_command,
@@ -110,6 +112,13 @@ def _run_evaluation_locked(target_dir: Path, timeout: float | None = None) -> tu
     paths = {step: log_dir / f"{step}.log" for step in ("test", "lint", "repro")}
     before = {step: _log_stamp(path) for step, path in paths.items()}
     evaluation_errors = []
+    baseline_path = loop_dir / BASELINE_LINT_FILENAME
+    baseline_stamp, evaluator_stamp = _log_stamp(baseline_path), _log_stamp(evaluator_sh)
+    try:
+        baseline_lint, baseline_type = read_baseline_lint(loop_dir, require_contract=True)
+    except (OSError, ValueError):
+        evaluation_errors.append('lint_baseline_contract_unavailable')
+        baseline_lint, baseline_type = 0, 0
     # GOAL.md is the existing program-generated command contract, including
     # the optional repro command. Keep existing task clones compatible.
     try:
@@ -157,8 +166,16 @@ def _run_evaluation_locked(target_dir: Path, timeout: float | None = None) -> tu
     lint_log = logs["lint"]
     repro_log = logs.get("repro")
 
-    # Baseline-aware gate: pre-existing debt recorded at init does not block.
-    baseline_lint, baseline_type = read_baseline_lint(loop_dir)
+    # Only the pre-execution, contract-bound snapshot can discount debt.
+    if baseline_stamp != _log_stamp(baseline_path):
+        evaluation_errors.append('lint_baseline_changed_during_evaluation')
+    if evaluator_stamp != _log_stamp(evaluator_sh):
+        evaluation_errors.append('lint_contract_changed_during_evaluation')
+    try:
+        read_baseline_lint(loop_dir, require_contract=True)
+    except (OSError, ValueError):
+        if 'lint_baseline_contract_unavailable' not in evaluation_errors:
+            evaluation_errors.append('lint_baseline_contract_unavailable')
     baseline_snap = loop_dir / BASELINE_TEST_FILENAME
     baseline_test = read_baseline_test(loop_dir) if baseline_snap.exists() else None
 
@@ -274,6 +291,11 @@ def main():
     eval_cmd.add_argument("--dir", default=".", help="Target project/clone directory")
     eval_cmd.add_argument("--timeout", type=float, default=None, help="Evaluation timeout in seconds (default: adaptive, min 300s)")
 
+    rebase_cmd = sub.add_parser("rebaseline", help="Capture a new lint baseline after authorized intake")
+    rebase_cmd.add_argument("--dir", default=".")
+    rebase_cmd.add_argument("--reason", required=True)
+    rebase_cmd.add_argument("--lint-cmd", required=True)
+
     # status
     status_cmd = sub.add_parser("status", help="Get current loop score and state")
     status_cmd.add_argument("--dir", default=".", help="Target project/clone directory")
@@ -303,6 +325,11 @@ def main():
             print(f"[HERDR_LOOP_EXHAUSTED] Max iterations reached. BLOCKER.md at {blocker_path}")
             print("[HERDR_LOOP_ACTION] Output HERDR_TASK_BLOCKER:<task_id> to escalate to Coordinator")
         sys.exit(0 if converged else 1)
+
+    elif args.command == "rebaseline":
+        path = rebaseline_lint(get_loop_dir(target_dir), args.lint_cmd, target_dir, reason=args.reason)
+        print(path)
+        sys.exit(0)
 
     elif args.command == "status":
         loop_dir = get_loop_dir(target_dir)

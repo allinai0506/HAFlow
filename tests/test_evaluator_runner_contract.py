@@ -4,10 +4,17 @@ import importlib.util
 import json
 from pathlib import Path
 import shlex
+import subprocess
 
 import pytest
 
-from herdr.evaluator import MetricVector, init_loop, is_converged, write_baseline_lint, write_state
+from herdr.evaluator import (
+    MetricVector,
+    capture_lint_baseline,
+    init_loop,
+    is_converged,
+    write_state,
+)
 
 
 @pytest.fixture
@@ -22,6 +29,11 @@ def loop_cli():
 
 def controlled_runner(tmp_path, *, exit_code=0, receipts=None, repro=False,
                       stale=None, missing=None, lint_output=""):
+    if not (tmp_path / '.git').exists():
+        subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+        subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=T', '-c',
+                        'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                        'commit', '--allow-empty', '-qm', 'base'], check=True)
     directory = init_loop(tmp_path, "execution evidence must belong to this evaluation",
                           test_cmd="true", repro_cmd="true" if repro else "")
     logs = directory / "logs"
@@ -94,7 +106,11 @@ def test_normal_generated_three_step_runner_converges(tmp_path, loop_cli):
 def test_recorded_lint_baseline_still_permits_complete_execution(tmp_path, loop_cli):
     directory = controlled_runner(tmp_path, receipts=["TEST_EXIT=0", "LINT_EXIT=1"],
                                   lint_output="1 problem (1 error, 0 warnings)\n")
-    write_baseline_lint(directory, 1)
+    capture_lint_baseline(
+        directory,
+        "printf '1 problem (1 error, 0 warnings)\\n'; exit 1",
+        tmp_path,
+    )
     metrics, converged, _ = loop_cli.run_evaluation(tmp_path)
     assert metrics.lint_errors == 1
     assert metrics.new_lint_errors == 0

@@ -265,7 +265,12 @@ class Handler(BaseHTTPRequestHandler):
                 # Initialize the selected state store on this write path, never on GET.
                 from herdr.state_store import get_state_store
                 get_state_store(state_db_path())
-                project=herdr_projects.create_project(root,project_name=name,template_name=tmpl)
+                try:
+                    project=herdr_projects.create_project(root,project_name=name,template_name=tmpl)
+                except RuntimeError as exc:
+                    if 'server_not_running' in str(exc):
+                        return self.send_json(503,error='workspace server_not_running; start the workspace service and retry project creation')
+                    raise
                 return self.send_json(200,project)
             if p=='/api/project/adopt':
                 wid=str(b.get('workspace_id','')).strip()

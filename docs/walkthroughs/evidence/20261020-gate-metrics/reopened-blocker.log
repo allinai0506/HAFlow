@@ -1,0 +1,24 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_reopened_workflow_gets_a_new_wait_generation _______________
+
+store = <herdr.state_store.SQLiteStateStore object at 0x1098ddd30>
+
+    def test_reopened_workflow_gets_a_new_wait_generation(store):
+        from herdr import gate_wait, recovery_store
+        import time
+        start = time.time()
+        for offset in (0, 30, 60):
+            previous = gate_wait.record_wait(store.db_path, 'wf', 'wrapup', ['t'], now=start + offset)
+        kernel.transition_workflow('wf', 'completed', reason='fixture closed', store=store)
+        kernel.transition_workflow('wf', 'in_progress', reason='workflow_reopened',
+            metadata={'reopened_at': start + 100, 'suppress_auto_close': True}, store=store)
+        kernel.transition_workflow('wf', 'running', reason='fixture resumed', store=store)
+        current = gate_wait.record_wait(store.db_path, 'wf', 'wrapup', ['t'], now=start + 130)
+>       assert current['id'] != previous['id']
+E       assert 2 != 2
+
+tests/test_gate_metrics_handoff.py:360: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_gate_metrics_handoff.py::test_reopened_workflow_gets_a_new_wait_generation
+1 failed, 29 deselected in 0.23s

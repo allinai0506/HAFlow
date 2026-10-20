@@ -1,0 +1,337 @@
+ROOT=/Users/user/.sandboxes/haflow-gate-metrics-candidate-compat-20261020
+ISOLATION=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-probe-5vtmu_au
+........................................................................ [  5%]
+........................................................................ [ 11%]
+........................................................................ [ 16%]
+........................................................................ [ 22%]
+........................................................................ [ 28%]
+........................................................................ [ 33%]
+........................................................................ [ 39%]
+............................................FFFFFFF..................... [ 45%]
+.................................................................. [ 50%]
+........................................................................ [ 56%]
+.................................................................. [ 61%]
+........................................................................ [ 66%]
+........................................................................ [ 72%]
+........................................................................ [ 78%]
+........................................................................ [ 83%]
+........................................................................ [ 89%]
+........................................................................ [ 95%]
+...............................................................          [100%]
+REAL_PATCH_SITES 118/119
+MISSING_PATCH_SITES 97
+
+=================================== FAILURES ===================================
+________________________ test_pause_and_resume_workflow ________________________
+
+kernel_env = {'wf_file': PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_pause_...r/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_pause_and_resume_workflow0/checkpoints')}
+
+    def test_pause_and_resume_workflow(kernel_env):
+        wid = "wf_test_pause"
+        _seed_workflow(kernel_env, wid, status="running")
+
+        # 1. Pause
+>       res = kernel.pause_workflow(wid)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../../.herdr-controller/clones/wf-haflow-1020-02-impl-craft/tests/test_kernel_control_primitives.py:83:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+workflow_id = 'wf_test_pause', node_id = None, store = None
+
+    def pause_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optional[StateStore] = None) -> Dict[str, Any]:
+        """Pause automatic workflow progression globally or hold a specific node."""
+        s = _get_store(store)
+        target = s.get_workflow(workflow_id)
+        if not target:
+>           raise ValueError(f"Workflow '{workflow_id}' not found")
+E           ValueError: Workflow 'wf_test_pause' not found
+
+herdr/kernel.py:319: ValueError
+____________________________ test_pause_node_level _____________________________
+
+kernel_env = {'wf_file': PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_pause_...rivate/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_pause_node_level0/checkpoints')}
+
+    def test_pause_node_level(kernel_env):
+        wid = "wf_test_pause_node"
+        _seed_workflow(kernel_env, wid, status="running")
+
+>       res = kernel.pause_workflow(wid, node_id="impl")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../../.herdr-controller/clones/wf-haflow-1020-02-impl-craft/tests/test_kernel_control_primitives.py:103:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+workflow_id = 'wf_test_pause_node', node_id = 'impl', store = None
+
+    def pause_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optional[StateStore] = None) -> Dict[str, Any]:
+        """Pause automatic workflow progression globally or hold a specific node."""
+        s = _get_store(store)
+        target = s.get_workflow(workflow_id)
+        if not target:
+>           raise ValueError(f"Workflow '{workflow_id}' not found")
+E           ValueError: Workflow 'wf_test_pause_node' not found
+
+herdr/kernel.py:319: ValueError
+_____________________________ test_force_pass_gate _____________________________
+
+kernel_env = {'wf_file': PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_force_...private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_force_pass_gate0/checkpoints')}
+
+    def test_force_pass_gate(kernel_env):
+        wid = "wf_test_force_pass"
+        _seed_workflow(kernel_env, wid)
+        _seed_tasks(
+            kernel_env,
+            [
+                {
+                    "task_id": "task_test_1",
+                    "workflow_id": wid,
+                    "node": "test",
+                    "status": "completed",
+                    "stage_verdict": "blocked",
+                    "stage_verdict_note": "Lint failed: unused import",
+                }
+            ],
+        )
+
+>       res = kernel.force_pass_gate(
+            wid,
+            gate_node_id="test",
+            note="Manual override: lint issue is cosmetic and approved",
+            operator="lead_architect",
+        )
+
+../../.herdr-controller/clones/wf-haflow-1020-02-impl-craft/tests/test_kernel_control_primitives.py:137:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+herdr/kernel.py:409: in force_pass_gate
+    res = s.force_pass_gate(
+herdr/state_store.py:912: in force_pass_gate
+    return state_db.force_pass_gate(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+workflow_id = 'wf_test_force_pass', gate_node_id = 'test'
+note = 'Manual override: lint issue is cosmetic and approved'
+operator = 'lead_architect'
+db_path = PosixPath('/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-probe-5vtmu_au/state.db')
+conn = <sqlite3.Connection object at 0x10a339e40>, expected_version = None
+task_id = None, expected_pane_id = None, expected_task_versions = None
+
+    def force_pass_gate(
+        workflow_id: str,
+        gate_node_id: str,
+        note: str = "human forced pass",
+        operator: str = "human",
+        db_path: Optional[Path] = None,
+        conn: Optional[sqlite3.Connection] = None,
+        expected_version: Optional[int] = None,
+        task_id: Optional[str] = None,
+        expected_pane_id: Optional[str] = None,
+        expected_task_versions: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """Atomically check and force-pass a gate node within a single immediate transaction."""
+        should_close = False
+        if conn is None:
+            conn = _facade().get_db_connection(db_path)
+            should_close = True
+
+        try:
+            if should_close:
+                conn.execute("BEGIN IMMEDIATE;")
+
+            cur_wf = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+            wf_row = cur_wf.fetchone()
+            if not wf_row:
+>               raise ValueError(f"Workflow '{workflow_id}' not found")
+E               ValueError: Workflow 'wf_test_force_pass' not found
+
+herdr/state/transition_gate.py:382: ValueError
+________________ test_rollback_workflow_downstream_invalidation ________________
+
+kernel_env = {'wf_file': PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_rollba...r/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_rollback_workflow_downstr0/checkpoints')}
+
+    def test_rollback_workflow_downstream_invalidation(kernel_env):
+        wid = "wf_test_rollback"
+        _seed_workflow(kernel_env, wid)
+        _seed_tasks(
+            kernel_env,
+            [
+                {"task_id": "t_req", "workflow_id": wid, "node": "req", "status": "completed"},
+                {"task_id": "t_impl", "workflow_id": wid, "node": "impl", "status": "completed"},
+                {"task_id": "t_test", "workflow_id": wid, "node": "test", "status": "active", "stage_verdict": "blocked"},
+                {"task_id": "t_deploy", "workflow_id": wid, "node": "deploy", "status": "pending"},
+            ],
+        )
+
+        # Seed stage-state.json with advance locks for req and impl
+        kernel_env["s_file"].write_text(json.dumps({
+            f"{wid}:req": "notified",
+            f"{wid}:impl": "notified",
+            f"{wid}:test": "notified",
+        }), encoding="utf-8")
+
+        # Roll back to "impl"
+        # Target "impl" and downstream "test", "deploy" should be invalidated
+        # "req" should remain unaffected!
+>       res = kernel.rollback_workflow(wid, target_node_id="impl", reason="Refactor needed")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../../.herdr-controller/clones/wf-haflow-1020-02-impl-craft/tests/test_kernel_control_primitives.py:182:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+workflow_id = 'wf_test_rollback', target_node_id = 'impl'
+reason = 'Refactor needed', store = None
+
+    def rollback_workflow(
+        workflow_id: str,
+        target_node_id: str,
+        reason: str = "manual_rollback",
+        store: Optional[StateStore] = None,
+    ) -> Dict[str, Any]:
+        """Roll back workflow execution to target_node_id, invalidating downstream tasks and locks."""
+        wf_data = load_workflows_data(store=store)
+        wf_entry = wf_data.get("workflows", {}).get(workflow_id)
+        if not wf_entry:
+>           raise ValueError(f"Workflow '{workflow_id}' not found")
+E           ValueError: Workflow 'wf_test_rollback' not found
+
+herdr/kernel.py:539: ValueError
+________________ test_step_workflow_triggers_single_ready_node _________________
+
+kernel_env = {'wf_file': PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_step_w...r/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_step_workflow_triggers_si0/checkpoints')}
+
+    def test_step_workflow_triggers_single_ready_node(kernel_env):
+        wid = "wf_test_step"
+        _seed_workflow(kernel_env, wid, status="paused")
+        # req is completed, impl is ready, test and deploy are waiting
+        _seed_tasks(
+            kernel_env,
+            [
+                {"task_id": "t_req", "workflow_id": wid, "node": "req", "status": "completed"},
+            ],
+        )
+
+>       res = kernel.step_workflow(wid)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../../.herdr-controller/clones/wf-haflow-1020-02-impl-craft/tests/test_kernel_control_primitives.py:219:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+herdr/kernel.py:666: in step_workflow
+    wf_entry, norm_cfg, wf_tasks = store.read_workflow_snapshot(workflow_id)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+herdr/state_store.py:708: in read_workflow_snapshot
+    return read_snapshot(self.db_path, workflow_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+herdr/recovery_store.py:78: in read_snapshot
+    return _snapshot(conn, workflow_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+herdr/recovery_store.py:61: in _snapshot
+    workflow, config = _workflow_snapshot(conn, workflow_id)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <sqlite3.Connection object at 0x10a24e4d0>, workflow_id = 'wf_test_step'
+
+    def _workflow_snapshot(conn, workflow_id):
+        row = conn.execute('SELECT * FROM workflows WHERE workflow_id=?', (workflow_id,)).fetchone()
+        if row is None:
+>           raise ValueError('workflow not found')
+E           ValueError: workflow not found
+
+herdr/recovery_store.py:45: ValueError
+______________________ test_step_workflow_no_ready_nodes _______________________
+
+kernel_env = {'wf_file': PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_step_w...r/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_step_workflow_no_ready_no0/checkpoints')}
+
+    def test_step_workflow_no_ready_nodes(kernel_env):
+        wid = "wf_test_step_none"
+        _seed_workflow(kernel_env, wid, status="paused")
+        # All nodes completed
+        _seed_tasks(
+            kernel_env,
+            [
+                {"task_id": "t_req", "workflow_id": wid, "node": "req", "status": "completed"},
+                {"task_id": "t_impl", "workflow_id": wid, "node": "impl", "status": "completed"},
+                {"task_id": "t_test", "workflow_id": wid, "node": "test", "status": "completed"},
+                {"task_id": "t_deploy", "workflow_id": wid, "node": "deploy", "status": "completed"},
+            ],
+        )
+
+>       res = kernel.step_workflow(wid)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../../.herdr-controller/clones/wf-haflow-1020-02-impl-craft/tests/test_kernel_control_primitives.py:241:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+herdr/kernel.py:666: in step_workflow
+    wf_entry, norm_cfg, wf_tasks = store.read_workflow_snapshot(workflow_id)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+herdr/state_store.py:708: in read_workflow_snapshot
+    return read_snapshot(self.db_path, workflow_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+herdr/recovery_store.py:78: in read_snapshot
+    return _snapshot(conn, workflow_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+herdr/recovery_store.py:61: in _snapshot
+    workflow, config = _workflow_snapshot(conn, workflow_id)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+conn = <sqlite3.Connection object at 0x10a339b70>
+workflow_id = 'wf_test_step_none'
+
+    def _workflow_snapshot(conn, workflow_id):
+        row = conn.execute('SELECT * FROM workflows WHERE workflow_id=?', (workflow_id,)).fetchone()
+        if row is None:
+>           raise ValueError('workflow not found')
+E           ValueError: workflow not found
+
+herdr/recovery_store.py:45: ValueError
+____________________ test_checkpoint_save_list_and_restore _____________________
+
+kernel_env = {'wf_file': PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_checkp...r/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-1641/test_checkpoint_save_list_and_0/checkpoints')}
+
+    def test_checkpoint_save_list_and_restore(kernel_env):
+        wid = "wf_test_cp"
+        _seed_workflow(kernel_env, wid, status="running")
+        _seed_tasks(
+            kernel_env,
+            [
+                {"task_id": "t_req", "workflow_id": wid, "node": "req", "status": "completed"},
+                {"task_id": "t_impl", "workflow_id": wid, "node": "impl", "status": "active"},
+            ],
+        )
+
+        # 1. Create checkpoint
+>       cp = kernel.create_checkpoint(wid, tag="before_risky_step")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+../../.herdr-controller/clones/wf-haflow-1020-02-impl-craft/tests/test_kernel_control_primitives.py:262:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+workflow_id = 'wf_test_cp', tag = 'before_risky_step'
+parent_checkpoint_id = None
+
+    def create_checkpoint(
+        workflow_id: str,
+        tag: Optional[str] = None,
+        parent_checkpoint_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Capture a durable point-in-time snapshot of the workflow and its tasks via StateStore."""
+        store = get_state_store()
+
+        wf_entry = store.get_workflow(workflow_id)
+        if not wf_entry:
+>           raise ValueError(f"Workflow '{workflow_id}' not found")
+E           ValueError: Workflow 'wf_test_cp' not found
+
+herdr/kernel.py:744: ValueError
+=========================== short test summary info ============================
+FAILED tests/test_kernel_control_primitives.py::test_pause_and_resume_workflow
+FAILED tests/test_kernel_control_primitives.py::test_pause_node_level - Value...
+FAILED tests/test_kernel_control_primitives.py::test_force_pass_gate - ValueE...
+FAILED tests/test_kernel_control_primitives.py::test_rollback_workflow_downstream_invalidation
+FAILED tests/test_kernel_control_primitives.py::test_step_workflow_triggers_single_ready_node
+FAILED tests/test_kernel_control_primitives.py::test_step_workflow_no_ready_nodes
+FAILED tests/test_kernel_control_primitives.py::test_checkpoint_save_list_and_restore
+7 failed, 1268 passed, 7 deselected, 12 subtests passed in 221.03s (0:03:41)
+
+EXIT=1

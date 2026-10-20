@@ -1,0 +1,7 @@
+ROOT=/Users/user/.sandboxes/haflow-gate-metrics-candidate-compat-20261020
+ISOLATION=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-compat-reopen-final-9a5hhegw
+COMMAND=['/opt/homebrew/opt/python@3.14/bin/python3.14', '-m', 'pytest', '-q', 'tests/test_gate_metrics_handoff.py', '-k', 'rebaseline or unparsed_lint or ruff_structured or nonzero_exit or unavailable_lint or initial_capture or native_eval_rejects']
+...........                                                              [100%]
+11 passed, 19 deselected in 1.29s
+
+EXIT=0

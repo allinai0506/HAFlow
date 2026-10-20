@@ -381,7 +381,13 @@ def test_force_is_a_direct_legacy_close_choice(tmp_path):
          patch.object(module, "_load_workflow_entry", return_value=(None, {})), \
          patch.object(module, "_finalize_one", return_value={"task_id": "t-force", "status": "cleaned", "action": "finalized"}), \
          patch.object(module, "_workflow_stage_tabs", return_value={"tab_ids": [], "workspace_id": None, "coordinator_pane": None, "owned_pane_ids": set()}), \
-         patch.object(module, "_mark_workflow_completed"), \
+         patch.object(
+             module,
+             "_mark_workflow_completed",
+             side_effect=lambda *_a, **_k: store.save_workflow(
+                 {**store.get_workflow("wf-force"), "status": "completed"}
+             ),
+         ), \
          patch.object(module, "stage_reset"):
         report = module.close_workflow("wf-force", force=True)
     assert report["escalated_accepted"] == [{"task_id": "t-force", "via": "force"}]

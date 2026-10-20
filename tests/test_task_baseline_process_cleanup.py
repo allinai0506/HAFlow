@@ -11,6 +11,15 @@ from herdr.evaluator import init_loop, read_baseline_lint
 from tests.test_task_loop_noninteractive import load_cli, ROOT
 
 
+def ensure_git_identity(tmp_path):
+    if (tmp_path / '.git').exists():
+        return
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=T', '-c',
+                    'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                    'commit', '--allow-empty', '-qm', 'base'], check=True)
+
+
 def child_command(tmp_path, *, ignore_term=False):
     child = tmp_path / 'baseline-child.py'
     child.write_text('from pathlib import Path\nimport time,signal\n' +
@@ -47,6 +56,7 @@ def test_baseline_timeout_cleans_descendants_without_fabricating_baseline(tmp_pa
 
 
 def test_successful_baseline_command_keeps_observed_existing_debt(tmp_path):
+    ensure_git_identity(tmp_path)
     task = load_cli('task_baseline_success', 'herdr-task')
     task.auto_init_task_loop(tmp_path, 'normal baseline', [], test_cmd='true',
                              lint_cmd="printf '2 problems (2 errors, 0 warnings)\\n';exit 1", node='implementation')
@@ -54,6 +64,7 @@ def test_successful_baseline_command_keeps_observed_existing_debt(tmp_path):
 
 
 def baseline_process(tmp_path, command):
+    ensure_git_identity(tmp_path)
     code = """import importlib.machinery,importlib.util,sys
 from pathlib import Path
 loader=importlib.machinery.SourceFileLoader('task_baseline_cli',sys.argv[1]);spec=importlib.util.spec_from_loader(loader.name,loader);task=importlib.util.module_from_spec(spec);loader.exec_module(task)

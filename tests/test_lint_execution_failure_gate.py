@@ -37,6 +37,13 @@ def test_failed_capture_never_publishes_fake_debt(tmp_path, command):
     assert read_baseline_lint(loop) == (0, 0)
 
 
+def test_baseline_capture_requires_git_commit_identity(tmp_path):
+    loop = init_loop(tmp_path, 'identity required', test_cmd='true')
+    with pytest.raises(ValueError, match='Git HEAD'):
+        capture_lint_baseline(loop, "printf '[{\"code\":\"F401\",\"message\":\"x\",\"filename\":\"a.py\",\"location\":{}}]'; exit 1", tmp_path)
+    assert not (loop / 'BASELINE_LINT.json').exists()
+
+
 @pytest.mark.parametrize('kind', ['missing', 'not_executable'])
 def test_native_cli_fails_init_and_persists_nonconvergence_with_old_debt(tmp_path, kind):
     command = 'herdr_nonexistent_linter_c28c'
@@ -84,6 +91,10 @@ def test_native_evaluation_of_old_polluted_baseline_is_blocked(tmp_path):
 
 
 def test_actual_tool_exit_two_can_capture_reported_debt(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=T', '-c',
+                    'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                    'commit', '--allow-empty', '-qm', 'base'], check=True)
     command = "printf 'Found 2 errors\\n'; exit 2"
     loop = init_loop(tmp_path, 'typescript existing debt',
                      test_cmd="printf '1 passed in 0.01s\\n'", lint_cmd=command,

@@ -7,15 +7,18 @@ import time
 
 import pytest
 
-from herdr.evaluator import init_loop, write_baseline_lint
+from herdr.evaluator import capture_lint_baseline, init_loop
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "herdr-loop"
 
 
 def active_evaluation(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=T', '-c',
+                    'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                    'commit', '--allow-empty', '-qm', 'base'], check=True)
     directory = init_loop(tmp_path, "namespace ownership", test_cmd="true")
-    write_baseline_lint(directory, 1)
     script = directory / "EVALUATOR.sh"
     script.write_text("""#!/bin/bash
 mkdir -p .herdr-loop/logs
@@ -32,6 +35,11 @@ echo LINT_EXIT=1
 exit 0
 """)
     script.chmod(0o755)
+    capture_lint_baseline(
+        directory,
+        "printf '1 problem (1 error, 0 warnings)\\n'; exit 1",
+        tmp_path,
+    )
     process = subprocess.Popen([sys.executable, str(CLI), "eval", "--dir", str(tmp_path)],
                                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + 10
