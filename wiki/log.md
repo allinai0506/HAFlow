@@ -3131,3 +3131,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - Updated [[architecture]]：记录服务入口的配置/资源装配边界，以及阶段调度、普通 Task event、返工、终化、监督、协作与监听模块的实际归属；任务权威读取说明修正为 StateStore。
 - Evidence：`services/controller/README.md`、`services/controller/bindings.py`、`services/controller/coordinator_queue.py`、`services/controller/stage_delivery.py`、`services/controller/task_events.py`、`tests/test_controller_modularity.py`。
+
+## [2026-10-20] Fix | Controller 拆分后的运行指纹覆盖
+
+- 补充 PR #283 评审 P2：工作区运行的 component_versions 覆盖 controller 包、completion_controller 和 coordinator helpers，避免实现变化后指纹保持不变。
+- Evidence：`services/herdr-controller.py#main`、`tests/test_runtime_fingerprint_entrypoints.py`。
