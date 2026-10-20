@@ -3233,3 +3233,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `docs/product-specs/workflow-template-schema.md` & `docs/guides/template-authoring-guide.md`：明确 `retry_node` 为标准字段，`retry_target` 为完全等价的兼容别名。
 - Updated `ontology/objects/gate_spec.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-005 状态标记为“已解决”。
 - Evidence：`herdr/workflow.py`、`herdr/workflow_progress.py`、`services/controller/node_policy.py`、`tests/test_gate_retry_node_target.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Docs & Fix | Run 快照失败行为与 fail-closed 语义对齐收敛 (SC-006)
+
+- Updated `docs/product-specs/workflow-template-schema.md`：校准 Workflow Run Definition Snapshot 规范说明，明确当源定义文件存在时，Run 定义快照失败将直接拒绝注册（fail-closed，抛出 RuntimeError），绝不静默降级为项目共享文件，杜绝后续模板切换并发污染进行中 Run 的拓扑定义；同时校准 Git 与 context Run 均执行私有快照冻结（SC-006 已解决）。
+- Updated `herdr/projects.py`：更新 `_snapshot_workflow_definition` 的文档注释与 stderr 警告信息，消除“将继续读取项目共享 workflow.json”陈旧误导性描述，对齐 `register_workflow` fail-closed 抛错契约。
+- Updated `ontology/relations/workflow_instance_instantiates_definition.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-006 状态标记为“已解决”。
+- Added `tests/test_workflow_snapshot_failclosed.py`：新增对快照冻结成功、快照失败拒绝注册、非法定义内容拦截及参数校验的专项回归测试。
+- Evidence：`herdr/projects.py:573-577`、`tests/test_workflow_stall_regressions.py:440-453`、`tests/test_workflow_snapshot_failclosed.py`、`ontology/tests/audit_ontology.py`。
