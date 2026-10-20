@@ -160,7 +160,7 @@ Trajectory 事件复用现有 SQLite `events` 表，由 `herdr/trajectory.py` �
 典型生命周期是：
 
 1. launch 持久化 task 后写入 `run_started`、`task_started`、`agent_started`；
-2. Task 状态真实变化时写入 `task_status_changed`；
+2. Task 状态真实变化时，在底层状态转移事务内原子写入单一权威事件 `task_transition`，并在事务提交后由内核向轨迹账本记录 best-effort 轨迹事件 `task_status_changed`；
 3. evaluator 产生 `tests_completed` 事实时写入 `verification_completed`，其中
    `verification.passed` 直接使用 evaluator 的 `converged`，并保留有界的
    failing/lint/type/composite/evidence_id 字段；
@@ -170,18 +170,25 @@ Trajectory 事件复用现有 SQLite `events` 表，由 `herdr/trajectory.py` �
 这些事件与 Runtime State 分层：Runtime State 回答“现在是什么状态”，Ledger
 回答“这次执行之前发生过什么”，Observer 或后续分析器可直接按 run 重放事实流。
 
+`FACT` **状态事件命名与写入权威分层（SC-007）**：
+- **同事务权威事件 `task_transition`**：由 `state_db.py:transition_task` 在底层 SQLite `BEGIN IMMEDIATE` 强事务锁内与任务行变更同步原子写入（`events` 表，`event_type="task_transition"`，载荷含 `from_status`、`to_status`、`reason`、`forced`）。它是全系统状态流转唯一不可丢失的单一事实源，供状态机审计与 CAS 校验使用。
+- **事后最佳努力轨迹事件 `task_status_changed`**：由内核网关 `kernel.py:transition_task` 在底层状态事务成功提交之后，通过 `TrajectoryLedger` 异步/事后追加到轨迹账本（`source="trajectory"`，`event_type="task_status_changed"`）。该事件专供观察者（Trajectory Observer）与执行轨迹重放（execution trace）消费；其采取 best-effort 旁路语义（捕获异常、不阻塞流转、允许在极端进程崩溃时丢失），不作为状态流转权威。
+
 `FACT` 在 Ledger 之上，Trajectory Observer（[[trajectory-observer]]）按
 `run_id` 读取事实流 + Runtime + bounded 日志，输出结构化 Finding
 （`trajectory_findings` 表，与 events 事实表物理分离）；它只检测/解释/建议，
 绝不改变任务状态机或调度。
 
 Evidence:
+- `herdr/state_db.py:transition_task, compare_and_set_task_transition`（`task_transition` 同事务原子写入权威）
+- `herdr/kernel.py:transition_task`（`task_status_changed` best-effort 轨迹旁路写入）
 - `herdr/trajectory.py:TrajectoryEvent, TrajectoryLedger, run_id_for_task`
 - `bin/herdr-task:_launch_task`
 - `services/herdr-controller.py:check_task_tests_completed`
 - `herdr/state_db.py:record_trajectory_event, list_trajectory_events`
 - `tests/test_trajectory.py`
 - `tests/test_supervisor_tests_completed.py`
+- `tests/test_state_transition_gateway.py`
 
 ### 1.3 完成标记的折行容错契约 (Wrap-Tolerant Marker Detection)
 

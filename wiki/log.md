@@ -3241,3 +3241,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/relations/workflow_instance_instantiates_definition.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-006 状态标记为“已解决”。
 - Added `tests/test_workflow_snapshot_failclosed.py`：新增对快照冻结成功、快照失败拒绝注册、非法定义内容拦截及参数校验的专项回归测试。
 - Evidence：`herdr/projects.py:573-577`、`tests/test_workflow_stall_regressions.py:440-453`、`tests/test_workflow_snapshot_failclosed.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Docs | 状态事件命名与写入权威分层对齐 (SC-007)
+
+- Updated `wiki/task-lifecycle.md`：校准状态事件命名与写入机制，明确区分同事务强一致性事件 `task_transition` 与事后异步/旁路轨迹事件 `task_status_changed`。
+  - `task_transition`：由 `state_db.py:transition_task` 在底层 SQLite `BEGIN IMMEDIATE` 强事务锁内与任务状态更新原子追加写入，为状态机单一权威事实源；
+  - `task_status_changed`：由 `kernel.py:transition_task` 在事务提交后通过 `TrajectoryLedger` 记录到轨迹账本，遵循 best-effort 旁路语义，供轨迹重放与 Trajectory Observer 消费。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-007 状态标记为“已解决”。
+- Evidence：`herdr/state_db.py:6829-6842`、`herdr/kernel.py:206-225`、`tests/test_state_transition_gateway.py:130-135,173-180`、`ontology/tests/audit_ontology.py`。
