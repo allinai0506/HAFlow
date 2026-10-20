@@ -588,6 +588,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
                 with self.subTest(node_type=node_type, enabled=enabled), \
                      patch.dict(os.environ, {"HERDR_DIRECT_STAGE_DISPATCH": enabled}), \
                      patch.object(self.ctrl, "coordinator_pane_for_workflow", return_value=None) as coordinator, \
+                     patch.object(self.ctrl, "notify_attention", return_value=True) as notify, \
                      patch("builtins.print") as output:
                     self.ctrl._handle_coordinator_item(
                         self._item(node=_node(node_type=node_type))
@@ -599,13 +600,19 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
                         "STAGE ADVANCE BLOCKED" in str(call)
                         for call in output.call_args_list
                     ))
+                    episode = self.ctrl.attention_get("wf-1:stage_advance:test")
+                    self.assertEqual(episode["reason"], "human_decision_required")
+                    self.assertIn(f"node_type={node_type}", episode["detail"])
+                    notify.assert_called_once()
+                    self.ctrl.attention_clear("wf-1:stage_advance:test")
 
     def test_missing_item_node_resolves_native_workflow_node(self):
         item = self._item()
         item.pop("node")
         with patch.object(self.ctrl, "workflow_config_for", return_value={
             "nodes": [_node(node_type="human")],
-        }), patch.object(self.ctrl, "coordinator_pane_for_workflow", return_value=None) as coordinator:
+        }), patch.object(self.ctrl, "coordinator_pane_for_workflow", return_value=None) as coordinator, \
+             patch.object(self.ctrl, "notify_attention", return_value=True):
             self.ctrl._handle_coordinator_item(item)
         coordinator.assert_not_called()
         self.assertEqual(self.commands, [])

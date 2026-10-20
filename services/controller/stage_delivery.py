@@ -20,8 +20,28 @@ def _handle_stage_advance_item(ports, item):
     if node:
         item = dict(item, node=node)
         if node.get("node_type", "agent") != "agent":
+            workflow_id = item["workflow_id"]
+            key = f"{workflow_id}:stage_advance:{target_node_id}"
+            episode = ports.attention_get(key) or {}
+            ports.attention_note(
+                key,
+                {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+                "stage_advance",
+                reason="human_decision_required",
+                attempts=int(episode.get("attempts") or 0) + 1,
+                next_retry_at=ports.time.time() + ports.liveness.attention_retry_interval(),
+                detail=f"node_type={node.get('node_type')}; native executor unavailable",
+            )
+            ports.clear_stage_advance(workflow_id, target_node_id)
+            ports.notify_attention(
+                "Herdr Factory · 需要人工决策",
+                {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+                f"节点 {target_node_id} 类型为 {node.get('node_type')}，"
+                "没有确定性执行器；请完成决策后清除 attention 以从原节点继续。",
+                "human_decision_required",
+            )
             print(
-                f"[STAGE ADVANCE BLOCKED] workflow={item['workflow_id']} "
+                f"[STAGE ADVANCE BLOCKED] workflow={workflow_id} "
                 f"node={target_node_id} node_type={node.get('node_type')}: "
                 "native executor unavailable; manual handling required"
             )
