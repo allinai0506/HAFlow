@@ -5,6 +5,7 @@ import os
 import re
 import time
 import sys
+import hashlib
 from pathlib import Path
 
 
@@ -407,19 +408,32 @@ def _gate_verdict_file_candidates(task):
     return result
 
 
+class GateVerdictEvidence(tuple):
+    """Authenticated gate verdict evidence container compatible with legacy 4-tuple unpacking."""
+    snapshot_hash: str = ""
+
+    def __new__(cls, verdict, note, affected_ids, mtime, snapshot_hash=""):
+        obj = super().__new__(cls, (verdict, note, affected_ids, mtime))
+        obj.snapshot_hash = snapshot_hash
+        return obj
+
+
 def _authenticate_gate_verdict_evidence(task, expected_verdict=None):
     """Authenticate durable gate verdict evidence from disk for task.
 
     Verifies that a valid gate verdict file exists for the task, belongs to
     the current execution epoch, has a fresh mtime (not older than rework_started_at,
-    and not in the future beyond clock skew allowance), and matches expected_verdict.
+    and not in the future beyond clock skew allowance), matches expected_verdict,
+    and verifies SHA256 against tasks.payload_json.evidence_snapshot_hash if present.
 
-    Returns (True, (verdict, note, affected_ids, st_mtime)) if valid and matches expected_verdict.
+    Returns (True, GateVerdictEvidence(verdict, note, affected_ids, st_mtime, snapshot_hash))
+    if valid and matches expected_verdict.
     Returns (False, err_msg) if missing, stale, invalid, or mismatched.
     """
     candidates = _gate_verdict_file_candidates(task)
     rework_started = task.get("rework_started_at")
     expected_token = task.get("execution_token") or task.get("rework_request_id")
+    expected_hash = task.get("evidence_snapshot_hash")
     skew_limit = 5.0
     try:
         raw_skew = os.environ.get("HERDR_MAX_CLOCK_SKEW_SECONDS")
@@ -444,8 +458,19 @@ def _authenticate_gate_verdict_evidence(task, expected_verdict=None):
             if (st.st_mtime - now) > skew_limit:
                 last_err = f"gate verdict file {path} has future timestamp exceeding clock skew allowance ({st.st_mtime - now:.1f}s > {skew_limit}s)"
                 continue
-            with open(path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
+            with open(path, "rb") as f_raw:
+                raw_bytes = f_raw.read()
+            file_hash = hashlib.sha256(raw_bytes).hexdigest()
+            if expected_hash and file_hash != expected_hash:
+                return (
+                    False,
+                    f"gate verdict evidence {path} hash mismatch: expected {expected_hash}, got {file_hash} (tampered or corrupted)",
+                )
+            try:
+                payload = json.loads(raw_bytes.decode("utf-8"))
+            except Exception:
+                last_err = f"gate verdict file {path} is not valid UTF-8 JSON"
+                continue
             if not isinstance(payload, dict):
                 last_err = f"gate verdict file {path} is not a valid JSON dictionary"
                 continue
@@ -513,7 +538,7 @@ def _authenticate_gate_verdict_evidence(task, expected_verdict=None):
                                 file=sys.stderr,
                             )
                             affected_ids = []
-            return True, (file_v, note, affected_ids, st.st_mtime)
+            return True, GateVerdictEvidence(file_v, note, affected_ids, st.st_mtime, snapshot_hash=file_hash)
         except Exception as exc:
             last_err = f"error inspecting gate verdict candidate {path}: {exc}"
             continue

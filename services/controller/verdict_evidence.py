@@ -26,6 +26,17 @@ def _gate_verdict_file_candidates(ports, task):
 
 def _gate_verdict_file_is_fresh(ports, path, task):
     """PR #250 & Codex P1: Check if candidate verdict file belongs to current execution epoch."""
+    expected_hash = task.get("evidence_snapshot_hash")
+    if expected_hash:
+        try:
+            import hashlib
+            hl = getattr(ports, "hashlib", hashlib)
+            with open(path, "rb") as f_raw:
+                if hl.sha256(f_raw.read()).hexdigest() != expected_hash:
+                    return False
+        except Exception:
+            return False
+
     expected_token = task.get("execution_token") or task.get("rework_request_id")
     if expected_token:
         try:
@@ -227,7 +238,7 @@ def read_gate_verdict(ports, task):
 DEPENDENCIES = {'auto_verdict_enabled': ('os',),
  '_normalize_gate_verdict': ('_GATE_VERDICT_ALIASES',),
  '_gate_verdict_file_candidates': ('GATE_VERDICT_FILE', 'direct_dispatch_planner', 'os'),
- '_gate_verdict_file_is_fresh': ('json', 'os'),
+ '_gate_verdict_file_is_fresh': ('hashlib', 'json', 'os'),
  '_gate_verdict_is_fresh': ('_gate_verdict_file_candidates', '_gate_verdict_file_is_fresh',
                             '_normalize_gate_verdict', 'json', 'os'),
  '_gate_verdict_file_mtime': ('_gate_verdict_file_candidates', '_gate_verdict_file_is_fresh',

@@ -108,6 +108,7 @@ def build_status_bindings(namespace):
             clear_suppress_auto_close=namespace["_clear_suppress_auto_close"],
             sync_tasks_projection=namespace["sync_tasks_projection"],
             tasks_file=namespace.get("TASKS_FILE"),
+            gate_verdict_file_candidates=namespace.get("_gate_verdict_file_candidates"),
         )
 
     def auto_init_task_loop(

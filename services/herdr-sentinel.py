@@ -127,10 +127,18 @@ def _gate_verdict_file_candidates(task):
 def _task_has_valid_gate_verdict(task):
     rework_started = task.get("rework_started_at")
     expected_token = task.get("execution_token") or task.get("rework_request_id")
+    expected_hash = task.get("evidence_snapshot_hash")
     for path in _gate_verdict_file_candidates(task):
         try:
             if not os.path.exists(path):
                 continue
+            if expected_hash:
+                try:
+                    with open(path, "rb") as f_raw:
+                        if hashlib.sha256(f_raw.read()).hexdigest() != expected_hash:
+                            continue
+                except Exception:
+                    continue
             st = os.stat(path)
             if rework_started:
                 try:
