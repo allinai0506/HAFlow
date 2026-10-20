@@ -217,6 +217,23 @@ def test_numbered_replay_preserves_unheaded_prefix_when_entries_exist():
     assert mapping == {}
 
 
+def test_numbered_replay_deduplicates_displaced_text_prefix_on_retry():
+    base = b'## 1. old\nold body\n'
+    incoming = base + (b'NOTE\n'
+                       b'## 2. shared\nshared body\n'
+                       b'## 3. later\nlater body\n')
+    main = base + (b'## 2. shared\nshared body\n'
+                   b'## 3. later\nlater body\n')
+
+    first, _ = merge_append_only(base, main, incoming, numbered=True)
+    second, mapping = merge_append_only(base, first, incoming, numbered=True)
+
+    assert first.endswith(b'NOTE\n')
+    assert second == first
+    assert second.count(b'later body\n') == 1
+    assert mapping == {}
+
+
 def test_numbered_replay_deduplicates_prefix_before_new_entries():
     base = b'## 1. old\nold body\n'
     prefix = b'\nIMPORTANT\n\n'

@@ -76,33 +76,43 @@ def _unmatched_entry_tail(candidate_block, main_block):
     return candidate_tail if candidate_tail != main_tail else b''
 
 
-def _applied_prefix(main, candidate, candidate_entries):
+def _applied_prefix(main, candidate, candidate_entries, prefix=b''):
     """Find the longest applied candidate prefix and its unmatched separators."""
     main_entries = _numbered_entries(main)
     main_identities = [_entry_identity(main, main_entries, index)
                        for index in range(len(main_entries))]
     candidate_identities = [_entry_identity(candidate, candidate_entries, index)
                             for index in range(len(candidate_entries))]
-    best = (0, b'', None, ())
+    best = (0, b'', None, (), False)
     for start in range(len(main_identities)):
         matched = 0
         pending = []
         first_position = None
         positions = []
+        displaced_prefix = False
         for main_index in range(start, len(main_identities)):
             identity = main_identities[main_index]
+            shifted = False
+            if matched < len(candidate_identities) and identity != candidate_identities[matched]:
+                main_block = _entry_block(main, main_entries, main_index)
+                if prefix and main_block.endswith(prefix):
+                    without_prefix = main_block[:-len(prefix)].rstrip(b'\r\n')
+                    shifted = (_HEADING_LINE.sub(b'## N.', without_prefix, count=1)
+                               == candidate_identities[matched])
             if (matched < len(candidate_identities)
-                    and candidate_identities[matched] == identity):
+                    and (candidate_identities[matched] == identity or shifted)):
                 if first_position is None:
                     first_position = main_entries[main_index][1]
                 positions.append(main_entries[main_index][1])
+                displaced_prefix = displaced_prefix or shifted
                 pending.append(_unmatched_entry_tail(
                     _entry_block(candidate, candidate_entries, matched),
                     _entry_block(main, main_entries, main_index),
                 ))
                 matched += 1
         if matched > best[0]:
-            best = (matched, b''.join(pending), first_position, tuple(positions))
+            best = (matched, b''.join(pending), first_position, tuple(positions),
+                    displaced_prefix)
     return best
 
 
@@ -139,10 +149,10 @@ def merge_append_only(base, main, incoming, *, numbered=False):
         if len(added) != len(set(added)):
             raise ValueError('duplicate new lesson numbers within incoming history')
         prefix = suffix[:candidate_entries[0][1]] if candidate_entries else b''
-        applied, unmatched_separators, first_position, matched_positions = _applied_prefix(
-            main_suffix, suffix, candidate_entries)
+        (applied, unmatched_separators, first_position, matched_positions,
+         displaced_prefix) = _applied_prefix(main_suffix, suffix, candidate_entries, prefix)
         if applied and prefix:
-            prefix_applied = any(
+            prefix_applied = displaced_prefix or any(
                 position >= len(prefix)
                 and main_suffix[position - len(prefix):position] == prefix
                 for position in matched_positions
