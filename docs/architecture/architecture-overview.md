@@ -38,12 +38,11 @@ graph TD
     end
 
     subgraph Storage_Layer [3. 注册与持久化层 (~/.herdr-controller/)]
-        TasksDB[(tasks.json: 工单状态机)]
-        ProjectsDB[(projects.json: 项目空间映射)]
-        WorkflowsDB[(workflows.json: 工作流实例)]
+        StateDB[(state.db: SQLite 事务与单一事实源)]
+        JSONCompat[tasks/projects/workflows.json: 兼容导出与只读投影]
         TemplatesDB[(templates/: YAML 模板仓库)]
         SharedDocs[(workflows/<wf>/shared/: 跨节点共享文档账本)]
-        Locks[router.lock: 并发资源锁]
+        Locks[agent-router.lock: 并发资源锁]
     end
 
     subgraph Agent_Layer [4. Agent 执行与适配层]
@@ -71,7 +70,7 @@ graph TD
 - **就绪判定 (`get_ready_nodes`)**：根据已完成节点集，实时推导当前可并发派发的新就绪节点列表。
 
 ### 3.2 控制器守护进程 (`services/herdr-controller.py`)
-- **事件循环**：作为后台 LaunchAgent 运行，监控 `tasks.json`。
+- **事件循环**：作为后台 LaunchAgent 运行，监控调度事件队列与持久化状态。
 - **任务推进**：当某节点下任务完成（状态进入 `cleaned` 或 `completed`）时，结合 DAG 依赖动态推进至下一个节点。
 - **协调器通知**：向 Coordinator Pane (`wX:p1`) 注入下一步的派发指令。
 - **启动请求同步**：新 Workflow 的需求正文先写入 Workflow Registry；Deep Preflight 完成并打开 `startup_ready` 后，Controller 从 Registry 读取正文并负责首次节点通知，避免阶段事件与需求消息竞态。
@@ -95,3 +94,8 @@ graph TD
 - **provenance 与 stale**：每条记录带 node/task/agent/source/base_sha；读取时计算 stale（base 漂移作废 evidence/gate；fix-loop 作废早于作废点的目标节点条目）。
 - **权威层级**：`git commits / verify-baseline` > `controller 机器证据` > `本区文档（仅上下文，不得当作事实）`；Controller 在 direct dispatch 与总指挥消息中按节点相关度注入区块。
 - **入口**：`herdr-task note-add` / `note-list`；门禁 verdict 自动落 `kind=gate` 机器证据。
+
+### 3.7 状态存储与单一事实源 (`herdr/state_store.py`, `herdr/state_db.py`)
+- **单一事实源 (Single Source of Truth)**：运行时所有状态读写均经由 `herdr.state_store.StateStore`（如 `SQLiteStateStore`）及 `herdr.state_db` 访问 SQLite 数据库（`~/.herdr-controller/state.db`），启用 WAL 模式保证跨进程与多线程事务原子性、并发一致性与崩溃安全。
+- **JSON 兼容层 (Compatibility & Export Projection)**：历史遗留的 `tasks.json`、`projects.json`、`workflows.json` 仅作为导出、调试与旧工具向后兼容的只读/单向同步投影，严禁直接作为运行时状态权威写入或决策来源。
+- **全局一致性**：调度器、CLI、Controller 与 Console 统一以 SQLite 表（`tasks`、`workflows`、`projects`、`trajectory_events`、`evidence`）为权威事实源。

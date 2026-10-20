@@ -51,7 +51,7 @@ flowchart TD
 
 ## 3. 并发控制与预占锁 (Reservation)
 
-为了避免多任务瞬间同时派发导致所有 Task 争抢同一个 Agent，系统在 `~/.herdr-controller/router-reservations.json` 中实现了带租期 (TTL) 的预占锁机制：
+为了避免多任务瞬间同时派发导致所有 Task 争抢同一个 Agent，系统在 `~/.herdr-controller/agent-reservations.json` 中实现了带租期 (TTL) 的预占锁机制：
 - 当 Router 选中某 Agent 时，自动为该任务登记带时间戳的预占记录；
 - 在后续任务路由计算负载时，将活跃任务数 + 预占任务数合并计算；
 - 任务正式启动或超时释放时自动解除预占。
