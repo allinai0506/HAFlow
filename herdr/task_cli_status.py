@@ -13,7 +13,8 @@ def set_task_status(task_id, new_status, verdict=None, note=None, affected_task_
                     active_task_statuses, is_gate_task, capture_verified_candidate,
                     enforce_wrapup_review_closure, authenticate_gate_verdict_evidence,
                     record_gate_note, clear_suppress_auto_close,
-                    sync_tasks_projection, tasks_file=None):
+                    sync_tasks_projection, tasks_file=None,
+                    gate_verdict_file_candidates=None):
 
     data = load_tasks()
     task = find_task(data, task_id)
@@ -77,6 +78,26 @@ def set_task_status(task_id, new_status, verdict=None, note=None, affected_task_
             )
             sys.exit(2)
 
+    # ADR-0006 & OEP-0002 (D2): Authenticate candidate gate verdict file and bind immutable evidence hash
+    if verdict in ("pass", "blocked"):
+        cand_func = gate_verdict_file_candidates
+        if cand_func is None:
+            from herdr.task_cli_verification import _gate_verdict_file_candidates as cand_func
+        existing_candidates = [p for p in cand_func(task) if os.path.exists(p)]
+        if existing_candidates:
+            ok, res_or_err = authenticate_gate_verdict_evidence(
+                task, expected_verdict=verdict
+            )
+            if not ok:
+                print(
+                    f"[VERDICT REFUSED] task {task_id}: {res_or_err}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            snap_hash = getattr(res_or_err, "snapshot_hash", "")
+            if snap_hash:
+                task["evidence_snapshot_hash"] = snap_hash
+
     if new_status not in transitions:
         print(f"Invalid status: {new_status}")
         sys.exit(1)
@@ -113,6 +134,8 @@ def set_task_status(task_id, new_status, verdict=None, note=None, affected_task_
                 updates["stage_verdict_note"] = note
             if verdict:
                 updates["stage_verdict_affected_task_ids"] = list(affected_ids)
+            if task.get("evidence_snapshot_hash"):
+                updates["evidence_snapshot_hash"] = task["evidence_snapshot_hash"]
             store = get_store()
             try:
                 from herdr import kernel
@@ -173,6 +196,8 @@ def set_task_status(task_id, new_status, verdict=None, note=None, affected_task_
         metadata["stage_verdict_note"] = note
     if verdict:
         metadata["stage_verdict_affected_task_ids"] = list(affected_ids)
+    if task.get("evidence_snapshot_hash"):
+        metadata["evidence_snapshot_hash"] = task["evidence_snapshot_hash"]
 
     expected_status = old_status if force_transition else None
     store = get_store()
@@ -223,6 +248,10 @@ def set_task_status(task_id, new_status, verdict=None, note=None, affected_task_
             sys.exit(2)
         file_v, file_note, file_aff, file_mtime = res_or_err
         metadata["gate_verdict_evidence_mtime"] = file_mtime
+        snap_hash = getattr(res_or_err, "snapshot_hash", "")
+        if snap_hash:
+            metadata["evidence_snapshot_hash"] = snap_hash
+            task["evidence_snapshot_hash"] = snap_hash
         if not note and file_note:
             metadata["stage_verdict_note"] = file_note
         if file_v == "blocked" and file_aff and not affected_ids:
@@ -321,6 +350,8 @@ def adopt_task_verdict(task_id, verdict=None, note=None, operator="human", as_js
         "affected_task_ids": affected_ids,
         "operator": operator,
     }
+    if task.get("evidence_snapshot_hash"):
+        result["evidence_snapshot_hash"] = task["evidence_snapshot_hash"]
     if as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:

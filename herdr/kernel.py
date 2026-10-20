@@ -847,6 +847,7 @@ def bypass_task_gate(
     records trajectory audit event, and appends a shared workflow note.
     """
     import uuid
+    import hashlib
     from datetime import datetime, timezone
     from .direct_dispatch import gate_verdict_path
     from . import workflow_docs
@@ -901,12 +902,28 @@ def bypass_task_gate(
     if note:
         verdict_note += f" ({note})"
 
+    v_data = {
+        "verdict": "pass",
+        "note": verdict_note,
+        "bypass": receipt,
+    }
+    if task.get("execution_token"):
+        v_data["execution_token"] = task.get("execution_token")
+    if task.get("rework_request_id"):
+        v_data["rework_request_id"] = task.get("rework_request_id")
+    if task.get("rework_token"):
+        v_data["rework_token"] = task.get("rework_token")
+
+    v_bytes = json.dumps(v_data, indent=2, ensure_ascii=False).encode("utf-8")
+    snapshot_hash = hashlib.sha256(v_bytes).hexdigest()
+
     metadata = {
         "stage_verdict": "pass",
         "stage_verdict_note": verdict_note,
         "blocker": None,
         "gate_bypassed": True,
         "gate_bypass": receipt,
+        "evidence_snapshot_hash": snapshot_hash,
     }
     if new_status == "completed":
         metadata["failure_reason"] = None
@@ -957,24 +974,13 @@ def bypass_task_gate(
     try:
         v_path = Path(gate_verdict_path(task_id))
         v_path.parent.mkdir(parents=True, exist_ok=True)
-        v_data = {
-            "verdict": "pass",
-            "note": verdict_note,
-            "bypass": receipt,
-        }
-        if task.get("execution_token"):
-            v_data["execution_token"] = task.get("execution_token")
-        if task.get("rework_request_id"):
-            v_data["rework_request_id"] = task.get("rework_request_id")
-        if task.get("rework_token"):
-            v_data["rework_token"] = task.get("rework_token")
-        v_path.write_text(json.dumps(v_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        v_path.write_bytes(v_bytes)
         clone_path = task.get("clone_path")
         if clone_path:
             try:
                 c_path = Path(clone_path) / ".herdr" / "gate-verdict.json"
                 c_path.parent.mkdir(parents=True, exist_ok=True)
-                c_path.write_text(json.dumps(v_data, indent=2, ensure_ascii=False), encoding="utf-8")
+                c_path.write_bytes(v_bytes)
             except Exception:
                 pass
     except Exception:

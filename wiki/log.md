@@ -8,6 +8,26 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-20] feat | D2 门禁对象解耦与双权威消除：单向不可变证据快照哈希强引用与调度权威收敛 (ADR-0006 & OEP-0002)
+
+- 背景：
+  1. HAFlow 在门禁执行层与规格层存在历史混淆（语义冲突 SC-012）：门禁规格为节点级（GateSpec），门禁裁决为任务执行事实（GateVerdict）。原系统在数据库任务行 `tasks.stage_verdict` 与磁盘工件 `~/.herdr-controller/gate-verdicts/<task_id>.json` 间存在双重事实源竞争，缺乏排他性权威与防篡改单向凭据强引用；
+  2. fix-loop 回流重试中，若以节点为标识记录裁决，多代任务历史结论易发生相互覆盖；外部快照若遭篡改可能反向影响系统判断。
+- 变更：
+  1. **实体解耦与权威源确立（ADR-0006）**：
+     - 确立数据库 `tasks.stage_verdict`（及同事务 `WorkflowEvent`）为全系统唯一调度推进事实源；
+     - 磁盘快照 `~/.herdr-controller/gate-verdicts/<task_id>.json` 确立为只读不可变佐证凭据，由主键 `task_id` 强隔离；
+  2. **证据快照 SHA256 单向防篡改强引用**：
+     - `herdr/task_cli_verification.py`：新增 `GateVerdictEvidence` 容器（兼容 legacy 4 元组解包），在 `_authenticate_gate_verdict_evidence` 中实时计算并核验 SHA256 哈希；一旦与 `tasks.payload_json.evidence_snapshot_hash` 不匹配或文件损坏，立即 fail-closed 阻断；
+     - `herdr/task_cli_status.py`：在 `set_task_status`、`adopt_task_verdict` 及 watchdog 恢复路径中，自动将证据快照哈希作为权威字段写入任务行与事件流元数据；
+     - `herdr/kernel.py:bypass_task_gate`：在特权放行流转前原子计算快照 SHA256 并持久化至 DB，随后写盘，杜绝文件与 DB 记录脱节；
+     - `services/controller/verdict_evidence.py` 与 `services/herdr-sentinel.py`：在证据新鲜度与有效性核验中，增加对 `evidence_snapshot_hash` 的一致性守卫。
+- 证据：
+  1. `tests/test_d2_gate_verdict_hash.py` 新增 5 项专项测试全量通过：涵盖哈希自动入库、磁盘篡改 fail-closed、损坏文件阻断、bypass 原子哈希绑定与多代 fix-loop 任务强隔离；
+  2. 既有门禁、验收与返工测试套件（`test_task_cli_status.py`、`test_issue_250_codex_p1_p2_fixes.py`、`test_auto_acceptance.py`、`test_task_bypass_gate.py`、`test_selective_replan_core.py` 共 168 项）全量 100% PASS；
+  3. 本体资产机械审计 `python3 ontology/tests/audit_ontology.py .` 严格保持 `MAJOR=0, MINOR=0, INFO=2` (Exit 0)；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警通过。
+
 ## [2026-10-19] fix | 严格守护 receipt-v1 返工回执校验、保留采纳授权快照 CAS 版本 (PR #266 Codex Review Round 6)
 
 - 背景：
