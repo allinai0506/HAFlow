@@ -475,7 +475,7 @@ def _snapshot_workflow_definition(workflow_id, source_file, sanitize=True):
     项目共享 workflow.json 代表"下一次 Workflow 用的当前模板"，会在模板切换时被覆盖；
     每个 Workflow Run 的执行定义必须创建即冻结。复用 workflow 级根目录
     （~/.herdr-controller/workflows/<workflow_id>/，与 shared/ 同级互不干扰）。
-    任何失败都回退旧行为（Run 继续读共享文件）并向 stderr 告警，绝不静默、绝不阻断创建。
+    任何失败都向 stderr 告警并返回 None（由 register_workflow 遵循 fail-closed 契约直接拒绝注册，绝不静默降级）。
     """
     reason = None
     if not source_file:
@@ -501,7 +501,7 @@ def _snapshot_workflow_definition(workflow_id, source_file, sanitize=True):
         reason = str(exc)
     print(
         f"warning: Workflow {workflow_id} 定义快照失败（{reason}），"
-        f"本次 Run 将继续读取项目共享 workflow.json，模板切换后其执行定义可能被覆盖。",
+        f"调用方将拒绝该 Run 注册（fail-closed 保护）。",
         file=sys.stderr,
     )
     return None
