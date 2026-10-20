@@ -13,8 +13,8 @@ evidence:
   locator: L128-168, L171-219
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: completion 判定 L3303-3345
+  source: services/controller/stage_state.py
+  locator: is_node_complete L146-188
   confidence: high
 outputs:
 - satisfied

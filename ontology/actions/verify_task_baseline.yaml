@@ -40,6 +40,6 @@ evidence:
   locator: verify_baseline L11-300
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: auto-accept 消费基线证据 L8004-8094
+  source: services/controller/auto_acceptance.py
+  locator: task_changes_recorded L15-40 / try_auto_accept L42-85
   confidence: high

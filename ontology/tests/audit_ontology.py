@@ -18,6 +18,7 @@ Usage: audit_ontology.py <repo-root>
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from collections import Counter
@@ -182,6 +183,31 @@ def python_op_resolves(dotted: str) -> bool:
     return False
 
 
+def controller_definitions(entry: Path) -> set[str]:
+    """Resolve only operations actually registered by the service assembly."""
+    tree = ast.parse(entry.read_text(encoding="utf-8"))
+    definitions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+    for node in tree.body:
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "install_modules"):
+            continue
+        for name in ast.literal_eval(node.value.args[1]):
+            if not re.fullmatch(r"[a-z_]+", name):
+                continue
+            path = entry.parent / "controller" / f"{name}.py"
+            if not path.is_file():
+                continue
+            module = ast.parse(path.read_text(encoding="utf-8"))
+            implemented = {part.name for part in module.body if isinstance(part, ast.FunctionDef)}
+            for part in module.body:
+                if (isinstance(part, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "DEPENDENCIES"
+                                for target in part.targets)):
+                    definitions.update(implemented.intersection(ast.literal_eval(part.value)))
+    return definitions
+
+
 def main() -> int:
     sys.path.insert(0, str(REPO))
     from herdr.transitions import TASK_TRANSITIONS, WORKFLOW_TRANSITIONS
@@ -189,8 +215,7 @@ def main() -> int:
     connectors = {c["id"]: c for _, c in items("connectors")}
     task_subs = subcommands(TASK_CLI)
     factory_subs = subcommands(FACTORY_CLI)
-    controller_defs = set(re.findall(r"^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
-                                     CONTROLLER.read_text(encoding="utf-8", errors="ignore"), re.M))
+    controller_defs = controller_definitions(CONTROLLER)
 
     # E, R
     for cat in ("objects", "relations", "states", "rules", "actions", "policies",

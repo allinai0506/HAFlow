@@ -56,8 +56,8 @@ evidence:
   locator: project_for_tasks L76-114 / item 字段 L341-357 / git_commit 选择 L777-821
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: check_task_deliverables_ready L8579-8616 / gate 标签语义 L8417-8432
+  source: services/controller/auto_acceptance.py
+  locator: check_task_deliverables_ready L87-124
   confidence: high
 - kind: implemented
   source: services/herdr-worker.py

@@ -177,7 +177,13 @@ def _source(name):
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    return (root / "services" / name).read_text(encoding="utf-8")
+    source = (root / "services" / name).read_text(encoding="utf-8")
+    if name == "herdr-controller.py":
+        source += "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (root / "services" / "controller").glob("*.py")
+        )
+    return source
 
 
 @pytest.mark.parametrize("daemon", DAEMONS)

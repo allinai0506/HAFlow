@@ -3126,3 +3126,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[task-lifecycle]]：修正 Task CLI 模块边界，记录 475 行入口、parser/entry/command 分发、各命令族 binding factory 与 owner 模块职责。
 - 追加 `docs/lessons/lessons-learned.md` §177：抽取大型 CLI 时通过实时 namespace/deps 保留动态调用 seam，并将 AST/patch 测试迁移到真实 owner。
 - Evidence：`bin/herdr-task#main`、`herdr/task_cli_entry.py#main`、`herdr/task_cli_*_bindings.py`、`tests/test_task_cli_entry.py`、`tests/test_task_cli_workflow.py`。
+
+## [2026-10-20] Refactor | Controller 按职责拆分并保留服务入口兼容
+
+- Updated [[architecture]]：记录服务入口的配置/资源装配边界，以及阶段调度、普通 Task event、返工、终化、监督、协作与监听模块的实际归属；任务权威读取说明修正为 StateStore。
+- Evidence：`services/controller/README.md`、`services/controller/bindings.py`、`services/controller/coordinator_queue.py`、`services/controller/stage_delivery.py`、`services/controller/task_events.py`、`tests/test_controller_modularity.py`。

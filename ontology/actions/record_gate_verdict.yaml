@@ -48,8 +48,8 @@ evidence:
   locator: set_task_status L9-130（verdict 规则 L25-45）
   confidence: high
 - kind: implemented
-  source: services/herdr-controller.py
-  locator: try_auto_verdict L8460-8501
+  source: services/controller/auto_verdict.py
+  locator: try_auto_verdict L99-165
   confidence: high
 - kind: implemented
   source: herdr/direct_dispatch.py

@@ -7,6 +7,7 @@ Tests safety constraints:
    different receivers, comments, methods in unrelated classes).
 """
 
+import ast
 import tempfile
 import unittest
 from pathlib import Path
@@ -329,6 +330,11 @@ class FindingVerifierSafetyTestCase(unittest.TestCase):
 
     def test_verify_findings_batch_and_zero_tp_rejection_guarantee(self):
         """Batch verification must reject confirmed FPs while retaining 100% of TPs and edge cases."""
+        transport = Path("services/controller/coordinator_transport.py")
+        status = next(
+            node for node in ast.parse((HERDR_ROOT / transport).read_text()).body
+            if isinstance(node, ast.FunctionDef) and node.name == "coordinator_status"
+        )
         test_findings = [
             # 1. Confirmed FP: args._launch_intent in same scope
             {
@@ -353,9 +359,9 @@ class FindingVerifierSafetyTestCase(unittest.TestCase):
             },
             # 4. Known TP: timeout policy (must be retained as uncertain)
             {
-                "file": "services/herdr-controller.py",
-                "start_line": 5398,
-                "end_line": 5422,
+                "file": transport.as_posix(),
+                "start_line": status.lineno,
+                "end_line": status.end_lineno,
                 "message": "Fallback returns unknown on exception rather than raising",
             },
         ]
