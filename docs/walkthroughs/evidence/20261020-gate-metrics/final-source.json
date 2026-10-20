@@ -1,6 +1,6 @@
 {
   "base": "df4b3cf",
-  "source_sha256": "b562ed765e37eaff6eda51218b6ef154ff74f6d308f3d3664e2b9eb730274a6b",
+  "source_sha256": "be5e24db77ec4662c8adc12ee28ce358cebdfa25c19bea57665e75cc00ae72b3",
   "files": {
     "bin/herdr-loop": "aeea6686c8945d3dde7c003c5b2e4c1febf96a87fe77491d7c2fce00303d8ff0",
     "console/http_server.py": "0c5be5191bc4db3413ed4d1a607572e586b1344eecbf00d8a56b9978d9dc2198",
@@ -30,6 +30,7 @@
     "tests/test_lint_execution_failure_gate.py": "e45295f003f394f0bdb9e416f36335d086e68e44e808f60ac26144b083ac250b",
     "tests/test_loop_init_baseline_atomicity.py": "3d2f7804a96bd1ad9f61bada22ae12a6ccd98691e13b2071b74dc2dfd21407cf",
     "tests/test_replay_append_only.py": "411c27f1031d0537a6c1a92864ae0b69143eeae0837a154909d2f09360dd692a",
+    "tests/test_task_baseline_process_cleanup.py": "7e6bca613f5c3be7ebcfb10d678b31170184829a5b5282f23246845859d335a8",
     "tests/test_t3_probes.py": "dca3942a73d5f4cc816445317631731923a0eb956bd80997a24c7ee991710ed2"
   }
 }
