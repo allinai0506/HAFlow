@@ -496,6 +496,21 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
             "workflow_configuration_missing",
         )
 
+    def test_untracked_launch_timeout_never_falls_through_to_coordinator(self):
+        """Once transport starts, an unknown outcome belongs to recovery."""
+        self.commands.clear()
+        with patch.object(
+            self.ctrl.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["herdr-task", "launch"], 45),
+        ), patch.object(self.ctrl, "attention_get", return_value={}), \
+             patch.object(self.ctrl, "attention_note") as note:
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
+        self.assertEqual(note.call_args.kwargs["reason"], "direct_dispatch_delivery_unknown")
+
     def test_direct_advance_triggers_coordinator_compaction(self):
         # 2026-09-17 效率优化:阶段推进成功即触发总指挥 /compact 注入
         # (上下文卫生,压长回合耗时)。
@@ -530,7 +545,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("共享文档区", prompt)
         self.assertIn("共享规格 MARKER", prompt)
 
-    def test_launch_timeout_is_bounded_and_falls_back(self):
+    def test_launch_timeout_is_bounded_and_blocks_second_transport(self):
         seen_timeouts = []
 
         def hung(cmd, **kwargs):
@@ -539,13 +554,13 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
 
         with patch.object(self.ctrl.subprocess, "run", side_effect=hung):
             result = self.ctrl.try_direct_stage_advance(self._item())
-        self.assertFalse(result)
-        self.assertEqual(self.notified, [])
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
         self.assertEqual(self.commands, [])
         self.assertTrue(seen_timeouts)
         self.assertTrue(all(t is not None and t > 0 for t in seen_timeouts))
 
-    def test_partial_launch_timeout_reports_partial(self):
+    def test_partial_launch_timeout_requires_reconciliation_without_fallback(self):
         node = _node(
             id="requirements",
             agent_policy={
@@ -568,11 +583,11 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         with patch.object(self.ctrl.subprocess, "run", side_effect=flaky), \
              patch("builtins.print") as output:
             result = self.ctrl.try_direct_stage_advance(self._item(node=node))
-        self.assertFalse(result)
-        self.assertEqual(self.notified, [])
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
         printed = " ".join(str(c) for c in output.call_args_list)
-        self.assertIn("PARTIAL", printed)
-        self.assertIn("wf-1-requirements-executor", printed)
+        self.assertIn("DIRECT DISPATCH UNKNOWN", printed)
+        self.assertIn("wf-1-requirements-challenger", printed)
 
     def test_dynamic_direct_dispatch_does_not_launch(self):
         result = self.ctrl.try_direct_stage_advance(self._item(node=_node(
@@ -618,15 +633,15 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertEqual(self.commands, [])
         self.assertEqual(self.notified, [])
 
-    def test_launch_failure_falls_back_to_coordinator(self):
+    def test_launch_failure_blocks_second_transport(self):
         with patch.object(
             self.ctrl.subprocess,
             "run",
             return_value=subprocess.CompletedProcess([], 1, "", "boom"),
         ):
             result = self.ctrl.try_direct_stage_advance(self._item())
-        self.assertFalse(result)
-        self.assertEqual(self.notified, [])
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
 
     def test_wait_mode_marks_notified_without_launch(self):
         with patch.object(

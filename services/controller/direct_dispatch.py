@@ -381,6 +381,28 @@ def try_direct_stage_advance(ports, item):
                 )
                 ports.mark_stage_advance_notified(workflow_id, ready_id)
                 return True
+            # Legacy events may not carry a durable node-dispatch operation.
+            # Once the launch subprocess has run, timeout/non-zero cannot prove
+            # absence of side effects. Persist an explicit intervention and
+            # consume the event; falling through to coordinator intake could
+            # send the same node through a second transport.
+            if dispatch_operation_id is None:
+                key = f"{workflow_id}:stage_advance:{ready_id}"
+                episode = ports.attention_get(key) or {}
+                ports.attention_note(
+                    key,
+                    {"task_id": f"stage_advance:{ready_id}", "workflow_id": workflow_id},
+                    "stage_advance",
+                    reason="direct_dispatch_delivery_unknown",
+                    attempts=int(episode.get("attempts") or 0) + 1,
+                    detail=(output or "launch transport timed out")[:500],
+                )
+                ports.mark_stage_advance_notified(workflow_id, ready_id)
+                print(
+                    f"[DIRECT DISPATCH UNKNOWN] workflow={workflow_id} "
+                    f"node={ready_id}: manual reconciliation required"
+                )
+                return True
             if launched:
                 print(
                     f"[DIRECT DISPATCH PARTIAL] "
