@@ -19,7 +19,7 @@ def resolve_gate_config(ports, node, node_id):
         gate = {}
 
     return {
-        "retry_node": gate.get("retry_node", "implementation"),
+        "retry_node": gate.get("retry_node") or gate.get("retry_target") or "implementation",
         "max_loops": int(gate.get("max_loops", ports.FIX_LOOP_MAX)),
     }
 

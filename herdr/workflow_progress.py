@@ -56,7 +56,7 @@ def _gate(nodes, node_id):
         if gate is False:
             return None
         if gate:
-            return gate.get('retry_node', 'implementation') if isinstance(gate, dict) else None
+            return (gate.get('retry_node') or gate.get('retry_target') or 'implementation') if isinstance(gate, dict) else None
     return _DEFAULT_GATES.get(node_id)
 
 

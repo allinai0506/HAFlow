@@ -155,7 +155,7 @@ HAFlow 内置了两套核心软件开发工作流模板，面向不同复杂度�
 - **选用 `software-development-v1`**：当任务存在需求不确定性、涉及复杂的业务规则、或需要拆分成多个子任务由不同工位并发执行时，必须经过 `requirements` 和 `plan` 的双角色（主起草 + 对抗审查）推演，保障技术架构的稳健性。
 
 ### 3.4 门禁配置与交付契约规范
-1. **显式声明 `gate`**：若节点属于验证或评审门禁（非默认的 `test`/`review`/`wrapup` 命名，如 `cleanroom_test`），必须显式声明 `gate: {retry_node: <target_node>}`，否则 Controller 无法将其识别为门禁节点，阻断自动裁决与 fix-loop 回流。
+1. **显式声明 `gate`**：若节点属于验证或评审门禁（非默认的 `test`/`review`/`wrapup` 命名，如 `cleanroom_test`），必须显式声明 `gate: {retry_node: <target_node>}`（亦支持兼容别名 `retry_target`），否则 Controller 无法将其识别为门禁节点，阻断自动裁决与 fix-loop 回流。
 2. **门禁结论契约**：门禁节点的机器可采纳结论严格受限于 `HERDR_GATE_VERDICT: pass` 或 `HERDR_GATE_VERDICT: blocked`（二选一），严禁使用未经机器注册的自定义状态（如 `REWORK` 或 `FAIL`）。
 3. **收尾节点规则**：收尾节点必须使用 `six-step-finish`，通过 `herdr-task create-pr` 建立交付 PR；严禁在工作流内自动执行 PR 合并，明确区分“工作流交付收尾”与“代码合入”。
 

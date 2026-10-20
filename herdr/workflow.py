@@ -118,14 +118,15 @@ def validate_workflow_dag(nodes: List[Dict[str, Any]]) -> None:
                     f"Node '{node_id}' depends on unknown node '{dep}'."
                 )
 
-        # Validate gate retry_target and command if present
+        # Validate gate retry_target / retry_node and command if present
         gate = node.get("gate") or {}
         if isinstance(gate, dict):
-            retry_target = gate.get("retry_target")
-            if retry_target and retry_target not in node_map:
-                raise ValueError(
-                    f"Node '{node_id}' gate retry_target references unknown node '{retry_target}'."
-                )
+            for field in ("retry_target", "retry_node"):
+                retry_dest = gate.get(field)
+                if retry_dest and retry_dest not in node_map:
+                    raise ValueError(
+                        f"Node '{node_id}' gate {field} references unknown node '{retry_dest}'."
+                    )
             gate_cmd = gate.get("command") or gate.get("auto_criteria")
             if gate_cmd and isinstance(gate_cmd, str) and ("awk" in gate_cmd or "$" in gate_cmd):
                 from herdr.gate_validator import validate_gate_command
