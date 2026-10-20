@@ -82,3 +82,9 @@ python3 scripts/replay-append-only.py --repo <repo> --base <共同基线SHA> \
 ## PR 交付入口
 
 用户随后授权创建 PR，继续使用同一隔离分支。平台入口 `bin/herdr-task create-pr local-gate-metrics-verification --title ...` 在隔离验收 DB 返回 `[PR PUBLICATION REFUSED] task must be integrated before PR publication`（exit 2）。该记录用于本地基线验收，不是原工作流的 wrapup Task；因此按项目允许的 forge 回退使用 `gh pr create`。不制造 integrated/acceptance 状态，也不冒用原工作流身份。本次授权包含提交、推送与建 PR，未包含合并、部署或服务重启。
+
+## PR #289 审查修复
+
+Codex P1 指出升级数据库仍可能保留不含 `generation` 的旧版 `workflow_close_operations`。原 reconcile 只检查表存在便按新列查询，会以 `no such column: generation` 中断 Controller/CLI。修复后的只读路径先读取列集合：新表按当前 generation 精确匹配，旧表按 workflow/status 读取历史 completed receipt 并继续报告状态不一致，不在 reconcile 中执行迁移。
+
+GitHub 全量 CI 同时暴露 9 个旧测试夹具与新合同不一致：close 测试 mock 掉了完成状态持久化，却仍要求发布 completed receipt；evaluator 测试直接写未绑定 baseline，却仍要求抵扣 lint 债。测试现保留原关注点，同时执行真实状态副作用或通过真实 lint capture 绑定命令/evaluator 合同。没有放宽生产门禁。审查修复专项覆盖 16 个相关模块，229 passed、10 subtests；CI 报出的 10 个失败与新增 legacy schema 回归合计 13 项单独通过。最终源码指纹已更新，等待新提交对应的 GitHub 全量 CI 与 Codex 复审。

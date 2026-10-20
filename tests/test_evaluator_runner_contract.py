@@ -7,7 +7,13 @@ import shlex
 
 import pytest
 
-from herdr.evaluator import MetricVector, init_loop, is_converged, write_baseline_lint, write_state
+from herdr.evaluator import (
+    MetricVector,
+    capture_lint_baseline,
+    init_loop,
+    is_converged,
+    write_state,
+)
 
 
 @pytest.fixture
@@ -94,7 +100,11 @@ def test_normal_generated_three_step_runner_converges(tmp_path, loop_cli):
 def test_recorded_lint_baseline_still_permits_complete_execution(tmp_path, loop_cli):
     directory = controlled_runner(tmp_path, receipts=["TEST_EXIT=0", "LINT_EXIT=1"],
                                   lint_output="1 problem (1 error, 0 warnings)\n")
-    write_baseline_lint(directory, 1)
+    capture_lint_baseline(
+        directory,
+        "printf '1 problem (1 error, 0 warnings)\\n'; exit 1",
+        tmp_path,
+    )
     metrics, converged, _ = loop_cli.run_evaluation(tmp_path)
     assert metrics.lint_errors == 1
     assert metrics.new_lint_errors == 0

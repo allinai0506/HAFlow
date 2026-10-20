@@ -1,5 +1,6 @@
 """Regression evidence for the 2026-10-20 handoff, using isolated SQLite."""
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -169,6 +170,27 @@ def test_reconcile_reports_completed_close_receipt_with_paused_workflow(store):
     assert result['status'] == 'paused'
     assert result['inconsistencies'][0]['reason'] == 'close_receipt_status_mismatch'
     assert result['inconsistencies'][0]['action_required']
+
+
+def test_reconcile_reads_legacy_close_receipt_without_generation_column(store):
+    from herdr.reconciliation import reconcile_workflow_state
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            'CREATE TABLE workflow_close_operations ('
+            'workflow_id TEXT PRIMARY KEY, operation_id TEXT UNIQUE NOT NULL, '
+            'state TEXT NOT NULL, options TEXT NOT NULL, receipt TEXT)'
+        )
+        conn.execute(
+            'INSERT INTO workflow_close_operations VALUES (?,?,?,?,?)',
+            ('wf', 'legacy-close', 'completed', '{}', '{"workflow_id":"wf"}'),
+        )
+    store.save_workflow({**store.get_workflow('wf'), 'status': 'paused'})
+
+    result = reconcile_workflow_state('wf', store=store)
+
+    assert result['status'] == 'paused'
+    assert result['inconsistencies'][0]['operation_id'] == 'legacy-close'
 
 
 def test_controller_join_wait_persists_stall_without_acceptance(store, monkeypatch):

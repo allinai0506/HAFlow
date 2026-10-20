@@ -166,9 +166,26 @@ def reconcile_workflow_state(
         conn = state_db.get_readonly_db_connection(db_path)
         try:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_close_operations'").fetchone():
-                generation = json.dumps([workflow.get('execution_id'), workflow.get('reopened_at')], sort_keys=True)
-                receipt = conn.execute("SELECT operation_id FROM workflow_close_operations "
-                    "WHERE workflow_id=? AND generation=? AND state='completed'", (workflow_id, generation)).fetchone()
+                columns = {
+                    row['name']
+                    for row in conn.execute('PRAGMA table_info(workflow_close_operations)')
+                }
+                if 'generation' in columns:
+                    generation = json.dumps(
+                        [workflow.get('execution_id'), workflow.get('reopened_at')],
+                        sort_keys=True,
+                    )
+                    receipt = conn.execute(
+                        "SELECT operation_id FROM workflow_close_operations "
+                        "WHERE workflow_id=? AND generation=? AND state='completed'",
+                        (workflow_id, generation),
+                    ).fetchone()
+                else:
+                    receipt = conn.execute(
+                        "SELECT operation_id FROM workflow_close_operations "
+                        "WHERE workflow_id=? AND state='completed'",
+                        (workflow_id,),
+                    ).fetchone()
                 if receipt and current_status != 'completed':
                     inconsistencies.append({'reason': 'close_receipt_status_mismatch',
                         'operation_id': receipt['operation_id'], 'workflow_status': current_status,

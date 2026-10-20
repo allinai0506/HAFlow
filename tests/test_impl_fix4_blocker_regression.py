@@ -543,7 +543,13 @@ def test_fr5_legacy_force_remains_a_direct_cli_choice(tmp_path):
         module, "_workflow_stage_tabs",
         return_value={"tab_ids": [], "workspace_id": None, "coordinator_pane": None,
                       "owned_pane_ids": set()},
-    ), patch.object(module, "_mark_workflow_completed"), patch.object(
+    ), patch.object(
+        module,
+        "_mark_workflow_completed",
+        side_effect=lambda *_a, **_k: store.save_workflow(
+            {**store.get_workflow("wf-force"), "status": "completed"}
+        ),
+    ), patch.object(
         module, "stage_reset"
     ):
         report = module.close_workflow("wf-force", force=True, confirm_force=False)

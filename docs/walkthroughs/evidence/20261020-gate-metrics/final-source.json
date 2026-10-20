@@ -1,6 +1,6 @@
 {
   "base": "df4b3cf",
-  "source_sha256": "332b58d52e3f7330e000d18a7e7826dde6a6da907681c30879607703d2e75d98",
+  "source_sha256": "f16ffeacf97b3663251143e6eb311ddbb46b4a396b41a246c114262b896b96d2",
   "files": {
     "bin/herdr-loop": "aeea6686c8945d3dde7c003c5b2e4c1febf96a87fe77491d7c2fce00303d8ff0",
     "console/http_server.py": "0c5be5191bc4db3413ed4d1a607572e586b1344eecbf00d8a56b9978d9dc2198",
@@ -8,7 +8,7 @@
     "herdr/evaluator.py": "8d94ae1d568dc6a2b8bfb9c66c12150ba3c501509f5c0a856753805a2c86b811",
     "herdr/gate_wait.py": "70fc33c33f121359156028ec5efa0be73632d7238a3d7f7b0f365dd471ad3570",
     "herdr/kernel.py": "b5136ece0b012cc35dfa9d7f0e8cc64bb8a321134181604549bc6c25e81abee2",
-    "herdr/reconciliation.py": "e2af01b061c4e29ee17cbd2e05bb55a96d9a1d715ea46e04e5d6e86fdb32fdab",
+    "herdr/reconciliation.py": "b0c16188418935fc15608a1f12637834879b74ae9e50659e7bf395f3b61110c8",
     "herdr/recovery_store.py": "593db68e70c400b548993892aeca735793080b8e94f1a14398702bae64ec696d",
     "herdr/replay_append_only.py": "da3b14afadaa3af9653c06aa1ed133279d673751f1b74f95feefabbe4c29416a",
     "herdr/state_db.py": "fb06b37b9715b76cf2a32a71fec8618e5e2c5957c1b068369bdbf12fdc4d103a",
@@ -19,7 +19,14 @@
     "scripts/replay-append-only.py": "1435eb6a306a9ce29d3faf3c6b2f95ecefd4bee1a75d5db836262416300170dc",
     "services/controller/join_gates.py": "76998271af7d97b69a3ae3ee8f871c51b5776da1790d281e7d548bb885da9c9d",
     "tests/test_dispatch_baseline_failfast.py": "3895332ce0cbfe16cb8a126b2b20b7fc1c1c3bef10332b97019d383d30e901a5",
-    "tests/test_gate_metrics_handoff.py": "e817beec68329fd16a7108818cc6ac59995672d07034153c850df91eab7b1757",
-    "tests/test_replay_append_only.py": "7dbb9dfed6381b5a9e9be8b193de3ac9c70751c71d3156928eb1ad5cf34d5bcc"
+    "tests/test_evaluator_process_isolation.py": "35f56f8f36bff932308a95811c8f3d72188a011505564236bd01054c06773ff2",
+    "tests/test_evaluator_runner_contract.py": "e80cd162920bd4cfca55129db08f4b618cd85b8a8b5e3c01dac5b64f9556e7ed",
+    "tests/test_gate_metrics_handoff.py": "33d9604be92f7339f7819f8ccea654a866e396d6e6b59fdc4e0703d1e0b978d2",
+    "tests/test_impl_fix1_regression.py": "16d2ef7cb9473814e67095ed4e751dd0d3f0a499881bdbcf918b59c76caf56bb",
+    "tests/test_impl_fix4_blocker_regression.py": "2afd8c79c17c28a6350191b9c3abaa1caaf910a6590d076175bda685be3b48ad",
+    "tests/test_impl_fix4_regression.py": "790d5a91a388d02525005946fcb4ea59e6235c1f84155ed9f011139e8e8997ee",
+    "tests/test_impl_fix6_regression.py": "b0f3909e56bbe78d19612a0d1c87d19077b4dffcf040c81bb59164e7eb1d23ca",
+    "tests/test_replay_append_only.py": "7dbb9dfed6381b5a9e9be8b193de3ac9c70751c71d3156928eb1ad5cf34d5bcc",
+    "tests/test_t3_probes.py": "dca3942a73d5f4cc816445317631731923a0eb956bd80997a24c7ee991710ed2"
   }
 }

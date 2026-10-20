@@ -318,6 +318,7 @@ class H1CloseGate(unittest.TestCase):
         directory = tempfile.TemporaryDirectory(prefix="h1-close-")
         self.addCleanup(directory.cleanup)
         store = SQLiteStateStore(Path(directory.name) / "state.db")
+        self.store = store
         store.save_workflow({"workflow_id": "wf-h1", "status": "running"})
         for task in self._tasks()["tasks"]:
             store.save_task(task)
@@ -353,7 +354,13 @@ class H1CloseGate(unittest.TestCase):
                                         "workspace_id": None,
                                         "coordinator_pane": None,
                                         "owned_pane_ids": set()}), \
-             patch.object(_ht, "_mark_workflow_completed"), \
+             patch.object(
+                 _ht,
+                 "_mark_workflow_completed",
+                 side_effect=lambda *_a, **_k: self.store.save_workflow(
+                     {**self.store.get_workflow("wf-h1"), "status": "completed"}
+                 ),
+             ), \
              patch.object(_ht, "stage_reset"):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
