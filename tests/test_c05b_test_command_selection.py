@@ -169,6 +169,20 @@ class AutoInitTestCommandContractTest(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(captured["test_cmd"], "CI=1 npm test")
 
+    def test_python_clone_requests_structured_ruff_output(self):
+        clone = self._make_clone({"pytest_ini": True})
+        (clone / "pyproject.toml").write_text("[tool.ruff]\n")
+        captured = {}
+        with patch(
+            "herdr.evaluator.init_loop",
+            lambda **kwargs: captured.update(kwargs),
+        ):
+            result = auto_init_task_loop(
+                clone, "python task", [], node="implementation", task_type="fix"
+            )
+        self.assertIsNone(result)
+        self.assertEqual(captured["lint_cmd"], "ruff check --output-format json .")
+
     def test_java_only_clone_refuses_instead_of_pytest_guess(self):
         clone = self._make_clone({"pom_xml": True})
 

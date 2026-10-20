@@ -149,7 +149,10 @@ class TestBaselineFreshnessPreflight(GitFixture):
             )
 
         self.assertEqual(raised.exception.code, 2)
-        self.assertEqual(store.get_task("task-stale")["status"], "failed")
+        self.assertEqual(store.get_task("task-stale")["status"], "superseded")
+        self.assertTrue(store.get_task("task-stale")["launch_not_started"])
+        self.assertIn("rebase", store.get_task("task-stale")["blocker"])
+        self.assertIn("2", store.get_task("task-stale")["blocker"])
         events = store.list_events(task_id="task-stale", event_type="baseline_stale_refused")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["payload"]["behind_by"], 2)

@@ -16,7 +16,17 @@ from tests.test_task_loop_noninteractive import ROOT, load_cli
 CLI = ROOT / 'bin/herdr-loop'
 
 
+def ensure_git_identity(target):
+    if (Path(target) / '.git').exists():
+        return
+    subprocess.run(['git', 'init', '-q', str(target)], check=True)
+    subprocess.run(['git', '-C', str(target), '-c', 'user.name=T', '-c',
+                    'user.email=t@example.invalid', '-c', 'commit.gpgsign=false',
+                    'commit', '--allow-empty', '-qm', 'base'], check=True)
+
+
 def init_argv(target, goal, lint):
+    ensure_git_identity(target)
     return [sys.executable, str(CLI), 'init', '--dir', str(target),
             '--goal', goal, '--test-cmd', "printf '5 passed in 0.01s\\n'",
             '--lint-cmd', lint]
@@ -72,6 +82,7 @@ def test_native_init_sigterm_cleans_its_baseline_descendants(tmp_path, ignore_te
 
 
 def test_task_publishes_current_baseline_before_first_unlock(tmp_path, monkeypatch):
+    ensure_git_identity(tmp_path)
     loop = init_loop(tmp_path, 'old task', test_cmd='true')
     write_baseline_lint(loop, 5)
     original = evaluator.evaluation_lock
@@ -118,6 +129,34 @@ def test_native_initialization_preserves_legitimate_existing_lint_debt(tmp_path)
     evaluate = subprocess.run([sys.executable, str(CLI), 'eval', '--dir', str(tmp_path)],
                               cwd=ROOT, capture_output=True, text=True, timeout=10)
     assert evaluate.returncode == 0, evaluate.stdout + evaluate.stderr
+
+
+def test_initial_baseline_rejects_head_change_during_lint(tmp_path, monkeypatch):
+    subprocess.run(['git', 'init', '-b', 'main'], cwd=tmp_path, check=True,
+                   capture_output=True)
+    subprocess.run(['git', 'config', 'user.name', 'T'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.email', 't@example.invalid'], cwd=tmp_path,
+                   check=True)
+    tracked = tmp_path / 'tracked.txt'
+    tracked.write_text('before\n')
+    subprocess.run(['git', 'add', 'tracked.txt'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'commit', '-m', 'before'], cwd=tmp_path, check=True,
+                   capture_output=True)
+    loop = init_loop(tmp_path, 'stable baseline identity', test_cmd='true')
+    original = evaluator.run_evaluation_command
+
+    def advance_head(*args, **kwargs):
+        result = original(*args, **kwargs)
+        tracked.write_text('after\n')
+        subprocess.run(['git', 'commit', '-am', 'advance'], cwd=tmp_path, check=True,
+                       capture_output=True)
+        return result
+
+    monkeypatch.setattr(evaluator, 'run_evaluation_command', advance_head)
+
+    with pytest.raises(ValueError, match='HEAD.*changed'):
+        evaluator.capture_lint_baseline(loop, 'true', tmp_path)
+    assert not (loop / 'BASELINE_LINT.json').exists()
 
 
 

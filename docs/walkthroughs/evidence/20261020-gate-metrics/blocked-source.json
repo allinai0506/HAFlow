@@ -1,0 +1,25 @@
+{
+  "base": "df4b3cf",
+  "source_sha256": "416773b827043354ce3aa2892501dbb02bd8d0d338c14b26ff9017853d20db19",
+  "files": {
+    "bin/herdr-loop": "aeea6686c8945d3dde7c003c5b2e4c1febf96a87fe77491d7c2fce00303d8ff0",
+    "console/http_server.py": "0c5be5191bc4db3413ed4d1a607572e586b1344eecbf00d8a56b9978d9dc2198",
+    "herdr/dispatch_recovery.py": "9bef312a0ffc353f9d860a9c872c5e03aac5cacdfd76a98906d92b674176e43a",
+    "herdr/evaluator.py": "8d94ae1d568dc6a2b8bfb9c66c12150ba3c501509f5c0a856753805a2c86b811",
+    "herdr/gate_wait.py": "d8b451b83022d54d0628a61def810d52867800b75e3615c0d2f7008261bbdcad",
+    "herdr/kernel.py": "b5136ece0b012cc35dfa9d7f0e8cc64bb8a321134181604549bc6c25e81abee2",
+    "herdr/reconciliation.py": "e2af01b061c4e29ee17cbd2e05bb55a96d9a1d715ea46e04e5d6e86fdb32fdab",
+    "herdr/recovery_store.py": "4d2494e671506fded9ad6c7bc0f4801831740af85cba0734222b53a05e68c1b8",
+    "herdr/replay_append_only.py": "da3b14afadaa3af9653c06aa1ed133279d673751f1b74f95feefabbe4c29416a",
+    "herdr/state_db.py": "fb06b37b9715b76cf2a32a71fec8618e5e2c5957c1b068369bdbf12fdc4d103a",
+    "herdr/task_checkpoint.py": "ae6f1e0fdd4ee831bfec7c54198f10555ee8326aa4c894877aa640d71b4e4235",
+    "herdr/task_cli_launch.py": "0303c6aa339ec367e33adf708af3a9be66315b4d8f4288f726371740ffb7375f",
+    "herdr/task_cli_workflow_close.py": "7acb2555225579688f9953cfdc0b28a5b9c20f205f835dc9b53a63cec41d4793",
+    "herdr/workflow_close.py": "723ee47474051b818855841d3413dd9ac87edc1e616477f997810d345b0fc66a",
+    "scripts/replay-append-only.py": "1435eb6a306a9ce29d3faf3c6b2f95ecefd4bee1a75d5db836262416300170dc",
+    "services/controller/join_gates.py": "76998271af7d97b69a3ae3ee8f871c51b5776da1790d281e7d548bb885da9c9d",
+    "tests/test_dispatch_baseline_failfast.py": "3895332ce0cbfe16cb8a126b2b20b7fc1c1c3bef10332b97019d383d30e901a5",
+    "tests/test_gate_metrics_handoff.py": "cef1ec786c1afb06d5e155dc79bb2d514613c3ecb43e3f98a952cb6cf14d606a",
+    "tests/test_replay_append_only.py": "7dbb9dfed6381b5a9e9be8b193de3ac9c70751c71d3156928eb1ad5cf34d5bcc"
+  }
+}

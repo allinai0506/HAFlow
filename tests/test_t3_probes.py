@@ -462,7 +462,13 @@ class M3CloseWorkflowGate(unittest.TestCase):
                                             "workspace_id": None,
                                             "coordinator_pane": None,
                                             "owned_pane_ids": set()}), \
-                 patch.object(_ht, "_mark_workflow_completed"), \
+                 patch.object(
+                     _ht,
+                     "_mark_workflow_completed",
+                     side_effect=lambda *_a, _store=store, **_k: _store.save_workflow(
+                         {**_store.get_workflow("wf-m3"), "status": "completed"}
+                     ),
+                 ), \
                  patch.object(_ht, "stage_reset"):
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
@@ -488,7 +494,13 @@ class M3CloseWorkflowGate(unittest.TestCase):
                                         "workspace_id": None,
                                         "coordinator_pane": None,
                                         "owned_pane_ids": set()}), \
-             patch.object(_ht, "_mark_workflow_completed"), \
+             patch.object(
+                 _ht,
+                 "_mark_workflow_completed",
+                 side_effect=lambda *_a, **_k: self.store.save_workflow(
+                     {**self.store.get_workflow("wf-m3"), "status": "completed"}
+                 ),
+             ), \
              patch.object(_ht, "stage_reset"):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):

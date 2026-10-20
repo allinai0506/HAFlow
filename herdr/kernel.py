@@ -457,6 +457,9 @@ def force_pass_gate(
                         )
             tasks_to_update = matching_tasks
 
+        from .task_checkpoint import reject_verdict_only_override
+        for task in tasks_to_update:
+            reject_verdict_only_override(task)
         updated_tasks = []
         for task in tasks_to_update:
             tid = task.get("task_id")
@@ -860,6 +863,9 @@ def bypass_task_gate(
     task = s.get_task(task_id)
     if not task:
         raise ValueError(f"Task '{task_id}' not found")
+
+    from .task_checkpoint import reject_verdict_only_override
+    reject_verdict_only_override(task)
 
     now = time.time()
     bypass_id = f"bypass_{uuid.uuid4().hex[:12]}"

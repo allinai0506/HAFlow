@@ -126,7 +126,13 @@ def test_accept_escalated_report_names_closed_pane_and_retained_unintegrated_clo
              "clone_retained_reason": "committed but not integrated",
          }), patch.object(task_bin, "_workflow_stage_tabs", return_value={
              "tab_ids": [], "workspace_id": None, "coordinator_pane": None,
-             "owned_pane_ids": set()}), patch.object(task_bin, "_mark_workflow_completed"), \
+             "owned_pane_ids": set()}), patch.object(
+                 task_bin,
+                 "_mark_workflow_completed",
+                 side_effect=lambda *_a, **_k: store.save_workflow(
+                     {**store.get_workflow("wf-r1-p2-2"), "status": "completed"}
+                 ),
+             ), \
          patch.object(task_bin, "stage_reset"):
         report = task_bin.close_workflow("wf-r1-p2-2", accept_escalated=True)
     rendered = capsys.readouterr().out

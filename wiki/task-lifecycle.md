@@ -755,3 +755,14 @@ Evidence:
 `FACT` 重基前持久记录固定 input/base。Git 已生成 S 而状态库尚登记 Y 时，正常 commit/integrate 通过临时无网络、禁 hooks 的 Git 重放树证明后 CAS 收编，source_sha 仍为原 Y。错误树、身份或 episode 不匹配不恢复；测试覆盖主干在中断期间再次前进。
 
 `FACT` 当前默认 wrapup 候选的 test/review 路由在准入即执行独立性合同：保留 pin 原排除项，强制排除 implementation/wrapup，禁止软降级或 opt-out。此约束适用于缺少新模板字段的旧 pin；上游轮次和其他模板的既有降级政策不变。未启用 wrapup review closure 的模板不进入收尾退役恢复事务。
+
+
+### 门禁等待、基线拒绝与文档重放（2026-10-20）
+
+FACT：receipt-v1 的 test/review 拒绝仅改 verdict 的 force-pass/bypass；门禁轮次须发布绑定当前候选的 acceptance。基线拒绝的未启动任务记录 superseded、replacement_pending、launch_not_started 和包含落后信息的 blocker；launch intent 中止为 resources_absent。
+
+FACT：业务门禁等待使用既有 recovery 表的 observing，三次相隔至少 30 秒的观测后转 waiting_human，并写一次 business_gate_stalled。它是恢复责任，不是 workflow 新状态或验收 PASS。Workflow 当前状态终结、执行/候选及 canonical generation（含 reopened_at）切换、节点移除会退役旧等待；历史 completed_at/outcome 不代表 reopen 后仍处于终态；业务凭证齐备后再次检查 resolve。
+
+FACT：`bin/herdr-loop rebaseline --dir <clone> --reason <intake原因> --lint-cmd <度量命令>` 保留原因、旧值与 SHA，并校验初始命令及 evaluator 摘要；换命令、evaluator 变化和未绑定旧基线明确拒绝。未知非零静态输出及报告显示 unavailable。`scripts/replay-append-only.py --help` 只导出三份指定文档的安全追加合并文件、编号映射和 patch，不执行完整代码 rebase；历史改写和不完整末行拒绝。
+
+Evidence：`herdr/task_cli_launch.py#record_router_failure_task`、`herdr/gate_wait.py#record_wait`、`herdr/recovery_store.py#ensure_obligations`、`herdr/workflow_close.py#CloseClaim.complete`、`tests/test_gate_metrics_handoff.py`、`tests/test_replay_append_only.py`。

@@ -372,3 +372,11 @@ def has_business_acceptance(store, task, candidate_sha, conn=None, observations=
     finally:
         if owned:
             conn.close()
+
+
+def reject_verdict_only_override(task):
+    """A stage verdict cannot replace a Run-bound business acceptance receipt."""
+    if (task.get('completion_protocol') == 'receipt-v1'
+            and (task.get('node') or task.get('stage')) in {'test', 'review'}):
+        raise ValueError('receipt-v1 business gate cannot be force-passed; rerun the gate '
+                         'on the current candidate and publish acceptance-record with its own evidence')

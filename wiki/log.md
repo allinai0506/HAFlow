@@ -3179,6 +3179,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - UNKNOWN：隔离测试使用外部 Agent/forge 替身，未部署或修改生产工作流。
 
 - 2026-10-20（工作流自动化优化，PR #287 复验）：补齐旧 pin 的新候选独立路由合同，派发前拒绝与最终发布矛盾的软降级；同步模板/技能 canonical hash 守护，保留旧非闭环调度路径。
+## [2026-10-20] Fix | 门禁等待、基线拒绝与追加文档重放
+
+- Updated [[task-lifecycle]]：receipt-v1 无效人工放行明确拒绝；未启动任务沿 replacement 链补派，等待责任可升级和退役。
+- 未知非零静态结果 unavailable；rebaseline 留原因、旧值与 SHA。完成收编凭证在发布事务确认 workflow 已完成，历史漂移可诊断。
+- 文档三路导出保持 onto 原前缀并顺延新增 lessons 编号；正文改写和不完整末行拒绝。不将追加文档视为完整候选零成本重放。
+- Evidence：`tests/test_gate_metrics_handoff.py`、`tests/test_replay_append_only.py`、`docs/walkthroughs/20261020-gate-metrics-repair.md`。
+- UNKNOWN：未部署、未重启，未改写 wf-haflow-1020-02 的业务状态或验收凭证。
 
 ## [2026-10-20] Fix | D5 fix-loop 可作废状态补齐与状态矩阵单一来源收敛 (SC-001/SC-002/SC-014)
 
@@ -3207,7 +3214,7 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - FACT：超过 2000 条存储事件窗口时，轨迹按同一 Task / Run 范围补读 `verification_completed`、`task_artifact_checkpoint`、`candidate_published` 和 `tool_execution`，按事件类型分别限流、每类最多 2000 条，按事件 ID 去重后按时间排序；不改成无界查询。
 - FACT：workflow 级 `candidate_frozen` 没有 `task_id`，轨迹按 `publication_event_id` 关联到 `candidate_published` 事件再回到该发布事件的 Task / Run，只有发布任务看得到这次冻结；身份不足（含发布事件缺少 `run_id`）时保持不归因。
 - Evidence：`herdr/execution_trace.py#read_stored_events/_execution_receipts_for_scope/_linked_freezes_for_task`、`tests/test_execution_trace.py`、`tests/test_execution_trace_api.py`、Issue #261 / #262。
-- 教训：`docs/lessons/lessons-learned.md` §179（升序有界窗口吞掉最新回执；workflow 级事件靠类型白名单无法归属）。
+- 教训：`docs/lessons/lessons-learned.md` §180（升序有界窗口吞掉最新回执；workflow 级事件靠类型白名单无法归属）。
 - UNKNOWN：仅在本地隔离环境验证，未部署或修改生产工作流。
 
 ### 2026-10-20：执行轨迹补读按类型分流与冻结运行身份收紧

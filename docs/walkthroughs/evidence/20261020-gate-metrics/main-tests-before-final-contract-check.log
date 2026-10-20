@@ -1,0 +1,13 @@
+ROOT=/Users/user/.sandboxes/haflow-gate-metrics-20261020
+ISOLATION=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/haflow-gate-metrics-verify-final-jk199hjw
+COMMAND=['tests/test_gate_metrics_handoff.py', 'tests/test_replay_append_only.py', 'tests/test_dispatch_baseline_failfast.py', 'tests/test_loop_evaluator.py', 'tests/test_lint_execution_failure_gate.py', 'tests/test_loop_init_baseline_atomicity.py', 'tests/test_task_checkpoint.py', 'tests/test_node_dispatch_contract.py', 'tests/test_scheduler_dispatch_e2e.py', 'tests/test_task_cli_workflow_close.py', 'tests/test_workflow_close_claim.py', 'tests/test_close_workflow_receipt_cli.py', 'tests/test_recovery_entrypoints.py', 'tests/test_selective_replan_core.py', 'tests/test_workflow_reconciliation.py', 'tests/test_console_project_creation.py', 'tests/test_task_bypass_gate.py', 'tests/test_console_ops_repair_gate_separation.py', 'tests/test_workflow_repair_contracts.py', 'tests/test_dispatch_recovery_ui.py']
+................................................................ [ 11%]
+...................................................................... [ 24%]
+........................................................................ [ 37%]
+.................................................................................................................................... [ 61%]
+........................................................................ [ 74%]
+........................................................................ [ 88%]
+.................................................................        [100%]
+547 passed, 22 subtests passed in 69.88s (0:01:09)
+
+EXIT=0

@@ -42,10 +42,15 @@ class CloseClaim:
             self.connection.execute('UPDATE workflow_close_actions SET status=?,result=? WHERE operation_id=? AND action_key=?', (result['status'],json.dumps(result),self.operation_id,key))
         return result
 
-    def complete(self, report):
+    def complete(self, report, *, require_workflow_completed=False):
         if self.state != 'owner': raise ValueError('close ownership required')
         receipt = dict(report, operation_id=self.operation_id, close_state='completed')
         with self.connection:
+            if require_workflow_completed:
+                self.connection.execute('BEGIN IMMEDIATE')
+                workflow = self.connection.execute('SELECT status FROM workflows WHERE workflow_id=?', (self.workflow_id,)).fetchone()
+                if not workflow or workflow[0] != 'completed':
+                    raise ValueError('workflow must be completed before issuing a completed close receipt')
             self.connection.execute('UPDATE workflow_close_operations SET state=?,receipt=? WHERE operation_id=?', ('completed',json.dumps(receipt),self.operation_id))
         self.receipt = receipt
         self.state = 'completed'
