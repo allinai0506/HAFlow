@@ -464,7 +464,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("auto", cmd)
 
     def test_previous_execution_task_does_not_block_current_launch(self):
-        old = _task("wf-1-test-old", "working")
+        old = _task("wf-1-test-auto", "working")
         old["execution_id"] = "previous-execution"
         with patch.object(
             self.ctrl,
@@ -481,6 +481,8 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(self.notified, ["test"])
         self.assertEqual(len(self.commands), 1)
+        task_id = self.commands[0][self.commands[0].index("--task-id") + 1]
+        self.assertNotEqual(task_id, "wf-1-test-auto")
 
     def test_direct_dispatch_does_not_require_coordinator_pane(self):
         """A fully specified Worker launch must not depend on coordinator liveness."""

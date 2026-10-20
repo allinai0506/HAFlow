@@ -18,14 +18,16 @@ def admit_stage_dispatch(
     dispatch_op = None
     dispatch_owner = None
     workflow_id = item["workflow_id"]
+    store = get_store()
+    workflow = store.get_workflow(workflow_id)
 
     if item.get("stage") in (None, "", "start") and not coordinator_intake_enabled():
-        if get_store().get_workflow(workflow_id):
+        if workflow:
             from herdr.node_dispatch_store import operation_for_node
 
             reconcile_node_dispatches(workflow_id, discover=False)
             previous_dispatch = operation_for_node(
-                get_store().db_path, workflow_id, target_node_id
+                store.db_path, workflow_id, target_node_id
             )
             if previous_dispatch and previous_dispatch["status"] not in (
                 "resolved",
@@ -34,12 +36,12 @@ def admit_stage_dispatch(
                 return None
 
     # Native workflows require durable responsibility for intake and downstream dispatch.
-    if ((node or {}).get("depends_on") or coordinator_intake_enabled()) and get_store().get_workflow(workflow_id):
+    if ((node or {}).get("depends_on") or coordinator_intake_enabled()) and workflow:
         from herdr.node_dispatch_store import claim, operation_for_node
 
         reconcile_node_dispatches(workflow_id)
         dispatch_op = operation_for_node(
-            get_store().db_path, workflow_id, target_node_id
+            store.db_path, workflow_id, target_node_id
         )
         if not dispatch_op:
             return None
@@ -57,7 +59,7 @@ def admit_stage_dispatch(
             import uuid
 
             dispatch_op = claim(
-                get_store().db_path, dispatch_op["id"], uuid.uuid4().hex
+                store.db_path, dispatch_op["id"], uuid.uuid4().hex
             )
             if dispatch_op is None:
                 return None
@@ -68,14 +70,23 @@ def admit_stage_dispatch(
             dispatch_operation_id=dispatch_op["id"],
             dispatch_owner=dispatch_owner,
         )
-        pinned = get_store().get_workflow(workflow_id)["config"]
+        pinned = workflow["config"]
         node = find_node(pinned, target_node_id)
         item = dict(item, node=node)
-        if not scheduler_join_gate_allows(workflow_id, node, load_tasks()):
+        tasks = load_tasks()
+        execution_id = workflow.get("execution_id")
+        if execution_id:
+            tasks = [
+                task for task in tasks
+                if task.get("workflow_id") != workflow_id
+                or not task.get("execution_id")
+                or task.get("execution_id") == execution_id
+            ]
+        if not scheduler_join_gate_allows(workflow_id, node, tasks):
             from herdr.node_dispatch_store import defer
 
             defer(
-                get_store().db_path,
+                store.db_path,
                 dispatch_op["id"],
                 "join_gate_blocked",
                 owner=dispatch_owner,

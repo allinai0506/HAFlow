@@ -31,7 +31,8 @@ def try_direct_stage_advance(ports, item):
         return fallback("workflow_configuration_missing")
 
     requirement = (project_ctx.get("requirement") or "").strip()
-    tasks = ports.load_tasks() or []
+    all_tasks = ports.load_tasks() or []
+    tasks = all_tasks
     execution_id = project_ctx.get("execution_id")
     if execution_id:
         tasks = [
@@ -191,6 +192,9 @@ def try_direct_stage_advance(ports, item):
             redispatch_blocker_notes=ports._selective_redispatch_blocker_notes(
                 workflow_id, ready_id
             ),
+            reserved_task_ids={
+                task.get("task_id") for task in all_tasks if task.get("task_id")
+            },
         )
     except ValueError as exc:
         print(

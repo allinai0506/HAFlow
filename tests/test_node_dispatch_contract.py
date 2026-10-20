@@ -115,6 +115,36 @@ def test_stage_admission_claims_real_dispatch_lease(scene):
     assert admitted_node["id"] == "implementation"
 
 
+def test_stage_admission_join_ignores_previous_execution_tasks(scene):
+    from herdr.coordinator_stage_admission import admit_stage_dispatch
+
+    scene.store.save_task({
+        "task_id": "old-dependency",
+        "workflow_id": "wf",
+        "node": "dependency",
+        "execution_id": "previous-execution",
+        "run_id": "old-run",
+        "status": "working",
+    })
+    observed = []
+
+    result = admit_stage_dispatch(
+        scene.item,
+        scene.item["node"],
+        "implementation",
+        get_store=lambda: scene.store,
+        coordinator_intake_enabled=lambda: True,
+        reconcile_node_dispatches=scene.ctrl.reconcile_node_dispatches,
+        find_node=scene.ctrl.find_node,
+        scheduler_join_gate_allows=lambda _wid, _node, tasks: observed.extend(tasks) or True,
+        load_tasks=scene.store.list_tasks,
+        clear_stage_advance=scene.ctrl.clear_stage_advance,
+    )
+
+    assert result is not None
+    assert all(task["task_id"] != "old-dependency" for task in observed)
+
+
 def test_stage_admission_defers_and_clears_when_join_gate_blocks(scene):
     from herdr.coordinator_stage_admission import admit_stage_dispatch
 
