@@ -160,6 +160,66 @@ class TestD3WorkflowRegistrationConvergence:
         assert payload.get("status") == "running"
         assert payload.get("from_status") == "pending"
 
+    def test_register_workflow_atomic_rollback_on_event_failure(self, store_env, monkeypatch):
+        proj = self._create_dummy_project(store_env["tmp"], "proj-d3-atomic")
+        wid = "wf-d3-atomic-fail"
+        store = get_state_store()
+
+        from herdr import state_db
+        real_record_event = state_db.record_event
+
+        def mock_failing_record_event(event, db_path=None, conn=None):
+            if event.get("event_type") == "workflow_created":
+                raise IOError("Simulated SQLite disk full during workflow_created audit event")
+            return real_record_event(event, db_path=db_path, conn=conn)
+
+        monkeypatch.setattr(state_db, "record_event", mock_failing_record_event)
+
+        with pytest.raises(IOError, match="Simulated SQLite disk full"):
+            projects.register_workflow(
+                wid,
+                proj,
+                requirement="Should fail atomically",
+                title="Atomic Failure Test",
+            )
+
+        # Invariant: Workflow MUST NOT be left in storage if creation audit record fails!
+        assert store.get_workflow(wid) is None
+
+    def test_register_workflow_idempotent_deduplicates_creation_event(self, store_env):
+        proj = self._create_dummy_project(store_env["tmp"], "proj-d3-idempotent")
+        wid = "wf-d3-retry-wid"
+        store = get_state_store()
+
+        # First registration
+        projects.register_workflow(
+            wid,
+            proj,
+            requirement="Initial registration",
+            title="Initial Title",
+        )
+
+        record1 = store.get_workflow(wid)
+        assert record1["status"] == "running"
+        events1 = [e for e in store.list_events(workflow_id=wid) if e.get("event_type") == "workflow_created"]
+        assert len(events1) == 1
+
+        # Second registration (retry or update)
+        projects.register_workflow(
+            wid,
+            proj,
+            requirement="Retried registration",
+            title="Updated Title",
+        )
+
+        record2 = store.get_workflow(wid)
+        assert record2["status"] == "running"
+        assert record2["title"] == "Updated Title"
+
+        # P2 guarantee: exactly ONE workflow_created event, deduplicated on retry!
+        events2 = [e for e in store.list_events(workflow_id=wid) if e.get("event_type") == "workflow_created"]
+        assert len(events2) == 1
+
 
 class TestD3ActiveWorkflowQueries:
     def test_active_queries_recognize_running_workflow(self, store_env):

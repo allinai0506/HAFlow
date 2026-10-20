@@ -7238,6 +7238,95 @@ def transition_workflow(
             conn.close()
 
 
+def register_workflow(
+    wf_dict: Dict[str, Any],
+    event_payload: Optional[Dict[str, Any]] = None,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+    save_workflow_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Atomically upsert a workflow record and persist its authoritative workflow_created event.
+
+    Shares a single SQLite write transaction (BEGIN IMMEDIATE) to guarantee that
+    workflow record persistence and creation audit event either both commit or both roll back.
+    Idempotent: If a workflow_created event already exists for this workflow_id,
+    deduplicates the event to prevent multiple creation records on registration retries.
+    """
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    wid = wf_dict.get("workflow_id")
+    if not wid:
+        raise ValueError("workflow_id is required")
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        row = conn.execute("SELECT status, metadata_json FROM workflows WHERE workflow_id = ?", (wid,)).fetchone()
+        from_status = row["status"] if row else None
+        if from_status and from_status != "running":
+            from .transitions import validate_workflow_transition
+            validate_workflow_transition(from_status, "running")
+
+        save_fn = save_workflow_fn or (lambda wf, **kw: save_workflow(wf, db_path=None, **kw))
+        try:
+            save_fn(wf_dict, conn=conn)
+        except TypeError:
+            save_fn(wf_dict)
+
+        # Check for existing workflow_created event to deduplicate retries (ADR-0007 / P2)
+        existing_ev = conn.execute(
+            "SELECT id FROM events WHERE workflow_id = ? AND event_type = 'workflow_created' LIMIT 1",
+            (wid,)
+        ).fetchone()
+
+        event_id = None
+        if not existing_ev:
+            payload = dict(event_payload or {})
+            payload.setdefault("workflow_id", wid)
+            payload.setdefault("title", wf_dict.get("title", ""))
+            payload.setdefault("status", "running")
+            payload.setdefault("from_status", from_status)
+            ev = record_event({
+                "workflow_id": wid,
+                "node_id": None,
+                "task_id": None,
+                "agent_id": None,
+                "event_type": "workflow_created",
+                "payload": payload,
+                "source": "register_workflow",
+                "timestamp": time.time(),
+            }, conn=conn)
+            event_id = ev.get("id")
+        else:
+            event_id = existing_ev["id"]
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return {
+            "ok": True,
+            "workflow_id": wid,
+            "status": "running",
+            "from_status": from_status,
+            "event_id": event_id,
+            "deduplicated": bool(existing_ev),
+        }
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
 def update_task_metadata(
     task_id: str,
     updates: Dict[str, Any],
