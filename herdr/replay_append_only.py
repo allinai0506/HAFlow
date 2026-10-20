@@ -68,6 +68,8 @@ def _unmatched_entry_tail(candidate_block, main_block):
     main_tail = main_block[len(main_block.rstrip(b'\r\n')):]
     if main_tail and candidate_tail.endswith(main_tail):
         return candidate_tail[:-len(main_tail)]
+    if candidate_tail and main_tail.endswith(candidate_tail):
+        return b''
     return candidate_tail if candidate_tail != main_tail else b''
 
 

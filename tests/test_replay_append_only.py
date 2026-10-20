@@ -240,3 +240,16 @@ def test_numbered_replay_preserves_unmatched_trailing_blank_lines():
     assert merged == main + b'\n'
     assert merged.count(b'shared body\n') == 1
     assert mapping == {}
+
+
+def test_numbered_replay_does_not_append_tail_covered_by_main():
+    base = b'## 1. old\nold body\n'
+    incoming = base + b'\n## 2. shared\nshared body\n'
+    main = base + (b'\n## 2. shared\nshared body\n\n'
+                   b'## 3. main only\nmain body\n')
+
+    first, first_mapping = merge_append_only(base, main, incoming, numbered=True)
+    second, second_mapping = merge_append_only(base, first, incoming, numbered=True)
+
+    assert first == second == main
+    assert first_mapping == second_mapping == {}
