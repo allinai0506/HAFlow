@@ -112,6 +112,15 @@ Evidence:
 - **权威事件与审计记录**：在同一事务内原子记录 `task_transition` 权威审计事件，透传操作人 `operator`、原因 `reason`、来源 `source: "console-force-review"` 与意图 `intent: "console-force-review"`，杜绝无守卫或无审计事件的裸写。
 - 证据链：`console/task_api.py:266-320`、`herdr/transitions.py:84-87`、`tests/test_d1_privileged_transitions.py`、`tests/test_console_force_review_guard.py`。
 
+`FACT` **门禁豁免版本守卫与并发防踩踏对称性（SC-015）**：
+- 门禁豁免入口在 CLI 与 Web 控制台之间建立了完全对称的乐观锁（CAS）版本守卫机制：
+  1. **任务级旁路放行 (`herdr-task bypass-gate <task_id> --reason <why> [--expected-version <ver>]`)**：支持传递可选的 `--expected-version`，底层在应用预检及 `compare_and_set_task_transition` 独占事务内双重比对；若版本已被并发推进，则 fail-closed 抛错拒绝，保护现有任务不被陈旧豁免写覆盖；
+  2. **工作流门禁强制放行 (`herdr-factory force-pass <wf_id> <gate_node_id> [--task-id <id>] [--expected-version <ver>] [--expected-task-versions <json>]`)**：
+     - 若指定 `--task-id` 单任务放行，通过 `--expected-version` 进行版本 CAS 保护；
+     - 若不指定 `--task-id` 进行节点级批量放行，严格禁止使用单一 `expected_version`（防止误伤多任务并发），要求必须提供 `--expected-task-versions` 字典映射对节点下全部有效任务进行完整版本校验；
+  3. **架构对称性**：消除历史版本中仅 Web 控制台携带 `expected_version` 而 CLI 无参数保护的非对称漏洞，使脚本与自动化管线同样享有数据库强一致性防踩踏保护。
+- 证据链：`herdr/kernel.py:839-868`、`bin/herdr-task:234-245`、`bin/herdr-factory:652-675`、`tests/test_gate_exemption_version_guard.py`。
+
 `FACT` 当前内循环耗尽的blocked是等待仲裁的持久事实，Agent working/idle/done不能代替明确恢复决策。实时事件保留该状态；重启在已知运行信号下恢复仲裁队列。最新blocked转换reason优先于可遗留的sentinel_reason；历史缺失时保留legacy行为。证据：`tests/test_inner_loop_arbitration_recovery.py`。旧屏幕跨恢复epoch（C03c）仍单独待修。仲裁卡及人工升级提示使用现有合法blocked→working命令，不增状态边或force；真实CLI参数执行回归见`tests/test_blocked_recovery_command_contract.py`（C30）。
 
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop

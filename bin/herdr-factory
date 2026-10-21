@@ -649,9 +649,38 @@ def rollback_command(workflow_id, target_node_id, reason="manual_rollback"):
         return 1
 
 
-def force_pass_command(workflow_id, gate_node_id, note="human forced pass", operator="human"):
+def force_pass_command(
+    workflow_id,
+    gate_node_id,
+    note="human forced pass",
+    operator="human",
+    expected_version=None,
+    task_id=None,
+    expected_task_versions=None,
+):
     try:
-        res = kernel.force_pass_gate(workflow_id, gate_node_id, note=note, operator=operator)
+        exp_task_vers = None
+        if expected_task_versions:
+            try:
+                parsed = json.loads(expected_task_versions)
+                if isinstance(parsed, dict):
+                    exp_task_vers = {str(k): int(v) for k, v in parsed.items()}
+                else:
+                    print("Force pass failed: --expected-task-versions 必须是 JSON 字典", file=sys.stderr)
+                    return 1
+            except Exception as e:
+                print(f"Force pass failed: 解析 --expected-task-versions 失败: {e}", file=sys.stderr)
+                return 1
+
+        res = kernel.force_pass_gate(
+            workflow_id,
+            gate_node_id,
+            note=note,
+            operator=operator,
+            expected_version=expected_version,
+            task_id=task_id,
+            expected_task_versions=exp_task_vers,
+        )
         print(f"Gate {gate_node_id} for workflow {workflow_id} marked as passed.")
         print(f"Updated tasks: {', '.join(res.get('updated_tasks', [])) or 'none'}")
         return 0
@@ -868,6 +897,9 @@ def main():
     fp_cmd.add_argument("gate_node_id")
     fp_cmd.add_argument("--note", default="human forced pass", help="审计说明")
     fp_cmd.add_argument("--operator", default="human", help="操作人标识")
+    fp_cmd.add_argument("--task-id", default=None, help="目标门禁任务标识 (可选，指定具体放行单任务)")
+    fp_cmd.add_argument("--expected-version", type=int, default=None, help="目标门禁任务期望版本号 (CAS 乐观锁)")
+    fp_cmd.add_argument("--expected-task-versions", default=None, help="多任务节点期望版本映射 JSON (例如 '{\"task-1\": 1}')")
 
     cp_cmd = sub.add_parser("checkpoint", help="工作流运行态快照管理")
     cp_sub = cp_cmd.add_subparsers(dest="cp_action", required=True)
@@ -950,7 +982,15 @@ def main():
         sys.exit(rollback_command(args.workflow_id, args.target_node_id, reason=args.reason))
 
     if args.command == "force-pass":
-        sys.exit(force_pass_command(args.workflow_id, args.gate_node_id, note=args.note, operator=args.operator))
+        sys.exit(force_pass_command(
+            args.workflow_id,
+            args.gate_node_id,
+            note=args.note,
+            operator=args.operator,
+            expected_version=getattr(args, "expected_version", None),
+            task_id=getattr(args, "task_id", None),
+            expected_task_versions=getattr(args, "expected_task_versions", None),
+        ))
 
     if args.command == "checkpoint":
         sys.exit(checkpoint_command(args.cp_action, args.workflow_id, tag=getattr(args, "tag", None), checkpoint_id=getattr(args, "checkpoint_id", None)))

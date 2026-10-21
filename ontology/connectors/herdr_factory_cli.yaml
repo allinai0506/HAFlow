@@ -20,5 +20,5 @@ retry:
 evidence:
 - kind: implemented
   source: bin/herdr-factory
-  locator: argparse 子命令 add_parser L805-886
+  locator: argparse 子命令 add_parser L834-920
   confidence: high

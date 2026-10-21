@@ -19,7 +19,7 @@
 | SC-012 | 门禁身份与权威 | 文档：门禁为节点级 GateSpec | 结论按任务：tasks.stage_verdict；verdict 文件按 task_id（kernel 写 gate_verdict_path(task_id)）；覆盖（force-pass）按节点 | — | **已裁决**（ADR-0006 / OEP-0002） |
 | SC-013 | 任务类型词表 | schema L53 历史版本称 explore/plan/code/test/review/docs | launch --task-type 取值 fix/feat/refactor/docs/test/chore/perf/ci；schema 与文档已同步校准，兼容别名自动映射为 docs/test，业务类型走 business_task_type | — | **已解决**（D4 落地） |
 | SC-014 | fix-loop 可作废集合 | controller 注释要求与矩阵“→ superseded”一致 | FIX_LOOP_SUPERSEDEABLE 已补齐 paused 与 interrupted，与 TASK_TRANSITIONS 完全对齐 | — | **已解决**（D5 落地） |
-| SC-015 | 门禁豁免守卫 | 控制台 force-pass 带 expected_version（console/control_api.py L409） | CLI 与 factory 的 force-pass 不带 expected_version（bin/herdr-factory L652-656）；bypass 亦不带 | — | 确认（控制台确认提示未核对） |
+| SC-015 | 门禁豁免守卫 | 门禁豁免需具备乐观锁（CAS）版本保护，防止并发流转时产生陈旧覆盖，CLI 与 Web 控制台应保持能力对称 | 控制台历史版本支持 expected_version；现已为 `bin/herdr-factory force-pass` 补齐 `--expected-version`、`--task-id` 与 `--expected-task-versions`，为 `herdr-task bypass-gate`（及 `kernel.bypass_task_gate`）补齐 `--expected-version`，经 `tests/test_gate_exemption_version_guard.py` 验证 | — | **已解决**（CLI 与 Web 控制台版本守卫能力完全对称） |
 | SC-016 | resume 目标 | 矩阵：paused 不可达 dispatched、blocked | `herdr/task_cli_workflow.py:resume_task` 显式守卫仅在最新来源为 `rework` 时恢复为 `rework`，其余来源（含 `dispatched`、`blocked`、`working`）均安全收敛恢复至 `working`；`TASK_TRANSITIONS["paused"]` 允许流转至 `working`/`rework`，经 `tests/test_resume_transition.py` 验证无非法边风险 | — | **已解决**（已验证安全收敛至 working/rework 合法子集） |
 | SC-017 | `herdr-task add` 覆盖写 | — | `add_task` 历史上通过 `save_tasks(data)` 遍历全量任务 upsert，存在覆写并发状态与自增旧任务版本的隐患；现已优化为单条任务持久化 `save_tasks({"tasks": [task]})`，并施加内存与 DB 双重存在性拒绝守卫，经 `tests/test_task_add_overwrite_verification.py` 验证 | — | **已解决**（已修复单条写入隔离并验证防回退） |
 | SC-018 | 越权状态变更拦截 | wiki/task-lifecycle.md L15：“任何越权状态变更将被 CLI 直接拦截” | 8 类状态机外写入路径，见 states/task_lifecycle.yaml 的 out_of_matrix_writers | — | **已裁决**（ADR-0005 / OEP-0002） |
@@ -33,10 +33,11 @@
 4. SC-005 已解决：规范定案为 `retry_node` 为标准推荐字段，`retry_target` 为完全等价兼容别名；DAG 校验与 Controller 调度均双向容错解析，消除打回降级隐患。SC-006 已解决：定案为源定义文件存在时快照失败直接拒绝注册（fail-closed），彻底杜绝模板切换并发污染，更新模板 Schema 与代码注释。
 5. SC-007 已解决：明确分层定义——`task_transition` 为 SQLite 强事务内原子写入的状态机单一权威事件；`task_status_changed` 为事务提交后的 best-effort 旁路轨迹事件，供 Observer 与重放分析消费。
 6. SC-008 已解决：显式解耦定义 `ROUTER_OCCUPIED_STATUSES` 与 `ACTIVE_TASK_STATUSES`，严格区分工位队列容量占用（含 pending，排队占配额；不含 paused/interrupted）与生命周期管线活跃（含 paused/interrupted，不含 pending），禁止同名混用并补齐全覆盖单元测试。
-7. SC-010、SC-015：把门禁豁免与人工覆盖纳入权限模型与统一版本守卫（SC-019 已收敛至特权状态流转与 CAS 守卫闭环）。
+7. SC-010：把门禁豁免与人工覆盖纳入权限模型与操作人审计契约规范（SC-015、SC-019 已分别收敛至统一版本守卫与特权状态流转闭环）。
 8. SC-011、SC-012 已由 ADR-0006、ADR-0007 与 OEP-0002 裁决：工作流初始状态定案为 running（pending 为未装配/草稿态）；门禁解耦为 gate_spec 与 gate_verdict，DB 为调度第一事实源，文件为不可变快照。
 9. SC-013、SC-014 已解决：任务类型词表统一对齐为 CLI choices；补齐 fix-loop 可作废集合（D4、D5）。
 10. SC-016 已解决（已验证）：核查并验证 `resume_task` 防御性恢复逻辑，任务暂停恢复时仅在来源为 rework 时返回 rework，其余情况统一安全收敛为 working，完全遵循状态转移矩阵，专项测试 `tests/test_resume_transition.py`（6/6）全绿通过。
 11. SC-017 已解决：`add_task` 优化为仅保存新注册单条任务，消除遍历覆写已有任务的并发回退窗口，并通过双重存在性拦截防止重复覆盖；回归测试 `tests/test_task_add_overwrite_verification.py` 验证通过。
 12. SC-018 已由 ADR-0005 与 OEP-0002 裁决：状态机外写入显式收敛为 privileged_transitions 特权流转契约，严禁直写 SQL/save_task 绕过网关。
 13. SC-019 已解决：控制台强制复审接口 `api_task_force_review` 接入 `console-force-review` 特权流转契约，建立非终态合法跃迁白名单（严格拒绝 `completed`/`superseded` 终态跃迁），强化 `expected_version` 与 `expected_status` CAS 乐观锁防并发踩踏，原子落库 `task_transition` 权威事件与 `operator` 审计记录；专项测试 `tests/test_console_force_review_guard.py`（9/9）与 `tests/test_d1_privileged_transitions.py` 全绿通过。
+14. SC-015 已解决：为 `bin/herdr-factory force-pass`（支持 `--expected-version`、`--task-id` 与多任务 `--expected-task-versions` 字典映射）与 `herdr-task bypass-gate`（支持 `--expected-version`，底层贯穿 `kernel.bypass_task_gate` 与 CAS 事务）补齐版本守卫，消除 CLI 缺少并发保护的非对称漏洞；专项测试 `tests/test_gate_exemption_version_guard.py`（7/7）全绿通过。

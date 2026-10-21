@@ -3291,3 +3291,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-019 状态从“确认”更新为“已解决（已收敛至特权状态流转与 CAS 守卫闭环）”。
 - Added `tests/test_console_force_review_guard.py`：新增对入参空值校验、非法版本号校验、任务不存在处理、全部非终态合法流转、全部终态非法流转拦截、版本号 CAS 不匹配拦截、状态 CAS 不匹配拦截、操作员/原因审计落库及协调员通知异常隔离等 9 项专项回归测试（9/9 PASSED）。
 - Evidence：`console/task_api.py:266-350`、`herdr/transitions.py:84-87`、`tests/test_console_force_review_guard.py`、`tests/test_d1_privileged_transitions.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Refactor & Tests | 门禁豁免版本守卫与 CLI 并发保护对称性收敛 (SC-015)
+
+- Updated `bin/herdr-factory`：
+  - 为 `force-pass` 子命令增加 `--expected-version`（单任务 CAS 乐观锁版本号）、`--task-id`（指定特定门禁任务）与 `--expected-task-versions`（多任务节点期望版本字典映射 JSON）；
+  - `force_pass_command` 解析参数并无缝传递至底层 `kernel.force_pass_gate` 与数据库立即事务核验，消除历史只有 Web 控制台携带版本号而命令行 CLI 裸写的非对称并发漏洞。
+- Updated `bin/herdr-task` & `herdr/task_cli.py` & `herdr/task_cli_parser_workflow.py`：
+  - 为 `bypass-gate` 子命令增加 `--expected-version` 可选参数；
+  - `bypass_gate_cli` 贯穿参数至 `kernel.bypass_task_gate`，在应用预检及底层 `compare_and_set_task_transition` 事务内双重比对版本，陈旧版本请求时 fail-closed 阻断并返回非零退出码。
+- Updated `herdr/kernel.py:bypass_task_gate`：
+  - 增加 `expected_version` 参数支持，在写入前和 CAS 流转阶段施加版本校验，防止覆盖并发推进中的新任务状态。
+- Updated `wiki/task-lifecycle.md`：在任务生命周期章节增补 SC-015“门禁豁免版本守卫与并发防踩踏对称性”条款。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-015 状态从“确认”更新为“已解决（CLI 与 Web 控制台版本守卫能力完全对称）”。
+- Added `tests/test_gate_exemption_version_guard.py`：新增对 `herdr-task bypass-gate` 与 `herdr-factory force-pass` 的匹配放行、陈旧版本拒绝、节点级单版本拦截以及多任务字典映射校验等 7 项专项回归测试（7/7 PASSED）。
+- Evidence：`bin/herdr-factory:652-675`、`bin/herdr-task:234-245`、`herdr/kernel.py:839-868`、`tests/test_gate_exemption_version_guard.py`、`ontology/tests/audit_ontology.py`。
