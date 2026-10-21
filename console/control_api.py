@@ -305,7 +305,8 @@ def api_controller_execute_action(payload):
         return execute_controller_action(payload)
     # Historical callers retain their result/exception contract; receipts add
     # authoritative outcome facts without changing transport success semantics.
-    from services.controller.cockpit_automation import read_cockpit, classify_receipt, persist_receipt
+    from services.controller.cockpit_automation import (read_cockpit, classify_receipt, persist_receipt,
+        read_action_state, pending_action_receipt, checkpoint_result, _unknown_cockpit)
     store = herdr_kernel._get_store()
     wid = str((payload or {}).get('workflow_id') or '').strip()
     try:
@@ -314,23 +315,51 @@ def api_controller_execute_action(payload):
         raise RuntimeError(str(exc)) from exc
     aid = str(payload.get('task_id') or wid) + ':' + str(payload.get('type') or payload.get('action_type') or '')
     action = {'action_id': aid, 'target': {'workflow_id': wid, 'task_id': payload.get('task_id')}, 'api_payload': payload}
+    if not wid:
+        return _execute_legacy_controller_action(payload)  # Preserve historical missing-id validation.
+    initial = read_action_state(store, action)
+    task = initial['action_readback']['task']
+    action['target'].update({key: task[key] for key in ('run_id', 'execution_id', 'candidate_sha') if task.get(key)})
+    pending = pending_action_receipt(action, before, payload, initial)
+    from uuid import uuid4
+    key = 'legacy:' + uuid4().hex
     try:
-        result = _execute_legacy_controller_action(payload)
+        _execute_legacy_controller_action(payload, validate_only=True)
     except Exception as exc:
         if wid:
             receipt = {'status': 'rejected', 'action_id': aid, 'workflow_id': wid, 'target': action['target'],
                        'outcome': 'rejected' if isinstance(exc, RuntimeError) else 'failed',
                        'reason_code': 'legacy_action_rejected', 'refresh_required': True}
-            persist_receipt(store, receipt)
+            persist_receipt(store, receipt, key=key)
             exc.receipt = receipt
         raise
-    after = read_cockpit(store, wid, controller={'status': 'running'})
-    receipt = classify_receipt(action, before, after, result)
-    persist_receipt(store, receipt)
+    persist_receipt(store, pending, key=key)
+    try:
+        result = _execute_legacy_controller_action(payload)
+    except Exception as exc:
+        receipt = {**pending, 'outcome': 'unknown', 'reason_code': 'effect_unknown', 'refresh_required': True}
+        persist_receipt(store, receipt, key=key)
+        exc.receipt = receipt
+        raise
+    pending = checkpoint_result(pending, result)
+    persist_receipt(store, pending, key=key)
+    context = pending['reconciliation']
+    try:
+        after = read_cockpit(store, wid, controller={'status': 'running'})
+        after['action_readback'] = read_action_state(store, action, result, since=context['started_at'],
+            intent_digest=context['intent_digest'], event_watermark=context['event_watermark'])['action_readback']
+        receipt = classify_receipt(action, before, after, result)
+        if receipt.get('reason_code') in {'effect_unconfirmed', 'readback_identity_changed'}:
+            receipt = {**pending, 'reason_code': receipt['reason_code'], 'refresh_required': True}
+    except Exception:
+        receipt = {**pending, 'reason_code': 'readback_unavailable', 'refresh_required': True}
+        receipt, _ = persist_receipt(store, receipt, key=key)
+        return {**result, 'receipt': receipt, 'cockpit': _unknown_cockpit(wid, receipt)}
+    receipt, _ = persist_receipt(store, receipt, key=key)
     return {**result, 'receipt': receipt, 'cockpit': after}
 
 
-def _execute_legacy_controller_action(payload):
+def _execute_legacy_controller_action(payload, *, validate_only=False):
     payload = payload or {}
     act_type = str(payload.get('type') or payload.get('action_type') or '').strip()
     wid = str(payload.get('workflow_id') or '').strip()
@@ -393,6 +422,9 @@ def _execute_legacy_controller_action(payload):
             cur_pane = str(task.get('pane_id') or '').strip()
             if req_pane and cur_pane and req_pane != cur_pane:
                 raise RuntimeError(f'任务运行实例已变化（请求实例 {req_pane}，当前实例 {cur_pane}），请刷新页面')
+
+    if validate_only:
+        return None
 
     if act_type == 'launch':
         stage = str(payload.get('stage') or 'implementation').strip()

@@ -138,3 +138,94 @@ def test_partial_force_pass_receipt_is_returned_by_real_control_boundary(cockpit
     assert cockpit_store.get_task('T1')['stage_verdict'] == 'pass'
     from console.controller_cockpit_api import get_controller_cockpit
     assert get_controller_cockpit('wf-1')['receipts'][0] == result['receipt']
+
+
+def test_review_distinct_steer_intents_and_retry_have_truthful_queue_receipts(cockpit_store, monkeypatch):
+    from console import control_api
+    from console.controller_cockpit_api import get_controller_cockpit
+    from herdr import steering
+    from types import SimpleNamespace
+    monkeypatch.setattr(steering, 'get_agent_adapter', lambda agent: SimpleNamespace(supports_soft_steer=True))
+    action = next(a for a in get_controller_cockpit('wf-1')['actions'] if a['action_id'] == 'T1:steer')
+    request = {'workflow_id': 'wf-1', 'action_id': action['action_id'],
+               'expected_identity': action['expected_identity'], 'instruction': 'first instruction'}
+    first = control_api.api_controller_execute_action(request)
+    retry = control_api.api_controller_execute_action(request)
+    second = control_api.api_controller_execute_action({**request, 'instruction': 'second instruction'})
+    queued = cockpit_store.list_steers(task_id='T1')
+    assert {item['instruction'] for item in queued} == {'first instruction', 'second instruction'}
+    assert len(queued) == 2
+    assert first['receipt']['status'] == second['receipt']['status'] == 'applied'
+    assert retry['receipt'] == first['receipt']
+    assert first['receipt']['steer_id'] != second['receipt']['steer_id']
+
+
+@pytest.mark.parametrize('interrupt_ok', [True, False])
+def test_review_halt_uses_own_interrupt_evidence_not_recovery(cockpit_store, monkeypatch, interrupt_ok):
+    from console import control_api
+    from console.controller_cockpit_api import get_controller_cockpit
+    from herdr import steering
+    from types import SimpleNamespace
+    monkeypatch.setattr(steering, 'get_agent_adapter', lambda agent: SimpleNamespace(
+        supports_interrupt=True, protocol_level='tty', name='test', interrupt=lambda *a, **kw: interrupt_ok))
+    cockpit_store.save_task({**cockpit_store.get_task('T1'), 'stage_verdict': 'blocked'})
+    recovery_store.reconcile(cockpit_store.db_path, 'wf-1')
+    action = next(a for a in get_controller_cockpit('wf-1')['actions'] if a['action_id'] == 'T1:halt')
+    result = control_api.api_controller_execute_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity'], 'reason': 'reviewed interrupt'})
+    assert result['receipt']['status'] == ('applied' if interrupt_ok else 'rejected')
+    assert cockpit_store.get_task('T1')['status'] == ('interrupted' if interrupt_ok else 'working')
+    assert result['receipt'].get('operation_id') is None
+
+
+@pytest.mark.parametrize('kind', ['steer', 'halt'])
+def test_review_legacy_intervention_receipt_uses_exact_operation_readback(cockpit_store, monkeypatch, kind):
+    from console import control_api
+    from herdr import steering
+    from types import SimpleNamespace
+    monkeypatch.setattr(steering, 'get_agent_adapter', lambda agent: SimpleNamespace(
+        supports_soft_steer=True, supports_interrupt=True, protocol_level='tty', name='test', interrupt=lambda *a, **kw: True))
+    result = control_api.api_controller_execute_action({'type': kind, 'workflow_id': 'wf-1', 'task_id': 'T1',
+        'instruction': 'legacy intent', 'reason': 'legacy interrupt'})
+    assert result['receipt']['status'] == 'applied'
+
+
+def test_review_legacy_post_effect_read_failure_is_uncertain_and_reconciles(cockpit_store, monkeypatch):
+    from console import control_api
+    from console.controller_cockpit_api import get_controller_cockpit
+    from herdr import steering
+    from services.controller import cockpit_automation as automation
+    from types import SimpleNamespace
+    monkeypatch.setattr(steering, 'get_agent_adapter', lambda agent: SimpleNamespace(supports_soft_steer=True))
+    original, reads = automation.read_cockpit, 0
+    def read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            raise OSError('post-effect read unavailable')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(automation, 'read_cockpit', read)
+    result = control_api.api_controller_execute_action({'type': 'steer', 'workflow_id': 'wf-1',
+        'task_id': 'T1', 'instruction': 'must survive readback failure'})
+    assert result['receipt']['status'] == 'accepted_waiting'
+    assert result['cockpit']['read_state'] == 'unknown'
+    assert get_controller_cockpit('wf-1')['receipts'][0]['status'] == 'applied'
+
+
+def test_review_legacy_handler_exception_after_queue_keeps_unknown_receipt(cockpit_store, monkeypatch):
+    from console import control_api, task_api
+    from console.controller_cockpit_api import get_controller_cockpit
+    from herdr import steering
+    from types import SimpleNamespace
+    monkeypatch.setattr(steering, 'get_agent_adapter', lambda agent: SimpleNamespace(supports_soft_steer=True))
+    real = task_api.api_task_steer
+    def effect_then_error(payload):
+        real(payload)
+        raise OSError('handler ended after committed queue')
+    monkeypatch.setattr(task_api, 'api_task_steer', effect_then_error)
+    with pytest.raises(OSError) as error:
+        control_api.api_controller_execute_action({'type': 'steer', 'workflow_id': 'wf-1', 'task_id': 'T1',
+            'instruction': 'committed before exception'})
+    assert error.value.receipt['status'] == 'accepted_waiting'
+    assert error.value.receipt['outcome'] == 'unknown'
+    assert get_controller_cockpit('wf-1')['receipts'][0]['status'] == 'applied'

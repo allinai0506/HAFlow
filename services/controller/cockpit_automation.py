@@ -6,9 +6,6 @@ unknown until an operator reconciles it.
 """
 import hashlib
 import json
-import os
-from pathlib import Path
-import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +21,10 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='cockpit')
 _inflight = set()
 _lock = threading.Lock()
 _scan_cursor = 0
+
+
+class _IdentityChanged(ValueError):
+    """Raised before the atomic Workflow handler mutates anything."""
 
 
 def _has_table(conn, name):
@@ -99,6 +100,12 @@ def persist_receipt(store, receipt, *, key=None, claim=False):
         if claim and row:
             conn.rollback()
             return json.loads(row[0]), False
+        if row:
+            authoritative = json.loads(row[0])
+            if ('reconciliation' not in authoritative
+                    and authoritative.get('status') in {'applied', 'partial', 'rejected'}):
+                conn.rollback()
+                return authoritative, False
         conn.execute('INSERT INTO cockpit_action_receipts VALUES (?,?,?,?) '
                      'ON CONFLICT(identity_key) DO UPDATE SET receipt_json=excluded.receipt_json,updated_at=excluded.updated_at',
                      (key, receipt['workflow_id'], json.dumps(receipt, ensure_ascii=False), time.time()))
@@ -119,6 +126,148 @@ def _receipt(action, wid, status, **extra):
             'operation_id': None, **extra}
 
 
+def _intent(action, payload):
+    """Server-derived semantic intent; a browser request id grants no authority."""
+    values = {**(action.get('api_payload') or {}), **payload}
+    kind = controller_action_type(action)
+    if kind == 'steer':
+        from herdr.completion import sanitize_completion_marker
+        instruction, _ = sanitize_completion_marker(str(values.get('instruction') or '').strip(),
+                                                     action['target'].get('task_id'))
+        fields = {'instruction': instruction, 'operator': str(values.get('operator') or 'human').strip(), 'urgent': False}
+    elif kind == 'halt':
+        fields = {'reason': str(values.get('reason') or '人工在控制台紧急叫停').strip(),
+                  'operator': str(values.get('operator') or 'human').strip()}
+    else:
+        fields = {key: values[key] for key in ('reason', 'operator', 'confirmed') if key in values}
+    return hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def _claim_key(action, before, intent_digest):
+    return hashlib.sha256(json.dumps({'workflow_id': before['workflow']['workflow_id'],
+        'action_id': action['action_id'], 'target': action['target'], 'expected': action['expected_identity'],
+        'intent_digest': intent_digest, 'workflow_status_epoch': before.get('workflow_status_epoch', 0)
+        if not action['target'].get('task_id') else None}, sort_keys=True).encode()).hexdigest()
+
+
+def read_action_state(store, action, result=None, *, since=0, intent_digest=None, event_watermark=0):
+    """Exact execution facts, independent of every Cockpit display window."""
+    result = result or {}
+    target = action.get('target') or {}
+    wid = target['workflow_id']
+    tid = result.get('task_id') or target.get('task_id')
+    conn = state_db.get_readonly_db_connection(store.db_path)
+    try:
+        conn.execute('BEGIN')
+        workflow, _ = recovery_store._workflow_snapshot(conn, wid)
+        row = conn.execute('SELECT * FROM tasks WHERE workflow_id=? AND task_id=?', (wid, tid)).fetchone() if tid else None
+        task = state_db._decode_task_row(row) if row else {}
+        watermark = conn.execute('SELECT COALESCE(MAX(id),0) FROM events WHERE workflow_id=?', (wid,)).fetchone()[0]
+        facts = {'workflow': workflow, 'task': task, 'event_watermark': watermark}
+        kind = controller_action_type(action)
+        if kind in {'resume', 'pause'} and result.get('event_id'):
+            event = conn.execute("SELECT * FROM events WHERE id=? AND workflow_id=? AND id>? "
+                "AND event_type='workflow_transition' AND source='controller-cockpit' AND timestamp>=?",
+                (result['event_id'], wid, event_watermark, since)).fetchone()
+            payload = json.loads(event['payload_json']) if event else {}
+            if (payload.get('from_status') == ('paused' if kind == 'resume' else 'running')
+                    and payload.get('to_status') == ('running' if kind == 'resume' else 'paused')
+                    and payload.get('reason') == kind + '_workflow'):
+                facts['workflow_transition'] = {'id': event['id']}
+        if kind == 'steer' and tid:
+            if result.get('steer_id'):
+                rows = conn.execute('SELECT * FROM steering_items WHERE task_id=? AND steer_id=?',
+                                    (tid, result['steer_id'])).fetchall()
+            else:
+                rows = conn.execute('SELECT * FROM steering_items WHERE task_id=? AND created_at>=? '
+                                    'ORDER BY created_at DESC LIMIT 100', (tid, since)).fetchall()
+            matches = []
+            for item in rows:
+                item = {**json.loads(item['payload_json'] or '{}'), **dict(item)}
+                if item.get('run_id') != target.get('run_id'):
+                    continue
+                digest = _intent(action, {'instruction': item['instruction'], 'operator': item['operator']})
+                if intent_digest and digest != intent_digest:
+                    continue
+                matches.append({key: item.get(key) for key in ('steer_id', 'task_id', 'run_id', 'status')})
+            if len(matches) == 1:
+                facts['steer'] = matches[0]
+        if kind == 'halt' and tid:
+            rows = conn.execute("SELECT * FROM events WHERE workflow_id=? AND task_id=? AND id>? "
+                "AND event_type IN ('steering.task_halted','steering.task_halt_failed') "
+                "AND source='steering' AND timestamp>=? ORDER BY timestamp DESC,id DESC LIMIT 100",
+                (wid, tid, event_watermark, since)).fetchall()
+            for event in rows:
+                payload = json.loads(event['payload_json'] or '{}')
+                if result.get('timestamp') is not None and event['timestamp'] != result['timestamp']:
+                    continue
+                if intent_digest and _intent(action, payload) != intent_digest:
+                    continue
+                if event['run_id'] and event['run_id'] != target.get('run_id'):
+                    continue
+                facts['halt_event'] = {'id': event['id'], 'event_type': event['event_type'], 'timestamp': event['timestamp']}
+                break
+        return {'workflow': workflow, 'tasks': [task] if task else [], 'recovery': [], 'action_readback': facts}
+    finally:
+        conn.close()
+
+
+def _unknown_cockpit(wid, receipt):
+    result = build_cockpit_projection(workflow={'workflow_id': wid}, config=None, tasks=None, graph=None,
+        actions=None, recovery=None, controller=None, events=None, errors={'readback': 'unavailable'})
+    result['receipts'] = [receipt]
+    return result
+
+
+def pending_action_receipt(action, before, payload, initial):
+    context = {'action': {key: action.get(key) or {} for key in ('action_id', 'target', 'expected_identity')},
+               'before_workflow': {key: before['workflow'].get(key) for key in ('workflow_id', 'status', 'execution_id', 'candidate_sha')},
+               'started_at': time.time(), 'event_watermark': initial['action_readback']['event_watermark'],
+               'intent_digest': _intent(action, payload)}
+    context['action']['api_payload'] = {key: action['api_payload'][key] for key in ('type', 'step') if key in action['api_payload']}
+    context['action']['api_endpoint'] = action.get('api_endpoint')
+    return _receipt(action, before['workflow']['workflow_id'], 'accepted_waiting', outcome='claimed',
+        reason_code='execution_unconfirmed', message='执行责任已预占；中断后需核查副作用，禁止自动重发', reconciliation=context)
+
+
+def checkpoint_result(pending, result):
+    context = dict(pending['reconciliation'])
+    context['result'] = {key: result[key] for key in ('task_id', 'steer_id', 'operation_id', 'timestamp',
+        'event_id', 'partial', 'gate_passed', 'ok', 'status') if key in result}
+    return {**pending, 'reconciliation': context, 'outcome': 'unknown', 'reason_code': 'readback_pending'}
+
+
+def reconcile_pending_receipts(store, workflow_id, *, limit=MAX_PER_TICK):
+    """Reconcile persisted effect facts; never dispatch a previously claimed intent."""
+    conn = state_db.get_readonly_db_connection(store.db_path)
+    try:
+        if not _has_table(conn, 'cockpit_action_receipts'):
+            return []
+        pending = [(row['identity_key'], json.loads(row['receipt_json'])) for row in conn.execute(
+            "SELECT identity_key,receipt_json FROM cockpit_action_receipts WHERE workflow_id=? "
+            "AND json_extract(receipt_json,'$.reconciliation') IS NOT NULL "
+            "ORDER BY updated_at LIMIT ?", (workflow_id, max(0, min(limit, MAX_PER_TICK))))]
+    finally:
+        conn.close()
+    updated = []
+    for key, receipt in pending:
+        context = receipt['reconciliation']
+        try:
+            after = read_action_state(store, context['action'], context.get('result'), since=context['started_at'],
+                intent_digest=context['intent_digest'], event_watermark=context['event_watermark'])
+            final = classify_receipt(context['action'], {'workflow': context['before_workflow']}, after,
+                                     context.get('result') or {})
+        except Exception:
+            persist_receipt(store, receipt, key=key)  # Rotate one unavailable target behind later work.
+            continue
+        if final['status'] == 'rejected' and final.get('reason_code') in {'effect_unconfirmed', 'readback_identity_changed'}:
+            persist_receipt(store, receipt, key=key)
+            continue  # Absence/current replacement does not prove the old effect failed.
+        final, _ = persist_receipt(store, final, key=key)
+        updated.append(final)
+    return updated
+
+
 def classify_receipt(action, before, after, result):
     """Transport completion is never business completion; require readback facts."""
     wid = before['workflow']['workflow_id']
@@ -126,8 +275,13 @@ def classify_receipt(action, before, after, result):
     target = action.get('target') or {}
     expected = action.get('expected_identity') or {}
     tid = result.get('task_id') or target.get('task_id')
-    task = next((t for t in after.get('tasks', []) if t.get('task_id') == tid), {})
-    identity = task if target.get('task_id') else after['workflow']
+    facts = after.get('action_readback') or {}
+    task = facts.get('task') if 'task' in facts else next((t for t in after.get('tasks', []) if t.get('task_id') == tid), {})
+    if kind in {'resume', 'pause'} and facts.get('workflow_transition'):
+        return _receipt(action, wid, 'applied', outcome='success', event_id=facts['workflow_transition']['id'],
+                        message='已核验本次动作的权威状态流转事件')
+    after_workflow = facts.get('workflow') or after['workflow']
+    identity = task if target.get('task_id') else after_workflow
     if (kind != 'launch' and any(value is not None and value != '' and identity.get(key) != value
             for fields in (target, expected) for key, value in fields.items()
             if key in {'run_id', 'execution_id', 'candidate_sha'})):
@@ -135,9 +289,24 @@ def classify_receipt(action, before, after, result):
                         refresh_required=True)
     if result.get('partial') and result.get('gate_passed') and task.get('stage_verdict') == 'pass':
         return _receipt(action, wid, 'partial', outcome='failed', applied_steps=['force_pass'], failed_step='advance')
-    applied = ((kind == 'resume' and after['workflow'].get('status') == 'running'
+    if kind == 'steer':
+        steer = facts.get('steer') or {}
+        if steer.get('status') in {'pending', 'dispatched', 'completed'}:
+            return _receipt(action, wid, 'applied', outcome='success', steer_id=steer['steer_id'],
+                            effect='queued' if steer['status'] == 'pending' else 'delivered', message='指导已持久记录')
+        if steer.get('status') == 'blocked':
+            return _receipt(action, wid, 'partial', outcome='failed', steer_id=steer['steer_id'],
+                            applied_steps=['steer_queued'], failed_step='steer_delivery')
+    if kind == 'halt':
+        event = facts.get('halt_event') or {}
+        if (event.get('event_type') == 'steering.task_halted' and task.get('status') == 'interrupted'
+                and task.get('interrupted_at') == event.get('timestamp')):
+            return _receipt(action, wid, 'applied', outcome='success', event_id=event['id'], effect='interrupted')
+        if event.get('event_type') == 'steering.task_halt_failed':
+            return _receipt(action, wid, 'rejected', outcome='failed', reason_code='interrupt_failed', refresh_required=True)
+    applied = ((kind == 'resume' and after_workflow.get('status') == 'running'
                 and before['workflow'].get('status') == 'paused')
-               or (kind == 'pause' and after['workflow'].get('status') == 'paused'
+               or (kind == 'pause' and after_workflow.get('status') == 'paused'
                    and before['workflow'].get('status') == 'running')
                or (kind in {'force_pass', 'force_pass_advance'} and task.get('stage_verdict') == 'pass')
                or (kind in {'commit', 'integrate', 'cleanup', 'finalize', 'accept_and_commit'}
@@ -147,7 +316,8 @@ def classify_receipt(action, before, after, result):
                                               'accept_and_commit': {'committed', 'integrated', 'cleanup_ready', 'cleaned'}}[kind]))
     if applied:
         return _receipt(action, wid, 'applied', outcome='success', task_id=tid, message='权威状态已回读确认')
-    operations = [op for op in after.get('recovery', []) if op.get('status') not in {'resolved', 'superseded'}
+    operations = [op for op in after.get('recovery', []) if kind in {'advance', 'launch', 'rework'}
+                  and op.get('status') not in {'resolved', 'superseded'}
                   and ((op.get('payload') or {}).get('task_id') == tid
                        or tid in ((op.get('payload') or {}).get('task_ids') or [])
                        or result.get('operation_id') == op.get('id'))]
@@ -170,7 +340,7 @@ def default_handlers(store):
             current = next((a.to_dict() for a in candidates if a.action_id == action['action_id']), None)
             if (not current or current['expected_identity'] != action['expected_identity']
                     or current['target'] != action['target'] or current['automation'] != action['automation']):
-                raise ValueError('workflow identity or policy changed at write boundary')
+                raise _IdentityChanged('workflow identity or policy changed at write boundary')
             result = state_db.transition_workflow(wid, 'running' if kind == 'resume' else 'paused',
                 reason=kind + '_workflow', source='controller-cockpit',
                 expected_status='paused' if kind == 'resume' else 'running', conn=conn)
@@ -182,16 +352,9 @@ def default_handlers(store):
         finally:
             conn.close()
 
-    def mechanical(action):
-        if action.get('command_base') != 'herdr-task' or not action.get('commands'):
-            raise ValueError('unsupported command handler')
-        binary = Path(__file__).resolve().parents[2] / 'bin' / 'herdr-task'
-        for command in action['commands']:
-            subprocess.run([str(binary), *map(str, command)], check=True, capture_output=True, text=True, timeout=60,
-                           env={**os.environ, 'HERDR_STATE_DB': str(store.db_path)})
-        return {'ok': True, 'task_id': (action.get('target') or {}).get('task_id')}
-    return {'resume': workflow_transition, 'pause': workflow_transition,
-            **{kind: mechanical for kind in ('commit', 'integrate', 'cleanup', 'finalize')}}
+    # Task CLIs accept only task_id: none can atomically fence a replaced Run.
+    # Existing human/dispatch paths remain available; do not auto-register them.
+    return {'resume': workflow_transition, 'pause': workflow_transition}
 
 
 def execute_action(payload, *, deps, automatic=False):
@@ -226,11 +389,11 @@ def execute_action(payload, *, deps, automatic=False):
     handler = handlers.get(kind)
     if handler is None:
         return reject('unsupported_handler')
-    key = hashlib.sha256(json.dumps({'workflow_id': wid, 'action_id': aid, 'target': action['target'],
-        'expected': expected, 'workflow_status_epoch': before.get('workflow_status_epoch', 0)
-        if not action['target'].get('task_id') else None}, sort_keys=True).encode()).hexdigest()
-    claimed = _receipt(action, wid, 'accepted_waiting', outcome='claimed', reason_code='execution_unconfirmed',
-                       message='执行责任已预占；中断后需核查副作用，禁止自动重发')
+    intent_digest = _intent(action, payload)
+    key = _claim_key(action, before, intent_digest)
+    initial = read_action_state(deps.store, action)
+    claimed = pending_action_receipt(action, before, payload, initial)
+    context = claimed['reconciliation']
     receipt, created = persist_receipt(deps.store, claimed, key=key, claim=True)
     if not created:
         return {'ok': receipt['status'] != 'rejected', 'receipt': receipt, 'cockpit': before, 'duplicate': True}
@@ -244,19 +407,53 @@ def execute_action(payload, *, deps, automatic=False):
         # Handler receives only freshly derived action plus the allowed human input.
         current = {**current, 'user_input': {k: payload[k] for k in ('instruction', 'reason', 'confirmed', 'operator') if k in payload}}
         result = handler(current) or {}
-        after = _project(deps, wid)
-        receipt = classify_receipt(current, before, after, result)
+    except _IdentityChanged:
+        return reject('identity_changed', key=key)
     except Exception:
-        return reject('execution_failed', key=key, outcome='failed')
-    persist_receipt(deps.store, receipt, key=key)
-    after['receipts'] = [receipt, *[r for r in after.get('receipts', []) if r != claimed]][:100]
+        uncertain = {**claimed, 'outcome': 'unknown', 'reason_code': 'effect_unknown', 'refresh_required': True}
+        uncertain, _ = persist_receipt(deps.store, uncertain, key=key)
+        return {'ok': False, 'receipt': uncertain, 'cockpit': _unknown_cockpit(wid, uncertain)}
+    # Checkpoint only small structured result identifiers before optional reads.
+    pending = checkpoint_result(claimed, result)
+    context = pending['reconciliation']
+    persist_receipt(deps.store, pending, key=key)
+    try:
+        after = _project(deps, wid)
+        exact = read_action_state(deps.store, current, result, since=context['started_at'],
+            intent_digest=intent_digest, event_watermark=context['event_watermark'])
+        after['action_readback'] = exact['action_readback']
+        receipt = classify_receipt(current, before, after, result)
+        if receipt.get('reason_code') in {'effect_unconfirmed', 'readback_identity_changed'}:
+            receipt = {**pending, 'reason_code': receipt['reason_code'], 'refresh_required': True}
+    except Exception:
+        uncertain = {**pending, 'reason_code': 'readback_unavailable', 'refresh_required': True}
+        uncertain, _ = persist_receipt(deps.store, uncertain, key=key)
+        return {**result, 'ok': False, 'receipt': uncertain, 'cockpit': _unknown_cockpit(wid, uncertain)}
+    receipt, _ = persist_receipt(deps.store, receipt, key=key)
+    after['receipts'] = [receipt, *[r for r in after.get('receipts', []) if r.get('reconciliation') != context]][:100]
     return {**result, 'ok': receipt['status'] in {'applied', 'accepted_waiting'}, 'receipt': receipt, 'cockpit': after}
 
 
 def run_automatic_controller_actions(workflow_id, *, deps):
     recovery_store.reconcile(deps.store.db_path, workflow_id)
+    reconcile_pending_receipts(deps.store, workflow_id)
     projection = _project(deps, workflow_id)
-    actions = [a for a in projection['actions'] if (a.get('automation') or {}).get('mode') == 'automatic'][:MAX_PER_TICK]
+    candidates = [a for a in projection['actions'] if (a.get('automation') or {}).get('mode') == 'automatic']
+    handlers = getattr(deps, 'handlers', None)
+    handlers = default_handlers(deps.store) if handlers is None else handlers
+    conn = state_db.get_readonly_db_connection(deps.store.db_path)
+    try:
+        claimed = set()
+        if _has_table(conn, 'cockpit_action_receipts'):
+            for action in candidates:
+                key = _claim_key(action, projection, _intent(action, {}))
+                if conn.execute('SELECT 1 FROM cockpit_action_receipts WHERE identity_key=?', (key,)).fetchone():
+                    claimed.add(action['action_id'])
+    finally:
+        conn.close()
+    eligible = [a for a in candidates if controller_action_type(a) in handlers and a['action_id'] not in claimed]
+    unsupported = [a for a in candidates if controller_action_type(a) not in handlers]
+    actions = (eligible + unsupported)[:MAX_PER_TICK]
     receipts = []
     for action in actions:
         result = execute_action({'workflow_id': workflow_id, 'action_id': action['action_id'],

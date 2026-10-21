@@ -1,7 +1,7 @@
 """Workflow-scoped Cockpit read and execution adapter."""
 from types import SimpleNamespace
 from herdr import kernel
-from services.controller.cockpit_automation import default_handlers, execute_action, read_cockpit
+from services.controller.cockpit_automation import default_handlers, execute_action, read_cockpit, reconcile_pending_receipts
 from console import runtime
 
 
@@ -9,6 +9,7 @@ def get_controller_cockpit(workflow_id: str) -> dict:
     workflow_id = str(workflow_id or '').strip()
     if not workflow_id:
         raise ValueError('workflow_id 不能为空')
+    reconcile_pending_receipts(kernel._get_store(), workflow_id)
     return read_cockpit(kernel._get_store(), workflow_id, controller=lambda: {
         'status': runtime.service_status().get('com.user.herdr-controller') or 'unknown'})
 

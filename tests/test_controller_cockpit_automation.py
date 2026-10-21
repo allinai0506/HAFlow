@@ -137,13 +137,13 @@ def test_registry_keeps_continuation_fix_stage_order_and_schedules_controller_ex
     assert store.get_workflow('wf-1')['status'] == 'running'
 
 
-def test_failure_has_durable_failed_receipt_and_preserves_workflow(store):
+def test_handler_failure_has_durable_uncertain_receipt_and_preserves_workflow(store):
     from services.controller.cockpit_automation import run_automatic_controller_actions, read_cockpit
     def fail(action):
         raise OSError('transport unavailable')
     receipts = run_automatic_controller_actions('wf-1', deps=deps_for(store, handlers={'resume': fail}))
-    assert receipts[0]['status'] == 'rejected'
-    assert receipts[0]['outcome'] == 'failed'
+    assert receipts[0]['status'] == 'accepted_waiting'
+    assert receipts[0]['outcome'] == 'unknown'
     assert read_cockpit(store, 'wf-1', controller={'status': 'running'})['receipts'][0] == receipts[0]
     assert store.get_workflow('wf-1')['status'] == 'paused'
 
@@ -228,7 +228,7 @@ def test_a_new_pause_episode_can_resume(store):
 
 
 @pytest.mark.parametrize('failure', [None, 'exit', 'timeout'])
-def test_mechanical_handler_uses_selected_database_and_readback(store, monkeypatch, failure):
+def test_manual_external_handler_success_or_uncertain_failure_has_durable_readback(store, failure):
     from services.controller import cockpit_automation as automation
     import subprocess
     wf = store.get_workflow('wf-1')
@@ -237,22 +237,21 @@ def test_mechanical_handler_uses_selected_database_and_readback(store, monkeypat
     store.save_task({'workflow_id': 'wf-1', 'task_id': 'T', 'stage': 'build', 'node': 'build',
                      'execution_id': 'exec-1', 'run_id': 'r', 'version': 1, 'status': 'integrated',
                      'stage_verdict': 'pass'})
-    def external(command, **kwargs):
-        assert command[1:] == ['finalize', 'T']
-        assert kwargs['env']['HERDR_STATE_DB'] == str(store.db_path)
-        assert 0 < kwargs['timeout'] <= 60
+    def external(action):
         store.record_event('test.transport_started', {}, workflow_id='wf-1', task_id='T')
         if failure == 'exit':
-            raise subprocess.CalledProcessError(2, command)
+            raise subprocess.CalledProcessError(2, ['finalize', 'T'])
         if failure == 'timeout':
-            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+            raise subprocess.TimeoutExpired(['finalize', 'T'], 60)
         task = store.get_task('T')
         store.save_task({**task, 'status': 'cleaned'})
-        return subprocess.CompletedProcess(command, 0, 'done', '')
-    monkeypatch.setattr(automation.subprocess, 'run', external)
-    result = automation.run_automatic_controller_actions('wf-1', deps=deps_for(store))
-    assert result[0]['status'] == ('rejected' if failure else 'applied')
-    assert result[0]['outcome'] == ('failed' if failure else 'success')
+        return {'ok': True, 'task_id': 'T'}
+    action = next(a for a in automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['actions']
+                  if a['action_id'] == 'T:finalize')
+    result = automation.execute_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity']}, deps=deps_for(store, handlers={'finalize': external}))
+    assert result['receipt']['status'] == ('accepted_waiting' if failure else 'applied')
+    assert result['receipt']['outcome'] == ('unknown' if failure else 'success')
     assert store.get_task('T')['status'] == ('integrated' if failure else 'cleaned')
     assert len(store.list_events(workflow_id='wf-1', event_type='test.transport_started')) == 1
 
@@ -286,3 +285,137 @@ def test_scheduler_queue_is_bounded_and_rotates_without_starving_workflows(store
     for work in pending:
         work()
     assert {store.get_workflow(wid)['status'] for wid in workflow_ids} == {'running'}
+
+
+def test_review_external_cli_without_identity_cas_never_runs_automatically(store, monkeypatch):
+    from services.controller import cockpit_automation as automation
+    wf = store.get_workflow('wf-1')
+    store.save_workflow({**wf, 'status': 'running'})
+    store.save_task({'workflow_id': 'wf-1', 'task_id': 'T', 'stage': 'build', 'node': 'build',
+                     'execution_id': 'exec-1', 'run_id': 'old-run', 'version': 1,
+                     'status': 'integrated', 'stage_verdict': 'pass'})
+    called = []
+    def external(command, **kwargs):
+        called.append(command)
+        # The CLI sees a replacement Run after the final projection read.
+        store.update_task_metadata('T', {'run_id': 'replacement-run'})
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr('subprocess.run', external)
+    result = automation.run_automatic_controller_actions('wf-1', deps=deps_for(store))
+    assert called == []
+    assert result[0]['reason_code'] == 'unsupported_handler'
+    assert store.get_task('T')['run_id'] == 'old-run'
+
+
+def test_review_exact_readback_does_not_use_two_hundred_task_display_cap(store):
+    from services.controller import cockpit_automation as automation
+    store.save_workflow({**store.get_workflow('wf-1'), 'status': 'running'})
+    for i in range(201):
+        store.save_task({'workflow_id': 'wf-1', 'task_id': f'pending-{i:03}', 'node': 'build', 'status': 'pending'})
+    store.save_task({'workflow_id': 'wf-1', 'task_id': 'target', 'node': 'build', 'stage': 'build',
+        'execution_id': 'exec-1', 'run_id': 'target-run', 'status': 'integrated', 'version': 1})
+    before = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})
+    assert before['tasks_truncated']
+    assert not any(t['task_id'] == 'target' for t in before['tasks'])
+    action = next(a for a in before['actions'] if a['action_id'] == 'target:finalize')
+    def effect(action):
+        store.save_task({**store.get_task('target'), 'status': 'cleaned'})
+        return {'ok': True, 'task_id': 'target'}
+    result = automation.execute_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity']}, deps=deps_for(store, handlers={'finalize': effect}))
+    assert result['receipt']['status'] == 'applied'
+    assert result['receipt']['target']['run_id'] == 'target-run'
+
+
+def test_review_unsupported_prefix_does_not_starve_registered_handler(store):
+    from services.controller import cockpit_automation as automation
+    from copy import deepcopy
+    original = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})
+    resume = original['actions'][0]
+    unsupported = [{**deepcopy(resume), 'action_id': f'unsupported-{i}',
+                    'api_payload': {'type': 'steer'}} for i in range(8)]
+    def project(wid):
+        return {**automation.read_cockpit(store, wid, controller={'status': 'running'}),
+                'actions': [*unsupported, resume]}
+    result = automation.run_automatic_controller_actions('wf-1', deps=deps_for(store, project=project))
+    assert store.get_workflow('wf-1')['status'] == 'running'
+    assert any(receipt['status'] == 'applied' for receipt in result)
+    assert len(result) <= 4
+
+
+def test_review_post_effect_readback_failure_stays_uncertain_then_reconciles(store):
+    from services.controller import cockpit_automation as automation
+    reads = 0
+    def project(wid):
+        nonlocal reads
+        reads += 1
+        if reads == 3:
+            raise OSError('readback unavailable after committed effect')
+        return automation.read_cockpit(store, wid, controller={'status': 'running'})
+    action = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['actions'][0]
+    result = automation.execute_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity']}, deps=deps_for(store, project=project))
+    assert store.get_workflow('wf-1')['status'] == 'running'
+    assert result['receipt']['status'] == 'accepted_waiting'
+    assert result['receipt']['outcome'] == 'unknown'
+    assert result['cockpit']['read_state'] == 'unknown'
+    assert result['cockpit']['workflow'].get('status') not in {'paused', 'running'}
+    reopened = SQLiteStateStore(store.db_path)
+    automation.run_automatic_controller_actions('wf-1', deps=deps_for(reopened))
+    receipts = automation.read_cockpit(reopened, 'wf-1', controller={'status': 'running'})['receipts']
+    assert receipts[0]['status'] == 'applied'
+    assert len(reopened.list_events(workflow_id='wf-1', event_type='workflow_transition')) == 1
+
+
+def test_review_completed_receipt_cannot_regress_to_stale_pending_write(store):
+    from services.controller import cockpit_automation as automation
+    pending = {'workflow_id': 'wf-1', 'action_id': 'a', 'status': 'accepted_waiting', 'reconciliation': {}}
+    final = {'workflow_id': 'wf-1', 'action_id': 'a', 'status': 'applied', 'outcome': 'success'}
+    automation.persist_receipt(store, pending, key='same-operation')
+    automation.persist_receipt(store, final, key='same-operation')
+    returned, _ = automation.persist_receipt(store, pending, key='same-operation')
+    assert returned == final
+    assert automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['receipts'][0] == final
+
+
+def test_review_reconciliation_rotates_unresolved_receipts_so_later_evidence_progresses(store):
+    from services.controller import cockpit_automation as automation
+    from copy import deepcopy
+    from herdr import kernel
+    before = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})
+    resume = before['actions'][0]
+    for i in range(4):
+        unknown = {**deepcopy(resume), 'action_id': f'ghost-{i}', 'api_payload': {'type': 'steer'},
+                   'target': {'workflow_id': 'wf-1', 'task_id': f'ghost-{i}', 'run_id': 'missing'}}
+        pending = automation.pending_action_receipt(unknown, before, {'instruction': 'unresolved'},
+                                                   automation.read_action_state(store, unknown))
+        automation.persist_receipt(store, pending, key=f'ghost-{i}')
+    pending = automation.pending_action_receipt(resume, before, {}, automation.read_action_state(store, resume))
+    automation.persist_receipt(store, pending, key='last-resume')
+    kernel.resume_workflow('wf-1', store=store)
+    automation.reconcile_pending_receipts(store, 'wf-1')
+    automation.reconcile_pending_receipts(store, 'wf-1')
+    receipts = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['receipts']
+    assert next(r for r in receipts if r['action_id'] == resume['action_id'])['status'] == 'applied'
+
+
+def test_review_reconciliation_uses_own_transition_event_after_later_pause(store):
+    from services.controller import cockpit_automation as automation
+    from herdr import kernel
+    reads = 0
+    def project(wid):
+        nonlocal reads
+        reads += 1
+        if reads == 3:
+            raise OSError('readback unavailable')
+        return automation.read_cockpit(store, wid, controller={'status': 'running'})
+    action = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['actions'][0]
+    result = automation.execute_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity']}, deps=deps_for(store, project=project))
+    assert result['receipt']['status'] == 'accepted_waiting'
+    kernel.pause_workflow('wf-1', store=store)
+    automation.reconcile_pending_receipts(store, 'wf-1')
+    receipts = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['receipts']
+    assert receipts[0]['status'] == 'applied'
+    assert receipts[0]['event_id'] == result['event_id']
+    assert store.get_workflow('wf-1')['status'] == 'paused'
