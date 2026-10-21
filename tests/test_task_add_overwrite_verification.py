@@ -112,6 +112,62 @@ class TaskAddOverwriteVerificationTest(unittest.TestCase):
         self.assertEqual(dup_task["status"], "working")
         self.assertEqual(dup_task["goal"], "initial goal")
 
+    def test_concurrent_add_task_interleaving_is_atomic(self):
+        """Codex P1 Gate regression: concurrent add_task processes for same task_id.
+
+        When two processes attempt to register the exact same new task_id concurrently,
+        exactly one must succeed (returncode 0) and the other must be atomically rejected
+        with 'Task already exists' (returncode 1). Neither can overwrite the other.
+        """
+        import concurrent.futures
+
+        # Seed the workflow
+        self._seed_workflow_and_task("T-BASE", status="working")
+
+        target_task_id = "T-CONCURRENT"
+        args_1 = [
+            "add",
+            "--task-id", target_task_id,
+            "--workflow-id", "wf-test",
+            "--node", "n1",
+            "--workspace", "ws1",
+            "--pane", "p1",
+            "--agent", "codex",
+            "--goal", "process 1 goal",
+        ]
+        args_2 = [
+            "add",
+            "--task-id", target_task_id,
+            "--workflow-id", "wf-test",
+            "--node", "n1",
+            "--workspace", "ws2",
+            "--pane", "p2",
+            "--agent", "claude",
+            "--goal", "process 2 goal",
+        ]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            f1 = executor.submit(self._task_cli, *args_1)
+            f2 = executor.submit(self._task_cli, *args_2)
+            res1 = f1.result()
+            res2 = f2.result()
+
+        results = [res1, res2]
+        returncodes = sorted([r.returncode for r in results])
+        self.assertEqual(returncodes, [0, 1], f"Expected exactly one success and one failure: {res1.stdout + res1.stderr} vs {res2.stdout + res2.stderr}")
+
+        success_res = [r for r in results if r.returncode == 0][0]
+        failure_res = [r for r in results if r.returncode == 1][0]
+
+        self.assertIn(f"Task registered: {target_task_id}", success_res.stdout)
+        self.assertIn(f"Task already exists: {target_task_id}", failure_res.stdout + failure_res.stderr)
+
+        # Database must have exactly one record for target_task_id
+        final_task = self._get_task(target_task_id)
+        self.assertEqual(final_task["task_id"], target_task_id)
+        self.assertEqual(final_task["status"], "pending")
+        self.assertIn(final_task["goal"], ["process 1 goal", "process 2 goal"])
+
 
 if __name__ == "__main__":
     unittest.main()

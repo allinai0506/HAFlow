@@ -47,7 +47,7 @@ evidence:
   confidence: high
 - kind: implemented
   source: herdr/state_db.py
-  locator: transition_task replacement_pending L6741-6744
+  locator: transition_task replacement_pending L6769-6772
   confidence: high
 - kind: implemented
   source: services/controller/infra_recovery.py

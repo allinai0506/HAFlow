@@ -38,6 +38,11 @@ from herdr.transitions import (
 )
 
 
+class TaskAlreadyExistsError(RuntimeError):
+    """Raised when attempting an exclusive task insert for a task_id that already exists."""
+    pass
+
+
 HOME = Path.home()
 CONTROLLER_DIR = HOME / ".herdr-controller"
 
@@ -1580,6 +1585,7 @@ def save_task(
     task_dict: Dict[str, Any],
     db_path: Optional[Path] = None,
     conn: Optional[sqlite3.Connection] = None,
+    fail_if_exists: bool = False,
 ) -> None:
     """Upsert a task record."""
     tid = task_dict.get("task_id")
@@ -1616,6 +1622,8 @@ def save_task(
         if not conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,)).fetchone():
             save_workflow({"workflow_id": wid, "title": wid, "status": "pending"}, db_path, conn=conn)
         existing = conn.execute('SELECT workflow_id,node,payload_json FROM tasks WHERE task_id=?', (tid,)).fetchone()
+        if fail_if_exists and existing:
+            raise TaskAlreadyExistsError(f"Task already exists: {tid}")
         if not existing or status not in {'superseded', 'cleaned', 'completed'}:
             from .dispatch_recovery import require_authorization
             require_authorization(conn, wid, node, task_dict.get('dispatch_operation_id'))
@@ -1711,24 +1719,33 @@ def save_task(
         elif task_dict.get('dispatch_operation_id') is not None:
             from .node_dispatch_store import validate_task_registration
             validate_task_registration(conn, task_dict, now)
-        conn.execute("""
-            INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, pane_id, goal, blocker, payload_json, created_at, updated_at, version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(task_id) DO UPDATE SET
-                workflow_id=excluded.workflow_id,
-                node=excluded.node,
-                stage=excluded.stage,
-                agent=excluded.agent,
-                status=excluded.status,
-                stage_verdict=excluded.stage_verdict,
-                stage_verdict_note=excluded.stage_verdict_note,
-                pane_id=excluded.pane_id,
-                goal=excluded.goal,
-                blocker=excluded.blocker,
-                payload_json=excluded.payload_json,
-                updated_at=excluded.updated_at,
-                version=COALESCE(tasks.version, 0) + 1;
-        """, (tid, wid, node, stage, agent, status, verdict, verdict_note, pane_id, goal, blocker, payload_json, created_at, now))
+        if fail_if_exists:
+            try:
+                conn.execute("""
+                    INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, pane_id, goal, blocker, payload_json, created_at, updated_at, version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """, (tid, wid, node, stage, agent, status, verdict, verdict_note, pane_id, goal, blocker, payload_json, created_at, now))
+            except sqlite3.IntegrityError as exc:
+                raise TaskAlreadyExistsError(f"Task already exists: {tid}") from exc
+        else:
+            conn.execute("""
+                INSERT INTO tasks (task_id, workflow_id, node, stage, agent, status, stage_verdict, stage_verdict_note, pane_id, goal, blocker, payload_json, created_at, updated_at, version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    workflow_id=excluded.workflow_id,
+                    node=excluded.node,
+                    stage=excluded.stage,
+                    agent=excluded.agent,
+                    status=excluded.status,
+                    stage_verdict=excluded.stage_verdict,
+                    stage_verdict_note=excluded.stage_verdict_note,
+                    pane_id=excluded.pane_id,
+                    goal=excluded.goal,
+                    blocker=excluded.blocker,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at,
+                    version=COALESCE(tasks.version, 0) + 1;
+            """, (tid, wid, node, stage, agent, status, verdict, verdict_note, pane_id, goal, blocker, payload_json, created_at, now))
         from .recovery_store import ensure_for_workflow
         ensure_for_workflow(conn, wid, now=now)
         if should_close:
