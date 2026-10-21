@@ -257,9 +257,14 @@ async function dashOpenWorkflowOf(wid,target={}){
 async function dashOpenWorkflow(navigation=++dashNavigationSequence){
   const wid=state.dashWorkflowId;
   if(!wid)return toast('请先在下拉框选择一个工作流',true);
-  const current=()=>navigation===dashNavigationSequence&&state.workflowId===wid&&!state.dashMode&&!state.opsMode;
+  const target=state.controllerTarget;
+  const current=()=>navigation===dashNavigationSequence&&state.workflowId===wid&&state.controllerTarget===target&&!state.dashMode&&!state.opsMode;
   state.workflowId=wid;state.dashMode=false;state.shellView='workbench';state.dashWorkflowId=null;stopDashTimer();saveViewState();syncOpsUi();
-  try{await loadWorkflow(wid)}catch(e){if(current())toast(e.message,true);return false;}
+  try{
+    const workflow=await api('/api/workflow?id='+encodeURIComponent(wid)+'&lightweight=1');
+    if(!workflow||!current())return false;
+    await loadWorkflow(wid,workflow);
+  }catch(e){if(current())toast(e.message,true);return false;}
   if(!current())return false;
   await refreshAll();
   return current();

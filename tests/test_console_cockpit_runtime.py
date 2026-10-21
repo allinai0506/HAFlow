@@ -323,12 +323,15 @@ class TestControllerCockpitRuntime(unittest.TestCase):
                       await NEWER;
                       const before=JSON.stringify(state.controllerTarget),reads=overviewCalls;releaseA();await oldNavigation;
                       console.log('TARGET='+JSON.stringify(state.controllerTarget));console.log('UNCHANGED='+(before===JSON.stringify(state.controllerTarget)));console.log('OLD_REFRESH='+(overviewCalls>reads));
+                      console.log('PROJECTION='+state.controllerCockpit?.workflow?.workflow_id);console.log('VISIBLE='+(state.workflowId==='__ctl__'&&!document.getElementById('controllerTabView').hidden));
                     })();
                 """.replace('NEWER', newer))
                 self.assertIn('"workflowId":"B"', out)
                 self.assertIn('"taskId":"task-B"', out)
                 self.assertIn('UNCHANGED=true', out)
                 self.assertIn('OLD_REFRESH=false', out)
+                self.assertIn('PROJECTION=B', out)
+                self.assertIn('VISIBLE=true', out)
 
     def test_task_row_opens_cockpit_with_complete_task_identity(self):
         import tempfile
