@@ -105,25 +105,18 @@ def api_workflow_controller_actions(wid):
     """
     wid = str(wid or '').strip()
     if not wid: raise RuntimeError('workflow_id 不能为空')
-    from herdr.recovery_store import read_snapshot
-    wf, _, ts = read_snapshot(herdr_kernel._get_store().db_path, wid)
-    blockers = herdr_controller_actions.resolve_workflow_blockers(ts, wf)
-    p = inventory.project_by_id(wf.get('project_id')) or wf
-    proj_root = p.get('project_root') or wf.get('project_root') or ''
-    operations = workflow_api.api_workflow_recovery(wid).get('operations',[])
+    from services.controller.cockpit_automation import read_cockpit
+    # Preserve legacy obligation discovery, then read all facts coherently.
+    workflow_api.api_workflow_recovery(wid)
+    cockpit = read_cockpit(herdr_kernel._get_store(), wid, controller={'status': 'unknown'})
+    operations = cockpit['recovery']
     managed = {tid for op in operations if op['status'] not in {'resolved','superseded'}
                for tid in op['payload'].get('task_ids') or []}
-    actions_list = [
-        act.to_dict()
-        for act in herdr_controller_actions.collect_workflow_actions(
-            ts, wf, project_root=proj_root,
-            workflow_paused=str(wf.get('status') or '') == 'paused',
-        )
-    ]
+    actions_list = cockpit['actions']
     actions_list = [a for a in actions_list if a.get('blocker_task_id') not in managed]
     return {
         'workflow_id': wid,
-        'blockers': blockers,
+        'blockers': cockpit['blockers'],
         'actions': actions_list,
         'recovery': operations,
     }
@@ -298,7 +291,46 @@ def _launch_experience_inherit(payload, old_task):
         flags += ["--mandatory-experience-rules"]
     return flags
 
+def resolve_controller_action(workflow_id, action_id, *, snapshot=None):
+    """Look up only the exact current server-authored Action."""
+    from console.controller_cockpit_api import get_controller_cockpit
+    cockpit = snapshot if snapshot is not None else get_controller_cockpit(workflow_id)
+    return next((action for action in cockpit['actions'] if action['action_id'] == action_id), None)
+
+
 def api_controller_execute_action(payload):
+    payload = payload or {}
+    from console.controller_cockpit_api import execute_controller_action
+    if (payload or {}).get('action_id'):
+        return execute_controller_action(payload)
+    # Historical callers retain their result/exception contract; receipts add
+    # authoritative outcome facts without changing transport success semantics.
+    from services.controller.cockpit_automation import read_cockpit, classify_receipt, persist_receipt
+    store = herdr_kernel._get_store()
+    wid = str((payload or {}).get('workflow_id') or '').strip()
+    try:
+        before = read_cockpit(store, wid, controller={'status': 'running'}) if wid else None
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    aid = str(payload.get('task_id') or wid) + ':' + str(payload.get('type') or payload.get('action_type') or '')
+    action = {'action_id': aid, 'target': {'workflow_id': wid, 'task_id': payload.get('task_id')}, 'api_payload': payload}
+    try:
+        result = _execute_legacy_controller_action(payload)
+    except Exception as exc:
+        if wid:
+            receipt = {'status': 'rejected', 'action_id': aid, 'workflow_id': wid, 'target': action['target'],
+                       'outcome': 'rejected' if isinstance(exc, RuntimeError) else 'failed',
+                       'reason_code': 'legacy_action_rejected', 'refresh_required': True}
+            persist_receipt(store, receipt)
+            exc.receipt = receipt
+        raise
+    after = read_cockpit(store, wid, controller={'status': 'running'})
+    receipt = classify_receipt(action, before, after, result)
+    persist_receipt(store, receipt)
+    return {**result, 'receipt': receipt, 'cockpit': after}
+
+
+def _execute_legacy_controller_action(payload):
     payload = payload or {}
     act_type = str(payload.get('type') or payload.get('action_type') or '').strip()
     wid = str(payload.get('workflow_id') or '').strip()

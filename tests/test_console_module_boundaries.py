@@ -132,3 +132,24 @@ def test_direct_static_console_url_keeps_the_executable_template(server):
         assert int(response.headers['Content-Length']) == len(raw)
         assert raw == console.HTML_TEMPLATE.encode()
         assert b'console:include' not in raw
+
+
+def test_cockpit_http_route_reads_selected_store(server, monkeypatch):
+    from console import runtime
+    monkeypatch.setattr(runtime, 'service_status', lambda: {'com.user.herdr-controller': 'running'})
+    base, db = server
+    state_db.save_workflow({'workflow_id': 'owned', 'project_id': 'p', 'status': 'paused', 'execution_id': 'e',
+                           'config': {'nodes': [{'id': 'build', 'node_type': 'agent'}]}}, db_path=db)
+    with urllib.request.urlopen(base + '/api/workflow/controller-cockpit?workflow_id=owned', timeout=5) as response:
+        cockpit = json.load(response)['data']
+    action = next(a for a in cockpit['actions'] if a['action_id'] == 'owned:resume_workflow')
+    request = urllib.request.Request(base + '/api/controller/execute-action',
+        data=json.dumps({'workflow_id': 'owned', 'action_id': action['action_id'],
+                         'expected_identity': action['expected_identity']}).encode(),
+        headers={'Content-Type': 'application/json', 'X-HAFlow-Console-Request': '1'})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        result = json.load(response)['data']
+    assert result['receipt']['status'] == 'applied'
+    assert state_db.get_workflow('owned', db_path=db)['status'] == 'running'
+    with urllib.request.urlopen(base + '/api/workflow/controller-cockpit?workflow_id=owned', timeout=5) as response:
+        assert json.load(response)['data']['receipts'][0] == result['receipt']
