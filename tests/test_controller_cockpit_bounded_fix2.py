@@ -1,4 +1,5 @@
 """Bounded cycle 2 counterexamples: persisted facts and real write boundaries."""
+from pathlib import Path
 import pytest
 
 from herdr import kernel, node_dispatch_store as dispatch, recovery_store, state_db
@@ -23,6 +24,21 @@ def test_legacy_task_without_workflow_identity_keeps_default_compatibility(tmp_p
     db = tmp_path / 'legacy.db'
     state_db.save_task({'task_id': 'legacy', 'run_id': 'old-run', 'status': 'completed'}, db_path=db)
     assert state_db.get_task('legacy', db_path=db)['workflow_id'] == 'default'
+
+
+def test_cockpit_status_epoch_ignores_malformed_legacy_event(scene):
+    conn = state_db.get_db_connection(scene.db_path)
+    conn.execute("INSERT INTO events(workflow_id,event_type,payload_json,timestamp,source) VALUES(?,?,?,?,?)",
+                 ('wf', 'workflow_transition', '{bad', 1, 'legacy'))
+    conn.commit()
+    view = automation.read_cockpit(scene, 'wf', controller={'status': 'running'})
+    assert view['workflow_id'] == 'wf'
+
+
+def test_ops_controls_resolve_a_current_cockpit_action_before_execution():
+    source = (Path(__file__).parents[1] / 'console/static/console/scripts/operations.js').read_text()
+    assert '/api/workflow/controller-cockpit?workflow_id=' in source
+    assert 'payload.action_id=action.action_id' in source
 
 
 @pytest.mark.parametrize('policy', ['workflow', 'node', 'launch', 'automatic'])

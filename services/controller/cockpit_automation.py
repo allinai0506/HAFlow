@@ -36,7 +36,7 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
         conn.execute('BEGIN')
         workflow, config, tasks = recovery_store._snapshot(conn, workflow_id)
         control_fingerprint = fingerprint(conn, workflow_id)
-        epoch = conn.execute("SELECT id FROM events WHERE workflow_id=? AND event_type='workflow_transition' "
+        epoch = conn.execute("SELECT id FROM events WHERE workflow_id=? AND event_type='workflow_transition' AND json_valid(payload_json) "
                              "AND json_extract(payload_json,'$.to_status')=? ORDER BY timestamp DESC,id DESC LIMIT 1",
                              (workflow_id, workflow['status'])).fetchone()
         operations = ([recovery_store._decode(row) for row in conn.execute(
