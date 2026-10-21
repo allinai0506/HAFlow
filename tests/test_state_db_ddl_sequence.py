@@ -101,6 +101,7 @@ def _assert_trace(name: str, actual: list[str]) -> None:
     feature_admission_reads = (
         "SELECT 1 FROM workflows WHERE workflow_id=",
         "SELECT * FROM workflows WHERE workflow_id=",
+        "SELECT id,event_type,payload_json FROM events WHERE workflow_id=",
         "SELECT id,payload_json FROM events WHERE workflow_id=",
     )
     # Feature-specific registration authorization adds these three reads only
