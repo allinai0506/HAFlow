@@ -145,6 +145,39 @@ def test_stage_admission_join_ignores_previous_execution_tasks(scene):
     assert all(task["task_id"] != "old-dependency" for task in observed)
 
 
+def test_stage_admission_rereads_workflow_after_reconciliation_generation_change(scene):
+    from herdr.coordinator_stage_admission import admit_stage_dispatch
+
+    def reopen_then_reconcile(workflow_id, discover=True):
+        workflow = scene.store.get_workflow(workflow_id)
+        workflow["execution_id"] = "execution-2"
+        workflow["config"] = {"nodes": [{
+            "id": "implementation",
+            "depends_on": [],
+            "purpose": "current-generation-purpose",
+        }]}
+        scene.store.save_workflow(workflow)
+        return scene.ctrl.reconcile_node_dispatches(workflow_id, discover=discover)
+
+    result = admit_stage_dispatch(
+        scene.item,
+        {"id": "implementation", "depends_on": [], "purpose": "stale-purpose"},
+        "implementation",
+        get_store=lambda: scene.store,
+        coordinator_intake_enabled=lambda: True,
+        reconcile_node_dispatches=reopen_then_reconcile,
+        find_node=scene.ctrl.find_node,
+        scheduler_join_gate_allows=lambda *_: True,
+        load_tasks=scene.store.list_tasks,
+        clear_stage_advance=scene.ctrl.clear_stage_advance,
+    )
+
+    assert result is not None
+    _item, admitted_node, dispatch_op, _owner = result
+    assert admitted_node["purpose"] == "current-generation-purpose"
+    assert dispatch_op["payload"]["generation"][0] == "execution-2"
+
+
 def test_stage_admission_defers_and_clears_when_join_gate_blocks(scene):
     from herdr.coordinator_stage_admission import admit_stage_dispatch
 

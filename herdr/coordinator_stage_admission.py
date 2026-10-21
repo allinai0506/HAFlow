@@ -40,6 +40,13 @@ def admit_stage_dispatch(
         from herdr.node_dispatch_store import claim, operation_for_node
 
         reconcile_node_dispatches(workflow_id)
+        workflow = store.get_workflow(workflow_id)
+        if not workflow:
+            return None
+        pinned = workflow["config"]
+        node = find_node(pinned, target_node_id)
+        if not node:
+            return None
         dispatch_op = operation_for_node(
             store.db_path, workflow_id, target_node_id
         )
@@ -70,8 +77,6 @@ def admit_stage_dispatch(
             dispatch_operation_id=dispatch_op["id"],
             dispatch_owner=dispatch_owner,
         )
-        pinned = workflow["config"]
-        node = find_node(pinned, target_node_id)
         item = dict(item, node=node)
         tasks = load_tasks()
         execution_id = workflow.get("execution_id")
