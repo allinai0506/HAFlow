@@ -1,0 +1,1361 @@
+{
+  "internal": [
+    {
+      "scope": [
+        "get_default_db_path"
+      ],
+      "symbol": "CONTROLLER_DIR",
+      "line": 80,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_db_connection"
+      ],
+      "symbol": "get_default_db_path",
+      "line": 1262,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "init_db"
+      ],
+      "symbol": "get_default_db_path",
+      "line": 1299,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "init_db"
+      ],
+      "symbol": "get_db_connection",
+      "line": 1302,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "resolve_state_db_path"
+      ],
+      "symbol": "CONTROLLER_DIR",
+      "line": 1339,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "_open_shadow_read_connection"
+      ],
+      "symbol": "get_readonly_db_connection",
+      "line": 1463,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "save_workflow"
+      ],
+      "symbol": "get_db_connection",
+      "line": 1484,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_workflow"
+      ],
+      "symbol": "get_readonly_db_connection",
+      "line": 1527,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_workflows"
+      ],
+      "symbol": "get_readonly_db_connection",
+      "line": 1549,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "delete_workflow"
+      ],
+      "symbol": "get_db_connection",
+      "line": 1565,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "save_task"
+      ],
+      "symbol": "get_db_connection",
+      "line": 1611,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_task"
+      ],
+      "symbol": "get_db_connection",
+      "line": 1785,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_task"
+      ],
+      "symbol": "_decode_task_row",
+      "line": 1789,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_tasks"
+      ],
+      "symbol": "get_db_connection",
+      "line": 1806,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "observe_completion"
+      ],
+      "symbol": "get_db_connection",
+      "line": 1886,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "observe_completion"
+      ],
+      "symbol": "_decode_task_row",
+      "line": 1894,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "observe_blocker_marker"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2167,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "observe_blocker_marker"
+      ],
+      "symbol": "record_event",
+      "line": 2220,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_completion_observation"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2259,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "clear_completion_observation"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2278,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "clear_completion_observations_for_statuses"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2314,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "delete_task"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2328,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "save_steer"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2350,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_steer"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2395,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_steers"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2425,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "update_steer_status"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2465,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "record_steering_history"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2496,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "record_steering_history"
+      ],
+      "symbol": "record_event",
+      "line": 2519,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_steering_history"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2555,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "_record_intervention_event"
+      ],
+      "symbol": "record_event",
+      "line": 2608,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "create_intervention"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2637,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_intervention"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2717,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_interventions"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2734,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "claim_intervention"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2766,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "_finish_intervention"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2842,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "create_collaboration_event"
+      ],
+      "symbol": "get_db_connection",
+      "line": 2972,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_collaboration_event"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3030,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "attach_working_context_ref"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3044,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_collaboration_events"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3094,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "_transition_collaboration_event"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3122,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "record_event"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3193,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "record_event_if_absent"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3272,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "record_event_if_absent"
+      ],
+      "symbol": "record_event",
+      "line": 3308,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_events"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3337,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "record_trajectory_event"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3405,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "record_observation_receipt"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3476,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_trajectory_events"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3541,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "aggregate_run_metric_rows"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3578,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "insert_execution_outcome"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3903,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_execution_outcome"
+      ],
+      "symbol": "get_db_connection",
+      "line": 3957,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "read_execution_outcome"
+      ],
+      "symbol": "get_readonly_db_connection",
+      "line": 3979,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "_rollout_read_connection"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4031,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "_rollout_read_connection"
+      ],
+      "symbol": "get_readonly_db_connection",
+      "line": 4034,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_rollout_stage"
+      ],
+      "symbol": "read_rollout_snapshot",
+      "line": 4114,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "rollout_stage_known"
+      ],
+      "symbol": "read_rollout_snapshot",
+      "line": 4212,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "transact_rollout_stage"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4267,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "query_execution_outcomes"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4363,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "latest_trajectory_sequence"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4636,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "trajectory_event_exists"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4653,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "artifact_ref_exists"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4667,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "upsert_trajectory_finding"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4740,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_trajectory_finding"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4808,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_trajectory_finding_by_id"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4826,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_trajectory_findings"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4846,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_trajectory_findings_bounded"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4871,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_context_source_version"
+      ],
+      "symbol": "get_db_connection",
+      "line": 4974,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "insert_observation"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5007,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_observation"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5053,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "find_observation_by_dedup"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5076,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_observations"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5101,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "read_context_compact_snapshot"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5195,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "read_context_compact_snapshot"
+      ],
+      "symbol": "_decode_task_row",
+      "line": 5217,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "save_context_pack"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5293,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_context_pack"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5395,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_latest_context_pack"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5407,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_context_packs"
+      ],
+      "symbol": "get_db_connection",
+      "line": 5422,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "save_working_context"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6271,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "register_working_context_source"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6432,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "working_context_source_is_current"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6484,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "record_working_context_metric"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6514,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_working_context"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6546,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_latest_working_context"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6563,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_working_contexts"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6606,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "transition_task"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6675,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "transition_task"
+      ],
+      "symbol": "_decode_task_row",
+      "line": 6722,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "transition_task"
+      ],
+      "symbol": "_decode_task_row",
+      "line": 6742,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "transition_task"
+      ],
+      "symbol": "_decode_task_row",
+      "line": 6820,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "transition_task"
+      ],
+      "symbol": "record_event",
+      "line": 6829,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "compare_and_set_completion_transition"
+      ],
+      "symbol": "get_db_connection",
+      "line": 6945,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "compare_and_set_completion_transition"
+      ],
+      "symbol": "_decode_task_row",
+      "line": 6953,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "transition_workflow"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7133,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "transition_workflow"
+      ],
+      "symbol": "record_event",
+      "line": 7202,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "register_workflow"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7257,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "register_workflow"
+      ],
+      "symbol": "record_event",
+      "line": 7293,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "update_task_metadata"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7344,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "update_workflow_metadata"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7417,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "force_pass_gate"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7483,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "force_pass_gate"
+      ],
+      "symbol": "_decode_task_row",
+      "line": 7499,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "create_checkpoint"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7669,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "create_checkpoint"
+      ],
+      "symbol": "record_event",
+      "line": 7748,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "list_checkpoints"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7776,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_checkpoint"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7805,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "restore_checkpoint"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7832,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "restore_checkpoint"
+      ],
+      "symbol": "record_event",
+      "line": 7845,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "fork_workflow_from_checkpoint"
+      ],
+      "symbol": "get_db_connection",
+      "line": 7875,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "fork_workflow_from_checkpoint"
+      ],
+      "symbol": "record_event",
+      "line": 7914,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "migrate_v1_to_v2"
+      ],
+      "symbol": "CONTROLLER_DIR",
+      "line": 7969,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "migrate_v1_to_v2"
+      ],
+      "symbol": "CONTROLLER_DIR",
+      "line": 7970,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "migrate_v1_to_v2"
+      ],
+      "symbol": "CONTROLLER_DIR",
+      "line": 7971,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "migrate_v1_to_v2"
+      ],
+      "symbol": "CONTROLLER_DIR",
+      "line": 7972,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "migrate_v1_to_v2"
+      ],
+      "symbol": "init_db",
+      "line": 7973,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "migrate_v1_to_v2"
+      ],
+      "symbol": "get_db_connection",
+      "line": 8015,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "save_user_token"
+      ],
+      "symbol": "get_default_db_path",
+      "line": 8083,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "save_user_token"
+      ],
+      "symbol": "_get_credentials_dir",
+      "line": 8086,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "save_user_token"
+      ],
+      "symbol": "get_db_connection",
+      "line": 8100,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "get_user_token"
+      ],
+      "symbol": "_get_credentials_dir",
+      "line": 8120,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "delete_user_token"
+      ],
+      "symbol": "get_default_db_path",
+      "line": 8152,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "delete_user_token"
+      ],
+      "symbol": "_get_credentials_dir",
+      "line": 8153,
+      "binding": "facade"
+    },
+    {
+      "scope": [
+        "delete_user_token"
+      ],
+      "symbol": "get_db_connection",
+      "line": 8161,
+      "binding": "facade"
+    }
+  ],
+  "imports": [
+    {
+      "file": "console/http_server.py",
+      "line": 83,
+      "scope": [
+        "Handler",
+        "get_auth_token"
+      ],
+      "symbols": [
+        "get_user_token"
+      ],
+      "source": "from herdr.state_db import get_user_token",
+      "binding": "late_import"
+    },
+    {
+      "file": "console/http_server.py",
+      "line": 242,
+      "scope": [
+        "Handler",
+        "do_GET"
+      ],
+      "symbols": [
+        "get_user_token"
+      ],
+      "source": "from herdr.state_db import get_user_token",
+      "binding": "late_import"
+    },
+    {
+      "file": "console/http_server.py",
+      "line": 319,
+      "scope": [
+        "Handler",
+        "do_POST"
+      ],
+      "symbols": [
+        "save_user_token"
+      ],
+      "source": "from herdr.state_db import save_user_token",
+      "binding": "late_import"
+    },
+    {
+      "file": "console/read_api.py",
+      "line": 44,
+      "scope": [
+        "project_runtime"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from herdr.state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "console/read_api.py",
+      "line": 103,
+      "scope": [
+        "_referenced_task_inventory"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from herdr.state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "console/read_api.py",
+      "line": 111,
+      "scope": [
+        "_referenced_task_inventory"
+      ],
+      "symbols": [
+        "_decode_task_row"
+      ],
+      "source": "from herdr.state_db import _decode_task_row",
+      "binding": "late_import"
+    },
+    {
+      "file": "console/read_api.py",
+      "line": 125,
+      "scope": [
+        "candidate_publication_times"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from herdr.state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/console_queries.py",
+      "line": 4,
+      "scope": [],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from .state_db import get_readonly_db_connection",
+      "binding": "module_copy"
+    },
+    {
+      "file": "herdr/dispatch_recovery.py",
+      "line": 154,
+      "scope": [
+        "list_operations"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from .state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/dispatch_recovery.py",
+      "line": 245,
+      "scope": [
+        "check_resources"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from .state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/dispatch_recovery.py",
+      "line": 308,
+      "scope": [
+        "check_resources"
+      ],
+      "symbols": [
+        "record_event"
+      ],
+      "source": "from .state_db import record_event",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/dispatch_recovery.py",
+      "line": 400,
+      "scope": [
+        "abandon_partial_launch"
+      ],
+      "symbols": [
+        "record_event"
+      ],
+      "source": "from .state_db import record_event",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/execution_trace.py",
+      "line": 17,
+      "scope": [],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from .state_db import get_readonly_db_connection",
+      "binding": "module_copy"
+    },
+    {
+      "file": "herdr/kernel.py",
+      "line": 61,
+      "scope": [
+        "state_db_path"
+      ],
+      "symbols": [
+        "get_default_db_path"
+      ],
+      "source": "from .state_db import get_default_db_path",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/quality_sources.py",
+      "line": 31,
+      "scope": [],
+      "symbols": [
+        "get_readonly_db_connection",
+        "read_execution_outcome"
+      ],
+      "source": "from .state_db import get_readonly_db_connection, read_execution_outcome",
+      "binding": "module_copy"
+    },
+    {
+      "file": "herdr/recovery_store.py",
+      "line": 35,
+      "scope": [
+        "_event"
+      ],
+      "symbols": [
+        "record_event"
+      ],
+      "source": "from herdr.state_db import record_event",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/recovery_store.py",
+      "line": 60,
+      "scope": [
+        "_snapshot"
+      ],
+      "symbols": [
+        "_decode_task_row"
+      ],
+      "source": "from herdr.state_db import _decode_task_row",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/recovery_store.py",
+      "line": 74,
+      "scope": [
+        "read_snapshot"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from herdr.state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/recovery_store.py",
+      "line": 145,
+      "scope": [
+        "_transaction"
+      ],
+      "symbols": [
+        "get_db_connection"
+      ],
+      "source": "from herdr.state_db import get_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/recovery_store.py",
+      "line": 403,
+      "scope": [
+        "settle_result"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from .state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/task_resources.py",
+      "line": 211,
+      "scope": [
+        "_launch_event"
+      ],
+      "symbols": [
+        "record_event"
+      ],
+      "source": "from .state_db import record_event",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/task_resources.py",
+      "line": 259,
+      "scope": [
+        "begin_launch_intent"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from .state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/task_resources.py",
+      "line": 356,
+      "scope": [
+        "record_launch_rejection"
+      ],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from .state_db import get_readonly_db_connection",
+      "binding": "late_import"
+    },
+    {
+      "file": "herdr/task_resources.py",
+      "line": 392,
+      "scope": [
+        "_intent_task"
+      ],
+      "symbols": [
+        "_decode_task_row"
+      ],
+      "source": "from .state_db import _decode_task_row",
+      "binding": "late_import"
+    },
+    {
+      "file": "tests/test_console_delivery_pipeline.py",
+      "line": 120,
+      "scope": [
+        "TestConsoleDeliveryProjection",
+        "_seed"
+      ],
+      "symbols": [
+        "record_event"
+      ],
+      "source": "from herdr.state_db import record_event",
+      "binding": "late_import"
+    },
+    {
+      "file": "tests/test_console_delivery_pipeline.py",
+      "line": 189,
+      "scope": [
+        "TestConsoleDeliveryApi",
+        "setUp"
+      ],
+      "symbols": [
+        "record_event"
+      ],
+      "source": "from herdr.state_db import record_event",
+      "binding": "late_import"
+    },
+    {
+      "file": "tests/test_console_interaction_api.py",
+      "line": 19,
+      "scope": [],
+      "symbols": [
+        "init_db"
+      ],
+      "source": "from herdr.state_db import init_db",
+      "binding": "module_copy"
+    },
+    {
+      "file": "tests/test_context_compact.py",
+      "line": 28,
+      "scope": [],
+      "symbols": [
+        "get_db_connection",
+        "upsert_trajectory_finding"
+      ],
+      "source": "from herdr.state_db import get_db_connection, upsert_trajectory_finding",
+      "binding": "module_copy"
+    },
+    {
+      "file": "tests/test_execution_trace.py",
+      "line": 530,
+      "scope": [
+        "test_transition_task_rows_keep_status_and_time"
+      ],
+      "symbols": [
+        "save_task",
+        "transition_task"
+      ],
+      "source": "from herdr.state_db import save_task, transition_task",
+      "binding": "late_import"
+    },
+    {
+      "file": "tests/test_execution_trace.py",
+      "line": 875,
+      "scope": [
+        "test_runless_task_keeps_the_synthetic_trajectory_run"
+      ],
+      "symbols": [
+        "save_task"
+      ],
+      "source": "from herdr.state_db import save_task",
+      "binding": "late_import"
+    },
+    {
+      "file": "tests/test_execution_trace_api.py",
+      "line": 18,
+      "scope": [],
+      "symbols": [
+        "get_readonly_db_connection"
+      ],
+      "source": "from herdr.state_db import get_readonly_db_connection",
+      "binding": "module_copy"
+    },
+    {
+      "file": "tests/test_observation.py",
+      "line": 21,
+      "scope": [],
+      "symbols": [
+        "get_db_connection"
+      ],
+      "source": "from herdr.state_db import get_db_connection",
+      "binding": "module_copy"
+    },
+    {
+      "file": "tests/test_state_store.py",
+      "line": 50,
+      "scope": [
+        "test_sqlite_state_store_saves_ordinary_working_context_mapping"
+      ],
+      "symbols": [
+        "save_task",
+        "save_workflow"
+      ],
+      "source": "from herdr.state_db import save_task, save_workflow",
+      "binding": "late_import"
+    },
+    {
+      "file": "tests/test_trajectory_observer.py",
+      "line": 51,
+      "scope": [],
+      "symbols": [
+        "get_trajectory_finding",
+        "list_trajectory_findings",
+        "upsert_trajectory_finding"
+      ],
+      "source": "from herdr.state_db import get_trajectory_finding, list_trajectory_findings, upsert_trajectory_finding",
+      "binding": "module_copy"
+    }
+  ]
+}

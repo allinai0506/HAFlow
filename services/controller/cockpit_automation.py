@@ -210,6 +210,7 @@ def read_action_state(store, action, result=None, *, since=0, intent_digest=None
             identity = 'step_workflow' if kind == 'step' else result.get('checkpoint_id') or target.get('checkpoint_id')
             source = 'kernel_step' if kind == 'step' else 'checkpoint_store'
             event = conn.execute('SELECT id FROM events WHERE workflow_id=? AND event_type=? AND source=? '
+                    "AND json_valid(payload_json) "
                     f"AND json_extract(payload_json,'$.{identity_field}')=? AND id>? "
                     'AND timestamp>=? ORDER BY id DESC LIMIT 1',
                     (wid, event_type, source, identity, event_watermark, since)).fetchone()

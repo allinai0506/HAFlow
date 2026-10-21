@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-21] fix | 门禁判定口径对齐、业务验收同步 verdict 凭据与合法重放 finalize 收编 (切片 1: P1, P8, P3)
+
+- 背景：
+  1. `wf-haflow-1020-02` 运行暴露平台三项设计缺陷：节点配置 `gate: {}` 被 CLI/Sentinel 误判为非门禁，导致 watchdog 失败后的通过裁决无法被流转采纳（P1）；
+  2. 业务验收落盘 DB 事件但未落盘 `gate-verdicts` 磁盘文件，导致系统判定双凭证割裂、Agent 空转后被超时判死（P8）；
+  3. 控制器在 finalize 执行 commit 时未向合法 replay/supersede 传递 `--allow-rebase`，导致被判定为 `commit_predates_task` 拒绝收编（P3）。
+- 变更：
+  1. **门禁口径统一**：在 `herdr/task_cli_verification.py`、`services/herdr-sentinel.py` 和 `services/controller/node_policy.py` 中，区分 `gate is False`（显式禁用）、`gate is not None`（启用门禁，含 `{}`）与默认门禁阶段语义（`test/review/wrapup`）；
+  2. **双凭据自动同步**：在 `herdr/task_checkpoint.py:record_business_acceptance` 中，成功记录验收事件后，自动原子落盘合规的 `gate-verdicts/<task_id>.json`，同步绑定 `verdict`、`candidate_sha`、`run_id`、`epoch`、`execution_token` 与 `verifier_agent`；
+  3. **重放与更迭收编支持**：在 `herdr/domain/software.py:should_allow_rebase` 识别 `supersedes`、`onto_branch`、`is_replay` 及 `dispatch_round > 1`；并在 `services/controller/git_finalize.py` 中对满足条件的任务自动向 `herdr-task commit` 追加 `--allow-rebase` 参数。
+- 证据：
+  1. 新增 `tests/test_slice1_gate_robustness.py`（4 项全绿）；
+  2. 门禁与裁决既有专项 `tests/test_issue_250_codex_p1_p2_fixes.py` 等 95 项专项及 9 项子测试全部通过；
+  3. Finalize 场景 `pytest -q -k finalize tests/` 100 项全量通过；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警通过。
+
 ## [2026-10-20] feat | D2 门禁对象解耦与双权威消除：单向不可变证据快照哈希强引用与调度权威收敛 (ADR-0006 & OEP-0002)
 
 - 背景：
@@ -3233,6 +3249,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `docs/product-specs/workflow-template-schema.md` & `docs/guides/template-authoring-guide.md`：明确 `retry_node` 为标准字段，`retry_target` 为完全等价的兼容别名。
 - Updated `ontology/objects/gate_spec.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-005 状态标记为“已解决”。
 - Evidence：`herdr/workflow.py`、`herdr/workflow_progress.py`、`services/controller/node_policy.py`、`tests/test_gate_retry_node_target.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-20] update | State DB 实现归属拆分，保留兼容入口
+- Updated [[task-lifecycle]]: 标明状态迁移和检查点实现模块，保留公共门面路径。
+- Updated [[trajectory-observer]]: 标明 Finding/Observation 与 Trajectory 存储实现归属。
+- Updated [[semantic-context-compact]]: 标明 ContextPack、WorkingContext 和来源校验实现归属。
+- Updated [[index]]: 补充上述存储模块的源码导航。
+
+
+## 2026-10-20 · state_db 新基线承接
+
+- FACT：a56739e / 8169 行 / 167 绑定 / time.*=35 / GA-5 matrix=119 / 授权45路径；旧日志为历史快照，不作为本轮验收。register_workflow→transition_gate，300-500行目标 + 第9条登记例外 ARCH-4.7-transition-gate-port（546行）。
+- Evidence：check_state_db_split.py 的 symbol→line 与 live snapshot 为当前锚点；D3、源码AST等价、五路径DDL与schema各自复跑。共享台账 wf-haflow-1020-02 implementation 留存分段原文，test节点洁净室尚待执行。
 
 ## [2026-10-21] Docs & Fix | Run 快照失败行为与 fail-closed 语义对齐收敛 (SC-006)
 

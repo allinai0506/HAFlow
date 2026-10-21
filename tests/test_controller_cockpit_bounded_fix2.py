@@ -225,7 +225,8 @@ def test_restore_lookup_uses_exact_identity_index(scene):
     conn = state_db.get_readonly_db_connection(scene.db_path)
     try:
         plan = conn.execute("EXPLAIN QUERY PLAN SELECT * FROM events WHERE workflow_id=? "
-            "AND event_type=? AND source=? AND json_extract(payload_json,'$.checkpoint_id')=? "
+            "AND event_type=? AND source=? AND json_valid(payload_json) "
+            "AND json_extract(payload_json,'$.checkpoint_id')=? "
             "AND id>? AND timestamp>=? ORDER BY id DESC LIMIT 1",
             ('wf', 'checkpoint_restored', 'checkpoint_store', 'A', 0, 0)).fetchall()
         assert any('idx_events_checkpoint_identity' in row['detail'] for row in plan)

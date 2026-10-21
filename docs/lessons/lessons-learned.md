@@ -7614,15 +7614,69 @@ python3 ontology/tests/audit_ontology.py .       # 机械审计（目标: MAJOR=
 - PR #308（OEP-0003，commit 88c7fe1）：第二切片三子域扩展，MAJOR=0 持续绿灯
 - 本体版本：0.1.0（发现）→ 0.3.0（两切片完整扩展）
 
----
-
-## 181. 自动策略的展示、执行能力和持久确认必须分别验证（2026-10-21）
+## 181. SQLite 初始化拆分需要旧库事务反例与导入值断言（2026-10-20）
 
 ### 问题背景
 
-Controller Cockpit 最终审查发现，页面把 supervised 显示为待确认，但节点派发仍能
-直接 claim/start；automatic 标签隐藏了未注册 handler 的手动入口，自动恢复还撤销
-了人工暂停。真实 SQLite 反例首次执行出现 11 个失败，页面状态不能证明执行授权成立。
+state_db 拆分的临时 SQLite 反例证明：把 rollout 迁移助手放进主 DDL 事务，fresh 库仍可能成功，已有 `bucket_key` 的旧库却会触发 `cannot start a transaction within a transaction`。只检查 fresh 建库或 SQL 文本无法约束这条旧库路径。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 迁移助手可能自行开启事务 | 调用位置是持久化契约的一部分 | 在既有事务之外保持原顺序；用真实旧表、数据行和 SQLite trace 复验 |
+| SQL trace 基线与错误字段映射一起更新 | 同源 trace 可能掩盖值错误 | 导入后独立断言 workflow/task/steer/history 的关键字段，并用错误映射变异证明断言有效 |
+| import 图只扫描模块顶层 | 函数体内静态上行 import 会漏检 | 遍历整棵 AST；合法延迟门面 helper 的例外只针对约定导入，不豁免其他嵌套边 |
+
+### 操作规范（已固化到拆分门禁与专项测试）
+
+1. `_ensure_schema` 只按已确认的连续段切片，事务内部不再切；V1 尾巴保持同一个函数。
+2. G-4 覆盖 fresh、已迁移、运行态升级、JSON 首次导入、legacy rollout 五条路径。负例只在内存变异，生产文件不改。
+3. 分开记录结构门禁、逐引用绑定检查、真实业务调用命中与最终候选哈希。中间态的命中不能自动迁移为最终候选证据。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 -m pytest -q tests/test_state_db_ddl_sequence.py tests/test_state_db_facade_compat.py tests/test_state_db_split_source_equivalence.py
+python3 scripts/check_state_db_split.py --final
+```
+
+证据：`test_legacy_rollout_rejects_helper_moved_inside_transaction`、`test_import_value_assertions_reject_wrong_task_mapping`、`test_nested_upward_import_is_rejected`。本单承接基线为 `a56739e`（8169行、167绑定、35个time调用、119条matrix、45授权路径）；原候选基线 `a6b315a` 与门禁资产来源 `a1614e5` 只描述历史，不作本轮证明。迁移行号由 `--report --symbols` 的 symbol→line 生成，`register_workflow` 归属 transition_gate（300-500行目标 + 第9条例外）。
+
+## 182. 门禁配置判定口径一致性、双凭证自动同步与重放提交收编（2026-10-21）
+
+### 问题背景
+
+在 `wf-haflow-1020-02` 复杂长流程中，暴露出三项平台核心机制缺陷：
+1. **P1 门禁口径冲突**：工作流配置节点为 `gate: {}` 时，CLI/Sentinel 的 `_is_gate_task` 因空字典在布尔上下文为假而直接 `return False`，无法命中 legacy 兜底；而 Controller 判定为门禁，导致 Watchdog 判死后的实质性通过裁决无法被 `herdr-task set ... completed --verdict pass` 或 `adopt-verdict` 采纳。
+2. **P8 门禁双凭证割裂**：任务执行完 `acceptance-record` 后在数据库生成了 `business_acceptance_recorded` 事件，但未在磁盘落盘 `gate-verdicts/<task>.json`，Sentinel 与 Controller 无法感知裁决，导致 Agent 空转被 Watchdog 杀死。
+3. **P3 finalize 拒绝合法 replay**：cherry-pick 重放代码继承了旧提交的 `author_ts`，在控制器 `git_finalize` 调用 `herdr-task commit` 时未带 `--allow-rebase`，被当做旧于任务创建的非法篡改提交触发 `commit_predates_task` 拒绝收编。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 配置中空字典被当作 falsy 处理 | 配置项存在与否（is not None）不等同于配置项布尔求值 | 区分 `gate is False`（显式禁用）、`gate is not None`（显式启用）与 `gate is None`（回退默认阶段）；标准阶段 `test/review/wrapup` 必须维持门禁语义 |
+| 业务验收与门禁裁决分离为两套不同步系统 | 多套凭证不同步必然出现状态撕裂与死循环 | `record_business_acceptance` 在记录验收事件时，必须原子同步生成合规的 `gate-verdicts/<task>.json`，实现双凭证合一 |
+| 重放与更迭场景保留历史作者时间戳 | 平台自身驱动的 replay/supersede 必然产生早于 task 创建的 author_ts | 在软件适配层识别 `supersedes`、`onto_branch`、`is_replay`、`dispatch_round > 1` 为合法 rebase 场景，并在 finalize 时显式追加 `--allow-rebase` |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_slice1_gate_robustness.py
+pytest -q tests/test_issue_250_codex_p1_p2_fixes.py
+pytest -q -k finalize tests/
+```
+
+证据：新增 `tests/test_slice1_gate_robustness.py`（4 项通过），覆盖 `gate: {}` 对称判定、业务验收同步落盘 verdict 文件、软件适配器识别重放特征以及 `git_finalize` 自动传参 `--allow-rebase`。既有 95 项门禁专项与 100 项 finalize 场景测试全量通过。
+
+---
+
+## 183. 自动策略的展示、执行能力和持久确认必须分别验证（2026-10-21）
+
+### 问题背景
+
+Controller Cockpit 最终审查发现，页面把 supervised 显示为待确认，但节点派发仍能直接 claim/start；automatic 标签隐藏了未注册 handler 的手动入口，自动恢复还撤销了人工暂停。真实 SQLite 反例说明页面状态不能证明执行授权成立。
 
 ### 经验教训
 
@@ -7647,5 +7701,4 @@ pytest -q tests/test_controller_cockpit_final_fixes.py tests/test_controller_coc
 pytest -q -n 2 tests/test_console_controller_cockpit_e2e.py
 ```
 
-证据：`herdr/node_dispatch_store.py`、`herdr/recovery_store.py#decide_operation`、
-`herdr/controller_receipts.py`、Controller Cockpit 设计 §17 入口盘点。
+证据：`herdr/node_dispatch_store.py`、`herdr/recovery_store.py#decide_operation`、`herdr/controller_receipts.py`、Controller Cockpit 设计 §17 入口盘点。

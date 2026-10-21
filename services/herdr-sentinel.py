@@ -194,12 +194,17 @@ def _is_gate_task(task):
         except Exception:
             pass
 
+    node = str(node_id or "").lower()
     if wf_cfg and isinstance(wf_cfg, dict):
         for n in wf_cfg.get("nodes", []):
             if n.get("id") == node_id:
-                if n.get("gate") or n.get("node_type") == "gate":
+                if n.get("gate") is False:
+                    return False
+                if n.get("gate") is not None or n.get("node_type") == "gate":
                     return True
-                if n.get("node_type") in ("agent", "implementation", "worker", "code") and not n.get("gate"):
+                if node in ("test", "review", "wrapup", "gate", "cleanroom", "cleanroom_test", "cleanroom_review", "cleanroom_gate") or re.search(r"(^|[_-])(gate|cleanroom)($|[_-])", node):
+                    return True
+                if n.get("node_type") in ("agent", "implementation", "worker", "code"):
                     return False
                 break
 
@@ -207,7 +212,6 @@ def _is_gate_task(task):
         return True
 
     # Legacy fallback: exact names or word-boundary tokens, NOT arbitrary substring
-    node = str(node_id or "").lower()
     if node in ("test", "review", "wrapup", "gate", "cleanroom", "cleanroom_test", "cleanroom_review", "cleanroom_gate"):
         return True
     if re.search(r"(^|[_-])(gate|cleanroom)($|[_-])", node):
