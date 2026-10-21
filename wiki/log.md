@@ -3234,6 +3234,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/objects/gate_spec.yaml` & `ontology/decisions/0003-semantic-conflicts.md`：将 SC-005 状态标记为“已解决”。
 - Evidence：`herdr/workflow.py`、`herdr/workflow_progress.py`、`services/controller/node_policy.py`、`tests/test_gate_retry_node_target.py`、`ontology/tests/audit_ontology.py`。
 
+## [2026-10-20] update | State DB 实现归属拆分，保留兼容入口
+- Updated [[task-lifecycle]]: 标明状态迁移和检查点实现模块，保留公共门面路径。
+- Updated [[trajectory-observer]]: 标明 Finding/Observation 与 Trajectory 存储实现归属。
+- Updated [[semantic-context-compact]]: 标明 ContextPack、WorkingContext 和来源校验实现归属。
+- Updated [[index]]: 补充上述存储模块的源码导航。
+
+
+## 2026-10-20 · state_db 新基线承接
+
+- FACT：a56739e / 8169 行 / 167 绑定 / time.*=35 / GA-5 matrix=119 / 授权45路径；旧日志为历史快照，不作为本轮验收。register_workflow→transition_gate，300-500行目标 + 第9条登记例外 ARCH-4.7-transition-gate-port（546行）。
+- Evidence：check_state_db_split.py 的 symbol→line 与 live snapshot 为当前锚点；D3、源码AST等价、五路径DDL与schema各自复跑。共享台账 wf-haflow-1020-02 implementation 留存分段原文，test节点洁净室尚待执行。
+
 ## [2026-10-21] Docs & Fix | Run 快照失败行为与 fail-closed 语义对齐收敛 (SC-006)
 
 - Updated `docs/product-specs/workflow-template-schema.md`：校准 Workflow Run Definition Snapshot 规范说明，明确当源定义文件存在时，Run 定义快照失败将直接拒绝注册（fail-closed，抛出 RuntimeError），绝不静默降级为项目共享文件，杜绝后续模板切换并发污染进行中 Run 的拓扑定义；同时校准 Git 与 context Run 均执行私有快照冻结（SC-006 已解决）。

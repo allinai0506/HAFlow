@@ -1,5 +1,12 @@
 # Trajectory Observer（运行过程诊断层）
 
+
+FACT：`herdr/state_db.py` 保留兼容入口；Finding/Observation 存储实现位于 `herdr/state/observation_finding.py`，Trajectory 事实存储位于 `herdr/state/trajectory.py`。
+
+Evidence:
+- `herdr/state/observation_finding.py#upsert_trajectory_finding`
+- `herdr/state/trajectory.py#record_trajectory_event`
+
 > 状态：V1 已落地，ObservationPack V1 已接入（只观察、只解释、只建议，绝不执行修复）。核心原则：**Ledger 记录事实，ObservationPack 保存证据，Observer 解释证据，Provider 只做确认，HAFlow 决定处置。**
 
 ## 1. 定位：事实层与语义监督层之间的诊断层
@@ -106,3 +113,12 @@ Evidence:
 - `bin/herdr-task:cmd_observe`
 - `tests/test_trajectory_observer.py`
 - `docs/superpowers/specs/2026-09-20-trajectory-observer-design.md`
+
+
+### 2026-10-20 承接基线与证据更新
+
+FACT：本次承接基线为 `a56739e`，单体 8169 行、167 绑定（153 def/class + 14 Assign/AnnAssign 名称）、35 个 `time.*` 调用点；GA-5 本轮矩阵 119 = 113 bare + 6 CONTROLLER_DIR。授权写集为 45 = 24 state + 1 门面 + 1 门禁 + 11 tests + 3 docs + 5 wiki。历史验证数字仅描述旧候选，不能证明本次验收。
+
+`register_workflow` 的唯一宿主为 `herdr/state/transition_gate.py`，门面显式 import 与 `__all__` 再导出；删除内联相对导入后复用顶层绝对导入，事务与 fallback 契约保持上游行为。300-500 行目标 + 登记例外：第 9 条 `above=ARCH-4.7-transition-gate-port`，实际 546 行。G-5 静态图为 25 模块 / 74 边，与历史动态调用边口径分开。
+
+Evidence：`scripts/check_state_db_split.py --report --symbols` 为 symbol→line 权威；`--snapshot-baseline` 为 live 167 绑定且拒绝缺失绑定与未知 owner。`tests/test_state_db_split_source_equivalence.py` 验证搬迁 AST 与 35 个 time 表达式；`tests/test_state_db_real_patch_paths.py` 验证注册事务边界；`tests/test_state_db_ddl_sequence.py` 五路径运行 trace 与 schema 93 对象等价分证。共享台账 wf-haflow-1020-02 / implementation 保存本次命令原文，独立洁净室验收待 test 节点执行。

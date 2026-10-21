@@ -7613,3 +7613,32 @@ python3 ontology/tests/audit_ontology.py .       # 机械审计（目标: MAJOR=
 - PR #306（SC-010，commit 188ee05）：第一切片 19 项语义冲突 100% 收敛
 - PR #308（OEP-0003，commit 88c7fe1）：第二切片三子域扩展，MAJOR=0 持续绿灯
 - 本体版本：0.1.0（发现）→ 0.3.0（两切片完整扩展）
+
+## 181. SQLite 初始化拆分需要旧库事务反例与导入值断言（2026-10-20）
+
+### 问题背景
+
+state_db 拆分的临时 SQLite 反例证明：把 rollout 迁移助手放进主 DDL 事务，fresh 库仍可能成功，已有 `bucket_key` 的旧库却会触发 `cannot start a transaction within a transaction`。只检查 fresh 建库或 SQL 文本无法约束这条旧库路径。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 迁移助手可能自行开启事务 | 调用位置是持久化契约的一部分 | 在既有事务之外保持原顺序；用真实旧表、数据行和 SQLite trace 复验 |
+| SQL trace 基线与错误字段映射一起更新 | 同源 trace 可能掩盖值错误 | 导入后独立断言 workflow/task/steer/history 的关键字段，并用错误映射变异证明断言有效 |
+| import 图只扫描模块顶层 | 函数体内静态上行 import 会漏检 | 遍历整棵 AST；合法延迟门面 helper 的例外只针对约定导入，不豁免其他嵌套边 |
+
+### 操作规范（已固化到拆分门禁与专项测试）
+
+1. `_ensure_schema` 只按已确认的连续段切片，事务内部不再切；V1 尾巴保持同一个函数。
+2. G-4 覆盖 fresh、已迁移、运行态升级、JSON 首次导入、legacy rollout 五条路径。负例只在内存变异，生产文件不改。
+3. 分开记录结构门禁、逐引用绑定检查、真实业务调用命中与最终候选哈希。中间态的命中不能自动迁移为最终候选证据。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 -m pytest -q tests/test_state_db_ddl_sequence.py tests/test_state_db_facade_compat.py tests/test_state_db_split_source_equivalence.py
+python3 scripts/check_state_db_split.py --final
+```
+
+证据：`test_legacy_rollout_rejects_helper_moved_inside_transaction`、`test_import_value_assertions_reject_wrong_task_mapping`、`test_nested_upward_import_is_rejected`。本单承接基线为 `a56739e`（8169行、167绑定、35个time调用、119条matrix、45授权路径）；原候选基线 `a6b315a` 与门禁资产来源 `a1614e5` 只描述历史，不作本轮证明。迁移行号由 `--report --symbols` 的 symbol→line 生成，`register_workflow` 归属 transition_gate（300-500行目标 + 第9条例外）。

@@ -1,5 +1,14 @@
 # 任务生命周期与基线验收机制 (task-lifecycle.md)
 
+
+FACT：`herdr/state_db.py` 保留状态库兼容门面；Task/Workflow 状态迁移实现分别位于 `herdr/state/transition_task.py`、`herdr/state/transition_gate.py`，检查点实现位于 `herdr/state/checkpoint.py`。
+
+Evidence:
+- `herdr/state_db.py#__all__`
+- `herdr/state/transition_task.py#transition_task`
+- `herdr/state/transition_gate.py#transition_workflow`
+- `herdr/state/checkpoint.py#create_checkpoint`
+
 > **公司：上海共事智能科技有限公司**  
 > **品牌：共事**  
 > **产品：HAFlow**  
@@ -826,3 +835,11 @@ FACT：业务门禁等待使用既有 recovery 表的 observing，三次相隔�
 FACT：`bin/herdr-loop rebaseline --dir <clone> --reason <intake原因> --lint-cmd <度量命令>` 保留原因、旧值与 SHA，并校验初始命令及 evaluator 摘要；换命令、evaluator 变化和未绑定旧基线明确拒绝。未知非零静态输出及报告显示 unavailable。`scripts/replay-append-only.py --help` 只导出三份指定文档的安全追加合并文件、编号映射和 patch，不执行完整代码 rebase；历史改写和不完整末行拒绝。
 
 Evidence：`herdr/task_cli_launch.py#record_router_failure_task`、`herdr/gate_wait.py#record_wait`、`herdr/recovery_store.py#ensure_obligations`、`herdr/workflow_close.py#CloseClaim.complete`、`tests/test_gate_metrics_handoff.py`、`tests/test_replay_append_only.py`。
+
+### 2026-10-20 承接基线与证据更新
+
+FACT：本次承接基线为 `a56739e`，单体 8169 行、167 绑定（153 def/class + 14 Assign/AnnAssign 名称）、35 个 `time.*` 调用点；GA-5 本轮矩阵 119 = 113 bare + 6 CONTROLLER_DIR。授权写集为 45 = 24 state + 1 门面 + 1 门禁 + 11 tests + 3 docs + 5 wiki。历史验证数字仅描述旧候选，不能证明本次验收。
+
+`register_workflow` 的唯一宿主为 `herdr/state/transition_gate.py`，门面显式 import 与 `__all__` 再导出；删除内联相对导入后复用顶层绝对导入，事务与 fallback 契约保持上游行为。300-500 行目标 + 登记例外：第 9 条 `above=ARCH-4.7-transition-gate-port`，实际 546 行。G-5 静态图为 25 模块 / 74 边，与历史动态调用边口径分开。
+
+Evidence：`scripts/check_state_db_split.py --report --symbols` 为 symbol→line 权威；`--snapshot-baseline` 为 live 167 绑定且拒绝缺失绑定与未知 owner。`tests/test_state_db_split_source_equivalence.py` 验证搬迁 AST 与 35 个 time 表达式；`tests/test_state_db_real_patch_paths.py` 验证注册事务边界；`tests/test_state_db_ddl_sequence.py` 五路径运行 trace 与 schema 93 对象等价分证。共享台账 wf-haflow-1020-02 / implementation 保存本次命令原文，独立洁净室验收待 test 节点执行。
