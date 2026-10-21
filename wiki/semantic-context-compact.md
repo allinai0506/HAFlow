@@ -1,5 +1,13 @@
 # Semantic Context Compact V1
 
+
+FACT：`herdr/state_db.py` 保留兼容入口；ContextPack 存储实现位于 `herdr/state/context_pack.py`，WorkingContext 存储与来源校验分别位于 `herdr/state/working_context.py`、`herdr/state/context_source_validation.py`。
+
+Evidence:
+- `herdr/state/context_pack.py#read_context_compact_snapshot`
+- `herdr/state/working_context.py#save_working_context`
+- `herdr/state/context_source_validation.py#_validate_context_source_existence`
+
 Semantic Context Compact 是 HAFlow 的 Working Memory 层。它把 Facts、Evidence 和 Analysis 压缩成下一 Agent 可以直接接手的 ContextPack；它不是删除历史，也不是把完整日志重新塞回模型。
 
 ## 数据边界
@@ -40,3 +48,12 @@ herdr-task compact --run-id <run_id> --json --no-model
 
 FACT：实现与测试见 `herdr/context_compiler.py`、`herdr/context_models.py`、`herdr/context_sources.py`、`herdr/context_candidates.py`、`herdr/context_selection.py`、`herdr/context_projection.py`、`herdr/context_diff.py`、`herdr/state_db.py:working_contexts`、`tests/test_context_compiler.py`、`tests/test_collaboration_wiring.py`。
 UNKNOWN：Context Diff 尚未接入 Dependency Wakeup；V1 不提供实时重写或跨 Workflow experience retrieval。
+
+
+### 2026-10-20 承接基线与证据更新
+
+FACT：本次承接基线为 `a56739e`，单体 8169 行、167 绑定（153 def/class + 14 Assign/AnnAssign 名称）、35 个 `time.*` 调用点；GA-5 本轮矩阵 119 = 113 bare + 6 CONTROLLER_DIR。授权写集为 45 = 24 state + 1 门面 + 1 门禁 + 11 tests + 3 docs + 5 wiki。历史验证数字仅描述旧候选，不能证明本次验收。
+
+`register_workflow` 的唯一宿主为 `herdr/state/transition_gate.py`，门面显式 import 与 `__all__` 再导出；删除内联相对导入后复用顶层绝对导入，事务与 fallback 契约保持上游行为。300-500 行目标 + 登记例外：第 9 条 `above=ARCH-4.7-transition-gate-port`，实际 546 行。G-5 静态图为 25 模块 / 74 边，与历史动态调用边口径分开。
+
+Evidence：`scripts/check_state_db_split.py --report --symbols` 为 symbol→line 权威；`--snapshot-baseline` 为 live 167 绑定且拒绝缺失绑定与未知 owner。`tests/test_state_db_split_source_equivalence.py` 验证搬迁 AST 与 35 个 time 表达式；`tests/test_state_db_real_patch_paths.py` 验证注册事务边界；`tests/test_state_db_ddl_sequence.py` 五路径运行 trace 与 schema 93 对象等价分证。共享台账 wf-haflow-1020-02 / implementation 保存本次命令原文，独立洁净室验收待 test 节点执行。

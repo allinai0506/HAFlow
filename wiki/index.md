@@ -39,9 +39,9 @@
 | **回放一次 Agent 执行的历史事实** | [[task-lifecycle]] §1.2 | `herdr/trajectory.py`, `herdr/state_db.py`, `bin/herdr-task`, `services/herdr-controller.py` |
 | **在任务详情查看 Agent 执行轨迹** | [[execution-trace]] | `herdr/execution_trace.py`, `herdr/native_session_trace.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
 | **评估一次 Agent 执行的业务结果和过程质量** | [[quality-assessment]] | `herdr/quality_assessment.py`, `herdr/quality_sources.py`, `bin/herdr-quality` |
-| **诊断一次运行是否卡住/异常/重复失败 (Trajectory Observer)** | [[trajectory-observer]] | `herdr/observer/`, `herdr/state_db.py:trajectory_findings`, `services/herdr-controller.py:registry_watcher`, `bin/herdr-task:observe` |
-| **为下一 Agent 生成可追溯的当前工作记忆 (Semantic Context Compact)** | [[semantic-context-compact]] | `herdr/context_compact.py`, `herdr/state_db.py:context_packs`, `bin/herdr-task:compact` |
-| **按 Task 状态和 Agent 角色编译 WorkingContext** | [[semantic-context-compact]] | `herdr/context_compiler.py`, `herdr/state_db.py:working_contexts`, `herdr/collaboration.py` |
+| **诊断一次运行是否卡住/异常/重复失败 (Trajectory Observer)** | [[trajectory-observer]] | `herdr/observer/`, `herdr/state_db.py:trajectory_findings`, `herdr/state/observation_finding.py`, `services/herdr-controller.py:registry_watcher`, `bin/herdr-task:observe` |
+| **为下一 Agent 生成可追溯的当前工作记忆 (Semantic Context Compact)** | [[semantic-context-compact]] | `herdr/context_compact.py`, `herdr/state_db.py:context_packs`, `herdr/state/context_pack.py`, `bin/herdr-task:compact` |
+| **按 Task 状态和 Agent 角色编译 WorkingContext** | [[semantic-context-compact]] | `herdr/context_compiler.py`, `herdr/state_db.py:working_contexts`, `herdr/state/working_context.py`, `herdr/collaboration.py` |
 | **修改任务/工作流收尾、清理 pane 或 clone** | [[task-lifecycle]] §5 | `bin/herdr-task:finalize_task`, `close_workflow` |
 | **新增/调整工作流模板或 DAG 调度算法** | [[dag-workflow-engine]] | `herdr/workflow.py` |
 | **修改 Agent 分配算法、优先级或并发锁** | [[agent-routing-and-pools]] | `herdr/agent_router.py` |
@@ -93,3 +93,12 @@
 - **[[ops-center]]**: 分层 Agent 运维视图、运行时/任务状态对照、时长与异常聚合
 - **[[WIKI]]**: Wiki 维护规范、证据契约与更新触发条件
 - **[[log]]**: 结构化演进记录与知识修订历史
+
+
+### 2026-10-20 承接基线与证据更新
+
+FACT：本次承接基线为 `a56739e`，单体 8169 行、167 绑定（153 def/class + 14 Assign/AnnAssign 名称）、35 个 `time.*` 调用点；GA-5 本轮矩阵 119 = 113 bare + 6 CONTROLLER_DIR。授权写集为 45 = 24 state + 1 门面 + 1 门禁 + 11 tests + 3 docs + 5 wiki。历史验证数字仅描述旧候选，不能证明本次验收。
+
+`register_workflow` 的唯一宿主为 `herdr/state/transition_gate.py`，门面显式 import 与 `__all__` 再导出；删除内联相对导入后复用顶层绝对导入，事务与 fallback 契约保持上游行为。300-500 行目标 + 登记例外：第 9 条 `above=ARCH-4.7-transition-gate-port`，实际 546 行。G-5 静态图为 25 模块 / 74 边，与历史动态调用边口径分开。
+
+Evidence：`scripts/check_state_db_split.py --report --symbols` 为 symbol→line 权威；`--snapshot-baseline` 为 live 167 绑定且拒绝缺失绑定与未知 owner。`tests/test_state_db_split_source_equivalence.py` 验证搬迁 AST 与 35 个 time 表达式；`tests/test_state_db_real_patch_paths.py` 验证注册事务边界；`tests/test_state_db_ddl_sequence.py` 五路径运行 trace 与 schema 93 对象等价分证。共享台账 wf-haflow-1020-02 / implementation 保存本次命令原文，独立洁净室验收待 test 节点执行。

@@ -115,13 +115,30 @@ def test_init_db_and_wal_mode(state_env):
 
 def _open_state_db_worker(db_path, start_event, results):
     start_event.wait(10)
+    real_connect = sqlite3.connect
+    trace = []
+
+    def connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(trace.append)
+        return conn
+
+    sqlite3.connect = connect
     try:
         conn = state_db.get_db_connection(Path(db_path))
         conn.execute("SELECT 1 FROM working_context_source_clock LIMIT 1").fetchall()
         conn.close()
-        results.put(("ok", ""))
+        assert str(Path(db_path).resolve()) in state_db._INITIALIZED_DBS
+        trace.clear()
+        conn = state_db.get_db_connection(Path(db_path))
+        conn.execute("SELECT 1 FROM working_context_source_clock LIMIT 1").fetchall()
+        conn.close()
+        assert not any(sql.lstrip().upper().startswith(("CREATE ", "ALTER ", "DROP ")) for sql in trace), trace
+        results.put(("ok", "process-local cache hit; second open executed no DDL"))
     except Exception as exc:
         results.put(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        sqlite3.connect = real_connect
 
 
 def _run_concurrent_state_db_open(db_path, count=4):
@@ -1284,3 +1301,25 @@ def test_steering_history_and_workflow_event_rollback_together(state_env, monkey
     finally:
         conn.close()
     assert event_count == 0
+
+
+def test_split_connection_reopens_durable_workflow_and_task(tmp_path):
+    db = tmp_path / 'reopen.db'
+    state_db.save_workflow({'workflow_id': 'wf-reopen', 'title': 'persisted'}, db_path=db)
+    state_db.save_task({'task_id': 't-reopen', 'workflow_id': 'wf-reopen',
+                        'status': 'working', 'goal': 'durable', 'run_id': 'r-reopen'}, db_path=db)
+    state_db.init_db(db)
+    assert state_db.get_workflow('wf-reopen', db_path=db)['title'] == 'persisted'
+    task = state_db.get_task('t-reopen', db_path=db)
+    assert task['goal'] == 'durable' and task['run_id'] == 'r-reopen'
+
+
+def test_rollout_snapshot_readonly_failure_never_initializes(monkeypatch, tmp_path):
+    db = tmp_path / 'missing-rollout.db'
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE unrelated (id INTEGER)')
+    monkeypatch.setattr(state_db, 'get_db_connection', lambda *a, **k: pytest.fail('writable connection on read'))
+    with pytest.raises(state_db.ReadonlySchemaError):
+        state_db.read_rollout_snapshot(agent='a', node='n', task_type='t', db_path=db, readonly=True)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [('unrelated',)]
