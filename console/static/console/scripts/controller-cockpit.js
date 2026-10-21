@@ -5,7 +5,7 @@ var {
   refreshDeepDrawer, showSteerModal, submitSteer, haltTaskPrompt,
   toggleWorkflowPause, stepWorkflow, showRollbackModal, executeRollback,
   forcePassTask, showCheckpointsModal, createWorkflowCheckpoint, restoreWorkflowCheckpoint,
-  createCandidate, controllerActionCard, catMeta, openDecisionPanel,
+  createCandidate, openDecisionPanel,
   submitDecision, openControllerCockpitModal, currentRecovery, dispatchConfirmationHtml,
   recoveryUnavailable, recoveryCard, openRecoveryDecision, decideRecovery,
   advanceStage, openControllerCockpit, returnFromControllerCockpit, renderControllerReceipt, executeCockpitAction
@@ -157,16 +157,6 @@ async function createCandidate(){
     }
   });
 }
-function controllerActionCard(act,tid,index){
-  const m=catMeta(act.category);
-  const fx=act.effect||act.description||'';
-  const target=tid||act.blocker_task_id||act.old_task_id||'';
-  return `<article class="ctl-card${act.recommended?' is-recommended':''}${act.is_destructive?' is-destructive':''}"><div class="ctl-card-head"><span class="ctl-index">操作 ${index}</span><span class="ctl-card-title">${act.recommended?'⭐ ':''}${esc(act.title)}</span><span class="ctl-badges">${act.recommended?'<span class="ctl-rec">推荐</span>':''}<span class="badge ${m[1]}">${esc(m[0])}</span></span></div><p class="ctl-card-desc">${esc(act.description)}</p>${fx?`<div class="ctl-effect">点按钮后：${esc(fx)}</div>`:''}${act.new_task_id||act.new_agent?`<div class="ctl-meta-chips">${act.old_task_id?`<span class="ctl-chip">旧任务 <strong>${esc(act.old_task_id)}</strong></span>`:''}${act.new_task_id?`<span class="ctl-chip">新任务 <strong>${esc(act.new_task_id)}</strong></span>`:''}${act.new_agent?`<span class="ctl-chip">执行者 <strong>${esc(act.new_agent)}</strong></span>`:''}</div>`:''}<div class="ctl-card-foot">${target?`<button class="btn" onclick="locateControllerTask('${esc(target)}')">查看任务</button>`:''}<button class="btn primary" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId||'')}')">一键执行</button></div>${act.command_line?`<details class="ctl-tech"><summary>工程师技术详情（可选）</summary><div class="ctl-tech-body"><div class="ctl-cheat-cmd"><code>${esc(act.command_line)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制命令</button></div></div></details>`:''}</article>`;
-}
-// Category → [label, badge class].  Module scope: the action-card renderer is
-// shared by both the blocker and pipeline sections.
-const CTL_CAT_META={fix:['修复','working'],rework:['换人重派','rework'],bypass:['豁免推进','cleaned'],recovery:['恢复','waiting'],pipeline:['推进交付','working']};
-function catMeta(c){return CTL_CAT_META[c]||[c||'操作','waiting'];}
 // Open decision asks must be impossible to miss: they block whole waves and
 // previously only existed as free text inside the coordinator's terminal.
 function renderDecisionPanel(){
@@ -347,15 +337,18 @@ async function executeCockpitAction(actionId){
   const snapshot=JSON.parse(JSON.stringify(action));
   const actionKey=cockpitActionKey(snapshot);
   const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk);
-  openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+'<label for="cockpitReason">处理依据</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
+  const isSteer=action.api_payload?.type==='steer';
+  openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+(isSteer?'<label for="cockpitInstruction">指导内容</label><textarea id="cockpitInstruction" rows="3"></textarea>':'')+'<label for="cockpitReason">处理依据</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
   const button=document.getElementById('cockpitActionConfirm');
   button.onclick=async()=>{
     if(!controllerActionMatches(action,state.controllerTarget||{})||state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.automation?.mode)||cockpitWorkflowId()!==wid||cockpitActionKey((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId))!==actionKey){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
     const reason=(document.getElementById('cockpitReason')?.value||'').trim();
+    const instruction=isSteer?(document.getElementById('cockpitInstruction')?.value||'').trim():null;
+    if(isSteer&&!instruction){document.getElementById('cockpitActionError').textContent='请输入指导内容';return;}
     if((highRisk)&&!reason){document.getElementById('cockpitActionError').textContent='必须填写人工核验依据';return;}
     button.disabled=true;
     try{
-      const result=await api('/api/controller/execute-action',{method:'POST',body:JSON.stringify({workflow_id:wid,action_id:actionId,expected_identity:action.expected_identity,reason,confirmed:true,operator:'human_console'})});
+      const result=await api('/api/controller/execute-action',{method:'POST',body:JSON.stringify({workflow_id:wid,action_id:actionId,expected_identity:action.expected_identity,reason,...(isSteer?{instruction}:{}),confirmed:true,operator:'human_console'})});
       if(state.workflowId!=='__ctl__'||cockpitWorkflowId()!==wid)return;
       state.controllerReceipt=result.receipt?{...result.receipt,...(result.receipt.status==='rejected'?{stale_action:snapshot}:{})}:{workflow_id:wid,action_id:actionId,status:'accepted_waiting',message:'回执缺失，结果未确认'};
       closeModal();paintControllerCockpit();
@@ -464,7 +457,7 @@ return {
   refreshDeepDrawer, showSteerModal, submitSteer, haltTaskPrompt,
   toggleWorkflowPause, stepWorkflow, showRollbackModal, executeRollback,
   forcePassTask, showCheckpointsModal, createWorkflowCheckpoint, restoreWorkflowCheckpoint,
-  createCandidate, controllerActionCard, catMeta, openDecisionPanel,
+  createCandidate, openDecisionPanel,
   submitDecision, openControllerCockpitModal, currentRecovery, dispatchConfirmationHtml,
   recoveryUnavailable, recoveryCard, openRecoveryDecision, decideRecovery,
   advanceStage, openControllerCockpit, returnFromControllerCockpit, renderControllerReceipt, executeCockpitAction

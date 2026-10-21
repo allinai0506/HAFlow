@@ -57,6 +57,34 @@ Evidence:
 
 ## 2. 后台常驻守护进程详解
 
+### Workflow Controller 驾驶舱
+
+- `FACT` Controller 保持后端控制权。Cockpit 是 Workflow 级的投影和统一 Action
+  界面，不创建浏览器调度器或第二份任务状态。Canvas、Task Drawer、Pane 和
+  Dashboard 用包含对象身份的上下文入口跳转并定位；返回恢复原节点或抽屉。
+- `FACT` 自动策略来自 StateStore 中的 Workflow 配置快照。缺省为 automatic，
+  模板可设置 supervised 或指定动作确认。新增默认自动注册表仅启用在 SQLite
+  事务中复查身份的 Workflow 暂停/恢复；其他未注册自动动作显式拒绝。现有
+  Controller 的派发、恢复顺序保持原有职责。
+- `FACT` 人工请求传 `action_id` 和 `expected_identity`，执行边界重新推导动作。
+  旧 Task 版本或 Pane 身份拒绝后回读。指导按当前 Run 记录；中断须实际适配器
+  成功与状态/事件回读一致。回执使用同一数据库中的 `cockpit_action_receipts`，
+  区分 applied、accepted_waiting、partial、rejected。读失败保留 unknown。
+- `FACT` 派发通知成功仍可能等待 Task 登记。Operation 与 launch intent、Task、
+  Run 的归属匹配后才能结案；页面刷新不重发已经执行的步骤。
+- `UNKNOWN` 以上隔离测试不能证明已安装服务或生产 Agent 的运行结果。运行中
+  Workflow 临时改自动策略、跨 Workflow 运维大屏和组织审批链尚未实现。
+
+Evidence:
+- `herdr/controller_cockpit.py#build_cockpit_projection`
+- `herdr/controller_actions.py#action_automation`
+- `console/controller_cockpit_api.py#execute_controller_action`
+- `services/controller/cockpit_automation.py#default_handlers`
+- `services/controller/cockpit_automation.py#execute_action`
+- `herdr/node_dispatch_store.py#reconcile_workflow`
+- `tests/test_console_controller_cockpit_e2e.py`
+- `tests/test_controller_cockpit_automation.py`
+
 ### 2.1 Herdr Controller (`services/herdr-controller.py`)
 
 - `FACT` **服务装配与模块职责**：入口保留配置、运行资源、兼容绑定和 `main`；实现按职责位于 `services/controller/`。`bindings.py` 将各操作声明的依赖绑定到同一入口实例，保留旧函数名、签名、配置替换和共享对象身份。实现模块可以独立注入其所需依赖，不反向导入服务入口。

@@ -1,7 +1,7 @@
 # Workflow Controller 驾驶舱设计（批准版）
 
 日期：2026-10-21  
-状态：产品与技术设计已批准；本次不实施  
+状态：设计已批准；实现见 §16，合并、部署与生产验收另行授权
 路由：`MATCH + Research + Medium + UI/state_machine + unified + controller-free`  
 验证：浏览器信息架构与浅色视觉评审  
 
@@ -334,3 +334,40 @@ HTTP 200、命令退出码 0、成功提示或已发送消息都不能单独证�
 4. **所有重要动作强制人工确认**：不懂领域的用户只能机械点击，产生虚假审核。
 
 最终选择：Workflow 内的集中式 Controller 驾驶舱；默认全自动，模板可配置有效的半自动确认；其他页面只保留同源快捷入口。
+
+## 16. 当前实现与验证边界
+
+Controller 仍是后端控制平面。`herdr/controller_cockpit.py` 从同一 Workflow
+的权威快照生成只读投影；`console/controller_cockpit_api.py` 装配 HTTP 读取和
+Action 执行。Canvas、Task Drawer、Pane 和 Dashboard 保留带 Workflow、Node、
+Task、Run、Pane 或 Operation 身份的定位入口，操作在驾驶舱集中确认。
+
+`control_policy`、Node `control_mode` 与 `confirm_before` 从 Workflow 的
+SQLite 配置快照解析。缺省策略为 automatic；半自动策略生成待确认 Action。
+运行时临时覆盖策略尚未实现。人工确认提交服务端 `action_id` 和
+`expected_identity`；服务端重新推导 Action，旧版本或 Pane 身份被拒绝。
+指导弹窗接受指导正文，指导队列回执绑定当前 Run。
+
+本轮新增的默认自动执行注册表只包含 Workflow `pause`、`resume`，写入前在
+同一 SQLite 事务中复查身份与策略。其他自动推荐不会调用终端或 Task CLI，
+没有注册执行能力时返回 `unsupported_handler`；存在未结恢复责任时先返回
+`recovery_conflict`。这不扩展或替代原有 Controller 的派发和恢复机制。不能
+将页面上的 automatic 策略标记解释为全部推荐动作均已实现自动执行。
+
+回执在所选 StateStore 数据库的 `cockpit_action_receipts` 表持久保存，区分：
+
+- `applied`：权威状态、事件或确切指导队列条目已回读确认。
+- `accepted_waiting`：责任已受理，或副作用结果尚未确认；终端返回不等于业务完成。
+- `partial`：部分步骤已生效，失败步骤单独展示；刷新只回读，不重发已生效步骤。
+- `rejected`：身份、策略或能力校验拒绝，页面保留过期上下文并刷新。
+
+派发 Operation 在 Task 尚未登记时保留 `awaiting_result`，只有与该 Operation、
+Workflow 执行身份和 launch intent 匹配的 Task/Run 登记后才结案。读取失败显示
+未确认状态并禁用 Action，不以旧缓存显示“暂无待办”。
+
+`tests/test_console_controller_cockpit_e2e.py` 使用本地 Console HTTP server、
+ego-browser 与临时 SQLite，覆盖指导、暂停恢复、模板确认、身份替换、中断、
+催办等待、派发登记、部分成功、读取失败和 Canvas 定位，并检查 1440px/390px
+布局。终端传输与服务存活探测受控；真实 Agent 执行、付费模型、已安装服务、
+Git 交付全链路和生产 UAT 不在该 E2E 的证明范围。门禁部分失败用例验证既有
+兼容执行请求到真实 Kernel 的路径，未把受恢复责任禁止的操作重新加入界面。

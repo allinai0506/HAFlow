@@ -3343,3 +3343,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 新增 1 connector：`console_http_api`（http_api 类型，api_experience_review/revoke）。
 - 全量机械审计：`MAJOR=0, MINOR=0, INFO=2`（与基线一致）；第一切片状态机不变量未被触碰。
 - Evidence：`ontology/proposals/OEP-0003-second-business-slice-expansion.md`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Console | Workflow Controller 驾驶舱与真实状态回读
+
+- Updated [[architecture]]：明确 Controller 控制权、Workflow 配置策略、统一 Action 身份、四类持久回执和其他页面的上下文定位入口。
+- 新增本地 Console HTTP → 核心 → 临时 SQLite → 浏览器回读 E2E，覆盖自动恢复、模板确认、指导、中断、陈旧身份、派发登记、部分成功与读取失败；不将隔离测试等同于生产 Agent 或部署验收。
+- 明确新增默认自动注册表只支持事务校验的 Workflow 暂停/恢复，其他自动能力显式拒绝；运行时策略覆盖及跨 Workflow 运维仍未实现。
+- Evidence：`tests/test_console_controller_cockpit_e2e.py`、`services/controller/cockpit_automation.py`、`docs/superpowers/specs/2026-10-21-controller-cockpit-design.md` §16。

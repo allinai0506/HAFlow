@@ -1,0 +1,324 @@
+"""Real Console HTTP/page journeys, checked against the selected SQLite store.
+
+Requires the local ego-browser service. Only terminal transport and service
+probes are controlled; projection, actions, identity, receipts and storage run
+unchanged. No Agent is launched and no model is called.
+"""
+import json
+import shutil
+import subprocess
+import threading
+import time
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.request import urlopen
+
+import pytest
+
+from herdr.state_store import SQLiteStateStore
+
+SPACE = "HAFlow Controller Cockpit Task 6 20261021"
+
+
+def browser(script):
+    binary = shutil.which("ego-browser")
+    if not binary:
+        pytest.skip("real browser E2E requires ego-browser and its local browser service")
+    prelude = f"const task=await taskSpace({json.dumps(SPACE)}); const page=task.page('p1');"
+    result = subprocess.run([binary, "nodejs", "-e", prelude + script],
+                            capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout + result.stderr
+
+
+@pytest.fixture
+def cockpit(tmp_path, monkeypatch):
+    from console import common, runtime
+    from console.http_server import Handler
+    from herdr import steering
+
+    store = SQLiteStateStore(tmp_path / "state.db")
+    monkeypatch.setenv("HERDR_STATE_DB", str(store.db_path))
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "workflow-docs"))
+    for key, name in (("TASKS_FILE", "tasks.json"), ("WORKFLOWS_FILE", "workflows.json"),
+                      ("STAGE_STATE_FILE", "stage-state.json")):
+        monkeypatch.setenv(key, str(tmp_path / name))
+    project = {"project_id": "cockpit-e2e", "project_name": "Cockpit 验收", "project_root": str(tmp_path)}
+    projects = tmp_path / "projects.json"
+    projects.write_text(json.dumps({"projects": {project["project_id"]: project}}))
+    monkeypatch.setattr(common, "PROJECTS_FILE", projects)
+    monkeypatch.setattr(runtime, "service_status", lambda: {"com.user.herdr-controller": "running"})
+
+    config = {"name": "cockpit-e2e", "nodes": [
+        {"id": "build", "label": "实现", "node_type": "agent", "control_mode": "supervised"},
+        {"id": "gate", "label": "验收门禁", "node_type": "agent", "depends_on": ["build"]},
+        {"id": "dispatch", "label": "等待派发", "node_type": "agent", "depends_on": ["gate"]}]}
+    for wid, cfg in (("wf-e2e", config), ("wf-auto", {"nodes": [{"id": "build"}]}),
+                     ("wf-confirm", {"control_policy": {"mode": "supervised"}, "nodes": [{"id": "build"}]})):
+        store.save_workflow({"workflow_id": wid, "project_id": project["project_id"],
+            "project_root": str(tmp_path), "title": wid, "execution_id": "exec-e2e",
+            "status": "running" if wid == "wf-e2e" else "paused", "config": cfg})
+    for tid, node, status in (("working", "build", "working"), ("blocked", "gate", "blocked")):
+        store.save_task({"task_id": tid, "workflow_id": "wf-e2e", "project_id": project["project_id"],
+            "node": node, "stage": node, "run_id": tid + "-run", "pane_id": tid + "-pane",
+            "execution_id": "exec-e2e", "version": 2, "status": status, "agent": "codex"})
+    effects = []
+
+    def interrupt(pane_id, *, reason):
+        assert pane_id == store.get_task("working")["pane_id"]
+        effects.append({"kind": "interrupt", "pane_id": pane_id, "reason": reason})
+        return True
+
+    monkeypatch.setattr(steering, "get_agent_adapter", lambda _: SimpleNamespace(
+        supports_soft_steer=True, supports_interrupt=True, protocol_level="tty", name="controlled",
+        interrupt=interrupt))
+
+    def transport(argv, timeout=20, check=False):
+        # Strictly contain every Console subprocess; unexpected writes fail closed.
+        assert timeout > 0
+        if argv[:3] == ["herdr", "agent", "prompt"]:
+            assert argv[3] == store.get_task("working")["pane_id"]
+            assert argv[-3:] == ["--wait", "--timeout", "180000"]
+            effects.append({"kind": "prompt", "pane_id": argv[3], "instruction": argv[4]})
+            return subprocess.CompletedProcess(argv, 0, "controlled Pane acknowledged", "")
+        if argv[:3] == ["herdr", "agent", "get"]:
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"result": {"agent": {
+                "agent_status": "working", "agent": "codex", "pane_id": argv[3]}}}), "")
+        if argv[:3] in (["herdr", "workspace", "list"], ["herdr", "pane", "list"], ["herdr", "tab", "list"]):
+            return subprocess.CompletedProcess(argv, 0, '{"result":{}}', "")
+        raise AssertionError(f"unexpected external command: {argv!r}")
+
+    monkeypatch.setattr(common, "run", transport)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}"
+
+    def read(wid="wf-e2e"):
+        with urlopen(url + "/api/workflow/controller-cockpit?workflow_id=" + wid, timeout=10) as response:
+            return json.load(response)["data"]
+
+    yield SimpleNamespace(store=store, url=url, read=read, effects=effects, artifacts=tmp_path)
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+def open_cockpit(fixture, wid="wf-e2e"):
+    browser(f"""
+        await page.cdp('Emulation.setDeviceMetricsOverride',{{width:1440,height:1800,deviceScaleFactor:1,mobile:false}});
+        await page.goto({json.dumps(fixture.url + '/?workflow_id=' + wid)});
+        await page.waitForFunction(()=>typeof openControllerCockpit==='function'&&state.overview&&state.workflow?.workflow?.workflow_id==={json.dumps(wid)}&&!state.controllerActionsData?.pending,undefined,{{timeout:15000}});
+        await page.evaluate(()=>openControllerCockpit({{workflowId:{json.dumps(wid)}}}));
+        await page.waitForFunction(()=>state.controllerCockpit?.workflow?.workflow_id==={json.dumps(wid)}&&state.controllerCockpit.read_state==='confirmed');
+    """)
+
+
+def confirm_action(aid, *, instruction=None, reason="人工核查当前身份和证据"):
+    browser(f"""
+        await page.press('loc=css:[data-action-id="{aid}"] button','Enter');
+        {f'await page.fill("#cockpitInstruction",{json.dumps(instruction)});' if instruction is not None else ''}
+        await page.fill('#cockpitReason',{json.dumps(reason)});
+        await page.click('#cockpitActionConfirm');
+        await page.waitForFunction(()=>!document.getElementById('modal').classList.contains('open'));
+        await page.waitForFunction(()=>state.controllerReceipt?.action_id==={json.dumps(aid)});
+        console.log(JSON.stringify(await page.evaluate(()=>state.controllerReceipt)));
+    """)
+
+
+def test_steer_custom_instruction_roundtrips_to_current_run(cockpit):
+    """Catches an Action modal that silently sends the core's generic default."""
+    open_cockpit(cockpit)
+    out = browser("""
+        await page.click('loc=css:[data-action-id="working:steer"] button');
+        console.log('INSTRUCTION_FIELD='+await page.evaluate(()=>!!document.getElementById('cockpitInstruction')));
+    """)
+    assert "INSTRUCTION_FIELD=true" in out, "steer confirmation must accept the human instruction"
+    browser("await page.evaluate(()=>closeModal());")
+    confirm_action("working:steer", instruction="请先核查 SQLite 回执再继续")
+    queued = cockpit.store.list_steers(task_id="working")
+    assert len(queued) == 1
+    assert (queued[0]["instruction"], queued[0]["run_id"], queued[0]["status"]) == (
+        "请先核查 SQLite 回执再继续", "working-run", "pending")
+    receipt = cockpit.read()["receipts"][0]
+    assert (receipt["status"], receipt["steer_id"]) == ("applied", queued[0]["steer_id"])
+    assert "已生效" in browser("console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));")
+
+
+def test_controller_automatic_default_and_template_confirmation(cockpit):
+    from services.controller.cockpit_automation import run_automatic_controller_actions
+    deps = SimpleNamespace(store=cockpit.store)
+    results = run_automatic_controller_actions("wf-auto", deps=deps)
+    assert results[0]["status"] == "applied"
+    assert cockpit.store.get_workflow("wf-auto")["status"] == "running"
+    assert run_automatic_controller_actions("wf-confirm", deps=deps) == []
+    assert cockpit.store.get_workflow("wf-confirm")["status"] == "paused"
+    open_cockpit(cockpit, "wf-confirm")
+    action = next(a for a in cockpit.read("wf-confirm")["actions"] if a["action_id"] == "wf-confirm:resume_workflow")
+    assert action["automation"] == {"mode": "confirmation_required", "source": "workflow"}
+    confirm_action("wf-confirm:resume_workflow")
+    assert cockpit.store.get_workflow("wf-confirm")["status"] == "running"
+    assert cockpit.read("wf-confirm")["receipts"][0]["status"] == "applied"
+    # Re-open the store: receipts must survive browser/Store lifetime, not live in JS.
+    assert SQLiteStateStore(cockpit.store.db_path).get_workflow("wf-auto")["status"] == "running"
+    assert cockpit.read("wf-auto")["receipts"][0] == results[0]
+
+
+def test_stale_identity_rejected_then_halt_uses_current_pane(cockpit):
+    open_cockpit(cockpit)
+    browser("await page.press('loc=css:[data-action-id=\"working:halt\"] button','Enter');")
+    cockpit.store.update_task_metadata("working", {"pane_id": "replacement-pane"})
+    browser("""
+        await page.fill('#cockpitReason','核查旧快照'); await page.click('#cockpitActionConfirm');
+        await page.waitForFunction(()=>state.controllerReceipt?.status==='rejected');
+        await page.waitForFunction(()=>state.controllerCockpit.tasks.some(t=>t.task_id==='working'&&t.pane_id==='replacement-pane'));
+    """)
+    assert cockpit.effects == []
+    assert cockpit.store.get_task("working")["status"] == "working"
+    assert cockpit.read()["receipts"][0]["reason_code"] == "identity_changed"
+    confirm_action("working:halt")
+    assert cockpit.effects == [{"kind": "interrupt", "pane_id": "replacement-pane", "reason": "人工核查当前身份和证据"}]
+    assert cockpit.store.get_task("working")["status"] == "interrupted"
+    assert cockpit.read()["receipts"][0]["status"] == "applied"
+
+
+def test_redrive_transport_ack_is_not_fabricated_completion(cockpit):
+    open_cockpit(cockpit)
+    confirm_action("working:redrive")
+    assert len(cockpit.effects) == 1
+    assert cockpit.effects[0]["kind"] == "prompt"
+    assert cockpit.effects[0]["pane_id"] == "working-pane"
+    assert cockpit.store.get_task("working")["status"] == "working"
+    assert cockpit.read()["receipts"][0]["status"] == "accepted_waiting"
+
+
+def test_canvas_deeplink_and_responsive_cockpit(cockpit):
+    open_cockpit(cockpit)
+    out = browser("""
+        await page.evaluate(()=>returnFromControllerCockpit());
+        await page.click('loc=css:.x6-node[data-cell-id="gate"]');
+        await page.waitForFunction(()=>state.flowSelectedNodeId==='gate'&&state.selectedTaskId==='blocked');
+        await page.keyboard.press('Escape');
+        console.log(await page.snapshot());
+    """)
+    assert "Controller" in out
+    browser("""
+        await page.press('loc=css:#flowInspectorBody .flow-act-group > button','Enter');
+        await page.waitForFunction(()=>state.workflowId==='__ctl__'&&state.controllerTarget.nodeId==='gate');
+        console.log(await page.snapshot());
+    """)
+    for width in (1440, 390):
+        out = browser(f"""
+            await page.cdp('Emulation.setDeviceMetricsOverride',{{width:{width},height:900,deviceScaleFactor:1,mobile:false}});
+            console.log('FIT='+await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+            await page.screenshot({{path:{json.dumps(str(cockpit.artifacts / ('cockpit-' + str(width) + '.png')))}}});
+        """)
+        assert "FIT=true" in out
+
+
+def test_recovery_read_failure_shows_unknown(cockpit, monkeypatch):
+    from herdr import state_db
+    open_cockpit(cockpit)
+    original = state_db.get_readonly_db_connection
+
+    def unavailable(path=None):
+        if Path(path) == cockpit.store.db_path:
+            raise OSError("controlled recovery read failure")
+        return original(path)
+
+    monkeypatch.setattr(state_db, "get_readonly_db_connection", unavailable)
+    out = browser("""
+        await page.evaluate(()=>loadControllerCockpit('wf-e2e'));
+        console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));
+        console.log('ENABLED='+await page.evaluate(()=>[...document.querySelectorAll('[data-action-id] button')].filter(b=>!b.disabled).length));
+    """)
+    assert "未确认" in out
+    assert "ENABLED=0" in out
+
+
+def test_dispatch_waits_for_registered_task_and_never_resends(cockpit):
+    from herdr import node_dispatch_store as nd
+    from herdr.task_resources import begin_launch_intent, finish_launch_intent
+    wid = "wf-dispatch"
+    cockpit.store.save_workflow({"workflow_id": wid, "project_id": "cockpit-e2e",
+        "status": "running", "execution_id": "dispatch-exec", "created_at": time.time(),
+        "config": {"nodes": [{"id": "dispatch", "node_type": "agent"}]}})
+    nd.reconcile_workflow(cockpit.store.db_path, wid)
+    operation = nd.operation_for_node(cockpit.store.db_path, wid, "dispatch")
+    assert nd.claim(cockpit.store.db_path, operation["id"], "controlled-transport")
+    nd.start(cockpit.store.db_path, operation["id"], "controlled-transport", expected_task_ids=["registered"])
+    operation = nd.transport_finished(cockpit.store.db_path, operation["id"], "controlled-transport",
+                                      reason="dispatch_awaiting_task")
+    assert operation["status"] == "awaiting_result"
+    assert cockpit.store.list_tasks(workflow_id=wid) == []
+    open_cockpit(cockpit, wid)
+    out = browser("console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));")
+    assert "等待总指挥建立任务" in out
+    assert "未登记任务" in out
+    # Only the controlled launch transport is replaced: real intent and registration
+    # own the evidence that resolves the production node-dispatch state machine.
+    intent = begin_launch_intent(cockpit.store, workflow_id=wid, node_id="dispatch", candidate_sha=None,
+        task_id="registered", run_id="registered-run", execution_id="dispatch-exec",
+        dispatch_operation_id=operation["id"])["intent"]
+    cockpit.store.save_task({"task_id": "registered", "workflow_id": wid, "node": "dispatch",
+        "status": "working", "run_id": "registered-run", "pane_id": "registered-pane",
+        "execution_id": "dispatch-exec", "launch_intent_id": intent["intent_id"],
+        "dispatch_operation_id": operation["id"]})
+    finish_launch_intent(cockpit.store, intent)
+    nd.reconcile_workflow(cockpit.store.db_path, wid)
+    assert nd.operation_for_node(cockpit.store.db_path, wid, "dispatch")["status"] == "resolved"
+    assert nd.claim(cockpit.store.db_path, operation["id"], "duplicate") is None
+    out = browser("""
+        await page.evaluate(()=>loadControllerCockpit('wf-dispatch'));
+        console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));
+    """)
+    assert "registered-run" in out
+    assert "registered-pane" in out
+    assert "等待总指挥建立任务" not in out
+    assert cockpit.effects == []
+
+
+def test_force_pass_advance_failure_is_durable_partial_without_repeat(cockpit):
+    wid = "wf-partial"
+    cockpit.store.save_workflow({"workflow_id": wid, "project_id": "cockpit-e2e", "status": "running",
+        "execution_id": "partial-exec", "config": {"nodes": [{"id": "gate"}]}})
+    cockpit.store.save_task({"task_id": "partial-task", "workflow_id": wid, "node": "gate", "stage": "gate",
+        "status": "working", "run_id": "partial-run", "pane_id": "partial-pane", "execution_id": "partial-exec"})
+    open_cockpit(cockpit, wid)
+    task = cockpit.store.get_task("partial-task")
+    request = {"workflow_id": wid, "type": "force_pass_advance", "task_id": "partial-task",
+        "gate_node_id": "gate", "expected_version": task["version"], "expected_pane_id": "partial-pane",
+        "reason": "核验现有产物，测试无下一阶段的失败回执", "confirmed": True}
+    out = browser(f"""
+        console.log(JSON.stringify(await page.evaluate(async payload=>{{
+            const response=await fetch('/api/controller/execute-action',{{method:'POST',headers:{{'Content-Type':'application/json','X-HAFlow-Console-Request':'1'}},body:JSON.stringify(payload)}});
+            return await response.json();
+        }},{json.dumps(request)})));
+        await page.evaluate(()=>loadControllerCockpit({json.dumps(wid)}));
+        console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));
+    """)
+    assert '"status":"partial"' in out
+    assert "部分生效" in out and "force_pass" in out and "advance" in out
+    assert cockpit.store.get_task("partial-task")["stage_verdict"] == "pass"
+    before = cockpit.store.list_events(workflow_id=wid)
+    browser(f"await page.evaluate(()=>loadControllerCockpit({json.dumps(wid)}));")
+    assert cockpit.store.list_events(workflow_id=wid) == before
+    assert cockpit.read(wid)["receipts"][0]["applied_steps"] == ["force_pass"]
+
+
+def test_unimplemented_automatic_action_rejects_without_terminal_effect(cockpit):
+    from services.controller.cockpit_automation import execute_action
+    # A policy recommendation cannot create an automatic terminal capability.
+    workflow = cockpit.store.get_workflow("wf-auto")
+    workflow["status"] = "running"
+    cockpit.store.save_workflow(workflow)
+    cockpit.store.save_task({"task_id": "auto-task", "workflow_id": "wf-auto", "node": "build",
+        "status": "working", "run_id": "auto-run", "pane_id": "auto-pane", "execution_id": "exec-e2e"})
+    action = next(a for a in cockpit.read("wf-auto")["actions"] if a["action_id"] == "auto-task:redrive")
+    assert action["automation"]["mode"] == "automatic"
+    result = execute_action({"workflow_id": "wf-auto", "action_id": action["action_id"],
+        "expected_identity": action["expected_identity"]}, deps=SimpleNamespace(store=cockpit.store), automatic=True)
+    assert result["receipt"]["status"] == "rejected"
+    assert result["receipt"]["reason_code"] == "unsupported_handler"
+    assert cockpit.effects == []

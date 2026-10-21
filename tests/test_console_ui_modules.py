@@ -45,7 +45,12 @@ def test_all_original_function_bodies_survive_encapsulation():
     baseline = json.loads((ROOT / 'tests/fixtures/console-ui-baseline.json').read_text())['functions']
     # These functions intentionally changed under the Cockpit projection contract.
     replaced = {'openControllerCockpitModal', 'renderSchedulerAttribution', 'renderPipelineActions',
-                'loadWorkflow', 'loadWorkflowExtras', 'clearWorkflow', 'currentRecovery', 'openRecoveryDecision', 'submitDecision'}
+                'loadWorkflow', 'loadWorkflowExtras', 'clearWorkflow', 'currentRecovery', 'openRecoveryDecision', 'submitDecision',
+                'loadProject', 'dashOpenWorkflowOf', 'dashOpenWorkflow', 'renderDashboard', 'dashExec',
+                'openWorkflowTab', 'closeWorkflowTab', 'executeControllerAction', 'updateAttentionHub',
+                'renderTaskRow', 'flowOverviewHtml', 'renderFlowWorkbench', 'renderNodeInspector',
+                'taskDrawerMenuHtml', 'showPane', 'askCoordinator',
+                'controllerActionCard', 'catMeta', 'canSteerTask', 'canForceReviewTask', 'canForcePassTask'}
     baseline = {name: entry for name, entry in baseline.items() if name not in replaced}
     script = re.findall(r'<script>(.*?)</script>', page.HTML_TEMPLATE, re.S)[0]
     for owner in {entry['owner'] for entry in baseline.values()}:

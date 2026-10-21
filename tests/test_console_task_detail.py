@@ -114,7 +114,7 @@ class TestTaskDetailDrawer(unittest.TestCase):
         node_bin = shutil.which("node")
         if not node_bin:
             self.skipTest("node not found; skipping JS execution test")
-        fns = ["taskDrawerMenuHtml", "canSteerTask", "canForceReviewTask", "canForcePassTask"]
+        fns = ["taskDrawerMenuHtml"]
         parts = []
         for fn in fns:
             src = _extract_fn(self.html, fn)

@@ -1,6 +1,6 @@
 /* 任务详情、轨迹分页与轮询；保持任务身份隔离。 */
 var {
-  canSteerTask, canForceReviewTask, canForcePassTask, toggleTaskDrawerMenu,
+  toggleTaskDrawerMenu,
   closeTaskDrawerMenu, traceDotClass, toggleTraceEvent, retryTaskTrace,
   loadMoreTaskTrace, openTaskDrawer, closeTaskDrawer, switchTaskDrawerTab,
   showTask, showPane, askCoordinator
@@ -17,9 +17,6 @@ function taskExecStart(t){t=t||{};const rt=t.runtime||{};return taskDrawerNumTs(
 function taskDisplayStart(t){const e=taskExecStart(t);if(e!==null)return {label:'开始时间',ts:e};const c=taskDrawerNumTs((t||{}).created_at);if(c!==null)return {label:'创建时间',ts:c};return null}
 function taskUpdatedAt(t){t=t||{};return taskDrawerNumTs(t.updated_at??t.last_activity_at)}
 function taskDurationSecs(t){const s=taskExecStart(t);const u=taskUpdatedAt(t);if(s===null||u===null)return null;return Math.max(0,Math.round(u-s))}
-function canSteerTask(t){return ['working','dispatched','rework','blocked','paused'].includes((t||{}).status)}
-function canForceReviewTask(t){return (t||{}).status==='rework'}
-function canForcePassTask(t){return (t||{}).stage_verdict==='blocked'}
 function buildTaskEvents(task,proj){
   task=task||{};proj=proj||{};
   const evs=[];
@@ -488,7 +485,7 @@ async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/tas
   return openControllerCockpit({workflowId:task?.workflow_id||state.workflow?.workflow?.workflow_id,nodeId:task?.node||task?.stage||'',taskId:id,runId:task?.run_id||'',paneId:task?.pane_id||task?.runtime?.pane_id||''});
 }
 return {
-  canSteerTask, canForceReviewTask, canForcePassTask, toggleTaskDrawerMenu,
+  toggleTaskDrawerMenu,
   closeTaskDrawerMenu, traceDotClass, toggleTraceEvent, retryTaskTrace,
   loadMoreTaskTrace, openTaskDrawer, closeTaskDrawer, switchTaskDrawerTab,
   showTask, showPane, askCoordinator
