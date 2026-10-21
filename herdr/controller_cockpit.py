@@ -56,7 +56,7 @@ def _event_order(event):
     return timestamp, event.get("id") if isinstance(event.get("id"), int) else 0
 
 
-def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unknown):
+def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unknown, graph_node_ids):
     wid = workflow.get("workflow_id")
     by_id = {task.get("task_id"): task for task in all_tasks if isinstance(task, dict) and task.get("task_id")}
     projected = []
@@ -82,7 +82,7 @@ def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unkn
             continue
         seen.add(action.get("action_id"))
         action["automation"], action["risk"] = action_automation(
-            action, config, task, workflow, read_unknown=read_unknown)
+            action, config, task, workflow, read_unknown=read_unknown, graph_node_ids=graph_node_ids)
         projected.append(action)
         if len(projected) > MAX_ACTIONS:
             break
@@ -150,7 +150,8 @@ def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recover
                        and op.get("workflow_id") in (None, "", wid)]
     unresolved = [op for op in scoped_recovery if op.get("status") not in {"resolved", "superseded"}]
     projected_actions, actions_truncated = _project_actions(actions or [], workflow, config, all_tasks,
-                                                           unresolved, read_unknown)
+                                                           unresolved, read_unknown,
+                                                           {node.get("id") for node in graph.get("nodes") or []})
     timeline = nlargest(MAX_TIMELINE + 1, (event for event in events or [] if _owned(event, wid)), key=_event_order)
     todos = [{"kind": "recovery", **deepcopy(op)} for op in unresolved[:MAX_RECOVERY]]
     todos.extend({"kind": "action", "action_id": a.get("action_id"), "title": a.get("title"),

@@ -74,6 +74,25 @@ def test_missing_task_identity_is_blocked_without_inventing_a_version():
     assert action.automation == {"mode": "blocked", "source": "safety", "reason": "identity_unknown"}
 
 
+@pytest.mark.parametrize("current_pane", [None, "other-pane"])
+def test_action_policy_requires_current_pane_not_only_matching_expected_target(current_pane):
+    from herdr.controller_actions import action_automation
+    task = _task(status="working", version=7, run_id="run-9")
+    workflow = {"workflow_id": "wf-001"}
+    action = generate_progress_actions(task, workflow)[0].to_dict()
+    task["pane_id"] = current_pane
+    automation, _ = action_automation(action, {}, task, workflow)
+    assert automation == {"mode": "blocked", "source": "safety", "reason": "identity_unknown"}
+
+
+def test_generated_actions_cannot_automate_a_node_absent_from_current_config():
+    task = _task(status="working", version=7, run_id="run-9", node="removed")
+    workflow = {"workflow_id": "wf-001", "config": {"nodes": [{"id": "other"}]}}
+    actions = generate_progress_actions(task, workflow)
+    assert all(a.automation == {"mode": "blocked", "source": "safety", "reason": "node_unknown"}
+               for a in actions)
+
+
 def test_workflow_resume_has_workflow_target():
     action = collect_workflow_actions([], {"workflow_id": "wf-001", "status": "paused",
                                           "execution_id": "exec-1"}, workflow_paused=True)[0]

@@ -72,7 +72,7 @@ def controller_action_type(action):
     return kind
 
 
-def action_automation(action, config, task, workflow, *, read_unknown=False):
+def action_automation(action, config, task, workflow, *, read_unknown=False, graph_node_ids=None):
     """Resolve policy after fail-closed identity/evidence checks; never execute."""
     kind = controller_action_type(action)
     known = {"launch", "rework", "force_pass", "force_pass_advance", "redrive", "steer", "halt",
@@ -99,12 +99,21 @@ def action_automation(action, config, task, workflow, *, read_unknown=False):
                 or expected.get("task_version") != task.get("version")
                 or (workflow.get("execution_id") and task.get("execution_id") != workflow["execution_id"])):
             reason = "identity_unknown"
-        elif kind in {"redrive", "steer", "halt", "rework"} and (
-                not target.get("pane_id") or expected.get("pane_id") != target["pane_id"]):
-            reason = "identity_unknown"
+        else:
+            current_pane = task.get("pane_id") or (task.get("runtime") or {}).get("pane_id")
+            if (target.get("pane_id") or expected.get("pane_id")
+                    or kind in {"redrive", "steer", "halt", "rework"}) and (
+                    not current_pane or current_pane != target.get("pane_id")
+                    or expected.get("pane_id") != current_pane):
+                reason = "identity_unknown"
     elif not reason and (not workflow.get("execution_id")
                          or expected.get("execution_id") != workflow["execution_id"]):
         reason = "identity_unknown"
+    node_id = target.get("node_id")
+    if not reason and node_id and (
+            ("nodes" in config and node_id not in {node.get("id") for node in config["nodes"]})
+            or (graph_node_ids is not None and node_id not in graph_node_ids)):
+        reason = "node_unknown"
     if reason:
         return {"mode": "blocked", "source": "safety", "reason": reason}, risk
     if bypass or destructive:

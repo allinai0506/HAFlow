@@ -108,6 +108,39 @@ def test_actions_bound_to_stale_task_snapshot_are_excluded(change):
     assert _project(**values)["actions"] == []
 
 
+@pytest.mark.parametrize("pane", [None, "", "absent"])
+def test_missing_current_pane_evidence_safety_blocks_old_live_actions(pane):
+    values = _inputs()
+    values["actions"] = generate_progress_actions(values["tasks"][0], values["workflow"])
+    if pane == "absent":
+        values["tasks"][0].pop("pane_id")
+    else:
+        values["tasks"][0]["pane_id"] = pane
+    actions = _project(**values)["actions"]
+    assert {a["action_id"] for a in actions} == {"T1:redrive", "T1:steer", "T1:halt"}
+    assert all(a["automation"] == {"mode": "blocked", "source": "safety", "reason": "identity_unknown"}
+               for a in actions)
+
+
+@pytest.mark.parametrize("missing_from", ["config", "graph", "both"])
+def test_current_task_node_missing_from_definition_or_graph_is_safety_blocked(missing_from):
+    from herdr.workflow_graph import workflow_graph_projection
+    values = _inputs()
+    values["tasks"][0]["node"] = "removed"
+    values["actions"] = generate_progress_actions(values["tasks"][0], values["workflow"])
+    if missing_from in {"config", "both"}:
+        values["config"] = {"nodes": [{"id": "other"}]}
+    else:
+        values["config"] = {"nodes": [{"id": "other"}, {"id": "removed"}]}
+    graph_config = {"nodes": [{"id": "other"}]} if missing_from in {"graph", "both"} else {
+        "nodes": [{"id": "other"}, {"id": "removed"}]}
+    values["graph"] = workflow_graph_projection({**graph_config, **values["workflow"]}, values["tasks"])
+    actions = _project(**values)["actions"]
+    assert actions
+    assert all(a["automation"] == {"mode": "blocked", "source": "safety", "reason": "node_unknown"}
+               for a in actions)
+
+
 def test_action_for_absent_task_is_preserved_but_safety_blocked():
     values = _inputs()
     values["actions"] = generate_progress_actions(values["tasks"][0], values["workflow"])
