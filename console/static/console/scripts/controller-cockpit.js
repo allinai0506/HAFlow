@@ -8,7 +8,7 @@ var {
   createCandidate, controllerActionCard, catMeta, openDecisionPanel,
   submitDecision, openControllerCockpitModal, currentRecovery, dispatchConfirmationHtml,
   recoveryUnavailable, recoveryCard, openRecoveryDecision, decideRecovery,
-  advanceStage, openControllerCockpit, renderControllerReceipt, executeCockpitAction
+  advanceStage, openControllerCockpit, returnFromControllerCockpit, renderControllerReceipt, executeCockpitAction
 } = (function({
   state, showConfirmModal, showPromptModal,
   api, toast, esc,
@@ -16,7 +16,7 @@ var {
   cleanStageLabel, deliveryOf, deliveryReason,
   deliveryOverridesStatus, taskDisplayName, refreshAll,
   loadWorkflow, renderWorkflowTabs, flowCardFoot,
-  setWorkspaceMode, openModal, closeModal
+  setWorkspaceMode, renderFlowWorkbench, renderTasks, switchTaskDrawerTab, openModal, closeModal
 }){
 
 function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><label for="overrideAgent">执行者策略</label><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi','grok','kimi'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}
@@ -225,7 +225,7 @@ function isRejectedCockpitAction(action){
 function renderControllerHeader(data){
   const c=data.controller||{};
   const labels={running:'运行中',stopped:'已停止',unknown:'未确认'};
-  return '<header class="controller-cockpit-header"><div><div class="controller-cockpit-eyebrow">工作流驾驶舱</div><h2>'+esc(data.workflow?.title||data.workflow?.workflow_id||cockpitWorkflowId())+'</h2></div><div>调度服务 · '+esc(labels[c.status]||c.status||'未确认')+'<div class="muted">最后检查：'+esc(c.last_check_at||c.checked_at||'未提供')+'</div><button class="mini" onclick="loadControllerCockpit('+cockpitArg(cockpitWorkflowId())+')">刷新状态</button></div></header>';
+  return '<header class="controller-cockpit-header"><div><div class="controller-cockpit-eyebrow">工作流驾驶舱</div><h2>'+esc(data.workflow?.title||data.workflow?.workflow_id||cockpitWorkflowId())+'</h2>'+(state.controllerReturnContext?'<button class="mini" onclick="returnFromControllerCockpit()">返回原位置</button>':'')+'</div><div>调度服务 · '+esc(labels[c.status]||c.status||'未确认')+'<div class="muted">最后检查：'+esc(c.last_check_at||c.checked_at||'未提供')+'</div><button class="mini" onclick="loadControllerCockpit('+cockpitArg(cockpitWorkflowId())+')">刷新状态</button></div></header>';
 }
 function renderControllerJudgment(data){
   const j=data.judgment||{};
@@ -235,21 +235,37 @@ function controllerTaskMatches(task,target){
   const fields=[['taskId',task.task_id],['runId',task.run_id],['paneId',task.pane_id||task.runtime?.pane_id]];
   return fields.some(([key])=>target[key])&&fields.every(([key,value])=>!target[key]||target[key]===value);
 }
+function controllerActionMatches(action,target){
+  if(target.operationId!=null)return false;
+  const fields=[['nodeId','node_id'],['taskId','task_id'],['runId','run_id'],['paneId','pane_id']];
+  return fields.every(([key,field])=>!target[key]||target[key]===action.target?.[field]);
+}
+function controllerRecoveryMatches(operation,target){
+  if(target.operationId!=null&&String(target.operationId)!==String(operation.id))return false;
+  return [['nodeId','node_id'],['taskId','task_id'],['runId','run_id'],['paneId','pane_id']].every(([key,field])=>!target[key]||target[key]===operation.payload?.[field]);
+}
+function renderControllerTarget(data,target){
+  const fields=['nodeId','taskId','runId','paneId','operationId'].filter(key=>target[key]!=null&&target[key]!=='');
+  if(!fields.length)return '';
+  const available=(data.actions||[]).some(a=>controllerActionMatches(a,target))||(data.todos||[]).some(o=>o.kind==='recovery'&&controllerRecoveryMatches(o,target));
+  return '<section class="controller-cockpit-target-context" tabindex="-1" role="status"><strong>'+(!available||data.read_state!=='confirmed'?'只读定位':'当前定位')+'</strong><p>'+fields.map(key=>esc(target[key])).join(' · ')+'</p>'+(!available?'<p>'+(data.read_state!=='confirmed'?'读取未确认，无法确认当前操作。':'当前投影中没有匹配的操作；该对象可能来自历史记录或未包含在本次投影中。')+'</p>':'')+'</section>';
+}
 function renderControllerNodes(data,target){
   return '<section class="controller-cockpit-section"><h3>节点与任务</h3><div class="controller-cockpit-nodes">'+(data.nodes||[]).map(n=>'<article class="controller-cockpit-node'+(target.nodeId===n.id?' is-target':'')+'"><div class="controller-cockpit-row"><strong>'+esc(n.label||n.id)+'</strong><span>'+esc(humanStatus(n.status)||n.status||'未确认')+'</span></div>'+((n.tasks||[]).map(t=>'<div class="controller-cockpit-task'+(controllerTaskMatches(t,target)?' is-target':'')+'"><button class="mini" onclick="locateControllerTask('+cockpitArg(t.task_id)+')">'+esc(t.task_id)+'</button><div>'+esc(humanStatus(t.status)||t.status||'未确认')+'</div><dl><dt>运行</dt><dd>'+esc(t.run_id||'未确认')+'</dd><dt>工位</dt><dd>'+esc(t.pane_id||t.runtime?.pane_id||'未确认')+'</dd><dt>执行身份</dt><dd>'+esc(t.execution_id||'未确认')+'</dd></dl></div>').join('')||'<p class="muted">未登记任务</p>')+'</article>').join('')+'</div>'+(data.nodes_truncated||data.tasks_truncated?'<p class="muted">仅显示服务端返回的部分节点 / 任务。</p>':'')+'</section>';
 }
-function cockpitActionCard(a){
+function cockpitActionCard(a,located=false){
   const mode=a.automation?.mode||'blocked';
   const labels={automatic:'自动处理（由后台执行）',manual:'人工操作',confirmation_required:'需要确认',blocked:'暂不可执行'};
   const stale=isRejectedCockpitAction(a);
-  return '<article class="controller-cockpit-action'+(stale?' is-outdated':'')+'" data-action-id="'+esc(a.action_id)+'"><div class="controller-cockpit-row"><strong>'+esc(a.title||a.action_id)+'</strong><span>'+esc(labels[mode]||'暂不可执行')+'</span></div><p>'+esc(a.effect||a.description||'')+'</p><p class="muted">'+esc(a.automation?.reason||'')+'</p>'+(stale?'<p role="alert">此操作卡片已过期，请刷新后核对。</p>':'')+(mode==='automatic'?'<p class="muted">页面不触发自动执行；请查看后台回执。</p>':'<button class="btn '+(a.is_destructive?'danger-btn':'primary')+'" '+(!['manual','confirmation_required'].includes(mode)||stale?'disabled':'')+' onclick="executeCockpitAction('+cockpitArg(a.action_id)+')">'+(mode==='blocked'?'当前不可执行':'查看并确认')+'</button>')+'</article>';
+  return '<article class="controller-cockpit-action'+(located?' is-target':'')+(stale?' is-outdated':'')+'" tabindex="-1" data-action-id="'+esc(a.action_id)+'"><div class="controller-cockpit-row"><strong>'+esc(a.title||a.action_id)+'</strong><span>'+esc(labels[mode]||'暂不可执行')+'</span></div><p>'+esc(a.effect||a.description||'')+'</p><p class="muted">'+esc(a.automation?.reason||'')+'</p>'+(stale?'<p role="alert">此操作卡片已过期，请刷新后核对。</p>':'')+(mode==='automatic'?'<p class="muted">页面不触发自动执行；请查看后台回执。</p>':'<button class="btn '+(a.is_destructive?'danger-btn':'primary')+'" '+(!['manual','confirmation_required'].includes(mode)||stale?'disabled':'')+' onclick="executeCockpitAction('+cockpitArg(a.action_id)+')">'+(mode==='blocked'?'当前不可执行':'查看并确认')+'</button>')+'</article>';
 }
 function renderControllerTodos(data,target){
-  const recovery=(data.todos||[]).filter(t=>t.kind==='recovery');
-  const actions=[...(data.actions||[])];
+  const recovery=(data.todos||[]).filter(t=>t.kind==='recovery'&&controllerRecoveryMatches(t,target));
+  const actions=(data.actions||[]).filter(a=>controllerActionMatches(a,target));
   const rejected=state.controllerReceipt;
-  if(rejected?.status==='rejected'&&rejected.workflow_id===data.workflow?.workflow_id&&rejected.stale_action&&!actions.some(a=>cockpitActionKey(a)===cockpitActionKey(rejected.stale_action)))actions.push(rejected.stale_action);
-  const body=recovery.map(o=>'<div class="controller-cockpit-recovery'+(String(target.operationId)===String(o.id)?' is-target':'')+'">'+recoveryCard(o,data.workflow?.workflow_id)+'</div>').join('')+actions.map(cockpitActionCard).join('');
+  if(rejected?.status==='rejected'&&rejected.workflow_id===data.workflow?.workflow_id&&rejected.stale_action&&controllerActionMatches(rejected.stale_action,target)&&!actions.some(a=>cockpitActionKey(a)===cockpitActionKey(rejected.stale_action)))actions.push(rejected.stale_action);
+  const located=['nodeId','taskId','runId','paneId','operationId'].some(key=>target[key]!=null&&target[key]!=='');
+  const body=recovery.map(o=>'<div class="controller-cockpit-recovery'+(located?' is-target':'')+'" tabindex="-1">'+recoveryCard(o,data.workflow?.workflow_id)+'</div>').join('')+actions.map(a=>cockpitActionCard(a,located)).join('');
   const decisions=state.decisionData?.workflow_id===data.workflow?.workflow_id?renderDecisionPanel():'<p class="muted">人工裁决状态尚未确认，请查看工作流详情。</p>';
   return '<section class="controller-cockpit-section"><h3>调度待办 · 继续推进</h3>'+(data.read_state!=='confirmed'?'<div role="alert">读取未确认，尚不能确认是否存在待办。</div>':body||'<p class="muted">暂无待办</p>')+(data.actions_truncated||data.recovery_truncated?'<p class="muted">待办已截断，请查看对应节点的详情。</p>':'')+decisions+'</section>';
 }
@@ -269,14 +285,31 @@ function paintControllerCockpit(){
     box.innerHTML='<div class="controller-cockpit-wrap" role="status">正在读取调度状态…</div>';return;
   }
   const receipt=state.controllerReceipt?.workflow_id===data.workflow.workflow_id?state.controllerReceipt:null;
-  box.innerHTML='<div class="controller-cockpit-wrap">'+renderControllerHeader(data)+(data.read_state!=='confirmed'?'<div class="controller-cockpit-error" role="alert">读取未确认：'+esc(Object.values(data.errors||{}).join('；')||'部分权威来源不可用')+'。请刷新核验。</div>':'')+renderControllerJudgment(data)+renderControllerReceipt(receipt)+'<div class="controller-cockpit-columns">'+renderControllerNodes(data,state.controllerTarget||{})+renderControllerTodos(data,state.controllerTarget||{})+'</div>'+renderControllerTimeline(data)+'</div>';
+  box.innerHTML='<div class="controller-cockpit-wrap">'+renderControllerHeader(data)+(data.read_state!=='confirmed'?'<div class="controller-cockpit-error" role="alert">读取未确认：'+esc(Object.values(data.errors||{}).join('；')||'部分权威来源不可用')+'。请刷新核验。</div>':'')+renderControllerJudgment(data)+renderControllerTarget(data,state.controllerTarget||{})+renderControllerReceipt(receipt)+'<div class="controller-cockpit-columns">'+renderControllerNodes(data,state.controllerTarget||{})+renderControllerTodos(data,state.controllerTarget||{})+'</div>'+renderControllerTimeline(data)+'</div>';
   box.hidden=false;
+  if(state.controllerFocusPending){
+    state.controllerFocusPending=false;
+    requestAnimationFrame(()=>{
+      if(state.workflowId!=='__ctl__')return;
+      const located=box.querySelector?.('.controller-cockpit-action.is-target')||box.querySelector?.('.controller-cockpit-recovery.is-target')||box.querySelector?.('.controller-cockpit-task.is-target')||box.querySelector?.('.controller-cockpit-node.is-target')||box.querySelector?.('.controller-cockpit-target-context')||box;
+      located.setAttribute('tabindex','-1');located.focus({preventScroll:true});located.scrollIntoView?.({block:'nearest'});
+    });
+  }
 }
 function openControllerCockpit(target={}){
   const wid=target.workflowId||(state.workflowId==='__ctl__'?state.controllerTarget?.workflowId:null)||state.workflow?.workflow?.workflow_id||(state.workflowId&&!state.workflowId.startsWith('__')?state.workflowId:'');
   if(!wid){toast('请先选择工作流',true);return;}
   const changed=state.controllerTarget?.workflowId!==wid;
-  state.controllerTarget={...(changed?{}:state.controllerTarget),...target,workflowId:wid};
+  const navigating=arguments.length>0||state.workflowId!=='__ctl__';
+  if(state.workflowId!=='__ctl__'){
+    state.controllerReturnContext={workflowId:state.workflow?.workflow?.workflow_id||wid,nodeId:state.flowSelectedNodeId,taskId:state.selectedTaskId,taskDrawerTab:state.taskDrawerTab,taskDetail:state.selectedTaskDetail,workflowView:state.workflowView||'flow',drawerHidden:document.getElementById('taskDrawer')?.hidden!==false,focusElement:document.activeElement};
+  }
+  if(navigating){
+    state.controllerTarget={...Object.fromEntries(['nodeId','taskId','runId','paneId','operationId'].filter(key=>target[key]!=null&&target[key]!=='').map(key=>[key,target[key]])),workflowId:wid};
+    state.controllerFocusPending=true;
+    closeModal();
+    const drawer=document.getElementById('taskDrawer');if(drawer)drawer.hidden=true;
+  }
   if(changed&&state.controllerReceipt?.workflow_id!==wid)state.controllerReceipt=null;
   setWorkspaceMode('ctl');
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
@@ -285,18 +318,39 @@ function openControllerCockpit(target={}){
   if(state.controllerCockpit?.workflow?.workflow_id!==wid)return loadControllerCockpit(wid);
 }
 function openControllerCockpitModal(){return openControllerCockpit();}
+async function returnFromControllerCockpit(){
+  const context=state.controllerReturnContext;
+  if(!context)return;
+  closeModal();
+  state.controllerReturnContext=null;state.controllerFocusPending=false;
+  state.workflowId=context.workflowId;state.shellView='workbench';state.workflowView=context.workflowView;
+  if(state.workflow?.workflow?.workflow_id!==context.workflowId){
+    try{await loadWorkflow(context.workflowId)}catch(e){toast('返回工作流失败：'+e.message,true);return;}
+    if(state.workflowId!==context.workflowId||state.workflow?.workflow?.workflow_id!==context.workflowId)return;
+  }
+  state.flowSelectedNodeId=context.nodeId;state.selectedTaskId=context.taskId;state.selectedTaskDetail=context.taskDetail;state.taskDrawerTab=context.taskDrawerTab;
+  setWorkspaceMode(context.workflowView);renderWorkflowTabs();
+  if(context.workflowView==='list')renderTasks();else renderFlowWorkbench();
+  const drawer=document.getElementById('taskDrawer');
+  if(drawer){drawer.hidden=context.drawerHidden;if(!context.drawerHidden&&context.taskId&&context.taskDetail)switchTaskDrawerTab(context.taskDrawerTab||'overview');}
+  requestAnimationFrame(()=>{
+    if(state.workflowId!==context.workflowId)return;
+    const focus=context.focusElement?.isConnected?context.focusElement:(!context.drawerHidden?drawer:document.getElementById('flowInspectorBody'));
+    if(focus){focus.setAttribute?.('tabindex','-1');focus.focus();}
+  });
+}
 async function executeCockpitAction(actionId){
   const data=state.controllerCockpit;
   const action=(data?.actions||[]).find(a=>a.action_id===actionId);
   const wid=data?.workflow?.workflow_id;
-  if(!action||data.read_state!=='confirmed'||!['manual','confirmation_required'].includes(action.automation?.mode)||!action.expected_identity||isRejectedCockpitAction(action)){toast('操作条件未确认，请刷新',true);return;}
+  if(!action||!controllerActionMatches(action,state.controllerTarget||{})||data.read_state!=='confirmed'||!['manual','confirmation_required'].includes(action.automation?.mode)||!action.expected_identity||isRejectedCockpitAction(action)){toast('操作条件未确认，请刷新',true);return;}
   const snapshot=JSON.parse(JSON.stringify(action));
   const actionKey=cockpitActionKey(snapshot);
   const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk);
   openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+'<label for="cockpitReason">处理依据</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
   const button=document.getElementById('cockpitActionConfirm');
   button.onclick=async()=>{
-    if(state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.automation?.mode)||cockpitWorkflowId()!==wid||cockpitActionKey((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId))!==actionKey){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
+    if(!controllerActionMatches(action,state.controllerTarget||{})||state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.automation?.mode)||cockpitWorkflowId()!==wid||cockpitActionKey((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId))!==actionKey){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
     const reason=(document.getElementById('cockpitReason')?.value||'').trim();
     if((highRisk)&&!reason){document.getElementById('cockpitActionError').textContent='必须填写人工核验依据';return;}
     button.disabled=true;
@@ -413,7 +467,7 @@ return {
   createCandidate, controllerActionCard, catMeta, openDecisionPanel,
   submitDecision, openControllerCockpitModal, currentRecovery, dispatchConfirmationHtml,
   recoveryUnavailable, recoveryCard, openRecoveryDecision, decideRecovery,
-  advanceStage, openControllerCockpit, renderControllerReceipt, executeCockpitAction
+  advanceStage, openControllerCockpit, returnFromControllerCockpit, renderControllerReceipt, executeCockpitAction
 };
 })({
   state, showConfirmModal, showPromptModal,
@@ -422,5 +476,5 @@ return {
   cleanStageLabel, deliveryOf, deliveryReason,
   deliveryOverridesStatus, taskDisplayName, refreshAll,
   loadWorkflow, renderWorkflowTabs:(...args)=>renderWorkflowTabs(...args), flowCardFoot,
-  setWorkspaceMode, openModal, closeModal
+  setWorkspaceMode, renderFlowWorkbench:(...args)=>renderFlowWorkbench(...args), renderTasks:(...args)=>renderTasks(...args), switchTaskDrawerTab:(...args)=>switchTaskDrawerTab(...args), openModal, closeModal
 });

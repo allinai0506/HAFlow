@@ -33,6 +33,7 @@ NODE = shutil.which("node")
 # markup the real function produced.
 PRELUDE = r"""
 const __probe = { modal: null };
+const __listeners = {};
 // Persistent per-id elements: the console reads back what it wrote, so a stub
 // that returns a fresh object per call would hide every render.
 const __els = {};
@@ -61,7 +62,7 @@ globalThis.document = {
   getElementById: document_getElementById,
   querySelectorAll: function(){ return []; },
   querySelector: function(){ return null; },
-  addEventListener(){}, createElement(){ return document_getElementById('x'); },
+  addEventListener(type, fn){ (__listeners[type] ||= []).push(fn); }, createElement(){ return document_getElementById('x'); },
 };
 globalThis.window = {
   localStorage: { getItem(){ return null; }, setItem(){} },
@@ -162,6 +163,259 @@ def _cockpit():
 @unittest.skipIf(NODE is None, "node executable not found in PATH")
 class TestControllerCockpitRuntime(unittest.TestCase):
     """Drive the real JS; a green ``node --check`` is not enough."""
+
+    def test_new_typed_target_clears_prior_focus_but_refresh_keeps_new_target(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};state.controllerCockpit=__cockpitFixture;
+                openControllerCockpit({workflowId:'wf-1',taskId:'impl-x',runId:'run-1',paneId:'pane-1',operationId:7});
+                openControllerCockpit({workflowId:'wf-1',nodeId:'build'});openControllerCockpitModal();
+                console.log('TARGET='+JSON.stringify(state.controllerTarget));
+            """)
+        target = json.loads(out.split('TARGET=', 1)[1].split('\n')[0])
+        self.assertEqual(target, {'workflowId': 'wf-1', 'nodeId': 'build'})
+
+    def test_absent_or_historical_target_is_readonly_and_never_exposes_unrelated_action(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};state.controllerCockpit=__cockpitFixture;
+                openControllerCockpit({workflowId:'wf-1',taskId:'impl-x',runId:'old-run'});
+                const markup=document.getElementById('controllerTabView').innerHTML;
+                console.log('READONLY='+markup.includes('只读定位'));console.log('EXPLAIN='+markup.includes('当前投影中没有匹配的操作'));
+                console.log('EXECUTABLE='+/onclick="executeCockpitAction/.test(markup));
+                console.log('OLD_RUN='+markup.includes('old-run'));
+            """)
+        for token in ('READONLY=true', 'EXPLAIN=true', 'EXECUTABLE=false', 'OLD_RUN=true'):
+            self.assertIn(token, out)
+
+    def test_located_card_receives_focus_once_and_return_restores_node_task_and_focus(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflowView='flow';state.flowSelectedNodeId='build';state.selectedTaskId='impl-x';state.taskDrawerTab='runtime';
+                  state.workflow={workflow:{workflow_id:'wf-1'},graph:{nodes:[{id:'build',status:'working'}],edges:[]}};state.controllerCockpit=__cockpitFixture;
+                  const drawer=document.getElementById('taskDrawer');drawer.hidden=false;
+                  let returned=0,focused=0,scrolled=0;document.activeElement={isConnected:true,focus(){returned++}};
+                  const target={setAttribute(){},focus(){focused++},scrollIntoView(){scrolled++}};
+                  document.getElementById('controllerTabView').querySelector=selector=>selector.includes('is-target')?target:null;
+                  globalThis.requestAnimationFrame=fn=>fn();
+                  openControllerCockpit({workflowId:'wf-1',taskId:'impl-x',runId:'run-1',paneId:'pane-1'});openControllerCockpitModal();
+                  console.log('FOCUS='+focused);console.log('SCROLL='+scrolled);console.log('DRAWER_HIDDEN='+drawer.hidden);
+                  state.flowSelectedNodeId='other';state.selectedTaskId='other-task';state.taskDrawerTab='overview';
+                  await returnFromControllerCockpit();
+                  console.log('RESTORED='+JSON.stringify([state.workflowId,state.flowSelectedNodeId,state.selectedTaskId,state.taskDrawerTab,drawer.hidden,returned]));
+                })();
+            """)
+        for token in ('FOCUS=1', 'SCROLL=1', 'DRAWER_HIDDEN=true', 'RESTORED=["wf-1","build","impl-x","runtime",false,1]'):
+            self.assertIn(token, out)
+
+    def test_coordinator_compatibility_entry_navigates_without_posting(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'},tasks:[{workflow_id:'wf-1',task_id:'impl-x',node:'build',run_id:'run-1',pane_id:'pane-1'}]};state.controllerCockpit=__cockpitFixture;
+                  let posts=0;globalThis.fetch=async(path,options)=>{if(options.method==='POST')posts++;return {ok:true,json:async()=>({ok:true,data:{}})}};
+                  await askCoordinator('impl-x');console.log('POSTS='+posts);console.log('TARGET='+JSON.stringify(state.controllerTarget));
+                  console.log('ROW='+renderTaskRow(state.workflow.tasks[0]).includes('askCoordinator('));
+                })();
+            """)
+        for token in ('POSTS=0', '"taskId":"impl-x"', 'ROW=false'):
+            self.assertIn(token, out)
+
+    def test_operation_target_requires_matching_node_and_never_reuses_old_confirmation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};state.controllerCockpit=__cockpitFixture;
+                  state.controllerCockpit.todos=[{kind:'recovery',id:7,version:1,status:'waiting_human',payload:{node_id:'build'}}];
+                  let posts=0;globalThis.fetch=async(path,options)=>{if(options.method==='POST')posts++;return {ok:true,json:async()=>({ok:true,data:__cockpitFixture})}};
+                  openControllerCockpit({workflowId:'wf-1',taskId:'impl-x'});executeCockpitAction('impl-x:integrate');
+                  const confirm=document.getElementById('cockpitActionConfirm').onclick;
+                  openControllerCockpit({workflowId:'wf-1',operationId:7,nodeId:'foreign'});
+                  console.log('RECOVERY_CONTROL='+document.getElementById('controllerTabView').innerHTML.includes('decideRecovery('));
+                  await confirm();console.log('POSTS='+posts);
+                })();
+            """)
+        self.assertIn('RECOVERY_CONTROL=false', out)
+        self.assertIn('POSTS=0', out)
+
+    def test_return_via_workflow_tab_restores_drawer_focus_after_original_element_detaches(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflowView='list';state.selectedTaskId='impl-x';state.taskDrawerTab='runtime';
+                  state.workflow={workflow:{workflow_id:'wf-1'},tasks:[]};state.controllerCockpit=__cockpitFixture;
+                  const drawer=document.getElementById('taskDrawer');drawer.hidden=false;let focused=0;drawer.focus=()=>focused++;
+                  document.activeElement={isConnected:false,focus(){throw Error('detached focus')}};globalThis.requestAnimationFrame=fn=>fn();
+                  openControllerCockpit({workflowId:'wf-1',taskId:'impl-x'});
+                  await openWorkflowTab('wf-1');
+                  console.log('RETURN='+JSON.stringify([state.workflowId,state.selectedTaskId,drawer.hidden,focused]));
+                })();
+            """)
+        self.assertIn('RETURN=["wf-1","impl-x",false,1]', out)
+
+    def test_project_background_refresh_keeps_target_and_does_not_steal_focus(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.shellView='workbench';state.workflow={workflow:{workflow_id:'wf-1'}};state.controllerCockpit=__cockpitFixture;state.controllerActionsData={};
+                  let focused=0;document.getElementById('controllerTabView').querySelector=()=>({setAttribute(){},focus(){focused++}});globalThis.requestAnimationFrame=fn=>fn();
+                  globalThis.fetch=async(path)=>({ok:true,json:async()=>({ok:true,data:path.startsWith('/api/project?id=')?{project:{project_name:'demo'},workflows:[{workflow_id:'wf-1'}],latest_workflow_id:'wf-1',agents:[],slots:[]}:{} })});
+                  openControllerCockpit({workflowId:'wf-1',taskId:'impl-x',runId:'run-1'});focused=0;
+                  await loadProject('project-1',false);
+                  console.log('TARGET='+JSON.stringify(state.controllerTarget));console.log('FOCUS='+focused);
+                })();
+            """)
+        self.assertIn('"taskId":"impl-x"', out)
+        self.assertIn('"runId":"run-1"', out)
+        self.assertIn('FOCUS=0', out)
+
+    def test_task_row_opens_cockpit_with_complete_task_identity(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                state.controllerCockpit=__cockpitFixture;
+                const markup=renderTaskRow({workflow_id:'wf-1',node:'build',task_id:'impl-x',run_id:'run-1',pane_id:'pane-1',status:'blocked'});
+                const button=markup.match(/onclick="([^"]*)"[^>]*>在 Controller 中处理/);
+                console.log('SHORTCUT='+Boolean(button));
+                if(button){eval(button[1].replace(/&quot;/g,'"').replace(/&amp;/g,'&'));console.log('TARGET='+JSON.stringify(state.controllerTarget));}
+                console.log('LOCAL_ACTION='+/onclick="[^"]*(?:executeControllerAction|forcePassTask|forceReviewTask|haltTaskPrompt|showSteerModal)/.test(markup));
+            """)
+        self.assertIn('SHORTCUT=true', out)
+        self.assertIn('LOCAL_ACTION=false', out)
+        target = json.loads(out.split('TARGET=', 1)[1].split('\n')[0])
+        self.assertEqual(target, dict(workflowId='wf-1', nodeId='build', taskId='impl-x', runId='run-1', paneId='pane-1'))
+
+    def test_flow_inspector_and_recovery_only_render_context_shortcuts(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.workflowId='wf-1';state.flowSelectedNodeId='build';state.flowInspectorTab='summary';
+                state.workflow={workflow:{workflow_id:'wf-1'},tasks:[],graph:{nodes:[{id:'build',label:'构建',status:'blocked',task_ids:['impl-x'],has_attention:true}],edges:[]}};
+                state.controllerActionsData={actions:__cockpitFixture.actions,recovery:[{id:7,status:'waiting_human',payload:{node_id:'build'},recovery:{summary:'需要恢复',actions:[{action:'retry',label:'重试'}]}}]};
+                state.controllerCockpit=__cockpitFixture;renderNodeInspector();
+                const markup=document.getElementById('flowInspectorBody').innerHTML;
+                console.log('EXECUTABLE='+/onclick="[^"]*(?:executeControllerAction|openRecoveryDecision|decideRecovery)/.test(markup));
+                const buttons=[...markup.matchAll(/onclick="([^"]*)"[^>]*>在 Controller 中处理/g)];
+                console.log('SHORTCUTS='+buttons.length);
+                for(const b of buttons){eval(b[1].replace(/&quot;/g,'"').replace(/&amp;/g,'&'));console.log('TARGET='+JSON.stringify(state.controllerTarget));}
+            """)
+        self.assertIn('EXECUTABLE=false', out)
+        self.assertIn('SHORTCUTS=2', out)
+        self.assertIn('"operationId":7', out)
+        self.assertIn('"nodeId":"build"', out)
+
+    def test_legacy_controller_executor_only_navigates_without_posting(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};state.controllerCockpit=__cockpitFixture;
+                  state.controllerActionsMap={'impl-x:integrate':__cockpitFixture.actions[0]};
+                  globalThis.fetch=async()=>{throw new Error('unexpected request')};
+                  await executeControllerAction('impl-x:integrate','wf-1');
+                  console.log('TARGET='+JSON.stringify(state.controllerTarget));
+                  console.log('CONFIRM='+Boolean(document.getElementById('ctlExecConfirmBtn').onclick));
+                })();
+            """)
+        self.assertIn('"taskId":"impl-x"', out)
+        self.assertIn('CONFIRM=false', out)
+
+    def test_pane_inspection_retains_output_and_task_pane_cockpit_shortcut(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'},tasks:[{task_id:'impl-x',workflow_id:'wf-1',node:'build',run_id:'run-1',pane_id:'pane-1'}]};state.controllerCockpit=__cockpitFixture;
+                  globalThis.fetch=async()=>({ok:true,json:async()=>({ok:true,data:{output:'readonly terminal'}})});
+                  await showPane('pane-1','impl-x');const markup=document.getElementById('modalBody').innerHTML;
+                  console.log('OUTPUT='+markup.includes('readonly terminal'));
+                  const button=markup.match(/onclick="([^"]*)"[^>]*>在 Controller 中处理/);console.log('SHORTCUT='+Boolean(button));
+                  if(button){eval(button[1].replace(/&quot;/g,'"').replace(/&amp;/g,'&'));console.log('TARGET='+JSON.stringify(state.controllerTarget));}
+                })();
+            """)
+        self.assertIn('OUTPUT=true', out)
+        self.assertIn('SHORTCUT=true', out)
+        self.assertIn('"taskId":"impl-x"', out)
+        self.assertIn('"paneId":"pane-1"', out)
+
+    def test_dashboard_controller_attention_navigates_with_workflow_and_task(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.dash={tasks:[],decisions:[],deliveries:[],stuck:[],workflows:[],counts:{tasks:0},attention:[{workflow_id:'wf-2',task_id:'other-task',node:'review',pane_id:'pane-2',endpoint:'/api/controller/execute-action',payload:{type:'halt'}}]};
+                renderDashboard();const markup=document.getElementById('tasks').innerHTML;
+                console.log('SHORTCUT='+markup.includes('在 Controller 中处理'));
+                console.log('EXECUTABLE='+/onclick="[^"]*(?:dashExec|dashSignoff|openSignoffChamber)/.test(markup));
+                console.log('TARGET='+markup.includes('other-task'));
+            """)
+        self.assertIn('SHORTCUT=true', out)
+        self.assertIn('EXECUTABLE=false', out)
+        self.assertIn('TARGET=true', out)
+
+    def test_dashboard_loads_decision_workflow_before_opening_its_cockpit(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-other';state.workflow={workflow:{workflow_id:'wf-other'}};state.dashMode=true;state.dashWorkflowId='wf-other';
+                  const calls=[];globalThis.fetch=async(path,options)=>{
+                    calls.push([path,options.method||'GET',state.workflowId]);
+                    const data=path.startsWith('/api/workflow?id=')?{workflow:{workflow_id:'wf-1',config:{}},tasks:[],graph:{nodes:[],edges:[]}}:path.startsWith('/api/overview')?{spaces:[]}:path.startsWith('/api/workflow/controller-cockpit')?__cockpitFixture:{};
+                    return {ok:true,json:async()=>({ok:true,data})};
+                  };
+                  await dashOpenWorkflowOf('wf-1',{nodeId:'build'});
+                  console.log('WORKFLOW='+state.workflow.workflow.workflow_id);console.log('TARGET='+JSON.stringify(state.controllerTarget));
+                  console.log('CALLS='+JSON.stringify(calls));
+                })();
+            """)
+        self.assertIn('WORKFLOW=wf-1', out)
+        self.assertIn('"workflowId":"wf-1"', out)
+        self.assertIn('"nodeId":"build"', out)
+        calls = json.loads(out.split('CALLS=', 1)[1].split('\n')[0])
+        self.assertTrue(calls[0][0].startswith('/api/workflow?id=wf-1'))
+        self.assertTrue(all(call[1] == 'GET' for call in calls))
+
+    def test_task_attention_cannot_execute_the_same_action_as_cockpit(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.workflowId='wf-1';state.shellView='workbench';
+                state.workflow={workflow:{workflow_id:'wf-1'},tasks:[{workflow_id:'wf-1',task_id:'impl-x',node:'build',status:'blocked'}]};
+                state.controllerActionsData={actions:__cockpitFixture.actions};state.controllerCockpit=__cockpitFixture;
+                globalThis.fetch=async()=>({ok:true,json:async()=>({ok:true,data:{interactions:[]}})});
+                renderTasks();const context=document.getElementById('attentionBanner').innerHTML+document.getElementById('tasks').innerHTML;
+                console.log('CONTEXT_ACTIONS='+/executeControllerAction|executeCockpitAction|impl-x:integrate/.test(context));
+                console.log('SHORTCUT='+context.includes('在 Controller 中处理'));
+                openControllerCockpit({workflowId:'wf-1',taskId:'impl-x'});
+                console.log('ACTION_CARDS='+document.getElementById('controllerTabView').innerHTML.split('data-action-id="impl-x:integrate"').length);
+            """)
+        self.assertIn('CONTEXT_ACTIONS=false', out)
+        self.assertIn('SHORTCUT=true', out)
+        self.assertIn('ACTION_CARDS=2', out)
+
+    def test_escape_closes_cockpit_confirmation_before_underlying_task_drawer(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};state.controllerCockpit=__cockpitFixture;
+                state.selectedTaskId='impl-x';const drawer=document.getElementById('taskDrawer');drawer.hidden=false;
+                let modalOpen=false;document.getElementById('modal').classList={add(){modalOpen=true},remove(){modalOpen=false},contains(){return modalOpen}};
+                openControllerCockpit({workflowId:'wf-1',taskId:'impl-x'});drawer.hidden=false;executeCockpitAction('impl-x:integrate');
+                const escape=()=>__listeners.keydown.forEach(fn=>fn({key:'Escape',target:{closest(){return null}}}));
+                escape();console.log('MODAL='+modalOpen);console.log('DRAWER='+!drawer.hidden);console.log('TASK='+state.selectedTaskId);
+                escape();console.log('CLOSED='+drawer.hidden);
+            """)
+        for token in ('MODAL=false', 'DRAWER=true', 'TASK=impl-x', 'CLOSED=true'):
+            self.assertIn(token, out)
 
     def test_failed_workflow_b_read_never_relabels_workflow_a_cached_facts(self):
         import tempfile

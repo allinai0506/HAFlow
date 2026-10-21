@@ -7,9 +7,8 @@ var {
   state, api, toast,
   esc, humanReason, cleanStageLabel,
   taskBadge, deliveryWaitHtml, taskDisplayName,
-  refreshAll, loadWorkflow, openModal,
   closeModal, openTaskDrawer, toggleDeepDrawer,
-  switchDrawerTab, catMeta
+  switchDrawerTab, openControllerCockpit
 }){
 
 function setTaskFilter(f){state.taskFilter=f;['All','Decision','Attention','Active'].forEach(k=>{const el=document.getElementById('f'+k);if(el)el.classList.toggle('active',f.toLowerCase()===k.toLowerCase())});renderTasks()}
@@ -45,63 +44,8 @@ function copyCliCommandByActionId(actId){
 }
 async function executeControllerAction(actId,wid){
   const act=(state.controllerActionsMap&&state.controllerActionsMap[actId])||{};
-  const payload=Object.assign({}, act.api_payload||{type:actId,workflow_id:wid});
-  const endpoint=act.api_endpoint||'/api/controller/execute-action';
-  const cmdLine=act.command_line||actId;
-  const effect=act.effect||act.description||'';
-  const targetTask=act.blocker_task_id||act.old_task_id||(act.api_payload&&act.api_payload.task_id)||'';
-  if(targetTask){
-    const allTasks=(state.workflow&&state.workflow.tasks)||[];
-    const matchedTask=allTasks.find(t=>String(t.task_id)===String(targetTask));
-    if(matchedTask){
-      if(payload.expected_version===undefined&&matchedTask.version!==undefined){
-        payload.expected_version=matchedTask.version;
-      }
-      if(payload.expected_pane_id===undefined&&matchedTask.pane_id){
-        payload.expected_pane_id=matchedTask.pane_id;
-      }
-      if(payload.pane_id===undefined&&matchedTask.pane_id){
-        payload.pane_id=matchedTask.pane_id;
-      }
-    }
-  }
-  const isForcePass=(payload.type==='force_pass'||payload.type==='force_pass_advance');
-  const reasonHtml=isForcePass?`
-    <div style="margin-top:12px">
-      <label for="ctlReasonInput" style="font-weight:600;font-size:12px;color:var(--text-primary);display:block;margin-bottom:4px">人工豁免原因（必填）:</label>
-      <textarea id="ctlReasonInput" class="input" style="width:100%;height:64px;box-sizing:border-box" placeholder="请输入人工核验结论及放行原因..."></textarea>
-    </div>
-  `:'';
-  const summaryHtml=`<div style="line-height:1.6"><div style="font-size:13.5px;font-weight:600;margin-bottom:8px;color:var(--text-primary)">将执行：${esc(act.title||actId)}</div>${targetTask?`<div class="muted" style="font-size:12px;margin-bottom:8px">针对卡点任务：<code>${esc(targetTask)}</code></div>`:''}${effect?`<div class="ctl-effect" style="margin-bottom:8px">${esc(effect)}</div>`:''}${act.is_destructive?'<div style="font-size:12px;color:var(--danger);font-weight:600;margin-bottom:8px">高风险豁免操作，请确认已人工核查产物。</div>':''}${reasonHtml}<details class="ctl-tech"><summary>工程师技术详情（可选展开）</summary><div class="ctl-tech-body"><div class="muted" style="font-size:11.5px;margin-bottom:4px">对应底层命令（仅审计 standby，点按钮即可执行，无需手动敲）：</div><div class="ctl-cheat-cmd"><code>${esc(cmdLine)}</code></div><div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="mini" onclick="copyCliCommandByActionId('${esc(act.action_id||actId)}')">复制命令</button></div></div></details></div>`;
-  openModal('执行 Controller 解卡操作',`${summaryHtml}<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px"><button class="btn" onclick="closeModal()">取消</button><button id="ctlExecConfirmBtn" class="btn ${act.is_destructive?'danger-btn':'primary'}">立即执行</button></div>`);
-  const confirmBtn=document.getElementById('ctlExecConfirmBtn');
-  if(confirmBtn)confirmBtn.onclick=async()=>{
-    if(isForcePass){
-      const rEl=document.getElementById('ctlReasonInput');
-      const rVal=(rEl?rEl.value:'').trim();
-      if(!rVal){toast('必须填写人工豁免原因',true);return;}
-      payload.reason=rVal;
-      payload.note=rVal;
-      payload.confirmed=true;
-    }
-    closeModal();
-    try{
-      toast('正在调度 Controller 执行…');
-      const res=await api(endpoint,{
-        method:'POST',
-        body:JSON.stringify(payload)
-      });
-      if(res.partial){
-        toast('人工豁免已写入但推进失败: '+(res.advance_error||res.error||'后续推进未完成'),true);
-      }else{
-        toast('Controller 解卡命令已执行！正在刷新现场…');
-      }
-      await loadWorkflow(wid);
-      if(state.spaceId)await refreshAll();
-    }catch(e){
-      toast('执行失败: '+e.message,true);
-    }
-  };
+  const target=act.target||{};
+  return openControllerCockpit({workflowId:target.workflow_id||wid,nodeId:target.node_id||'',taskId:target.task_id||act.blocker_task_id||act.old_task_id||'',runId:target.run_id||'',paneId:target.pane_id||''});
 }
 function controllerBlockerTask(actionId){
   const act=(state.controllerActionsMap&&state.controllerActionsMap[actionId])||{};
@@ -205,12 +149,7 @@ function updateAttentionHub(){
   if(stall&&stall.is_stalled){
     ab.style.background='var(--warning-bg)';
     ab.style.borderColor='rgba(217,119,6,0.25)';
-    let actBtn='';
-    if(stall.suggested_action==='force_review'&&stall.target_task_id){
-      actBtn=`<button class="btn primary" style="background:#d97706;border-color:#b45309;padding:4px 12px;font-size:12px" onclick="forceReviewTask('${stall.target_task_id}')">🔔 立即唤醒评审</button>`;
-    }else if(stall.suggested_action==='retry_advance'){
-      actBtn=`<button class="btn primary" style="background:#2563eb;border-color:#1d4ed8;padding:4px 12px;font-size:12px" onclick="retryStageAdvance('${state.workflowId}')">⚡ 尝试推进阶段</button>`;
-    }
+    const actBtn=`<button class="btn primary" onclick="openControllerCockpit(${esc(JSON.stringify({workflowId:state.workflowId,taskId:stall.target_task_id||''}))})">在 Controller 中处理</button>`;
     ab.innerHTML=`<div style="display:flex;align-items:center;gap:8px"><span class="att-badge" style="background:var(--warning);color:#fff">推进停滞告警</span><span class="att-text" style="color:var(--text-primary)">⚠️ ${esc(stall.message)}</span></div><div>${actBtn}</div>`;
   }else if(w&&(w.status==='completed'||w.outcome==='delivered')){
     ab.style.background='var(--success-bg)';
@@ -220,31 +159,10 @@ function updateAttentionHub(){
     ab.style.background='var(--bg-surface)';
     ab.style.borderColor='var(--border-default)';
     ab.style.borderLeft='3px solid var(--primary)';
-    state.controllerActionsMap={};
-    const acts=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
-    acts.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
     const detailRows=decisionTasks.slice(0,3).map(t=>{
       const d=decisionSummary(t);
-      let actionsHtml='';
-      if(acts.length){
-        const mine=acts.filter(a=>((a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0])===t.task_id));
-        const shown=(mine.length?mine:acts).slice(0,2);
-        const cardRows=shown.map(act=>`
-          <div class="ctl-mini-card${act.recommended?' is-recommended':''}">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:2px">
-              <strong style="color:var(--text-primary);font-size:12px">${act.recommended?'⭐ ':''}${esc(act.title)}</strong>
-              <span class="ctl-badges"><span class="badge ${catMeta(act.category)[1]}" style="font-size:10px">${esc(catMeta(act.category)[0])}</span></span>
-            </div>
-            <div class="muted" style="margin-bottom:4px;font-size:11px;line-height:1.5">${esc(act.effect||act.description)}</div>
-            <div style="display:flex;justify-content:flex-end;gap:8px;align-items:center">
-              <button class="mini" style="padding:2px 8px;font-size:10.5px;flex-shrink:0" onclick="locateControllerTask('${esc(t.task_id)}')">查看任务</button>
-              <button class="btn primary" style="padding:3px 8px;font-size:11.5px" onclick="executeControllerAction('${esc(act.action_id)}','${esc(state.workflowId)}')">一键执行</button>
-            </div>
-            <details class="ctl-tech" style="margin-top:8px"><summary>技术详情</summary><div class="ctl-tech-body"><div class="ctl-mini-cmd"><code>${esc(act.command_line)}</code><button class="mini" style="padding:2px 8px;font-size:10.5px;flex-shrink:0" onclick="copyCliCommandByActionId('${esc(act.action_id)}')">复制</button></div></div></details>
-          </div>
-        `).join('');
-        actionsHtml=`<div class="controller-actions-wrap" style="margin-top:4px">${cardRows}</div>`;
-      }
+      const target={workflowId:t.workflow_id||state.workflowId,nodeId:t.node||t.stage||'',taskId:t.task_id,runId:t.run_id||'',paneId:t.pane_id||''};
+      const actionsHtml=`<button class="mini" onclick="openControllerCockpit(${esc(JSON.stringify(target))})">在 Controller 中处理</button>`;
       return `<div class="decision-item"><strong>${esc(d.title)}</strong><span>${esc(d.question)}</span><small>依据：${esc(d.basis)}</small>${actionsHtml}</div>`;
     }).join('');
     const more=decisionTasks.length>3?`<div class="decision-more">还有 ${decisionTasks.length-3} 项，请查看全部决策项。</div>`:'';
@@ -347,6 +265,7 @@ function renderTasks(){
   e.innerHTML=ts.map(renderTaskRow).join('')
 }
 function renderTaskRow(t){
+  const target={workflowId:t.workflow_id||state.workflowId,nodeId:t.node||t.stage||'',taskId:t.task_id,runId:t.run_id||'',paneId:t.pane_id||''};
   const isDone=['completed','committed','integrated','cleaned'].includes(t.status);
   const isAct=['working','dispatched','rework','in_progress'].includes(t.status);
   const isBlk=['blocked','failed'].includes(t.status);
@@ -365,24 +284,8 @@ function renderTaskRow(t){
       <button class="task-menu-btn" title="更多操作" onclick="toggleTaskMenu(event)">···</button>
       <div class="task-dropdown-menu" onclick="event.stopPropagation()">
         <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();openSignoffChamber('${esc(t.task_id)}')">成果会签</button>
-        <button class="task-dropdown-item" onclick="closeAllTaskMenus();showPane('${esc(t.pane_id||'')}')">查看工位</button>
-        <button class="task-dropdown-item" onclick="closeAllTaskMenus();askCoordinator('${esc(t.task_id)}')">让总指挥处理</button>
-        ${['blocked','failed','rework'].includes(t.status)||t.stage_verdict==='blocked'||(t.blocker&&t.blocker.length)?`
-          <button class="task-dropdown-item" style="color:var(--primary);font-weight:600" onclick="closeAllTaskMenus();openControllerCockpitModal()">⚡ 查看解卡方案</button>
-        `:''}
-        ${['working','dispatched','rework','blocked','paused'].includes(t.status)?`
-          <div class="task-dropdown-divider"></div>
-          <button class="task-dropdown-item" style="color:var(--primary)" onclick="closeAllTaskMenus();showSteerModal('${esc(t.task_id)}')">留话指导</button>
-          <button class="task-dropdown-item danger" onclick="closeAllTaskMenus();haltTaskPrompt('${esc(t.task_id)}')">紧急叫停</button>
-        `:''}
-        ${t.status==='rework'?`
-          <div class="task-dropdown-divider"></div>
-          <button class="task-dropdown-item" style="color:var(--warning);font-weight:600" onclick="closeAllTaskMenus();forceReviewTask('${esc(t.task_id)}')">唤醒评审</button>
-        `:''}
-        ${t.stage_verdict==='blocked'?`
-          <div class="task-dropdown-divider"></div>
-          <button class="task-dropdown-item primary" onclick="closeAllTaskMenus();forcePassTask('${esc(t.workflow_id||state.workflowId)}','${esc(t.node||t.stage)}',{task_id:'${esc(t.task_id||'')}',expected_version:${t.version!==undefined&&t.version!==null?t.version:'null'},expected_pane_id:'${esc(t.pane_id||'')}',pane_id:'${esc(t.pane_id||'')}'})">强制放行</button>
-        `:''}
+        <button class="task-dropdown-item" onclick="closeAllTaskMenus();showPane('${esc(t.pane_id||'')}','${esc(t.task_id)}')">查看工位</button>
+        <button class="task-dropdown-item" onclick="closeAllTaskMenus();openControllerCockpit(${esc(JSON.stringify(target))})">在 Controller 中处理</button>
       </div>
     </div>
   </div>`;
@@ -396,7 +299,6 @@ return {
   state, api, toast,
   esc, humanReason, cleanStageLabel,
   taskBadge, deliveryWaitHtml, taskDisplayName,
-  refreshAll, loadWorkflow, openModal,
   closeModal, openTaskDrawer:(...args)=>openTaskDrawer(...args), toggleDeepDrawer:(...args)=>toggleDeepDrawer(...args),
-  switchDrawerTab:(...args)=>switchDrawerTab(...args), catMeta:(...args)=>catMeta(...args)
+  switchDrawerTab:(...args)=>switchDrawerTab(...args), openControllerCockpit:(...args)=>openControllerCockpit(...args)
 });

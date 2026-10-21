@@ -6,7 +6,7 @@ var {
   state, saveViewState, toast,
   esc, showTemplateLibrary, workflowSubject,
   loadWorkflow, clearWorkflow, paintCrumb,
-  setWorkspaceMode, openControllerCockpitModal, showLogs,
+  setWorkspaceMode, openControllerCockpit, returnFromControllerCockpit, showLogs,
   showArchive, stopLogAutoRefresh
 }){
 
@@ -172,12 +172,18 @@ function toggleCompletedExpanded(){
 }
 function openWorkflowTab(id){
   if(!id)return;
+  if(state.workflowId==='__ctl__'&&state.controllerReturnContext?.workflowId===id)return returnFromControllerCockpit();
+  if(id==='__ctl__'){
+    const workflowId=state.workflowId==='__ctl__'?state.controllerTarget?.workflowId:state.workflow?.workflow?.workflow_id||(!state.workflowId?.startsWith('__')?state.workflowId:null);
+    openControllerCockpit({workflowId});
+    if(typeof paintCrumb==='function')paintCrumb();
+    return;
+  }
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes(id))state.openWorkflowTabIds.push(id);
   state.workflowId=id;
   if(typeof renderSidebarWorkflows==='function')renderSidebarWorkflows();
   if(typeof renderWorkflowTabs==='function')renderWorkflowTabs();
-  if(id==='__ctl__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('ctl');if(typeof paintCrumb==='function')paintCrumb();if(typeof openControllerCockpitModal==='function')openControllerCockpitModal();return;}
   if(id==='__templates__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('templates');if(typeof paintCrumb==='function')paintCrumb();if(typeof showTemplateLibrary==='function')showTemplateLibrary();return;}
   if(id==='__archive__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('archive');if(typeof paintCrumb==='function')paintCrumb();if(typeof showArchive==='function')showArchive();return;}
   if(id==='__logs__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('logs');if(typeof paintCrumb==='function')paintCrumb();if(typeof showLogs==='function')showLogs();return;}
@@ -192,6 +198,7 @@ function closeWorkflowTab(id,e){
   const idx=state.openWorkflowTabIds.indexOf(id);
   if(idx===-1)return;
   state.openWorkflowTabIds.splice(idx,1);
+  if(id==='__ctl__'&&state.workflowId===id&&state.controllerReturnContext)return returnFromControllerCockpit();
   if(id==='__ctl__'){const ctlP=document.getElementById('controllerTabView');if(ctlP)ctlP.hidden=true;}
   if(id==='__templates__'){const tplP=document.getElementById('templatesTabView');if(tplP)tplP.hidden=true;}
   if(id==='__archive__'){const arcP=document.getElementById('archiveTabView');if(arcP)arcP.hidden=true;}
@@ -278,6 +285,6 @@ return {
   state, saveViewState, toast,
   esc, showTemplateLibrary, workflowSubject,
   loadWorkflow, clearWorkflow, paintCrumb:(...args)=>paintCrumb(...args),
-  setWorkspaceMode:(...args)=>setWorkspaceMode(...args), openControllerCockpitModal:(...args)=>openControllerCockpitModal(...args), showLogs:(...args)=>showLogs(...args),
+  setWorkspaceMode:(...args)=>setWorkspaceMode(...args), openControllerCockpit:(...args)=>openControllerCockpit(...args), returnFromControllerCockpit:(...args)=>returnFromControllerCockpit(...args), showLogs:(...args)=>showLogs(...args),
   showArchive:(...args)=>showArchive(...args), stopLogAutoRefresh:(...args)=>stopLogAutoRefresh(...args)
 });

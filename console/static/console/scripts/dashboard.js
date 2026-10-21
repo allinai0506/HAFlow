@@ -9,7 +9,7 @@ var {
   api, pageRead, toast,
   esc, jsArg, refreshAll,
   loadWorkflow, paintCrumb, setWorkspaceMode,
-  openSignoffChamber, openControllerCockpitModal
+  openSignoffChamber, openControllerCockpit
 }){
 
 let dashTimer=null;
@@ -245,11 +245,11 @@ async function loadDashboard(){
   }
 }
 function dashSelectWorkflow(v){state.dashWorkflowId=v||null;saveViewState();loadDashboard()}
-async function dashOpenWorkflowOf(wid){
+async function dashOpenWorkflowOf(wid,target={}){
   if(!wid)return dashOpenWorkflow();
   state.dashWorkflowId=wid;
   await dashOpenWorkflow();
-  openControllerCockpitModal();
+  return openControllerCockpit({...target,workflowId:wid});
 }
 async function dashOpenWorkflow(){
   const wid=state.dashWorkflowId;
@@ -295,7 +295,8 @@ function renderDashboard(){
   const taskRows=d.tasks.length?d.tasks.map((t,i)=>'<div class="dash-task"><span class="n">'+(i+1)+'</span><div><div class="t">'+esc(t.task_id)+'</div><div class="d">'+esc(t.goal||t.node)+'</div><div class="m">工位 '+esc(t.pane_id||'—')+' · 执行者 '+esc(t.agent)+(t.runtime_status?(' · '+esc(t.runtime_status)):'')+' · 更新于 '+esc(t.updated_at_text)+'</div></div><div>'+dashPillFor(t)+'</div></div>').join(''):'<div class="empty">当前没有任务</div>';
   const attRows=d.attention.length?d.attention.map(a=>{
     if(a.decision_id)return '<div class="dash-q"><div class="qt"><span>待你裁决 · '+esc(a.decision_id)+'</span><span class="dash-default">'+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.reason||a.default_action_text)+'</span></div><div class="qm">'+esc(a.workflow_id)+' · '+esc(a.node||'—')+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(a.workflow_id)+')">进入工作流裁决</button></div></div>';
-    return '<div class="dash-q"><div class="qt"><span>'+esc(a.reason||a.task_id)+'</span><span class="dash-default">默认: '+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.default_action_text)+'</span></div><div class="qm">'+esc(a.task_id)+' · 工位 '+esc(a.pane_id||'—')+' · '+esc(a.workflow_id)+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="openSignoffChamber('+JSON.stringify(a.task_id)+')">会签放行</button><button class="btn danger-btn" onclick="dashSignoff('+JSON.stringify(a.task_id)+','+JSON.stringify(a.workflow_id)+','+JSON.stringify(a.node||'')+',\'reject\')">打回</button>'+(a.endpoint?'<button class="btn" onclick="dashExec('+JSON.stringify(a.endpoint)+','+JSON.stringify(a.payload||{}).replace(/</g,'\\u003c')+')">一键：'+esc(a.default_action)+'</button>':'')+'</div></div>';
+    const target={nodeId:a.node||'',taskId:a.task_id||'',runId:a.run_id||'',paneId:a.pane_id||'',operationId:a.operation_id||null};
+    return '<div class="dash-q"><div class="qt"><span>'+esc(a.reason||a.task_id)+'</span><span class="dash-default">默认: '+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.default_action_text)+'</span></div><div class="qm">'+esc(a.task_id)+' · 工位 '+esc(a.pane_id||'—')+' · '+esc(a.workflow_id)+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(a.workflow_id)+','+esc(JSON.stringify(target))+')">在 Controller 中处理</button></div></div>';
   }).join(''):'<div class="dash-ok"><span class="dash-dot green"></span>没有等你的问题</div>';
   const decRows=(d.decisions||[]).length?d.decisions.map(x=>'<div class="dash-q"><div class="qt"><span>'+esc(x.decision_id)+'</span><span class="dash-default">'+esc(x.node||'—')+'</span></div><div class="qd"><b>问题</b><span>'+esc(x.question||x.title)+'</span></div>'+((x.options||[]).length?'<div class="qm">可选：'+esc((x.options||[]).join(' / '))+(x.recommended?('（建议：'+esc(x.recommended)+'）'):'')+'</div>':'')+'<div class="qm">'+esc(x.workflow_id)+' · '+esc(x.raised_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(x.workflow_id)+')">去拍板</button></div></div>').join(''):'<div class="dash-ok"><span class="dash-dot green"></span>没有待裁决项</div>';
   const dlvRows=d.deliveries.length?d.deliveries.map(x=>'<div class="dash-task"><span class="n">✓</span><div><div class="t">'+esc(x.title||x.candidate_sha)+'</div><div class="m">'+esc(x.workflow_id)+' · '+esc(x.updated_at_text)+'</div></div><div><span class="badge cleaned">交付</span></div></div>').join(''):'<div class="empty">暂无交付物</div>';
@@ -314,7 +315,7 @@ function renderDashboard(){
   document.getElementById('alerts').innerHTML='<div class="empty">卡住事项见上方。</div>';
 }
 async function dashSignoff(taskId,wid,node,act){if(act==='approve'){return openSignoffChamber(taskId)}try{await api('/api/task/signoff',{method:'POST',body:JSON.stringify({task_id:taskId,workflow_id:wid,node:node,action:act,operator:'仪表板'})});await loadDashboard()}catch(e){toast('操作失败：'+e.message,true)}}
-async function dashExec(endpoint,payload){try{await api(endpoint||'/api/controller/execute-action',{method:'POST',body:JSON.stringify(payload||{})});await loadDashboard()}catch(e){toast('操作失败：'+e.message,true)}}
+async function dashExec(endpoint,payload){payload=payload||{};return dashOpenWorkflowOf(payload.workflow_id||state.dashWorkflowId,{nodeId:payload.node_id||payload.node||'',taskId:payload.task_id||'',runId:payload.run_id||'',paneId:payload.pane_id||'',operationId:payload.operation_id||null})}
 return {
   stopDashTimer, toggleLinearSelectMenu, closeLinearSelectMenu, togglePopoverGroup,
   handleLinearSelectSearch, handleLinearSelectKeydown, selectLinearWorkflow, showDashboard,
@@ -326,5 +327,5 @@ return {
   api, pageRead, toast,
   esc, jsArg, refreshAll,
   loadWorkflow, paintCrumb:(...args)=>paintCrumb(...args), setWorkspaceMode:(...args)=>setWorkspaceMode(...args),
-  openSignoffChamber:(...args)=>openSignoffChamber(...args), openControllerCockpitModal:(...args)=>openControllerCockpitModal(...args)
+  openSignoffChamber:(...args)=>openSignoffChamber(...args), openControllerCockpit:(...args)=>openControllerCockpit(...args)
 });

@@ -59,18 +59,30 @@ function api(path){
 ''' + block + r'''
 (async()=>{
  await loadWorkflow('A');await new Promise(r=>setImmediate(r));
- assert.deepEqual(renders,['A']);assert.equal(pending.length,4);
+ assert.deepEqual(renders,['A']);assert.equal(pending.length,5);
+ const sidecars=['/api/workflow/controller-cockpit','/api/workflow/deliverables','/api/workflow/controller-actions','/api/workflow/decisions','/api/workflow/runtime'];
+ assert.deepEqual(pending.map(p=>p.path.split('?')[0]).sort(),sidecars.slice().sort());
  await loadWorkflow('B');await new Promise(r=>setImmediate(r));
  assert.equal(state.workflow.workflow.workflow_id,'B');
- assert.equal(pending.length,4,'at most one request per auxiliary type');
- for(const p of pending.slice(0,4))p.resolve({items:[{name:'from-A'}],counts:{},coordinator:'A'});
+ assert.deepEqual(renders,['A','B'],'primary B render does not await any sidecar');
+ assert.equal(pending.length,6,'only the identity-fenced Cockpit read bypasses the four coalesced sidecars');
+ assert.equal(pending[5].path,'/api/workflow/controller-cockpit?workflow_id=B');
+ const response=id=>({workflow:{workflow_id:id},workflow_id:id,read_state:'confirmed',items:[{name:'from-'+id}],counts:{},coordinator:id});
+ for(const p of pending.slice(0,5))p.resolve(response('A'));
  await new Promise(r=>setImmediate(r));
- assert.equal(pending.length,8);
+ assert.equal(pending.length,10);
+ assert.deepEqual(pending.slice(5).map(p=>p.path.split('?')[0]).sort(),sidecars.slice().sort());
+ assert.equal(state.controllerCockpit,null,'late Cockpit A must not install in B');
+ assert.deepEqual(state.controllerActionsData,{pending:true});
+ assert.deepEqual(state.decisionData,{pending:true});
  assert.deepEqual(state.workflow.deliverables,{items:[],pending:true});
- for(const p of pending.slice(4))p.resolve({items:[{name:'from-B'}],counts:{},coordinator:'B'});
+ for(const p of pending.slice(5))p.resolve(response('B'));
  await new Promise(r=>setImmediate(r));
  assert.equal(state.workflow.deliverables.items[0].name,'from-B');
- assert.equal(state.workflow.coordinator,'B');completed=true;
+ assert.equal(state.workflow.coordinator,'B');
+ assert.equal(state.controllerCockpit.workflow.workflow_id,'B');
+ assert.equal(state.controllerActionsData.workflow_id,'B');
+ assert.equal(state.decisionData.workflow_id,'B');completed=true;
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
     result=subprocess.run(['node','-e',program],capture_output=True,text=True,timeout=10)

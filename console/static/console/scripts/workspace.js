@@ -13,7 +13,7 @@ var {
   taskDisplayName, badge, closeSpaceMenu,
   destroyFlowGraph, setWorkspaceMode, populateTemplateSelect,
   showTemplateLibrary, renderAgents, renderSlots,
-  renderWorkflowSwitcher, renderWorkflowTabs, openControllerCockpitModal,
+  renderWorkflowSwitcher, renderWorkflowTabs, openControllerCockpit,
   showArchive, showLogs, clearWorkflow
 }){
 
@@ -256,11 +256,16 @@ async function loadProject(id,rer=true){
     paintCrumb();
     const sysId=state.workflowId;
     if(sysId==='__ctl__'){
-      const anchor=(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id)||(state.project&&state.project.latest_workflow_id);
+      const anchor=state.controllerTarget?.workflowId||(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id)||(state.project&&state.project.latest_workflow_id);
       if(anchor&&!(state.controllerActionsData&&state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===anchor)){
         if(!state.workflow||!state.workflow.workflow)state.workflow={workflow:{workflow_id:anchor}};
         await loadWorkflow(anchor);
-      }else if(typeof openControllerCockpitModal==='function')openControllerCockpitModal();
+      }
+      if(anchor){
+        if(state.workflowId!=='__ctl__'&&state.workflowId!==anchor)return;
+        if(state.controllerTarget?.workflowId===anchor){state.workflowId='__ctl__';openControllerCockpit();}
+        else openControllerCockpit({workflowId:anchor});
+      }
     }else if(sysId==='__templates__'&&typeof showTemplateLibrary==='function')showTemplateLibrary();
     else if(sysId==='__archive__'&&typeof showArchive==='function')showArchive();
     else if(sysId==='__logs__'&&typeof showLogs==='function')showLogs();
@@ -304,6 +309,6 @@ return {
   taskDisplayName, badge, closeSpaceMenu:(...args)=>closeSpaceMenu(...args),
   destroyFlowGraph:(...args)=>destroyFlowGraph(...args), setWorkspaceMode:(...args)=>setWorkspaceMode(...args), populateTemplateSelect:(...args)=>populateTemplateSelect(...args),
   showTemplateLibrary:(...args)=>showTemplateLibrary(...args), renderAgents:(...args)=>renderAgents(...args), renderSlots:(...args)=>renderSlots(...args),
-  renderWorkflowSwitcher:(...args)=>renderWorkflowSwitcher(...args), renderWorkflowTabs:(...args)=>renderWorkflowTabs(...args), openControllerCockpitModal:(...args)=>openControllerCockpitModal(...args),
+  renderWorkflowSwitcher:(...args)=>renderWorkflowSwitcher(...args), renderWorkflowTabs:(...args)=>renderWorkflowTabs(...args), openControllerCockpit:(...args)=>openControllerCockpit(...args),
   showArchive:(...args)=>showArchive(...args), showLogs:(...args)=>showLogs(...args), clearWorkflow:(...args)=>clearWorkflow(...args)
 });
