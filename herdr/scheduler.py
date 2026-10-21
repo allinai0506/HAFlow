@@ -129,12 +129,23 @@ def required_task_issues(tasks_for_node, required_task_ids, *, all_tasks=(), wor
     """Explain failed required-task lineage and zombie obligations without borrowing foreign evidence."""
     issues = []
     # §1.7 Invariant: Scan for zombie obligations (declared replacement_pending but no superseded_by).
+    superseded_targets = {
+        other.get("supersedes")
+        for other in (tasks_for_node or ())
+        if isinstance(other, dict) and other.get("supersedes")
+    } | {
+        other.get("supersedes")
+        for other in (all_tasks or ())
+        if isinstance(other, dict) and other.get("supersedes")
+    }
     for t in (tasks_for_node or []):
         if isinstance(t, dict):
+            task_id = t.get("task_id")
             if (t.get("status") == "superseded"
                     and t.get("replacement_pending")
-                    and not t.get("superseded_by")):
-                issues.append({"task_id": t.get("task_id"), "reason": "zombie_obligation_unreplaced"})
+                    and not t.get("superseded_by")
+                    and (not task_id or task_id not in superseded_targets)):
+                issues.append({"task_id": task_id, "reason": "zombie_obligation_unreplaced"})
 
     if required_task_ids is None:
         return issues

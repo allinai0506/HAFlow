@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 EVENT_SCHEDULER_DECISION = "scheduler_decision"
 EVENT_CANDIDATE_FROZEN = "candidate_frozen"
+EVENT_CANDIDATE_INVALIDATED = "candidate_invalidated"
 EVENT_JOIN_GATE_VERDICT = "join_gate_verdict"
 EVENT_REVERIFICATION_DECISION = "reverification_decision"
 EVENT_SELECTIVE_REPLAN_DECISION = "selective_replan_decision"
@@ -98,6 +99,7 @@ def record_scheduler_decision(
 def record_candidate_frozen(
     workflow_id, candidate_sha, source_node="", delivery_branch="", db_path=None,
     expected_episode_id=None, publication_event_id=None, delivery_inventory=None,
+    repo_path=None, base_branch=None,
 ):
     """Explicit candidate publication, serialized with episode CAS.
 
@@ -116,12 +118,41 @@ def record_candidate_frozen(
             raise ValueError('workflow not found')
         metadata = json.loads(workflow_row['metadata_json'] or '{}')
         epoch = max(float(workflow_row['created_at'] or 0), float(metadata.get('reopened_at') or 0))
-        row = conn.execute("SELECT * FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source=? AND timestamp>=? ORDER BY id DESC LIMIT 1",
+        row = conn.execute("SELECT * FROM events WHERE workflow_id=? AND event_type IN ('candidate_frozen','candidate_invalidated') AND source=? AND timestamp>=? ORDER BY id DESC LIMIT 1",
                            (workflow_id, SCHEDULER_EVENT_SOURCE, epoch)).fetchone()
         latest_id = row['id'] if row else 0
         if expected_episode_id is not None and expected_episode_id != latest_id:
             raise ValueError('candidate episode changed')
-        prior = json.loads(row['payload_json']) if row else {}
+        prior = json.loads(row['payload_json']) if (row and row['event_type'] == 'candidate_frozen') else {}
+
+        effective_repo = repo_path or metadata.get('project_root')
+        effective_base = base_branch or metadata.get('base_branch')
+        if effective_repo and effective_base:
+            from .launch_baseline import _rev_parse_commit, _git_is_ancestor
+            resolved_sha = _rev_parse_commit(effective_repo, f"{sha}^{{commit}}")
+            if resolved_sha:
+                base_tip = _rev_parse_commit(effective_repo, f"origin/{effective_base}") or _rev_parse_commit(effective_repo, effective_base)
+                if base_tip and base_tip != sha:
+                    is_ancestor = _git_is_ancestor(effective_repo, base_tip, sha)
+                    if is_ancestor is False:
+                        invalidated_event = state_db.record_event({
+                            'event_type': EVENT_CANDIDATE_INVALIDATED,
+                            'workflow_id': workflow_id,
+                            'source': SCHEDULER_EVENT_SOURCE,
+                            'payload': {
+                                'candidate_sha': sha,
+                                'reason': 'base_advanced',
+                                'base_branch': effective_base,
+                                'base_tip': base_tip,
+                                'rotated_from': prior.get('candidate_sha', ''),
+                            }
+                        }, conn=conn)
+                        return {
+                            'status': 'invalidated',
+                            'event': invalidated_event,
+                            'reason': 'base_advanced',
+                            'base_tip': base_tip,
+                        }
         if delivery_inventory is not None:
             from .candidate_assembly import delivery_inventory as current_inventory
             workflow, _, tasks = recovery_store._snapshot(conn, workflow_id)

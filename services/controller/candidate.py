@@ -196,9 +196,12 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
                                      allow_merge=publication_current)
             if sha == workflow.get('candidate_sha'):
                 return sha
-            ports.scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
+            res = ports.scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
                 db_path=store.db_path, expected_episode_id=workflow.get('candidate_episode_id') or 0,
-                delivery_inventory=inventory, publication_event_id=publication['id'])
+                delivery_inventory=inventory, publication_event_id=publication['id'],
+                repo_path=project_root, base_branch=workflow.get('base_branch'))
+            if isinstance(res, dict) and res.get('status') == 'invalidated':
+                return ''
             return sha
         except (ValueError, OSError, ports.subprocess.TimeoutExpired) as exc:
             print(f"[SCHEDULER ASSEMBLY REFUSED] workflow={workflow_id}: {type(exc).__name__}")
@@ -213,9 +216,12 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
     if ports.scheduler_core.resolve_candidate_sha_for_branch(project_root, f'{sha}^{{commit}}') != sha:
         return ''
     try:
-        ports.scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
+        res = ports.scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
             db_path=store.db_path, expected_episode_id=ports.json.loads(publication['payload_json']).get('expected_episode_id'),
-            publication_event_id=publication['id'])
+            publication_event_id=publication['id'],
+            repo_path=project_root, base_branch=workflow.get('base_branch'))
+        if isinstance(res, dict) and res.get('status') == 'invalidated':
+            return ''
     except ValueError as exc:
         print(f"[SCHEDULER FREEZE REJECTED] workflow={workflow_id}: {exc}")
         return ''
