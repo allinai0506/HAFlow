@@ -160,6 +160,27 @@ async function createCandidate(){
     }
   });
 }
+function renderSchedulerAttribution(){
+  const ts=((state.workflow&&state.workflow.tasks)||[]).filter(deliveryOverridesStatus);
+  if(!ts.length)return {count:0,html:''};
+  const html=ts.map(t=>{
+    const note=String((deliveryOf(t)||{}).owner_note||'');
+    const reason=deliveryReason(t);
+    const detail=reason&&reason!==note?' · '+esc(reason):'';
+    return '<div class="ctl-blocker" style="margin-bottom:8px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">'+esc(taskDisplayName(t)||t.task_id)+'</div><div class="ctl-blocker-id">'+esc(t.task_id||'')+'</div></div></div><div class="ctl-effect">'+esc(note)+detail+'</div></div>';
+  }).join('');
+  return {count:ts.length,html};
+}
+function renderPipelineActions(acts){
+  const pipelineActs=acts.filter(a=>a.group==='pipeline');
+  const attributed=renderSchedulerAttribution();
+  if(!pipelineActs.length&&!attributed.count)return '';
+  const resumeAct=pipelineActs.find(a=>a.action_id.endsWith(':resume_workflow'));
+  const taskActs=pipelineActs.filter(a=>a!==resumeAct);
+  const cards=taskActs.map(a=>cockpitActionCard(a)).join('');
+  const resumeHtml=resumeAct?cockpitActionCard(resumeAct):'';
+  return '<section><div class="ctl-section-title">继续推进 <span class="ctl-count">'+(pipelineActs.length+attributed.count)+'</span></div><div class="ctl-sub">这些任务本身没有报错，只是还差一步就能收尾；若当前没有报错卡点，请直接查看“继续推进”一节。由调度器接管的任务只显示当前等待原因。</div>'+resumeHtml+cards+attributed.html+'</section>';
+}
 // Open decision asks must be impossible to miss: they block whole waves and
 // previously only existed as free text inside the coordinator's terminal.
 function renderDecisionPanel(){
@@ -258,13 +279,17 @@ function cockpitActionCard(a,located=false){
 }
 function renderControllerTodos(data,target){
   const recovery=(data.todos||[]).filter(t=>t.kind==='recovery'&&controllerRecoveryMatches(t,target));
-  const actions=(data.actions||[]).filter(a=>controllerActionMatches(a,target));
+  const rawActs=data.actions||[];
+  const allActs=data.read_state==='confirmed'?rawActs.filter(a=>controllerActionMatches(a,target)):[];
+  const actions=allActs.filter(a=>a.group!=='pipeline'&&controllerActionMatches(a,target));
   const rejected=state.controllerReceipt;
   if(rejected?.status==='rejected'&&rejected.workflow_id===data.workflow?.workflow_id&&rejected.stale_action&&controllerActionMatches(rejected.stale_action,target)&&!actions.some(a=>cockpitActionKey(a)===cockpitActionKey(rejected.stale_action)))actions.push(rejected.stale_action);
   const located=['nodeId','taskId','runId','paneId','operationId'].some(key=>target[key]!=null&&target[key]!=='');
   const body=recovery.map(o=>'<div class="controller-cockpit-recovery'+(located?' is-target':'')+'" tabindex="-1">'+recoveryCard(o,data.workflow?.workflow_id)+'</div>').join('')+actions.map(a=>cockpitActionCard(a,located)).join('');
-  const decisions=state.decisionData?.workflow_id===data.workflow?.workflow_id?renderDecisionPanel():'<p class="muted">人工裁决状态尚未确认，请查看工作流详情。</p>';
-  return '<section class="controller-cockpit-section"><h3>调度待办 · 继续推进</h3>'+(data.read_state!=='confirmed'?'<div role="alert">读取未确认，尚不能确认是否存在待办。</div>':body||'<p class="muted">暂无待办</p>')+(data.actions_truncated||data.recovery_truncated?'<p class="muted">待办已截断，请查看对应节点的详情。</p>':'')+decisions+'</section>';
+  const decisionSection=state.decisionData?.workflow_id===data.workflow?.workflow_id?renderDecisionPanel():'<p class="muted">人工裁决状态尚未确认，请查看工作流详情。</p>';
+  const unblockSection='<section class="controller-cockpit-section"><h3>调度待办 · 继续推进</h3>'+(data.read_state!=='confirmed'?'<div role="alert">读取未确认，尚不能确认是否存在待办。</div>':body||'<p class="muted">暂无待办</p>')+(data.actions_truncated||data.recovery_truncated?'<p class="muted">待办已截断，请查看对应节点的详情。</p>':'')+'</section>';
+  const pipelineSection=renderPipelineActions(allActs);
+  return `${decisionSection}${unblockSection}${pipelineSection}`;
 }
 function renderControllerReceipt(receipt){
   if(!receipt)return '';

@@ -191,7 +191,7 @@ async function loadControllerCockpit(workflowId){
 }
 function loadWorkflowExtras(id,sequence){
   loadControllerCockpit(id);
-  const current=()=>sequence===state.workflowLoadSequence&&state.workflow?.workflow?.workflow_id===id&&(state.workflowId===id||(state.workflowId==='__ctl__'&&state.controllerTarget?.workflowId===id));
+  const current=()=>sequence===state.workflowLoadSequence&&state.workflow?.workflow?.workflow_id===id&&(!state.workflowId||state.workflowId===id||(state.workflowId==='__ctl__'&&state.controllerTarget?.workflowId===id));
   const apply=(path,success,failure)=>workflowExtraRequest(path,sequence).then(data=>{
     if(current())success(data);
   }).catch(()=>{if(current())failure();});
@@ -204,7 +204,8 @@ function loadWorkflowExtras(id,sequence){
     state.controllerActionsData=data;if(state.workflowId!=='__ctl__'){renderTasks();renderFlowWorkbench();}
   },()=>{state.controllerActionsData=null;if(state.workflowId!=='__ctl__')renderFlowWorkbench();});
   apply('/api/workflow/decisions?workflow_id='+encodeURIComponent(id),data=>{
-    state.decisionData=data.workflow_id===id?data:{error:'裁决身份不匹配'};if(state.workflowId==='__ctl__')openControllerCockpitModal();else renderTasks();
+    const scoped=data.workflow_id===id||(!data.workflow_id&&(data.decisions||[]).every(item=>item.workflow_id===id));
+    state.decisionData=scoped?data:{error:'裁决身份不匹配'};if(state.workflowId==='__ctl__')openControllerCockpitModal();else renderTasks();
   },()=>{state.decisionData={error:'决策读取失败'};if(state.workflowId==='__ctl__')openControllerCockpitModal();else renderTasks();});
   apply('/api/workflow/runtime?id='+encodeURIComponent(id),data=>{
     state.workflow.coordinator=data.coordinator;state.workflow.coordinator_pending=false;

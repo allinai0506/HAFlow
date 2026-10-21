@@ -246,7 +246,8 @@ async function loadDashboard(){
   }
 }
 function dashSelectWorkflow(v){state.dashWorkflowId=v||null;saveViewState();loadDashboard()}
-async function dashOpenWorkflowOf(wid,target={}){
+async function dashOpenWorkflowOf(wid){
+  const target=arguments[1]||{};
   if(!wid)return dashOpenWorkflow();
   const navigation=++dashNavigationSequence;
   const destination={...target,workflowId:wid};

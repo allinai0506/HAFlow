@@ -32,7 +32,7 @@
     "herdr/state/trajectory.py": "e5695a6d89deeb7cf74289e48c22c2818e77c03ac271128795a33a6c8d4ba958",
     "herdr/state/transition_gate.py": "2f9c2f8db4d86b19a16152043e5bc51f62e18d0be22312e479f18604b9d29d12",
     "herdr/state/transition_task.py": "63a578c02107f33984f06c4b0b91222822b22a064b1334e3195f51b4c4a88575",
-    "herdr/state/workflow_task_store.py": "e01b787c4b9b641b666b8695fd5b81b3c193b59c8b98dc2b9d1bb75b681511d2",
+    "herdr/state/workflow_task_store.py": "ce0c20f8d7d33dbe9dbe15c28c745a95a96feb23aaa131c12996523061408f21",
     "herdr/state/working_context.py": "5bff06d56d753e4843977721b49218892f61e7053c3d50db56aca0ed45c26337",
     "tests/state_db_patch_probe.py": "a944058cfd1d65930452c4ef75c5f9c05e33893bb4323fc9e2dd0e54364473e1",
     "tests/fixtures/state_db_patch_sites.json": "ad8b351e6e547dbdfe850bbde30229c90cfa40fe8482ebb41277af732d7931b4"

@@ -19,6 +19,12 @@ def policy_config(store, policy):
     store.save_workflow(wf)
 
 
+def test_legacy_task_without_workflow_identity_keeps_default_compatibility(tmp_path):
+    db = tmp_path / 'legacy.db'
+    state_db.save_task({'task_id': 'legacy', 'run_id': 'old-run', 'status': 'completed'}, db_path=db)
+    assert state_db.get_task('legacy', db_path=db)['workflow_id'] == 'default'
+
+
 @pytest.mark.parametrize('policy', ['workflow', 'node', 'launch', 'automatic'])
 def test_operationless_registration_obeys_persisted_policy(scene, policy):
     policy_config(scene, policy)

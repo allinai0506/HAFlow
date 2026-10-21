@@ -18,13 +18,12 @@ from herdr.controller_receipts import _receipt, classify_receipt
 from herdr.controller_workflow_actions import workflow_control_actions
 from herdr.workflow_graph import workflow_graph_projection
 from herdr.workflow_control_store import WorkflowIdentityChanged as _IdentityChanged, fingerprint
-
+DEPENDENCIES = {}
 MAX_PER_TICK = 4
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='cockpit')
 _inflight = set()
 _lock = threading.Lock()
 _scan_cursor = 0
-
 
 def _has_table(conn, name):
     return bool(conn.execute('SELECT 1 FROM sqlite_master WHERE type=? AND name=?', ('table', name)).fetchone())
@@ -94,6 +93,7 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
                                       actions=actions, recovery=operations, controller=controller,
                                       events=events, errors=errors, action_id=action_id)
     for action in result['actions']:
+        action['effect'] = action.get('effect') or action.get('description') or action.get('title') or action['action_id']
         automatic = (action['automation']['mode'] == 'automatic'
                      and controller_action_type(action) in default_handlers(store))
         action['execution'] = {'mode': 'automatic' if automatic else 'manual',
@@ -464,8 +464,6 @@ def run_automatic_controller_actions(workflow_id, *, deps):
         if not result.get('duplicate'):
             receipts.append(result['receipt'])
     return receipts
-
-
 def schedule_automatic_controller_actions(store, workflow_ids):
     """One worker, four in-flight workflows; never block the registry tick."""
     global _scan_cursor
