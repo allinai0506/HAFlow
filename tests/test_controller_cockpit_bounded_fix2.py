@@ -41,6 +41,36 @@ def test_ops_controls_resolve_a_current_cockpit_action_before_execution():
     assert 'payload.action_id=action.action_id' in source
 
 
+def test_task_action_without_current_candidate_identity_is_blocked(scene):
+    from herdr.controller_actions import action_automation
+    wf = scene.get_workflow('wf')
+    wf['candidate_sha'] = 'a' * 40
+    task = {'task_id': 'working', 'workflow_id': 'wf', 'node': 'build', 'run_id': 'run',
+            'execution_id': 'exec', 'version': 1, 'status': 'working'}
+    action = {'api_payload': {'type': 'force_pass_advance', 'task_id': 'working'},
+              'target': {'workflow_id': 'wf', 'node_id': 'build', 'task_id': 'working', 'run_id': 'run'},
+              'expected_identity': {'task_version': 1, 'execution_id': 'exec'}, 'category': 'bypass'}
+    policy, _ = action_automation(action, wf['config'], task, wf)
+    assert policy == {'mode': 'blocked', 'source': 'safety', 'reason': 'identity_unknown'}
+
+
+def test_manual_advance_receives_the_canonical_expected_identity(scene, monkeypatch):
+    from console import controller_cockpit_api, control_api
+    from herdr.controller_workflow_actions import workflow_control_actions
+    wf = scene.get_workflow('wf')
+    action = next(a.to_dict() for a in workflow_control_actions(wf, wf['config'], scene.list_tasks('wf'), [], [])
+                  if a.action_id == 'wf:advance')
+    action['automation'] = {'mode': 'confirmation_required'}
+    captured = {}
+    monkeypatch.setattr(control_api.workflow_api, 'manual_advance',
+                        lambda wid, expected_identity=None: captured.update(wid=wid, identity=expected_identity) or {'ok': True})
+    monkeypatch.setattr(controller_cockpit_api, 'execute_action',
+                        lambda payload, deps: deps.handlers['advance'](action))
+    controller_cockpit_api.execute_controller_action({'workflow_id': 'wf', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity'], 'confirmed': True})
+    assert captured['identity'] == action['expected_identity']
+
+
 @pytest.mark.parametrize('policy', ['workflow', 'node', 'launch', 'automatic'])
 def test_operationless_registration_obeys_persisted_policy(scene, policy):
     policy_config(scene, policy)

@@ -98,7 +98,8 @@ def action_automation(action, config, task, workflow, *, read_unknown=False, gra
                 or not isinstance(task.get("version"), int) or task["version"] < 0
                 or isinstance(task.get("version"), bool)
                 or expected.get("task_version") != task.get("version")
-                or (workflow.get("execution_id") and task.get("execution_id") != workflow["execution_id"])):
+                or (workflow.get("execution_id") and task.get("execution_id") != workflow["execution_id"])
+                or (workflow.get("candidate_sha") and task.get("candidate_sha") != workflow["candidate_sha"])):
             reason = "identity_unknown"
         else:
             current_pane = task.get("pane_id") or (task.get("runtime") or {}).get("pane_id")

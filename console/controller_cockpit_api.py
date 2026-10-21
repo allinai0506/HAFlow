@@ -36,7 +36,8 @@ def execute_controller_action(payload: dict) -> dict:
         controls = {'step': control_api.api_kernel_step, 'rollback': control_api.api_kernel_rollback,
                     'checkpoint': control_api.api_kernel_checkpoint_create,
                     'restore_checkpoint': control_api.api_kernel_checkpoint_restore,
-                    'advance': lambda body: control_api.workflow_api.manual_advance(body['workflow_id'])}
+                    'advance': lambda body: control_api.workflow_api.manual_advance(
+                        body['workflow_id'], expected_identity=body.get('expected_identity'))}
         if kind in controls:
             return controls[kind](canonical)
         return control_api._execute_legacy_controller_action(canonical)

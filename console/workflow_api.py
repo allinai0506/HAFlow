@@ -238,7 +238,7 @@ def api_workflow_recovery_decide(b):
         time.time(),until=b.get('until'))
     return {'ok':True,'operation':result}
 
-def manual_advance(wid):
+def manual_advance(wid, expected_identity=None):
     d=read_api.workflow_detail(wid); done=None; nxt=None
     bl=_blocked_verdict_tasks(wid)
     if bl:raise RuntimeError('存在 blocked 验收结论('+', '.join(t['task_id'] for t in bl)+'),禁止手工推进;请先走 fix-loop(修复→重测→复审)或作废过期结论')
@@ -249,6 +249,14 @@ def manual_advance(wid):
     if not done or not nxt:raise RuntimeError('当前没有可手工推进的下一阶段')
     w=d['workflow']; p=d['project']; c=w.get('coordinator_pane_id')
     msg=f'''HERDR_FACTORY_CONSOLE_STAGE_ADVANCE\n\nworkflow_id: {wid}\nproject_name: {p.get('project_name')}\nproject_root: {p.get('project_root')}\ncompleted_stage: {done}\nnext_stage: {nxt}\nbase_branch: {w.get('base_branch',p.get('base_branch',''))}\n\n用户点击“进入下一阶段”。请先检查门禁；满足后用 ~/HAFlow/bin/herdr-task launch 创建 {nxt} Task，参数必须包含 --workflow-id {wid} --stage {nxt} --source {p.get('project_root')} --agent auto。优先复用 Persistent Pane；不要删除 Tab、Pane、Clone。'''
+    if expected_identity is not None:
+        from herdr import state_db
+        from herdr.workflow_control_store import validate_identity
+        conn = state_db.get_readonly_db_connection(state_db_path())
+        try:
+            validate_identity(conn, wid, expected_identity)
+        finally:
+            conn.close()
     r=common.run(['herdr','agent','prompt',c,msg,'--wait','--timeout','600000'],620)
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return {'completed_stage':done,'next_stage':nxt}
