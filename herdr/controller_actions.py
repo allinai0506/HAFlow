@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
 
 from .delivery_pipeline import scheduler_owns_next_step
+from .workflow import resolve_control_policy
 
 
 AGENT_CANDIDATE_POOL = ["codex", "claude", "opencode", "qodercli", "agy"]
@@ -48,9 +49,87 @@ class ControllerAction:
     # means the action is served by ``api_endpoint``/``api_payload`` only.
     commands: List[List[str]] = field(default_factory=list)
     command_base: str = "herdr-task"
+    target: Dict[str, Any] = field(default_factory=dict)
+    expected_identity: Dict[str, Any] = field(default_factory=dict)
+    automation: Dict[str, Any] = field(default_factory=lambda: {
+        "mode": "automatic", "source": "default",
+    })
+    risk: str = "normal"
+    evidence_refs: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+def controller_action_type(action):
+    """Use the mechanical step for template confirmations, not its transport."""
+    payload = action.get("api_payload") or {}
+    kind = payload.get("type") or ""
+    if kind == "task_git_step":
+        return payload.get("step") or ""
+    if not kind and action.get("api_endpoint") == "/api/kernel/resume":
+        return "resume"
+    return kind
+
+
+def action_automation(action, config, task, workflow, *, read_unknown=False):
+    """Resolve policy after fail-closed identity/evidence checks; never execute."""
+    kind = controller_action_type(action)
+    known = {"launch", "rework", "force_pass", "force_pass_advance", "redrive", "steer", "halt",
+             "clear_escalation", "supersede", "close_workflow", "advance", "pause", "resume",
+             "accept_and_commit", "commit", "integrate", "finalize", "cleanup"}
+    target = action.get("target") or {}
+    expected = action.get("expected_identity") or {}
+    bypass = (action.get("category") == "bypass" or kind in {"force_pass", "force_pass_advance"}
+              or (kind == "close_workflow" and (action.get("api_payload") or {}).get("accept_escalated")))
+    destructive = action.get("is_destructive") or kind in {"halt", "supersede"}
+    risk = "evidence_bypass" if bypass else "destructive" if destructive else "normal"
+    reason = "read_unknown" if read_unknown else "action_unknown" if kind not in known else ""
+    wid = workflow.get("workflow_id")
+    if not reason and (not wid or target.get("workflow_id") != wid):
+        reason = "identity_unknown"
+    task_bound = bool(task or target.get("task_id") or action.get("blocker_task_id")
+                      or (action.get("api_payload") or {}).get("task_id"))
+    if not reason and task_bound:
+        if (not task or task.get("workflow_id") != wid or not target.get("node_id")
+                or target.get("task_id") != task.get("task_id")
+                or not target.get("run_id") or target.get("run_id") != task.get("run_id")
+                or not isinstance(task.get("version"), int) or task["version"] < 0
+                or isinstance(task.get("version"), bool)
+                or expected.get("task_version") != task.get("version")
+                or (workflow.get("execution_id") and task.get("execution_id") != workflow["execution_id"])):
+            reason = "identity_unknown"
+        elif kind in {"redrive", "steer", "halt", "rework"} and (
+                not target.get("pane_id") or expected.get("pane_id") != target["pane_id"]):
+            reason = "identity_unknown"
+    elif not reason and (not workflow.get("execution_id")
+                         or expected.get("execution_id") != workflow["execution_id"]):
+        reason = "identity_unknown"
+    if reason:
+        return {"mode": "blocked", "source": "safety", "reason": reason}, risk
+    if bypass or destructive:
+        return {"mode": "confirmation_required", "source": "safety", "reason": risk}, risk
+    if workflow.get("status") in {"paused", "completed", "cleaned", "archived", "failed"} and kind != "resume":
+        return {"mode": "blocked", "source": "safety", "reason": "workflow_inactive"}, risk
+    return resolve_control_policy(config, target.get("node_id") or "", kind), risk
+
+
+def _bind_actions(actions, task, workflow):
+    """Bind generated recommendations to their source, including replacement launches."""
+    wid = task.get("workflow_id") or workflow.get("workflow_id")
+    pane = task.get("pane_id") or (task.get("runtime") or {}).get("pane_id")
+    target = {"workflow_id": wid, "node_id": task.get("node") or task.get("stage"),
+              "task_id": task.get("task_id"), "run_id": task.get("run_id"), "pane_id": pane}
+    expected = {"task_version": task.get("version"), "pane_id": pane}
+    for field_name in ("execution_id", "candidate_sha"):
+        expected[field_name] = task.get(field_name) if task else workflow.get(field_name)
+    config = workflow.get("config") or {}
+    for action in actions:
+        action.target = {key: value for key, value in target.items() if value is not None and value != ""}
+        action.expected_identity = {key: value for key, value in expected.items() if value is not None and value != ""}
+        action.automation, action.risk = action_automation(action.to_dict(), config, task, workflow)
+        action.evidence_refs = [{key: task[key] for key in ("task_id", "run_id") if task.get(key)}] if task.get("task_id") else []
+    return actions
 
 
 def next_replacement_id(old_task_id: str, default_fallback: str = "task-r2") -> str:
@@ -348,7 +427,7 @@ def generate_controller_actions(
         )
     )
 
-    return actions
+    return _bind_actions(actions, task, workflow)
 
 
 # ============================================================
@@ -673,7 +752,7 @@ def generate_progress_actions(task, workflow=None):
     actions.extend(_git_pipeline_actions(task, wid, workflow))
     if not actions:
         actions.extend(_live_pane_actions(task, wid))
-    return actions
+    return _bind_actions(actions, task, workflow)
 
 
 def collect_workflow_actions(tasks, workflow, project_root="", workflow_paused=False):
@@ -709,7 +788,7 @@ def collect_workflow_actions(tasks, workflow, project_root="", workflow_paused=F
             _add(action)
 
     if workflow_paused and wid:
-        _add(ControllerAction(
+        resume = ControllerAction(
             action_id=f"{wid}:resume_workflow",
             title="恢复工作流（继续往下推进）",
             description=(
@@ -726,5 +805,6 @@ def collect_workflow_actions(tasks, workflow, project_root="", workflow_paused=F
             stage="",
             group="pipeline",
             commands=[],
-        ))
+        )
+        _add(_bind_actions([resume], {}, workflow)[0])
     return actions

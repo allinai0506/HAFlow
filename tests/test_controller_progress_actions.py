@@ -45,6 +45,42 @@ def _by_id(actions, suffix):
     return next(a for a in actions if a.action_id.endswith(suffix))
 
 
+def test_live_pane_action_binds_current_task_and_pane_identity():
+    task = {"task_id": "T1", "workflow_id": "wf-1", "node": "build",
+            "status": "working", "version": 7, "pane_id": "w1:p2", "run_id": "run-9"}
+    actions = generate_progress_actions(task, {"workflow_id": "wf-1"})
+    redrive = next(a for a in actions if a.api_payload.get("type") == "redrive")
+    assert redrive.target == {"workflow_id": "wf-1", "node_id": "build", "task_id": "T1",
+                              "run_id": "run-9", "pane_id": "w1:p2"}
+    assert redrive.expected_identity == {"task_version": 7, "pane_id": "w1:p2"}
+    assert redrive.automation == {"mode": "automatic", "source": "default"}
+    halt = next(a for a in actions if a.api_payload.get("type") == "halt")
+    assert halt.risk == "destructive"
+    assert halt.automation["mode"] == "confirmation_required"
+
+
+def test_generated_policy_uses_task_node_and_mechanical_step():
+    task = _task(status="completed", version=2, run_id="r")
+    workflow = {"workflow_id": "wf-001", "config": {"nodes": [
+        {"id": "implementation", "confirm_before": ["commit"]},
+    ]}}
+    action = generate_progress_actions(task, workflow)[0]
+    assert action.automation == {"mode": "confirmation_required", "source": "action"}
+
+
+def test_missing_task_identity_is_blocked_without_inventing_a_version():
+    action = generate_progress_actions(_task(status="working"), {"workflow_id": "wf-001"})[0]
+    assert action.expected_identity == {"pane_id": "w1:p9"}
+    assert action.automation == {"mode": "blocked", "source": "safety", "reason": "identity_unknown"}
+
+
+def test_workflow_resume_has_workflow_target():
+    action = collect_workflow_actions([], {"workflow_id": "wf-001", "status": "paused",
+                                          "execution_id": "exec-1"}, workflow_paused=True)[0]
+    assert action.target == {"workflow_id": "wf-001"}
+    assert action.expected_identity == {"execution_id": "exec-1"}
+
+
 def test_agent_done_offers_accept_and_commit():
     act = _by_id(
         generate_progress_actions(_task(status="agent_done"), {"workflow_id": "wf-001"}),
