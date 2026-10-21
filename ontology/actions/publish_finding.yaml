@@ -1,0 +1,49 @@
+id: publish_finding
+name: 发布诊断发现
+description: Observer 引擎将分析结论持久化到 trajectory_findings 表，以 finding_key 为去重约束，防止同一问题重复记录。
+lifecycle: experimental
+target: finding
+inputs:
+  - run_id
+  - finding_type
+  - severity
+  - summary
+  - recommended_action
+preconditions:
+  - finding_severity_actionable
+authorization:
+  policies:
+    - observer_service_policy
+effects:
+  sets:
+    status: open
+  state_transition: null
+side_effects:
+  - 写 trajectory_findings 表（finding_key UNIQUE 约束幂等）
+idempotency:
+  strategy: business_key
+  key: finding_key（UNIQUE 约束，相同 key 仅更新，不重复插入）
+transaction:
+  mode: best_effort
+  owner: herdr/observer/engine.py:_persist
+audit:
+  required: false
+  note: 诊断副产品，不在主轨迹事务中
+failure_behavior:
+  retry: safe_only
+  compensation: fallback_read（失败后读取已存在记录）
+bindings:
+  - connector: herdr_core_lib
+    operation: herdr.state_db.upsert_trajectory_finding
+verification:
+  strategy: reread_target
+  target: trajectory_findings[finding_key]
+evidence:
+  - kind: implemented
+    source: herdr/observer/engine.py
+    locator: _persist L374
+    confidence: high
+  - kind: implemented
+    source: herdr/state_db.py
+    locator: upsert_trajectory_finding L4726
+    confidence: high

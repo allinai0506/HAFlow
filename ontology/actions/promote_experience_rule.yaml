@@ -1,0 +1,49 @@
+id: promote_experience_rule
+name: 晋升经验规则
+description: 审核并将 pending_review 状态的 Experience Rule 提升为 approved/published 全局可用状态。需要 admin 角色授权，变更审核意见写入 audit_trail。
+lifecycle: experimental
+target: experience_rule
+inputs:
+  - experience_id
+  - reviewer
+  - verdict
+  - comment
+preconditions:
+  - experience_rule_promotable
+authorization:
+  policies:
+    - experience_hub_policy
+effects:
+  sets:
+    status: approved
+  state_transition: null
+side_effects:
+  - 写 experience hub SQLite（status, review_info, audit_trail）
+  - 通知订阅的 Task 调度器刷新规则缓存
+idempotency:
+  strategy: business_key
+  key: experience_id + verdict（同一结论幂等）
+transaction:
+  mode: single_table_write
+  owner: herdr/experience/hub_server.py:review_candidate
+audit:
+  required: true
+  event: experience_reviewed（reviewer, verdict, comment）
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+  - connector: console_http_api
+    operation: api_experience_review
+verification:
+  strategy: reread_target
+  target: experience_rules[experience_id].status
+evidence:
+  - kind: implemented
+    source: herdr/experience/hub_server.py
+    locator: review_candidate L398
+    confidence: high
+  - kind: implemented
+    source: console/http_server.py
+    locator: api_experience_review L58
+    confidence: high

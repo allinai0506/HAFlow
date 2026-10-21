@@ -1,0 +1,13 @@
+id: console_view_projects_workflow
+name: 控制台视图投影工作流
+description: ConsoleView 聚合并投影指定 WorkflowInstance 的可见状态与操作权限，1:1 绑定选中的 workflow_id。
+lifecycle: experimental
+from: console_view
+to: workflow_instance
+cardinality: one_to_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: console/workflow_policy.py
+  locator: _validate_force_pass_params L34
+  confidence: high

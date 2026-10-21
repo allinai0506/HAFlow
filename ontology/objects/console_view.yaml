@@ -1,0 +1,48 @@
+id: console_view
+name: 控制台交互视图模型
+description: 面向人类操作者的控制台会话视图状态快照。记录当前激活 Tab、选中的工作流 ID 以及由权限策略决定的允许操作集合。view_id 由 session+workflow_id 组合派生，是只读投影的身份锚点，不拥有写语义。
+lifecycle: experimental
+identity:
+  primary_key: view_id
+  format: "console:{session_id}:{workflow_id}"
+aliases:
+- ConsoleView
+- 控制台视图
+- 操作舱视图
+properties:
+- id: view_id
+  name: 视图 ID
+  type: string
+  required: true
+- id: active_tab
+  name: 激活标签页
+  type: enum
+  required: true
+  notes: workflow|experience|ops|dashboard
+- id: selected_workflow_id
+  name: 选中工作流
+  type: string
+  required: false
+- id: allowed_actions
+  name: 允许操作集
+  type: list
+  required: true
+  notes: 由 workflow_policy._validate_force_pass_params 与状态机约束计算
+- id: operator_token
+  name: 操作者令牌
+  type: string
+  required: false
+  notes: 来自 HTTP 请求头 Authorization Bearer，已脱敏
+evidence:
+- kind: implemented
+  source: console/herdr_factory_console.py
+  locator: main L37
+  confidence: high
+- kind: implemented
+  source: console/workflow_policy.py
+  locator: _validate_force_pass_params L34
+  confidence: high
+- kind: implemented
+  source: console/http_server.py
+  locator: Handler L73
+  confidence: high

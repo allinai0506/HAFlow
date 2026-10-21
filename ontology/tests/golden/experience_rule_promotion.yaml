@@ -1,0 +1,24 @@
+id: experience_rule_promotion
+name: 经验规则从候选晋升为已发布
+facts:
+  experience_rule:
+    experience_id: exp_test_001
+    title: 避免在 Git 合并冲突时直接 force push
+    status: pending_review
+    contributor: agent_session_01
+    type: business_rule
+    version: 1
+  review_request:
+    reviewer: admin_user
+    action: approve
+    comment: 已核实此规则在 3 个项目中有效
+expected:
+  rules:
+    experience_rule_promotable: true
+  allowed_actions:
+  - promote_experience_rule
+  resulting_status: approved
+  side_effects:
+  - experience hub SQLite status -> approved
+  - audit_trail event experience_reviewed appended
+notes: pending_review + admin reviewer 满足 experience_rule_promotable 规则；audit_trail 必须追加不可变审核事件

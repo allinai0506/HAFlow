@@ -1,0 +1,25 @@
+id: observer_service_policy
+name: Observer 服务权限
+description: Observer 后台分析服务（herdr/observer/engine.py）权限策略。仅允许写入诊断发现，禁止修改任务状态机。
+lifecycle: experimental
+subjects:
+  roles:
+    - observer_service
+  roles_implemented: false
+  note: Observer 引擎以旁路身份运行，不参与任务状态机转换
+resources:
+  objects:
+    - finding
+    - observation
+allowed_actions:
+  - publish_finding
+conditions:
+  - Observer 诊断写入不得修改 Task 状态；finding_key 为唯一幂等键
+agent_execution:
+  mode: service_identity
+  note: Observer 以独立进程身份执行，不继承用户上下文
+evidence:
+  - kind: implemented
+    source: herdr/observer/engine.py
+    locator: _persist L374
+    confidence: high

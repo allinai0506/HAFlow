@@ -1,0 +1,61 @@
+id: console_cockpit_view
+name: 控制台操作舱上下文投影
+description: 面向人类操作者的控制台写操作上下文聚合视图，结合当前选中工作流、任务状态与 workflow_policy 计算出的允许操作集。r1：写动作由 workflow_policy 在运行时动态计算，本投影不静态授予写语义。
+lifecycle: experimental
+consumers:
+- role: human_operator_console
+  role_implemented: false
+objects:
+  console_view:
+    properties:
+    - view_id
+    - active_tab
+    - selected_workflow_id
+    - allowed_actions
+  workflow_instance:
+    properties:
+    - workflow_id
+    - title
+    - status
+    - version
+  task:
+    properties:
+    - task_id
+    - node
+    - status
+    - version
+    - stage_verdict
+    - agent
+  finding:
+    properties:
+    - finding_id
+    - finding_type
+    - severity
+    - recommended_action
+    - status
+  artifact:
+    properties:
+    - rel_path
+    - status
+    - kind
+relations:
+- console_view_projects_workflow
+- workflow_instance_groups_task
+- finding_evaluates_task
+- task_produces_artifact
+rules:
+- task_transition_allowed
+- console_action_permitted
+actions: []
+policies: []
+exclude_by_default: true
+evidence:
+- kind: implemented
+  source: console/workflow_policy.py
+  locator: _validate_force_pass_params L34
+  confidence: high
+- kind: implemented
+  source: console/herdr_factory_console.py
+  locator: main L37
+  confidence: high
+notes: 控制台写路由（/api/kernel/force-pass、/api/task/force-review 等）由 workflow_policy 运行时守卫；本投影仅聚合视图内容，写权限见 console_action_permitted 规则。

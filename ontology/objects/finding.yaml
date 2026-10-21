@@ -1,0 +1,69 @@
+id: finding
+name: 旁路诊断发现
+description: Observer 引擎对 Agent 运行轨迹进行分析后产生的结构化诊断结论。finding_key 是去重合约（UNIQUE），相同问题集的多次观测映射到同一 key。finding 是分析结论，不是事实——事实存在 trajectory events 中。
+lifecycle: experimental
+identity:
+  primary_key: finding_id
+  format: fnd_{uuid.hex[:16]}
+  dedup_key: finding_key
+  dedup_format: fk_{sha256(run_id|finding_type|node|agent_session_id|anchor)[:20]}
+aliases:
+- TrajectoryFinding
+- 诊断发现
+- 轨迹诊断
+properties:
+- id: finding_id
+  name: 发现 ID
+  type: string
+  required: true
+- id: finding_key
+  name: 去重键
+  type: string
+  required: true
+  notes: 稳定去重键，相同问题集的多次观测映射到同一 key
+- id: run_id
+  name: 运行 ID
+  type: string
+  required: true
+- id: task_id
+  name: 归属任务
+  type: string
+  required: false
+- id: workflow_id
+  name: 归属工作流
+  type: string
+  required: false
+- id: finding_type
+  name: 类型
+  type: enum
+  required: true
+  notes: stalled_execution|repeated_failure|repeated_action|no_progress|verification_failure|runtime_unavailable|possible_context_problem|other
+- id: severity
+  name: 严重级别
+  type: enum
+  required: true
+  notes: info|warning|critical
+- id: recommended_action
+  name: 建议处置
+  type: enum
+  required: true
+  notes: continue|inspect|replan|retry|change_agent|request_human|interrupt
+- id: status
+  name: 状态
+  type: enum
+  required: true
+  notes: open（目前唯一值）
+- id: confidence
+  name: 置信度
+  type: float
+  required: true
+  notes: 0.0–1.0
+evidence:
+- kind: implemented
+  source: herdr/observer/models.py
+  locator: TrajectoryFinding L72 / new_finding_id L42 / finding_key_for L46
+  confidence: high
+- kind: implemented
+  source: herdr/state_db.py
+  locator: upsert_trajectory_finding L4726
+  confidence: high

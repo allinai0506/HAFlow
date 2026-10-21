@@ -1,0 +1,23 @@
+id: finding_actionable_remediation
+name: 高严重级别诊断须有明确修复动作
+facts:
+  finding:
+    finding_id: fnd_test001
+    run_id: run_abc123
+    task_id: T-001
+    finding_type: repeated_failure
+    severity: critical
+    recommended_action: request_human
+    status: open
+    confidence: 0.85
+  context:
+    signal_type: _detect_repeated_failure
+    trailing_failures_count: 3
+expected:
+  rules:
+    finding_severity_actionable: true
+  allowed_actions:
+  - publish_finding
+  side_effects:
+  - upsert trajectory_findings[finding_key]
+notes: critical severity + request_human action 满足 finding_severity_actionable 规则；finding_key 去重保证同一问题不重复插入

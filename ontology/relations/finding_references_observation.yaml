@@ -1,0 +1,13 @@
+id: finding_references_observation
+name: 诊断发现引用观察证据
+description: 一个 Finding 可以引用多个 Observation 作为支撑证据（脱敏后的不可变快照）。N:M 关系由 finding.evidence 列表维护。
+lifecycle: experimental
+from: finding
+to: observation
+cardinality: many_to_many
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/observer/engine.py
+  locator: _materialize_observations L312 / _persist L374
+  confidence: high

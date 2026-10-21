@@ -1,0 +1,47 @@
+id: revoke_experience_rule
+name: 撤销经验规则
+description: 将已失效、冲突或错误的 Experience Rule 标记为 revoked，阻止其继续注入 Task 上下文。撤销不可逆，变更写入 audit_trail。
+lifecycle: experimental
+target: experience_rule
+inputs:
+  - experience_id
+  - revoker
+  - reason
+preconditions:
+  - experience_rule_promotable
+authorization:
+  policies:
+    - experience_hub_policy
+effects:
+  sets:
+    status: revoked
+  state_transition: null
+side_effects:
+  - 写 experience hub SQLite（status=revoked, audit_trail 追加撤销事件）
+idempotency:
+  strategy: business_key
+  key: experience_id（revoked 为终态，重复调用安全）
+transaction:
+  mode: single_table_write
+  owner: herdr/experience/hub_server.py:revoke_rule
+audit:
+  required: true
+  event: experience_revoked（revoker, reason）
+failure_behavior:
+  retry: safe_only
+  compensation: none
+bindings:
+  - connector: console_http_api
+    operation: api_experience_revoke
+verification:
+  strategy: reread_target
+  target: experience_rules[experience_id].status
+evidence:
+  - kind: implemented
+    source: herdr/experience/hub_server.py
+    locator: revoke_rule L461
+    confidence: high
+  - kind: implemented
+    source: console/http_server.py
+    locator: api_experience_revoke L66
+    confidence: high
