@@ -678,6 +678,79 @@ class P1LatchRecoveryTest(unittest.TestCase):
         put.assert_called()
 
 
+def test_persisted_non_agent_node_is_queued_for_manual_attention(tmp_path):
+    from herdr.state_store import get_state_store
+
+    workflow_id = "wf-manual-node"
+    config = {
+        "nodes": [
+            {"id": "implementation", "depends_on": []},
+            {
+                "id": "human_approval",
+                "node_type": "human",
+                "depends_on": ["implementation"],
+            },
+        ]
+    }
+    store = get_state_store(tmp_path / "state.db")
+    store.save_workflow({
+        "workflow_id": workflow_id,
+        "status": "running",
+        "startup_ready": True,
+        "config": config,
+    })
+    store.save_task({
+        "task_id": "implementation-task",
+        "workflow_id": workflow_id,
+        "node": "implementation",
+        "status": "cleaned",
+    })
+
+    with patch.object(_ctl, "_get_store", return_value=store), patch.object(
+        _ctl, "workflow_closed", return_value=False
+    ), patch.object(
+        _ctl, "workflow_config_for", return_value=config
+    ), patch.object(
+        _ctl, "project_for_workflow", return_value={"startup_ready": True}
+    ), patch.object(
+        _ctl, "_workflow_entry", return_value={"status": "running"}
+    ), patch.object(
+        _ctl, "reconcile_stage_advance_states"
+    ), patch.object(
+        _ctl, "reconcile_node_dispatches"
+    ), patch.object(
+        _ctl, "is_node_complete", side_effect=lambda _wid, node: node == "implementation"
+    ), patch.object(
+        _ctl, "is_workflow_completed", return_value=False
+    ), patch.object(
+        _ctl, "_scheduler_resolve_candidate_and_plan", return_value=("", False)
+    ), patch.object(
+        _ctl, "_reset_reverification_memo"
+    ), patch.object(
+        _ctl, "get_ready_nodes", return_value=[config["nodes"][1]]
+    ), patch.object(
+        _ctl, "_fix_loop_latch_blocks", return_value=False
+    ), patch.object(
+        _ctl, "blocked_gate_dependency", return_value=None
+    ), patch.object(
+        _ctl, "blocked_verdict_dep", return_value=None
+    ), patch.object(
+        _ctl, "_scheduler_join_gate_allows", return_value=True
+    ), patch.object(
+        _ctl, "attention_get", return_value=None
+    ), patch.object(
+        _ctl, "attention_blocks_retry", return_value=False
+    ), patch.object(
+        _ctl, "mark_stage_advance_queued", return_value=True
+    ) as queued, patch.object(_ctl.coordinator_queue, "put") as put:
+        _ctl.check_workflow_stage_advance(workflow_id)
+
+    queued.assert_called_once_with(workflow_id, "human_approval")
+    event = put.call_args.args[0]
+    assert event["node_id"] == "human_approval"
+    assert event["dispatch_operation_id"] is None
+
+
 class FrozenCandidateFactTest(unittest.TestCase):
     """P1(第 3 轮)回归:冻结 Candidate 与 Final Delivery Record 是两种事实。
 
