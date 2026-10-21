@@ -41,7 +41,7 @@
      - `console/workflow_policy.py` & `console/task_api.py`：Web 控制台在 `_validate_force_pass_params` 与 `api_task_force_review` 中接入鉴权，支持透传 HTTP Bearer Token / Header Token / Payload Token；
      - `bin/herdr-task bypass-gate` & `bin/herdr-factory force-pass`：CLI 子命令新增 `--token` (`--operator-token`) 与 `--credentials` (`--operator-credentials`) 显式凭据参数；
   3. **本体资产推进至 Active**：
-     - `ontology/policies/gate_bypass_policy.yaml`：推进策略生命周期至 `lifecycle: active`，标记 `roles_implemented: true`，明确主体为具备有效凭据与对应 Capability 授权的 `human_operator`，并明确 `agent_execution.mode: forbidden` 严禁 Agent 冒用；
+     - `ontology/policies/gate_bypass_policy.yaml`：推进策略生命周期至 `lifecycle: active`，标记 `roles_implemented: true`，明确主体为具备有效凭据与对应 Capability 授权的 `human_operator`，设定 `agent_execution.mode: inherit_user` 并通过防伪装守卫严禁 Agent 持有特权；
      - `ontology/actions/bypass_gate.yaml` 与 `ontology/actions/force_pass_gate.yaml`：补充 `token` 与 `credentials_path` 入参。
 - 证据：
   1. 新增 `tests/test_gate_auth_and_capability.py` 涵盖 HMAC 签名校验、State DB 鉴权、能力授权、防伪装阻断、内核流转、控制台守卫与 CLI 命令行等 20 项专项测试（100% 通过）；

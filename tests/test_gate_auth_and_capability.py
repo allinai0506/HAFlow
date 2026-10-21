@@ -573,3 +573,132 @@ class TestCLITokenIntegration:
         )
         assert proc_ok.returncode == 0, proc_ok.stdout + proc_ok.stderr
 
+
+class TestCleanroomFindingsRegression:
+    """Regression tests for cleanroom review findings B1 through B5."""
+
+    def test_b1_default_unauthenticated_bypass_rejected(self, monkeypatch):
+        """B1: Verify default fail-closed behavior: unauthenticated operator cannot bypass gate."""
+        monkeypatch.delenv("HERDR_OPERATOR_AUTH_STRICT", raising=False)
+        monkeypatch.delenv("HERDR_ALLOW_UNAUTHENTICATED_OPERATOR", raising=False)
+        monkeypatch.delenv("HERDR_OPERATOR_TOKEN", raising=False)
+        with pytest.raises(OperatorAuthenticationError, match="missing operator credentials|missing operator token"):
+            authenticate_and_authorize_operator(
+                operator_id="human",
+                action="bypass_gate",
+                token=None,
+            )
+
+    def test_b2_worker_self_issued_hmac_rejected(self, monkeypatch):
+        """B2: Worker / untrusted caller cannot self-issue HMAC token without explicit secret."""
+        monkeypatch.delenv("HERDR_OPERATOR_SIGNING_SECRET", raising=False)
+        monkeypatch.delenv("HERDR_HMAC_SECRET", raising=False)
+        monkeypatch.setattr("herdr.operator_auth.is_worker_environment", lambda: False)
+        with pytest.raises(OperatorAuthorizationError, match="explicit secret|HERDR_OPERATOR_SIGNING_SECRET"):
+            issue_operator_hmac_token("human", role="admin")
+
+        monkeypatch.setattr("herdr.operator_auth.is_worker_environment", lambda: True)
+        with pytest.raises(OperatorImpersonationError, match="worker environment is not authorized"):
+            issue_operator_hmac_token("human", role="admin", secret="some_secret")
+
+    def test_b3_signing_secret_fallback_to_hardcoded_prohibited(self, monkeypatch):
+        """B3: If signing secret is unreadable or credentials dir raises OSError, hardcoded fallback is forbidden."""
+        from herdr.operator_auth import _get_signing_secret
+        monkeypatch.delenv("HERDR_OPERATOR_SIGNING_SECRET", raising=False)
+        monkeypatch.delenv("HERDR_HMAC_SECRET", raising=False)
+        monkeypatch.setattr(state_db, "_get_credentials_dir", lambda: (_ for _ in ()).throw(OSError("Disk failed")))
+        with pytest.raises(OperatorAuthenticationError, match="unavailable"):
+            _get_signing_secret()
+
+    def test_b4_console_execute_action_forwards_credentials(self, tmp_path, monkeypatch):
+        """B4: Console execute-action and signoff must forward token to herdr_kernel.force_pass_gate."""
+        from console import control_api, task_api
+        from herdr.state_store import SQLiteStateStore
+
+        db_path = tmp_path / "b4_test.db"
+        monkeypatch.setenv("HERDR_STATE_DB", str(db_path))
+        store = SQLiteStateStore(db_path)
+        store.save_workflow({
+            "workflow_id": "wf-b4",
+            "title": "B4 Test",
+            "status": "running",
+            "config": {"nodes": [{"id": "craft", "label": "Craft"}]},
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        })
+        store.save_task({
+            "task_id": "task-b4-1",
+            "workflow_id": "wf-b4",
+            "run_id": "run-b4",
+            "node": "craft",
+            "stage": "craft",
+            "status": "blocked",
+            "stage_verdict": "blocked",
+            "agent": "gemini",
+            "version": 1,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        })
+
+        state_db.save_user_token("lead_op", "operator", "lead_secret_tok_456", db_path=db_path)
+        from herdr import kernel
+        orig_store = kernel._get_store
+        kernel._get_store = lambda s=None: store
+        try:
+            payload = {
+                "action_type": "force_pass",
+                "workflow_id": "wf-b4",
+                "task_id": "task-b4-1",
+                "gate_node_id": "craft",
+                "reason": "Legitimate verified pass",
+                "confirmed": True,
+                "expected_version": 1,
+                "operator": "lead_op",
+                "auth_token": "lead_secret_tok_456",
+            }
+            res = control_api.api_controller_execute_action(payload)
+            assert res.get("ok") is True
+
+            t = store.get_task("task-b4-1")
+            t["status"] = "blocked"
+            t["stage_verdict"] = "blocked"
+            store.save_task(t)
+            fresh_t = store.get_task("task-b4-1")
+
+            signoff_payload = {
+                "action": "approve",
+                "workflow_id": "wf-b4",
+                "task_id": "task-b4-1",
+                "node": "craft",
+                "reason": "Legitimate signoff pass",
+                "confirm": True,
+                "expected_version": fresh_t["version"],
+                "operator": "lead_op",
+                "token": "lead_secret_tok_456",
+            }
+            s_res = task_api.api_task_signoff(signoff_payload)
+            assert s_res.get("ok") is True
+        finally:
+            kernel._get_store = orig_store
+
+    def test_b5_console_http_server_does_not_inject_hub_token(self):
+        """B5: Console HTTP server must not inject experience_hub token into operator auth."""
+        from console.http_server import Handler
+
+        state_db.save_user_token("local-console-reviewer", "experience_hub", "hub_token_xyz")
+
+        class FakeHandler(Handler):
+            def __init__(self):
+                self.headers = {"Authorization": "Bearer hub_token_xyz"}
+
+        handler = FakeHandler.__new__(FakeHandler)
+        handler.headers = {"Authorization": "Bearer hub_token_xyz"}
+
+        assert getattr(handler, "get_operator_token", lambda: None)() is None
+
+        handler.headers = {
+            "Authorization": "Bearer hub_token_xyz",
+            "X-HAFlow-Operator-Token": "op_token_123",
+        }
+        assert getattr(handler, "get_operator_token", lambda: None)() == "op_token_123"
+

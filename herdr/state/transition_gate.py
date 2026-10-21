@@ -369,21 +369,8 @@ def force_pass_gate(
     credentials_path: Optional[str] = None,
     strict_auth: Optional[bool] = None,
     secret: Optional[str] = None,
-    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Atomically check and force-pass a gate node within a single immediate transaction."""
-    from herdr.operator_auth import authenticate_and_authorize_operator
-    principal = authenticate_and_authorize_operator(
-        operator_id=operator,
-        action="force_pass_gate",
-        token=token,
-        credentials_path=credentials_path,
-        task=None,
-        db_path=db_path,
-        strict_auth=strict_auth,
-        secret=secret,
-    )
-    operator = principal.operator_id
     should_close = False
     if conn is None:
         conn = _facade().get_db_connection(db_path)
@@ -409,7 +396,7 @@ def force_pass_gate(
             if gate_node_id in (t.get("node"), t.get("stage")) and t.get("status") != "superseded"
         ]
 
-        tasks_to_update = []
+        target_task = None
         if task_id:
             target_task = next((t for t in matching_tasks if t.get("task_id") == task_id), None)
             if not target_task:
@@ -420,6 +407,30 @@ def force_pass_gate(
                     raise RuntimeError(f"任务 {task_id} 已被替换或作废，请刷新页面")
                 t_node = any_t.get("node") or any_t.get("stage")
                 raise RuntimeError(f"任务 {task_id} 属于节点 {t_node}，与目标门禁节点 {gate_node_id} 不匹配")
+        elif matching_tasks:
+            for mt in matching_tasks:
+                m_agent = str(mt.get("agent") or "").strip().lower()
+                if m_agent and str(operator or "").strip().lower() == m_agent:
+                    from herdr.operator_auth import OperatorImpersonationError
+                    raise OperatorImpersonationError(
+                        "the operator must be independent of the task worker; agent cannot bypass its own gate"
+                    )
+
+        from herdr.operator_auth import authenticate_and_authorize_operator
+        principal = authenticate_and_authorize_operator(
+            operator_id=operator,
+            action="force_pass_gate",
+            token=token,
+            credentials_path=credentials_path,
+            task=target_task,
+            db_path=db_path,
+            strict_auth=strict_auth,
+            secret=secret,
+        )
+        operator = principal.operator_id
+
+        tasks_to_update = []
+        if task_id:
 
             if expected_pane_id is not None:
                 cur_pane = str(target_task.get("pane_id") or "").strip()

@@ -118,6 +118,6 @@ def _validate_force_pass_params(payload, wid, wf=None, task=None, db_path=None):
         raise RuntimeError(f"无效的操作人标识: {exc}")
     except OperatorAuthError as exc:
         raise RuntimeError(f"操作人凭据或能力鉴权失败: {exc}")
-    except (ValueError, RuntimeError) as exc:
+    except ValueError as exc:
         raise RuntimeError(f"无效的操作人标识: {exc}")
     return gate, reason, op

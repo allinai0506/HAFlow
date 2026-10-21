@@ -914,7 +914,6 @@ class SQLiteStateStore(StateStore):
         credentials_path: Optional[str] = None,
         strict_auth: Optional[bool] = None,
         secret: Optional[str] = None,
-        **kwargs: Any,
     ) -> Dict[str, Any]:
         return state_db.force_pass_gate(
             workflow_id=workflow_id,
@@ -930,7 +929,6 @@ class SQLiteStateStore(StateStore):
             credentials_path=credentials_path,
             strict_auth=strict_auth,
             secret=secret,
-            **kwargs,
         )
 
     # Steering

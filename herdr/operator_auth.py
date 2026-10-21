@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -19,6 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from herdr.transitions import validate_operator
+
+
+def is_worker_environment() -> bool:
+    """Detect if the current process is executing within a worker clone/sandbox environment."""
+    return bool(os.environ.get("WORKER_WRITE_ROOT") or os.environ.get("HERDR_TASK_ID"))
 
 # ============================================================
 # Exception Hierarchy
@@ -57,6 +63,13 @@ DEFAULT_CAPABILITIES: tuple[str, ...] = (
     "force_review",
 )
 
+ROLE_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "human_operator": ("bypass_gate", "force_pass_gate", "force_review"),
+    "admin": ("bypass_gate", "force_pass_gate", "force_review"),
+    "system_admin": ("bypass_gate", "force_pass_gate", "force_review"),
+    "security_auditor": ("force_review",),
+}
+
 
 @dataclass(frozen=True)
 class OperatorPrincipal:
@@ -65,7 +78,7 @@ class OperatorPrincipal:
     role: str = "human_operator"
     capabilities: tuple[str, ...] = DEFAULT_CAPABILITIES
     authenticated: bool = True
-    auth_method: str = "token"  # "state_db_token" | "hmac_token" | "bearer_token" | "credentials_file" | "unauthenticated"
+    auth_method: str = "token"  # "state_db_token" | "hmac_token" | "bearer_token" | "credentials_file"
 
 
 # ============================================================
@@ -73,7 +86,10 @@ class OperatorPrincipal:
 # ============================================================
 
 def _get_signing_secret(explicit_secret: str | None = None) -> str:
-    """Resolve signing secret for HMAC tokens."""
+    """Resolve signing secret for HMAC tokens.
+
+    Fail-closed: Hardcoded fallback constants are prohibited (Issue #307 / B3).
+    """
     if explicit_secret:
         return explicit_secret.strip()
     env_secret = (
@@ -92,15 +108,15 @@ def _get_signing_secret(explicit_secret: str | None = None) -> str:
             val = key_file.read_text(encoding="utf-8").strip()
             if val:
                 return val
-        secret_val = hashlib.sha256(f"haflow_system_secret_{os.getuid()}_{time.time()}".encode()).hexdigest()
-        key_file.write_text(secret_val, encoding="utf-8")
-        try:
-            key_file.chmod(0o600)
-        except OSError:
-            pass
+        secret_val = secrets.token_hex(32)
+        temp_file = cred_dir / f".operator_hmac_{secrets.token_hex(8)}.tmp"
+        fd = os.open(temp_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            f.write(secret_val)
+        os.replace(temp_file, key_file)
         return secret_val
-    except (OSError, ValueError, RuntimeError):
-        return "haflow_default_local_signing_secret"
+    except Exception as exc:
+        raise OperatorAuthenticationError(f"operator signing secret is unavailable: {exc}") from exc
 
 
 # ============================================================
@@ -110,20 +126,41 @@ def _get_signing_secret(explicit_secret: str | None = None) -> str:
 def issue_operator_hmac_token(
     operator_id: str,
     role: str = "human_operator",
-    capabilities: Sequence[str] = DEFAULT_CAPABILITIES,
+    capabilities: Sequence[str] | None = None,
     secret: str | None = None,
     expires_in: float | None = 3600.0,
 ) -> str:
     """Issue a tamper-evident signed HMAC token for an operator principal."""
+    if is_worker_environment():
+        raise OperatorImpersonationError(
+            "worker environment is not authorized to issue operator tokens (Issue #307 / B2)"
+        )
+    if not secret:
+        env_secret = (
+            os.environ.get("HERDR_OPERATOR_SIGNING_SECRET")
+            or os.environ.get("HERDR_HMAC_SECRET")
+        )
+        if env_secret and env_secret.strip():
+            secret = env_secret.strip()
+        else:
+            raise OperatorAuthorizationError(
+                "operator token issuance requires an explicit secret or HERDR_OPERATOR_SIGNING_SECRET (Issue #307 / B2)"
+            )
     op_clean = validate_operator(operator_id)
     signing_secret = _get_signing_secret(secret)
     now = time.time()
     exp = (now + float(expires_in)) if expires_in is not None else None
 
+    clean_role = str(role).strip()
+    if capabilities is None:
+        caps = list(ROLE_CAPABILITIES.get(clean_role, DEFAULT_CAPABILITIES))
+    else:
+        caps = [str(c).strip() for c in capabilities]
+
     payload = {
         "sub": op_clean,
-        "role": str(role).strip(),
-        "caps": [str(c).strip() for c in capabilities],
+        "role": clean_role,
+        "caps": caps,
         "iat": int(now),
         "exp": int(exp) if exp is not None else None,
     }
@@ -288,16 +325,21 @@ def authenticate_and_authorize_operator(
     except (OSError, ValueError, RuntimeError):
         registered_token = None
 
-    # Strict auth determination
+    # Strict auth determination: fail-closed by default (Issue #307 / B1)
     is_strict = strict_auth
     if is_strict is None:
-        is_strict = os.environ.get("HERDR_OPERATOR_AUTH_STRICT", "").lower() in ("1", "true", "yes")
+        if is_worker_environment():
+            is_strict = True
+        else:
+            strict_env = os.environ.get("HERDR_OPERATOR_AUTH_STRICT", "1").strip().lower()
+            allow_unauth = os.environ.get("HERDR_ALLOW_UNAUTHENTICATED_OPERATOR", "0").strip().lower()
+            is_strict = (strict_env in ("1", "true", "yes")) and (allow_unauth not in ("1", "true", "yes"))
 
     principal: OperatorPrincipal
 
     # 4. Authentication check
     if not presented_token:
-        # If credentials exist for this operator in state_db, presentation is MANDATORY (anti-spoofing)
+        # Mandatory authentication for all gate exemptions and privileged actions (Issue #307 / B1)
         if registered_token is not None:
             raise OperatorAuthenticationError(
                 f"operator authentication required: missing operator token for '{op_clean}'"
@@ -306,7 +348,7 @@ def authenticate_and_authorize_operator(
             raise OperatorAuthenticationError(
                 f"operator authentication required: missing operator credentials for '{op_clean}'"
             )
-        # Unauthenticated fallback (legacy compatibility when no credentials registered and non-strict)
+        # Unauthenticated fallback (only permitted when legacy test mode explicitly enabled and non-strict)
         principal = OperatorPrincipal(
             operator_id=op_clean,
             role="human_operator",
@@ -327,10 +369,11 @@ def authenticate_and_authorize_operator(
                 raise OperatorAuthenticationError(
                     f"operator authentication failed: invalid operator token for '{op_clean}'"
                 )
+            role = "human_operator"
             principal = OperatorPrincipal(
                 operator_id=op_clean,
-                role="human_operator",
-                capabilities=DEFAULT_CAPABILITIES,
+                role=role,
+                capabilities=ROLE_CAPABILITIES.get(role, DEFAULT_CAPABILITIES),
                 authenticated=True,
                 auth_method="state_db_token",
             )

@@ -473,6 +473,8 @@ def _execute_legacy_controller_action(payload, *, validate_only=False):
         exp_ver = payload.get('expected_version')
         exp_task_vers = payload.get('expected_task_versions')
         exp_pane = str(payload.get('expected_pane_id') or payload.get('pane_id') or '').strip()
+        token = payload.get('auth_token') or payload.get('token') or payload.get('operator_token')
+        credentials_path = payload.get('credentials_path') or payload.get('operator_credentials')
 
         # Execution/write boundary check: pass expected_version, task_id, expected_pane_id, expected_task_versions to force_pass_gate
         gate_res = herdr_kernel.force_pass_gate(
@@ -484,6 +486,8 @@ def _execute_legacy_controller_action(payload, *, validate_only=False):
             task_id=task_id or None,
             expected_pane_id=exp_pane or None,
             expected_task_versions=exp_task_vers,
+            token=token,
+            credentials_path=credentials_path,
         )
 
         adv_res = None

@@ -289,7 +289,7 @@ def api_task_force_review(b):
         raise RuntimeError(f"无效的操作人标识: {exc}")
     except OperatorAuthError as exc:
         raise RuntimeError(f"操作人凭据或能力鉴权失败: {exc}")
-    except (ValueError, Exception) as exc:
+    except ValueError as exc:
         raise RuntimeError(f"无效的操作人标识: {exc}")
     reason = str(b.get('reason') or 'console_force_review').strip()
     exp_ver_raw = b.get('expected_version')
@@ -424,6 +424,8 @@ def api_task_signoff(b):
         exp_ver = b.get('expected_version')
         exp_task_vers = b.get('expected_task_versions')
         exp_pane = str(b.get('expected_pane_id') or b.get('pane_id') or '').strip()
+        token = b.get('auth_token') or b.get('token') or b.get('operator_token')
+        credentials_path = b.get('credentials_path') or b.get('operator_credentials')
 
         res = herdr_kernel.force_pass_gate(
             wid,
@@ -434,6 +436,8 @@ def api_task_signoff(b):
             task_id=tid or None,
             expected_pane_id=exp_pane or None,
             expected_task_versions=exp_task_vers,
+            token=token,
+            credentials_path=credentials_path,
         )
         return {'ok': True, 'action': 'approve', 'result': res}
     elif act=='reject':

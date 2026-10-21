@@ -370,11 +370,8 @@ def force_pass_gate(
     s = _get_store(store)
     from .operator_auth import authenticate_and_authorize_operator
     target_task = None
-    if task_id:
-        try:
-            target_task = s.get_task(task_id) if hasattr(s, "get_task") else None
-        except Exception:
-            target_task = None
+    if task_id and hasattr(s, "get_task"):
+        target_task = s.get_task(task_id)
 
     principal = authenticate_and_authorize_operator(
         operator_id=operator,
