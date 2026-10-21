@@ -175,8 +175,8 @@ class StateStore(ABC):
 
     # Tasks
     @abstractmethod
-    def save_task(self, task: Dict[str, Any]) -> None:
-        """Upsert a task record."""
+    def save_task(self, task: Dict[str, Any], fail_if_exists: bool = False) -> None:
+        """Upsert a task record, or fail closed if task already exists."""
         pass
 
     @abstractmethod
@@ -746,8 +746,8 @@ class SQLiteStateStore(StateStore):
         )
 
     # Tasks
-    def save_task(self, task: Dict[str, Any]) -> None:
-        state_db.save_task(task, db_path=self.db_path)
+    def save_task(self, task: Dict[str, Any], fail_if_exists: bool = False) -> None:
+        state_db.save_task(task, db_path=self.db_path, fail_if_exists=fail_if_exists)
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         return state_db.get_task(task_id, db_path=self.db_path)

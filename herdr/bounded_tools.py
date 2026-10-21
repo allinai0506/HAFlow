@@ -78,14 +78,14 @@ def run_bounded(argv, input_data=b'', *, timeout=30, output_limit=65536, cwd=Non
                     # never act on a cached Pane/PID from a different execution.
                     try:
                         os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
+                    except (ProcessLookupError, PermissionError):
                         pass
                     try:
                         process.wait(timeout=0.5)
                     except subprocess.TimeoutExpired:
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
+                        except (ProcessLookupError, PermissionError):
                             pass
                         process.wait(timeout=1)
                     if status != 'completed':
@@ -93,7 +93,7 @@ def run_bounded(argv, input_data=b'', *, timeout=30, output_limit=65536, cwd=Non
                         # obeyed SIGTERM or stopped holding the output pipes.
                         try:
                             os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
+                        except (ProcessLookupError, PermissionError):
                             pass
                 process.stdout.close()
                 process.stderr.close()

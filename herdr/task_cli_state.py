@@ -53,11 +53,11 @@ def load_tasks(*, get_store):
     return {"tasks": get_store().list_tasks()}
 
 
-def save_tasks(data, *, get_store, sync_tasks_projection, tasks_file):
+def save_tasks(data, *, get_store, sync_tasks_projection, tasks_file, fail_if_exists=False):
     store = get_store()
     for task in data.get("tasks", []):
         if task.get("task_id"):
-            store.save_task(task)
+            store.save_task(task, fail_if_exists=fail_if_exists)
     task_path = tasks_file or os.environ.get("TASKS_FILE")
     sync_tasks_projection(
         store=store, tasks_file=Path(task_path) if task_path else None

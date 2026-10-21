@@ -1,6 +1,7 @@
 """Task lookup, registration and workflow-node resolution CLI helpers."""
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -138,7 +139,8 @@ def add_task(args, *, deps):
     TrajectoryLedger = deps["trajectory_ledger"]
     record_trajectory_event_best_effort = deps["record_trajectory_event"]
     data = load_tasks()
-    if find_task(data, args.task_id):
+    store = _get_store()
+    if find_task(data, args.task_id) or (store and store.get_task(args.task_id)):
         print(f"Task already exists: {args.task_id}")
         sys.exit(1)
     node_id = getattr(args, "node", None) or getattr(args, "stage", None)
@@ -169,7 +171,16 @@ def add_task(args, *, deps):
     now = _now()
     _init_status_history(task, "pending", now)
     data["tasks"].append(task)
-    save_tasks(data)
+    # Save only the newly created task with atomic duplicate rejection (SC-017 & Codex P1)
+    try:
+        from herdr.state_db import TaskAlreadyExistsError
+    except ImportError:
+        TaskAlreadyExistsError = RuntimeError
+    try:
+        save_tasks({"tasks": [task]}, fail_if_exists=True)
+    except (TaskAlreadyExistsError, sqlite3.IntegrityError):
+        print(f"Task already exists: {args.task_id}")
+        sys.exit(1)
     trajectory_ledger = TrajectoryLedger(getattr(_get_store(), "db_path", None))
     record_trajectory_event_best_effort(
         task, "run_started", ledger=trajectory_ledger, status="pending"

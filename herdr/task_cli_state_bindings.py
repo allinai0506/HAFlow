@@ -64,7 +64,7 @@ def build_state_bindings(namespace):
 
         return load(get_store=namespace["_get_store"])
 
-    def save_tasks(data):
+    def save_tasks(data, fail_if_exists=False):
         from herdr.task_cli_state import save_tasks as save
 
         return save(
@@ -72,6 +72,7 @@ def build_state_bindings(namespace):
             get_store=namespace["_get_store"],
             sync_tasks_projection=namespace["sync_tasks_projection"],
             tasks_file=namespace.get("TASKS_FILE"),
+            fail_if_exists=fail_if_exists,
         )
 
     def find_task(data, task_id):
