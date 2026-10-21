@@ -180,11 +180,22 @@ def spaces():
         x.get('workspace_id', ''),
     ))
 
+TERMINAL_WORKFLOW_STATUSES = {
+    'completed',
+    'failed',
+    'halted',
+    'closed',
+    'abandoned',
+    'archived',
+    'cancelled',
+}
+
+
 def overview():
     ts = inventory.tasks()
     wfs = inventory.workflows()
     superseded_ids = {t['supersedes'] for t in ts if t.get('supersedes')}
-    terminal_wf_statuses = {'completed', 'archived', 'cancelled'}
+    terminal_wf_statuses = TERMINAL_WORKFLOW_STATUSES
     active_wf_ids = {
         t.get('workflow_id')
         for t in ts

@@ -104,7 +104,7 @@ class TestConsoleShell(unittest.TestCase):
 
     def test_workflow_badge_matches_current_space_rows(self):
         functions = []
-        for name in ("paintCrumb", "renderShellWorkflows"):
+        for name in ("paintCrumb", "renderShellWorkflows", "updateShellRail"):
             match = re.search(
                 rf"function {name}\([^)]*\)\{{.*?\n\}}",
                 self.html,
@@ -125,6 +125,7 @@ const document = {
 };
 const state = {overview: {active_workflows: 3}, shellView: 'workflows'};
 function esc(value) { return String(value); }
+function jsArg(value) { return "'" + String(value).replace(/'/g, "\\\\'") + "'"; }
 function workflowDisplayName(workflow) { return workflow.title; }
 """ + "\n".join(functions) + r"""
 function verify(workflows, expected) {

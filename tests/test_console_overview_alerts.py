@@ -71,6 +71,33 @@ class TestConsoleOverviewAlerts(unittest.TestCase):
             self.assertNotIn("impl-r2", alert_task_ids)
             self.assertEqual(len(ov["alerts"]), 0)
 
+    def test_all_terminal_workflow_statuses_filter_failed_tasks(self):
+        """Workflows in any terminal state (completed, failed, halted, closed, abandoned, archived, cancelled)
+        must not leak their child tasks into alerts."""
+        terminal_statuses = [
+            "completed", "failed", "halted", "closed", "abandoned", "archived", "cancelled"
+        ]
+        fake_tasks = []
+        fake_workflows = {}
+        for idx, st in enumerate(terminal_statuses):
+            wid = f"wf-term-{idx}"
+            tid = f"task-failed-{idx}"
+            fake_tasks.append({
+                "task_id": tid,
+                "workflow_id": wid,
+                "project_id": "proj-1",
+                "status": "failed",
+                "failure_reason": f"error in {st} workflow",
+            })
+            fake_workflows[wid] = {"workflow_id": wid, "status": st}
+
+        with patch("console.inventory.tasks", return_value=fake_tasks), \
+             patch("console.inventory.workflows", return_value=fake_workflows), \
+             patch("console.runtime.spaces", return_value=[]), \
+             patch("console.runtime.service_status", return_value={}):
+            ov = runtime.overview()
+            self.assertEqual(ov["alerts"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
