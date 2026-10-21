@@ -214,6 +214,14 @@ async function submitDecision(decisionId){
 }
 function cockpitWorkflowId(){return (state.workflowId==='__ctl__'?state.controllerTarget?.workflowId:null)||state.workflow?.workflow?.workflow_id||'';}
 function cockpitArg(value){return esc(JSON.stringify(value));}
+function cockpitActionKey(action){
+  const ordered=value=>value&&typeof value==='object'?(Array.isArray(value)?value.map(ordered):Object.fromEntries(Object.keys(value).sort().map(key=>[key,ordered(value[key])]))):value;
+  return JSON.stringify(ordered({action_id:action?.action_id,target:action?.target,expected_identity:action?.expected_identity,api_payload:action?.api_payload,automation:action?.automation,risk:action?.risk,is_destructive:action?.is_destructive,category:action?.category}));
+}
+function isRejectedCockpitAction(action){
+  const receipt=state.controllerReceipt;
+  return receipt?.status==='rejected'&&receipt.stale_action&&receipt.workflow_id===cockpitWorkflowId()&&cockpitActionKey(action)===cockpitActionKey(receipt.stale_action);
+}
 function renderControllerHeader(data){
   const c=data.controller||{};
   const labels={running:'运行中',stopped:'已停止',unknown:'未确认'};
@@ -221,7 +229,7 @@ function renderControllerHeader(data){
 }
 function renderControllerJudgment(data){
   const j=data.judgment||{};
-  return '<section class="controller-cockpit-judgment" aria-label="当前判断">'+[['现在',j.now],['阻塞原因',j.blocked_reason||'无'],['下一步',j.next]].map(([label,value])=>'<div><span class="muted">'+label+'</span><strong>'+esc(value||'未确认')+'</strong></div>').join('')+'<p class="muted">'+(j.requires_user?'需要人工确认':'按服务端判断推进')+'</p></section>';
+  return '<section class="controller-cockpit-judgment" aria-label="当前判断">'+[['现在',j.now],['阻塞原因',j.blocked_reason||'无'],['下一步',j.next]].map(([label,value])=>'<div><span class="muted">'+label+'</span><strong>'+esc(value||'未确认')+'</strong></div>').join('')+'<p class="muted">'+(data.read_state!=='confirmed'?'当前判断未确认，请刷新核验':j.requires_user?'需要人工确认':'按服务端判断推进')+'</p></section>';
 }
 function controllerTaskMatches(task,target){
   const fields=[['taskId',task.task_id],['runId',task.run_id],['paneId',task.pane_id||task.runtime?.pane_id]];
@@ -233,14 +241,14 @@ function renderControllerNodes(data,target){
 function cockpitActionCard(a){
   const mode=a.automation?.mode||'blocked';
   const labels={automatic:'自动处理（由后台执行）',manual:'人工操作',confirmation_required:'需要确认',blocked:'暂不可执行'};
-  const stale=state.controllerReceipt?.status==='rejected'&&state.controllerReceipt.action_id===a.action_id;
+  const stale=isRejectedCockpitAction(a);
   return '<article class="controller-cockpit-action'+(stale?' is-outdated':'')+'" data-action-id="'+esc(a.action_id)+'"><div class="controller-cockpit-row"><strong>'+esc(a.title||a.action_id)+'</strong><span>'+esc(labels[mode]||'暂不可执行')+'</span></div><p>'+esc(a.effect||a.description||'')+'</p><p class="muted">'+esc(a.automation?.reason||'')+'</p>'+(stale?'<p role="alert">此操作卡片已过期，请刷新后核对。</p>':'')+(mode==='automatic'?'<p class="muted">页面不触发自动执行；请查看后台回执。</p>':'<button class="btn '+(a.is_destructive?'danger-btn':'primary')+'" '+(!['manual','confirmation_required'].includes(mode)||stale?'disabled':'')+' onclick="executeCockpitAction('+cockpitArg(a.action_id)+')">'+(mode==='blocked'?'当前不可执行':'查看并确认')+'</button>')+'</article>';
 }
 function renderControllerTodos(data,target){
   const recovery=(data.todos||[]).filter(t=>t.kind==='recovery');
   const actions=[...(data.actions||[])];
   const rejected=state.controllerReceipt;
-  if(rejected?.status==='rejected'&&rejected.workflow_id===data.workflow?.workflow_id&&rejected.stale_action&&!actions.some(a=>a.action_id===rejected.action_id))actions.push(rejected.stale_action);
+  if(rejected?.status==='rejected'&&rejected.workflow_id===data.workflow?.workflow_id&&rejected.stale_action&&!actions.some(a=>cockpitActionKey(a)===cockpitActionKey(rejected.stale_action)))actions.push(rejected.stale_action);
   const body=recovery.map(o=>'<div class="controller-cockpit-recovery'+(String(target.operationId)===String(o.id)?' is-target':'')+'">'+recoveryCard(o,data.workflow?.workflow_id)+'</div>').join('')+actions.map(cockpitActionCard).join('');
   const decisions=state.decisionData?.workflow_id===data.workflow?.workflow_id?renderDecisionPanel():'<p class="muted">人工裁决状态尚未确认，请查看工作流详情。</p>';
   return '<section class="controller-cockpit-section"><h3>调度待办 · 继续推进</h3>'+(data.read_state!=='confirmed'?'<div role="alert">读取未确认，尚不能确认是否存在待办。</div>':body||'<p class="muted">暂无待办</p>')+(data.actions_truncated||data.recovery_truncated?'<p class="muted">待办已截断，请查看对应节点的详情。</p>':'')+decisions+'</section>';
@@ -281,20 +289,21 @@ async function executeCockpitAction(actionId){
   const data=state.controllerCockpit;
   const action=(data?.actions||[]).find(a=>a.action_id===actionId);
   const wid=data?.workflow?.workflow_id;
-  if(!action||data.read_state!=='confirmed'||!['manual','confirmation_required'].includes(action.automation?.mode)||!action.expected_identity){toast('操作条件未确认，请刷新',true);return;}
-  const identity=JSON.stringify(action.expected_identity);
+  if(!action||data.read_state!=='confirmed'||!['manual','confirmation_required'].includes(action.automation?.mode)||!action.expected_identity||isRejectedCockpitAction(action)){toast('操作条件未确认，请刷新',true);return;}
+  const snapshot=JSON.parse(JSON.stringify(action));
+  const actionKey=cockpitActionKey(snapshot);
   const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk);
   openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+'<label for="cockpitReason">处理依据</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
   const button=document.getElementById('cockpitActionConfirm');
   button.onclick=async()=>{
-    if(state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.automation?.mode)||cockpitWorkflowId()!==wid||JSON.stringify((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.expected_identity)!==identity){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
+    if(state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.automation?.mode)||cockpitWorkflowId()!==wid||cockpitActionKey((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId))!==actionKey){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
     const reason=(document.getElementById('cockpitReason')?.value||'').trim();
     if((highRisk)&&!reason){document.getElementById('cockpitActionError').textContent='必须填写人工核验依据';return;}
     button.disabled=true;
     try{
       const result=await api('/api/controller/execute-action',{method:'POST',body:JSON.stringify({workflow_id:wid,action_id:actionId,expected_identity:action.expected_identity,reason,confirmed:true,operator:'human_console'})});
       if(state.workflowId!=='__ctl__'||cockpitWorkflowId()!==wid)return;
-      state.controllerReceipt=result.receipt?{...result.receipt,...(result.receipt.status==='rejected'?{stale_action:action}:{})}:{workflow_id:wid,action_id:actionId,status:'accepted_waiting',message:'回执缺失，结果未确认'};
+      state.controllerReceipt=result.receipt?{...result.receipt,...(result.receipt.status==='rejected'?{stale_action:snapshot}:{})}:{workflow_id:wid,action_id:actionId,status:'accepted_waiting',message:'回执缺失，结果未确认'};
       closeModal();paintControllerCockpit();
       await loadControllerCockpit(wid);
     }catch(error){if(cockpitWorkflowId()===wid){document.getElementById('cockpitActionError').textContent=error.message;button.disabled=false;}}

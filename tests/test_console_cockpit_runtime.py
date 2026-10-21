@@ -163,6 +163,159 @@ def _cockpit():
 class TestControllerCockpitRuntime(unittest.TestCase):
     """Drive the real JS; a green ``node --check`` is not enough."""
 
+    def test_failed_workflow_b_read_never_relabels_workflow_a_cached_facts(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                  state.controllerCockpit=__cockpitFixture;
+                  state.controllerActionsData={recovery:[{id:7,workflow_id:'wf-1',status:'waiting_human'}]};
+                  globalThis.fetch=async()=>{throw new Error('B unavailable')};
+                  await openControllerCockpit({workflowId:'wf-2'});
+                  console.log('STATE='+JSON.stringify(state.controllerCockpit));
+                  console.log('RECOVERY='+JSON.stringify(currentRecovery()));
+                  console.log('HTML='+document.getElementById('controllerTabView').innerHTML);
+                })();
+            """)
+        data = json.loads(out.split('STATE=', 1)[1].split('\n')[0])
+        self.assertEqual(data['workflow']['workflow_id'], 'wf-2')
+        self.assertEqual(data['read_state'], 'unknown')
+        for token in ('impl-x', 'run-1', 'pane-1', 'build_running', 'past', 'start_review'):
+            self.assertNotIn(token, out)
+        self.assertIn('读取未确认', out)
+        self.assertIn('RECOVERY=[]', out)
+
+    def test_rejected_snapshot_does_not_disable_a_new_identity_or_new_intent(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                  state.controllerCockpit=__cockpitFixture;openControllerCockpit({workflowId:'wf-1'});
+                  let posts=0;
+                  globalThis.fetch=async(path,options)=>({ok:true,json:async()=>({ok:true,data:options.method==='POST'?
+                    (posts++,{receipt:{workflow_id:'wf-1',action_id:'impl-x:integrate',status:'rejected',reason_code:'identity_changed'}}):
+                    {...__cockpitFixture,actions:[{...__cockpitFixture.actions[0],expected_identity:{execution_id:'exec-1',pane_id:'pane-1',task_version:2}}]}})});
+                  executeCockpitAction('impl-x:integrate');
+                  await document.getElementById('cockpitActionConfirm').onclick();
+                  const same=document.getElementById('controllerTabView').innerHTML;
+                  console.log('SAME_DISABLED='+same.includes('is-outdated'));
+                  __probe.modal=null;executeCockpitAction('impl-x:integrate');console.log('SAME_FORM='+Boolean(__probe.modal));
+                  state.controllerCockpit.actions[0].expected_identity.task_version=3;
+                  openControllerCockpit({workflowId:'wf-1'});
+                  let html=document.getElementById('controllerTabView').innerHTML;
+                  const current=html.match(/<article class="controller-cockpit-action"[\s\S]*?<\/article>/)?.[0]||'';
+                  console.log('NEW_ENABLED='+Boolean(current&&!current.includes('disabled')));
+                  console.log('OLD_RETAINED='+html.includes('此操作卡片已过期'));
+                  __probe.modal=null;executeCockpitAction('impl-x:integrate');console.log('NEW_FORM='+Boolean(__probe.modal));
+                  state.controllerCockpit.actions[0].expected_identity.task_version=2;
+                  state.controllerCockpit.actions[0].api_payload={...state.controllerCockpit.actions[0].api_payload,instruction:'new intent'};
+                  openControllerCockpit({workflowId:'wf-1'});
+                  html=document.getElementById('controllerTabView').innerHTML;
+                  const changedIntent=html.match(/<article class="controller-cockpit-action"[\s\S]*?<\/article>/)?.[0]||'';
+                  console.log('INTENT_ENABLED='+Boolean(changedIntent&&!changedIntent.includes('disabled')));
+                  console.log('POSTS='+posts);
+                })();
+            """)
+        for token in ('SAME_DISABLED=true', 'SAME_FORM=false', 'NEW_ENABLED=true', 'OLD_RETAINED=true',
+                      'NEW_FORM=true', 'INTENT_ENABLED=true', 'POSTS=1'):
+            self.assertIn(token, out)
+
+    def test_late_legacy_actions_cannot_hide_current_cockpit(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                (async()=>{
+                  const pending={};const tick=()=>new Promise(resolve=>setImmediate(resolve));
+                  globalThis.fetch=path=>new Promise(resolve=>{pending[path]=data=>resolve({ok:true,json:async()=>({ok:true,data})});});
+                  state.shellView='alerts';state.workflowId='wf-1';
+                  await loadWorkflow('wf-1',{workflow:{workflow_id:'wf-1'},tasks:[],stages:[],graph:{nodes:[]}});
+                  await tick();pending['/api/workflow/controller-cockpit?workflow_id=wf-1'](__cockpitFixture);await tick();
+                  state.shellView='workbench';state.workflowView='list';openControllerCockpit({workflowId:'wf-1'});
+                  document.getElementById('tasks').innerHTML='task-view-sentinel';
+                  pending['/api/workflow/controller-actions?workflow_id=wf-1']({workflow_id:'wf-1',actions:[],recovery:[]});
+                  await tick();console.log('HIDDEN='+document.getElementById('controllerTabView').hidden);
+                  console.log('TASKS_UNTOUCHED='+(document.getElementById('tasks').innerHTML==='task-view-sentinel'));
+                  console.log('SELECTED='+state.workflowId);
+                })();
+            """)
+        self.assertIn('HIDDEN=false', out)
+        self.assertIn('SELECTED=__ctl__', out)
+        self.assertIn('TASKS_UNTOUCHED=true', out)
+
+    def test_late_decision_response_repaints_only_its_current_cockpit(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, f"""
+                (async()=>{{
+                  const pending={{}};const tick=()=>new Promise(resolve=>setImmediate(resolve));
+                  globalThis.fetch=path=>new Promise(resolve=>{{pending[path]=data=>resolve({{ok:true,json:async()=>({{ok:true,data}})}});}});
+                  state.shellView='alerts';state.workflowId='wf-1';
+                  await loadWorkflow('wf-1',{{workflow:{{workflow_id:'wf-1'}},tasks:[],stages:[],graph:{{nodes:[]}}}});
+                  await tick();pending['/api/workflow/controller-cockpit?workflow_id=wf-1'](__cockpitFixture);await tick();
+                  state.shellView='workbench';state.workflowView='list';openControllerCockpit({{workflowId:'wf-1'}});
+                  document.getElementById('tasks').innerHTML='task-view-sentinel';
+                  pending['/api/workflow/decisions?workflow_id=wf-1']({{workflow_id:'wf-1',decisions:[{json.dumps(_decision(), ensure_ascii=False)}],advice:[]}});
+                  await tick();console.log('DECISION='+document.getElementById('controllerTabView').innerHTML.includes('DU-10'));
+                  console.log('TASKS_UNTOUCHED='+(document.getElementById('tasks').innerHTML==='task-view-sentinel'));
+                  console.log('HIDDEN='+document.getElementById('controllerTabView').hidden);
+                }})();
+            """)
+        self.assertIn('DECISION=true', out)
+        self.assertIn('HIDDEN=false', out)
+        self.assertIn('TASKS_UNTOUCHED=true', out)
+
+    def test_late_legacy_and_decision_failures_keep_cockpit_visible_without_stale_decisions(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, f"""
+                (async()=>{{
+                  const pending={{}};const tick=()=>new Promise(resolve=>setImmediate(resolve));
+                  globalThis.fetch=path=>new Promise((resolve,reject)=>{{pending[path]={{ok:data=>resolve({{ok:true,json:async()=>({{ok:true,data}})}}),fail:()=>reject(new Error('unavailable'))}};}});
+                  state.shellView='alerts';state.workflowId='wf-1';
+                  await loadWorkflow('wf-1',{{workflow:{{workflow_id:'wf-1'}},tasks:[],stages:[],graph:{{nodes:[]}}}});
+                  await tick();pending['/api/workflow/controller-cockpit?workflow_id=wf-1'].ok(__cockpitFixture);await tick();
+                  state.shellView='workbench';state.workflowView='list';
+                  state.decisionData={{workflow_id:'wf-1',decisions:[{json.dumps(_decision(), ensure_ascii=False)}],advice:[]}};
+                  openControllerCockpit({{workflowId:'wf-1'}});
+                  pending['/api/workflow/controller-actions?workflow_id=wf-1'].fail();
+                  pending['/api/workflow/decisions?workflow_id=wf-1'].fail();await tick();
+                  console.log('HIDDEN='+document.getElementById('controllerTabView').hidden);
+                  console.log('STALE_DECISION='+document.getElementById('controllerTabView').innerHTML.includes('DU-10'));
+                  console.log('UNKNOWN='+document.getElementById('controllerTabView').innerHTML.includes('人工裁决状态尚未确认'));
+                }})();
+            """)
+        self.assertIn('HIDDEN=false', out)
+        self.assertIn('STALE_DECISION=false', out)
+        self.assertIn('UNKNOWN=true', out)
+
+    def test_late_workflow_a_extras_cannot_overwrite_explicit_workflow_b_cockpit(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, f"""
+                (async()=>{{
+                  const pending={{}};const tick=()=>new Promise(resolve=>setImmediate(resolve));
+                  globalThis.fetch=path=>new Promise(resolve=>{{pending[path]=data=>resolve({{ok:true,json:async()=>({{ok:true,data}})}});}});
+                  state.shellView='alerts';state.workflowId='wf-1';
+                  await loadWorkflow('wf-1',{{workflow:{{workflow_id:'wf-1'}},tasks:[],stages:[],graph:{{nodes:[]}}}});
+                  await tick();pending['/api/workflow/controller-cockpit?workflow_id=wf-1'](__cockpitFixture);await tick();
+                  state.shellView='workbench';state.workflowView='list';
+                  const opened=openControllerCockpit({{workflowId:'wf-2'}});await tick();
+                  pending['/api/workflow/controller-cockpit?workflow_id=wf-2']({{...__cockpitFixture,workflow:{{workflow_id:'wf-2'}},nodes:[],actions:[],todos:[],receipts:[],timeline:[]}});
+                  await opened;
+                  pending['/api/workflow/controller-actions?workflow_id=wf-1']({{workflow_id:'wf-1',actions:[],recovery:[]}});
+                  pending['/api/workflow/decisions?workflow_id=wf-1']({{workflow_id:'wf-1',decisions:[{json.dumps(_decision(), ensure_ascii=False)}],advice:[]}});
+                  await tick();
+                  console.log('OLD_APPLIED='+Boolean(state.controllerActionsData?.workflow_id==='wf-1'||state.decisionData?.workflow_id==='wf-1'));
+                  console.log('OLD_VISIBLE='+document.getElementById('controllerTabView').innerHTML.includes('DU-10'));
+                  console.log('TARGET='+state.controllerTarget.workflowId);
+                  console.log('HIDDEN='+document.getElementById('controllerTabView').hidden);
+                }})();
+            """)
+        for token in ('OLD_APPLIED=false', 'OLD_VISIBLE=false', 'TARGET=wf-2', 'HIDDEN=false'):
+            self.assertIn(token, out)
+
     def test_projection_renders_service_judgment_identity_and_receipts(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
