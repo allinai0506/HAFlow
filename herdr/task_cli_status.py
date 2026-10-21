@@ -23,8 +23,11 @@ def set_task_status(task_id, new_status, verdict=None, note=None, affected_task_
         print(f"Task not found: {task_id}")
         sys.exit(1)
 
+    from herdr.node_roles import is_verifier_task
+
     if (verdict in ('pass', 'approved') and task.get('completion_protocol') == 'receipt-v1'
-            and (task.get('node') or task.get('stage')) in ('test', 'review')):
+            and task.get('execution_mode') != 'context'
+            and is_verifier_task(task)):
         from herdr.task_checkpoint import has_business_acceptance
         if not has_business_acceptance(get_store(), task, task.get('candidate_sha')):
             print('Business acceptance checkpoint receipt required before passing gate', file=sys.stderr)

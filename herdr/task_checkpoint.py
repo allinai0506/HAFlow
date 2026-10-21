@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from . import state_db
+from .node_roles import is_verifier_task
 from .observation import ObservationStore
 from .supervisor.state import redact_text
 from .task_resources import workflow_launch_lock
@@ -22,7 +23,7 @@ def checkpoint_instruction_block(task, epoch):
     identity = ' '.join(("--task-id", shlex.quote(task['task_id']), "--run-id",
                          shlex.quote(task['run_id']), "--epoch", shlex.quote(epoch)))
     acceptance = ''
-    if (task.get('node') or task.get('stage')) in ('test', 'review') and task.get('candidate_sha'):
+    if is_verifier_task(task) and task.get('candidate_sha'):
         acceptance = (f"Before a passing business gate, bind published reports: {command} acceptance-record "
                       f"{identity} --candidate-sha {shlex.quote(task['candidate_sha'])} --verdict pass "
                       "--artifact <observation_id>:<sha256> --criterion AC-1=pass --criterion AC-2=pass (include every required criterion)\n"
@@ -409,6 +410,6 @@ def has_business_acceptance(store, task, candidate_sha, conn=None, observations=
 def reject_verdict_only_override(task):
     """A stage verdict cannot replace a Run-bound business acceptance receipt."""
     if (task.get('completion_protocol') == 'receipt-v1'
-            and (task.get('node') or task.get('stage')) in {'test', 'review'}):
+            and is_verifier_task(task)):
         raise ValueError('receipt-v1 business gate cannot be force-passed; rerun the gate '
                          'on the current candidate and publish acceptance-record with its own evidence')

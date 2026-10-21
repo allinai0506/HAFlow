@@ -7762,3 +7762,59 @@ git diff --check
 
 证据：`console/runtime.py:overview` 增加终态工作流与替代者过滤；`presentation.js` 与 `shell.js` 增加消警机制与可操作卡片；新增 `tests/test_console_overview_alerts.py` 与 `tests/test_console_frontend_syntax.py::test_shell_alerts_render_and_actionability`。
 
+
+---
+
+## 186. 验证节点身份用字面量 id 判定，模板改名即静默失效（2026-10-21）
+
+### 问题背景
+
+`wf-haflow-1021-01`（模板 `code-craft-v1`，需求 issue #307）跑完一轮后两个洁净室门禁都 blocked，但结论对候选无效。现场证据链：
+
+```text
+20:30:32  candidate_published   d24d2d3   craft 交出候选
+20:34:11  initial_dispatch_prepared  cleanroom_test    candidate_sha=None
+20:35:21  initial_dispatch_prepared  cleanroom_review  candidate_sha=None
+22:13:04  candidate_frozen      d24d2d3   冻结晚了 1 小时 43 分
+```
+
+洁净室测试工位的结论原文：`Controller candidate_sha=null，洁净室工位 HEAD=9128462 未加载 craft 候选 d24d2d3`。即两个门禁都在 baseline 上跑，验的不是 craft 的产物，整轮门禁白跑。
+
+根因不是「冻结太晚」这一件事，而是**验证节点身份用硬编码字面量 `{"test","review"}` 判定**。`code-craft-v1` 把门禁节点声明为 `cleanroom_test` / `cleanroom_review`，于是所有以该字面量为条件的保护对这套模板**全部静默失效**——不报错、不告警、照常放行：
+
+| 站点 | 失效后果 |
+|------|---------|
+| `task_cli_launch_preflight.py:38` `preflight_delivery_identity` | fail-closed 候选身份证明直接 `return None`，洁净室带着 `candidate_sha=None` 派发成功 |
+| `task_cli_launch_preflight.py:432/463` `validate_allocated_launch_baselines` | 分配后基线门（clone HEAD 是否等于冻结候选）不执行，正是「HEAD 停在 9128462」无人拦截的原因 |
+| `direct_dispatch.py:463/506` | 并行验证者不锁 `candidate_branch`，反而拿到 `onto_branch` |
+| `business_gate.py:96/110/116` | `dependencies & {'test','review'}` 恒为空集，wrapup 的双门禁汇聚校验形同虚设 |
+| `task_checkpoint.py:412` / `task_cli_status.py:27` | receipt-v1 业务门禁可被 stage verdict 单独 force-pass（洁净室评审独立报出的 B1 正是此类） |
+| `task_checkpoint.py:26` | 不下发 `acceptance-record` 绑定指令，验证工位不知道该发布凭据 |
+| `agent_router.py:505/547` | 跨阶段独立性（`exclude_stage_agents`）与 FR-6.1 fail-closed 默认排除不生效 |
+| `task_delivery.py:88` | 验证工位被当作可写任务 |
+
+全库扫描共 **15 处出现、12 个站点**（初判 7 处偏低）。另有一处同族但不同概念的判据 `task_cli_verification.py:_is_gate_task`，它自带第三套字面量表（含 `cleanroom_test`/`cleanroom_review`/`wrapup` 及正则 `(^|[_-])(gate|cleanroom)($|[_-])`）——同一个仓库里「门禁节点」存在三套互不知晓的词表。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 语义角色用字面量 id 判定 | 模板 id 是**命名**，不是**契约**。任何以 id 字面量为条件的保护，都会在模板改名时静默失效，且失效方式是「放行」而非「报错」 | 角色判定必须来自模板声明的语义字段（`default_task_type` / `gate`），收敛为单一权威纯函数，禁止在调用点散落字面量集合 |
+| 判据只有一个形状 | 同一角色在模板原始节点、`normalize_node` 后的派发节点、持久化 Task 上是三种不同字段形状（`default_task_type` / `declared_task_type`+`task_type` / `task_type`），只吃一种形状的判据会在另一条链路上静默降级 | 权威判据必须同时提供 node 级、task 级、id+config 级三个入口，并分别有测试 |
+| 替换判据时未检查上下文可得性 | `agent_router.py:547` 若机械替换成 `stage in verifier_node_ids(wf_cfg)`，当 `wf_cfg` 为 None 时返回空集，legacy `test`/`review` 会**丢掉 FR-6.1 fail-closed 默认排除**——把一处静默失效换成另一处 | 替换判据必须逐站点核对「配置不可得时」的退化方向，fail-closed 语义要用不依赖 config 的 legacy 兜底保住 |
+| fail-closed 门禁跨执行模式复用 | 候选 SHA 是 Git 事实；context 模式模板（`bidding`、`business-research-v1`）全程无 Git 语义，对它们的验证节点强制候选证明会直接打断派发 | fail-closed 门禁必须显式声明适用范围，用权威 `execution_mode(workflow)` 守卫，而不是假定所有工作流都有候选 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_node_roles.py tests/test_verifier_identity_parity.py \
+  tests/test_task_cli_launch_preflight.py tests/test_fix_bug1002_parallel_candidate.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：新增 `herdr/node_roles.py` 作为验证节点身份的唯一权威来源（`is_verifier_node` / `is_verifier_task` / `is_verifier_node_id` / `verifier_node_ids` / `candidate_identity_applies`），替换 11 个站点。全模板分类断言固化在 `tests/test_node_roles.py`：`software-development-v1` 与 `spec-development-v1` 的 `test`/`review` 判据前后**完全等价**（零行为变化），`code-craft-v1` 的两个洁净室节点新命中，`craft`/`wrapup` 不命中。受影响 66 个测试文件回归 **1542 passed, 2 skipped, 237 subtests passed**。
+
+**遗留（已记录未修）**：`coordinator_messages.py:261` 仍是字面量。该处只生成兜底路径给总指挥的**建议命令文本**（是否附 `--onto`），不是强制门禁；且 `build_stage_advance_context` 是有意的纯函数，只拿得到 `next_stage` 字符串、拿不到下一个节点的 dict，正确修需要改签名由调用方传入。其残余风险已被本次修好的 `validate_allocated_launch_baselines` 兜住：即便建议文本带了 `--onto`，洁净室节点仍会走候选基线门而非 selective 分支。
+
+**同源不同概念（未合并）**：`_is_gate_task` 回答「是否产出门禁结论」（含 `wrapup`、`acceptance`），`is_verifier_node` 回答「是否独立验证冻结候选」（不含 `wrapup`）。两者语义不同，不是平行事实源，但三套词表并存本身是债务，合并需要单独的规格决策。

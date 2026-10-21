@@ -25,6 +25,25 @@ def _resolve_expected_candidate(workflow_id, claim):
     return "", ""
 
 
+def _default_workflow_config(workflow_id):
+    from .projects import workflow_config_for
+
+    return workflow_config_for(workflow_id)
+
+
+def _verifier_candidate_gate(workflow_id, node_id, workflow_config_for):
+    """True when this node must prove a frozen candidate before it may launch.
+
+    A candidate SHA is a Git fact, so a context workflow's declared verifier has
+    nothing to prove; failing it closed would block templates that never had a
+    candidate in the first place.
+    """
+    from .node_roles import candidate_identity_applies, is_verifier_node_id
+
+    config = workflow_config_for(workflow_id) if workflow_config_for else None
+    return is_verifier_node_id(config, node_id) and candidate_identity_applies(config)
+
+
 def preflight_delivery_identity(
     workflow_id,
     node_id,
@@ -33,9 +52,10 @@ def preflight_delivery_identity(
     *,
     get_store,
     resolve_expected_candidate=_resolve_expected_candidate,
+    workflow_config_for=_default_workflow_config,
 ):
-    """Prove the candidate identity before launching a test or review task."""
-    if node_id not in {"test", "review"}:
+    """Prove the candidate identity before launching a task that verifies one."""
+    if not _verifier_candidate_gate(workflow_id, node_id, workflow_config_for):
         return None
     from herdr import delivery_record, workflow_docs
 
@@ -427,9 +447,11 @@ def validate_allocated_launch_baselines(
     validate_selective,
     reclaim,
     get_store,
+    workflow_config_for=_default_workflow_config,
 ):
     """Run post-worker baseline gates and reclaim unregistered resources on refusal."""
-    if node_id in ("test", "review"):
+    verifies_candidate = _verifier_candidate_gate(args.workflow_id, node_id, workflow_config_for)
+    if verifies_candidate:
         try:
             validate_test_review(args, baseline_commit, source_repo)
         except SystemExit:
@@ -460,7 +482,7 @@ def validate_allocated_launch_baselines(
             )
 
     claim = str(getattr(args, "candidate_sha", None) or "").strip()
-    if node_id not in ("test", "review") and claim and onto_branch:
+    if not verifies_candidate and claim and onto_branch:
         try:
             validate_selective(args, claim, baseline_commit, source_repo)
         except SystemExit:
