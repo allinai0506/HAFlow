@@ -3,24 +3,48 @@
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
 
+DEFAULT_GATE_NODES = (
+    "test",
+    "review",
+    "wrapup",
+    "gate",
+    "cleanroom",
+    "cleanroom_test",
+    "cleanroom_review",
+    "cleanroom_gate",
+)
+
 def resolve_gate_config(ports, node, node_id):
-    gate = (node or {}).get("gate") or ports.get_stage_policy(node_id).get("gate")
+    node = node or {}
+    explicit_gate = node.get("gate")
 
-    if gate is None and (node or {}).get("node_type") == "gate":
-        gate = {}
-
-    if gate is None:
-        gate = ports.GATE_DEFAULTS.get(node_id)
-
-    if not gate and (node or {}).get("node_type") != "gate":
+    if explicit_gate is False:
         return None
+
+    if explicit_gate is not None:
+        gate = explicit_gate if isinstance(explicit_gate, dict) else {}
+    elif node.get("node_type") == "gate":
+        gate = {}
+    else:
+        stage_policy_gate = ports.get_stage_policy(node_id).get("gate") if hasattr(ports, "get_stage_policy") else None
+        if stage_policy_gate is False:
+            return None
+        if stage_policy_gate is not None:
+            gate = stage_policy_gate if isinstance(stage_policy_gate, dict) else {}
+        elif hasattr(ports, "GATE_DEFAULTS") and node_id in ports.GATE_DEFAULTS:
+            gate = ports.GATE_DEFAULTS.get(node_id) or {}
+        elif str(node_id or "").lower() in DEFAULT_GATE_NODES:
+            gate = {}
+        else:
+            return None
 
     if not isinstance(gate, dict):
         gate = {}
 
+    fix_loop_max = getattr(ports, "FIX_LOOP_MAX", 5)
     return {
         "retry_node": gate.get("retry_node") or gate.get("retry_target") or "implementation",
-        "max_loops": int(gate.get("max_loops", ports.FIX_LOOP_MAX)),
+        "max_loops": int(gate.get("max_loops", fix_loop_max)),
     }
 
 def gate_verdict(ports, workflow_id, node_id):

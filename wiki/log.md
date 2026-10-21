@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-21] fix | 门禁判定口径对齐、业务验收同步 verdict 凭据与合法重放 finalize 收编 (切片 1: P1, P8, P3)
+
+- 背景：
+  1. `wf-haflow-1020-02` 运行暴露平台三项设计缺陷：节点配置 `gate: {}` 被 CLI/Sentinel 误判为非门禁，导致 watchdog 失败后的通过裁决无法被流转采纳（P1）；
+  2. 业务验收落盘 DB 事件但未落盘 `gate-verdicts` 磁盘文件，导致系统判定双凭证割裂、Agent 空转后被超时判死（P8）；
+  3. 控制器在 finalize 执行 commit 时未向合法 replay/supersede 传递 `--allow-rebase`，导致被判定为 `commit_predates_task` 拒绝收编（P3）。
+- 变更：
+  1. **门禁口径统一**：在 `herdr/task_cli_verification.py`、`services/herdr-sentinel.py` 和 `services/controller/node_policy.py` 中，区分 `gate is False`（显式禁用）、`gate is not None`（启用门禁，含 `{}`）与默认门禁阶段语义（`test/review/wrapup`）；
+  2. **双凭据自动同步**：在 `herdr/task_checkpoint.py:record_business_acceptance` 中，成功记录验收事件后，自动原子落盘合规的 `gate-verdicts/<task_id>.json`，同步绑定 `verdict`、`candidate_sha`、`run_id`、`epoch`、`execution_token` 与 `verifier_agent`；
+  3. **重放与更迭收编支持**：在 `herdr/domain/software.py:should_allow_rebase` 识别 `supersedes`、`onto_branch`、`is_replay` 及 `dispatch_round > 1`；并在 `services/controller/git_finalize.py` 中对满足条件的任务自动向 `herdr-task commit` 追加 `--allow-rebase` 参数。
+- 证据：
+  1. 新增 `tests/test_slice1_gate_robustness.py`（4 项全绿）；
+  2. 门禁与裁决既有专项 `tests/test_issue_250_codex_p1_p2_fixes.py` 等 95 项专项及 9 项子测试全部通过；
+  3. Finalize 场景 `pytest -q -k finalize tests/` 100 项全量通过；
+  4. `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警通过。
+
 ## [2026-10-20] feat | D2 门禁对象解耦与双权威消除：单向不可变证据快照哈希强引用与调度权威收敛 (ADR-0006 & OEP-0002)
 
 - 背景：

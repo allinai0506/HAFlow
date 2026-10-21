@@ -337,9 +337,41 @@ def record_business_acceptance(store, task_id, run_id, epoch, candidate_sha, ver
         fresh_workflow, _ = recovery_store._workflow_snapshot(conn, task.get('workflow_id'))
         if _business_scope(fresh, fresh_workflow) != scope:
             raise ValueError('business acceptance scope changed during verification')
-        return state_db.record_event({'event_type': 'business_acceptance_recorded',
+        ev = state_db.record_event({'event_type': 'business_acceptance_recorded',
             'workflow_id': task['workflow_id'], 'task_id': task_id, 'run_id': run_id,
             'node_id': task.get('node') or task.get('stage'), 'source': 'checkpoint', 'payload': payload}, conn=conn)
+
+        try:
+            from .direct_dispatch import gate_verdict_path
+            vpath = Path(gate_verdict_path(task_id))
+            vpath.parent.mkdir(parents=True, exist_ok=True)
+            existing_doc = {}
+            if vpath.exists():
+                try:
+                    existing_doc = json.loads(vpath.read_text(encoding='utf-8')) or {}
+                except Exception:
+                    pass
+            note_text = existing_doc.get('note') or f"business acceptance recorded: {verdict}"
+            verdict_doc = {
+                'verdict': verdict,
+                'note': note_text,
+                'candidate_sha': candidate_sha,
+                'task_id': task_id,
+                'run_id': run_id,
+                'epoch': epoch,
+            }
+            if task.get('agent'):
+                verdict_doc['verifier_agent'] = task['agent']
+            token = task.get('execution_token') or (task.get('payload') or {}).get('execution_token')
+            if token:
+                verdict_doc['execution_token'] = token
+            tmp_vpath = vpath.with_name(f".tmp.{task_id}.{os.getpid()}")
+            tmp_vpath.write_text(json.dumps(verdict_doc, ensure_ascii=False, indent=2), encoding='utf-8')
+            tmp_vpath.replace(vpath)
+        except Exception:
+            pass
+
+        return ev
 
 
 def business_acceptance_receipt(conn, task, candidate_sha):
