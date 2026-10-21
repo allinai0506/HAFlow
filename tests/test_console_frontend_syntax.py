@@ -326,8 +326,14 @@ if (!tasksContainer.innerHTML.includes("task&#39;with&#39;quote-1")) process.exi
 if (!tasksContainer.innerHTML.includes("watchdog &#39;timeout&#39; error")) process.exit(2);
 if (!tasksContainer.innerHTML.includes("openTaskDrawer('task\\\'with\\\'quote-1')")) process.exit(3);
 if (!tasksContainer.innerHTML.includes("dismissAlert('task\\\'with\\\'quote-1')")) process.exit(4);
+if (tasksContainer.innerHTML.includes("showPane")) process.exit(5); // unverified pane omitted
+
+state.project = {slots: [{pane_id: "w1:p1'quote", claimed_by: "task'with'quote-1"}]};
+renderShellAlerts();
+if (!tasksContainer.innerHTML.includes("showPane('w1:p1\\\'quote','task\\\'with\\\'quote-1')")) process.exit(6);
+
 dismissAlert("task'with'quote-1");
-if (!tasksContainer.innerHTML.includes('已知晓')) process.exit(5);
+if (!tasksContainer.innerHTML.includes('已知晓')) process.exit(7);
 process.exit(0);
 """
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:

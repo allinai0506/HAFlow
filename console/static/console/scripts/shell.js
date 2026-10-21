@@ -183,6 +183,7 @@ function renderShellAlerts(){
     const wid=a.workflow_id||'';
     const tid=a.task_id||'';
     const pid=a.pane_id||'';
+    const hasLivePane=pid&&!!(state.project?.slots||[]).some(s=>s.pane_id===pid&&s.claimed_by===tid);
     return `
       <div class="alert-card ${dismissed?'is-dismissed':''}" style="border:1px solid var(--border-subtle);border-radius:8px;padding:12px;margin-bottom:8px;background:var(--bg-subtle,var(--card-bg));${dismissed?'opacity:0.6;':''}">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
@@ -195,13 +196,13 @@ function renderShellAlerts(){
             <div class="task-id" style="margin-top:4px;color:var(--text-secondary);font-size:12px">${esc(tid)}${wid?' · 工作流: '+esc(wid):''}</div>
             ${a.reason?`<div style="margin-top:8px;padding:8px 12px;border-radius:4px;background:rgba(239,68,68,0.1);color:var(--danger,#ef4444);font-size:12px;font-family:monospace">⚠️ 原因: ${esc(a.reason)}</div>`:''}
             <div class="task-meta" style="margin-top:8px;font-size:11px">
-              ${a.stage_label?'阶段: '+esc(a.stage_label)+' · ':''}${a.agent?'执行者: '+esc(a.agent)+' · ':''}${pid?'工位: '+esc(pid):''}
+              ${a.stage_label?'阶段: '+esc(a.stage_label)+' · ':''}${a.agent?'执行者: '+esc(a.agent)+' · ':''}${hasLivePane?'工位: '+esc(pid):''}
             </div>
           </div>
           <div class="alert-actions" style="display:flex;flex-direction:column;gap:8px;flex-shrink:0">
             <button class="btn mini primary" onclick="openTaskDrawer(${jsArg(tid)})">任务详情</button>
             ${wid?`<button class="btn mini" onclick="loadWorkflow(${jsArg(wid)}).then(()=>showShellView('workbench'))">前往工作流</button>`:''}
-            ${pid?`<button class="btn mini" onclick="showPane(${jsArg(pid)},${jsArg(tid)})">查看终端</button>`:''}
+            ${hasLivePane?`<button class="btn mini" onclick="showPane(${jsArg(pid)},${jsArg(tid)})">查看终端</button>`:''}
             ${!dismissed?`<button class="btn mini" onclick="dismissAlert(${jsArg(tid)})">忽略</button>`:''}
           </div>
         </div>
