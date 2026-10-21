@@ -69,6 +69,17 @@ def _gate_verdict_file_is_fresh(ports, path, task):
     except OSError:
         return False
 
+def sync_verdict_from_business_acceptance(ports, task):
+    """Restore durable gate-verdict file projection from authoritative business_acceptance_recorded DB event."""
+    try:
+        store = ports._get_store() if hasattr(ports, "_get_store") else None
+        if not store or not getattr(store, "db_path", None):
+            return None
+        from herdr.task_checkpoint import project_gate_verdict_from_business_acceptance
+        return project_gate_verdict_from_business_acceptance(store, task)
+    except Exception:
+        return None
+
 def _gate_verdict_is_fresh(ports, task):
     """PR #250 & Codex P1: Return True if at least one candidate file is valid and fresh."""
     for path in ports._gate_verdict_file_candidates(task):
@@ -83,6 +94,17 @@ def _gate_verdict_is_fresh(ports, task):
                 return True
         except Exception:
             continue
+    if hasattr(ports, "sync_verdict_from_business_acceptance"):
+        restored = ports.sync_verdict_from_business_acceptance(task)
+        if restored and ports.os.path.exists(restored):
+            try:
+                if ports._gate_verdict_file_is_fresh(restored, task):
+                    with open(restored, encoding="utf-8") as handle:
+                        payload = ports.json.load(handle)
+                    if isinstance(payload, dict) and ports._normalize_gate_verdict(payload.get("verdict")):
+                        return True
+            except Exception:
+                pass
     return False
 
 def _gate_verdict_file_mtime(ports, task):
@@ -99,6 +121,17 @@ def _gate_verdict_file_mtime(ports, task):
                 return ports.os.stat(path).st_mtime
         except Exception:
             continue
+    if hasattr(ports, "sync_verdict_from_business_acceptance"):
+        restored = ports.sync_verdict_from_business_acceptance(task)
+        if restored and ports.os.path.exists(restored):
+            try:
+                if ports._gate_verdict_file_is_fresh(restored, task):
+                    with open(restored, encoding="utf-8") as handle:
+                        payload = ports.json.load(handle)
+                    if isinstance(payload, dict) and ports._normalize_gate_verdict(payload.get("verdict")):
+                        return ports.os.stat(restored).st_mtime
+            except Exception:
+                pass
     return None
 
 def _verdict_from_file(ports, task):
@@ -117,6 +150,19 @@ def _verdict_from_file(ports, task):
         verdict = ports._normalize_gate_verdict(payload.get("verdict"))
         if verdict:
             return verdict, str(payload.get("note") or "").strip()
+    if hasattr(ports, "sync_verdict_from_business_acceptance"):
+        restored = ports.sync_verdict_from_business_acceptance(task)
+        if restored and ports.os.path.exists(restored):
+            try:
+                if ports._gate_verdict_file_is_fresh(restored, task):
+                    with open(restored, encoding="utf-8") as handle:
+                        payload = ports.json.load(handle)
+                    if isinstance(payload, dict):
+                        verdict = ports._normalize_gate_verdict(payload.get("verdict"))
+                        if verdict:
+                            return verdict, str(payload.get("note") or "").strip()
+            except Exception:
+                pass
     return None, ""
 
 def _verdict_affected_task_ids(ports, task):
@@ -152,6 +198,27 @@ def _verdict_affected_task_ids(ports, task):
             if text not in ids:
                 ids.append(text)
         return ids
+    if hasattr(ports, "sync_verdict_from_business_acceptance"):
+        restored = ports.sync_verdict_from_business_acceptance(task)
+        if restored and ports.os.path.exists(restored):
+            try:
+                if ports._gate_verdict_file_is_fresh(restored, task):
+                    with open(restored, encoding="utf-8") as handle:
+                        payload = ports.json.load(handle)
+                    if isinstance(payload, dict) and ports._normalize_gate_verdict(payload.get("verdict")):
+                        raw = payload.get("affected_task_ids")
+                        if not isinstance(raw, list):
+                            return None
+                        ids = []
+                        for item in raw:
+                            text = str(item).strip() if isinstance(item, str) else ""
+                            if not text:
+                                return None
+                            if text not in ids:
+                                ids.append(text)
+                        return ids
+            except Exception:
+                pass
     return None
 
 def _is_instructional_or_ambiguous_verdict_line(ports, line):
@@ -239,14 +306,15 @@ DEPENDENCIES = {'auto_verdict_enabled': ('os',),
  '_normalize_gate_verdict': ('_GATE_VERDICT_ALIASES',),
  '_gate_verdict_file_candidates': ('GATE_VERDICT_FILE', 'direct_dispatch_planner', 'os'),
  '_gate_verdict_file_is_fresh': ('hashlib', 'json', 'os'),
+ 'sync_verdict_from_business_acceptance': ('_get_store',),
  '_gate_verdict_is_fresh': ('_gate_verdict_file_candidates', '_gate_verdict_file_is_fresh',
-                            '_normalize_gate_verdict', 'json', 'os'),
+                            '_normalize_gate_verdict', 'json', 'os', 'sync_verdict_from_business_acceptance'),
  '_gate_verdict_file_mtime': ('_gate_verdict_file_candidates', '_gate_verdict_file_is_fresh',
-                              '_normalize_gate_verdict', 'json', 'os'),
+                              '_normalize_gate_verdict', 'json', 'os', 'sync_verdict_from_business_acceptance'),
  '_verdict_from_file': ('_gate_verdict_file_candidates', '_gate_verdict_file_is_fresh',
-                        '_normalize_gate_verdict', 'json', 'os'),
+                        '_normalize_gate_verdict', 'json', 'os', 'sync_verdict_from_business_acceptance'),
  '_verdict_affected_task_ids': ('_gate_verdict_file_candidates', '_gate_verdict_file_is_fresh',
-                                '_normalize_gate_verdict', 'json', 'os'),
+                                '_normalize_gate_verdict', 'json', 'os', 'sync_verdict_from_business_acceptance'),
  '_is_instructional_or_ambiguous_verdict_line': ('GATE_VERDICT_MARKER',),
  '_verdict_from_screen': ('GATE_NOTE_MARKER', 'GATE_VERDICT_MARKER',
                           '_is_instructional_or_ambiguous_verdict_line', '_normalize_gate_verdict',

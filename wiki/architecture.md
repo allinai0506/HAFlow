@@ -142,7 +142,7 @@ Evidence:
   3. **决策等待校准**：`wait_for_coordinator_decision` 默认预算 30s → 180s（`HERDR_COORDINATOR_DECISION_TIMEOUT`），超时不再立即重试，写入 attention（`decision_timeout`）按 `HERDR_ATTENTION_RETRY_INTERVAL` 退避；
   4. **提交门禁拆分**：Git 集成任务的 commit 由 Controller 下发 `HERDR_DEFER_HEAVY_TESTS=1`（目标仓 hook 识别该显式开关，不做仓库来源猜测，人类/Agent 手工提交仍走全量门禁），全量测试交给 workflow test 节点与 pre-push 门禁；
   5. **唤醒守卫**：存在活跃 workflow 时 Controller 持有 `caffeinate -i -s -w <pid>`（`[AWAKE GUARD]`），workflow 清零或进程退出自动释放，`HERDR_AWAKE_GUARD=0` 关闭。
-- `FACT` **验证节点身份的权威判据（2026-10-21 引入，lessons §186）**:
+- `FACT` **验证节点身份的权威判据（2026-10-22 引入，lessons §187）**:
   `herdr/node_roles.py` 是「该节点是否独立验证冻结候选」的唯一权威来源，判据来自模板
   **声明的语义**（`default_task_type` 经 `resolve_task_type` 解析后为 `test`）而非节点 id
   字面量；legacy id `test`/`review` 继续按 id 命中，因此 `software-development-v1` 与

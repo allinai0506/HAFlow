@@ -7765,7 +7765,36 @@ git diff --check
 
 ---
 
-## 186. 验证节点身份用字面量 id 判定，模板改名即静默失效（2026-10-21）
+## 186. 门禁口径判定对齐、业务验收文件异常透出与权威 DB 投影恢复（2026-10-21）
+
+### 问题背景
+
+在多 Agent 协同工作流的自动化闭环（测试任务派发 → Agent 实际执行 → 测试证据产生 → 业务验收记录 → 门禁结论采纳 → Controller 自动推进）中，暴露出两类阻碍自动推进的核心缺陷：
+1. **门禁口径判定多模块割裂（问题 A）**：`services/controller/auto_verdict.py` 的 `process_gate_verdict_reconciliations` 存在局部的 ad-hoc 判定：当节点 `node_type == "agent"` 且未显式指定 `gate: true`（如 `gate: {}` 或省略 gate 键的测试节点）时，局部的 `not node_match.get("gate")` 将其误判为 `is_gate = False`，跳过了权威的 `ports.node_is_gate()` 判定。同时，`services/controller/node_policy.py` 中的 `resolve_gate_config` 缺少 `(^|[_-])(gate|cleanroom)($|[_-])` 命名模式识别，导致 Controller、Sentinel、CLI 和巡检对同一自定义门禁节点的判定结论产生分歧。
+2. **业务验收与裁决文件同步脱节且静默吞异常（问题 B）**：`herdr/task_checkpoint.py` 的 `record_business_acceptance()` 在 SQLite 数据库中已成功提交 `business_acceptance_recorded` 事实事件，但在同步写入磁盘 `gate-verdict` 文件时，使用了 `except Exception: pass` 静默吞掉所有 I/O 异常。当磁盘写入失败或外部导致文件丢失时，Controller 和 CLI 只检查磁盘文件，无法获取门禁裁决，导致已产生合法通过回执的任务卡死在 `working` 或被 Watchdog 超时标记为 `failed`，整个工作流发生假死。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 门禁判定口径碎片化，各模块自创判定规则 | 节点类型判定必须统一权威来源，禁止在局部流程中硬编码 truthy/falsy 或自造白名单 | 统一复用 `node_policy.resolve_gate_config` 与 `ports.node_is_gate`，对齐 `(^|[_-])(gate|cleanroom)($|[_-])` 模式，确保 Controller/Sentinel/CLI 对门禁属性认知严格一致 |
+| 文件同步异常被静默吞掉导致事实与投影割裂 | 副作用同步失败不得静默忽略，否则会导致上层无法感知落盘缺陷 | 明确区分事务核心与外围投影：文件同步失败必须记录明确日志并向外抛出（`OSError`），严禁无声吞没 |
+| 外部文件系统不可靠导致裁决结算永久阻塞 | 数据库事件是唯一的权威事实源（Single Source of Truth），易失文件只是投影 | Controller 和 CLI 必须支持以 DB `business_acceptance_recorded` 事实为源的幂等投影恢复（`project_gate_verdict_from_business_acceptance`），严格校验身份完整性（task/run/epoch/candidate/artifacts/verdict）后自动重建裁决文件 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_node_gate_receipt_convergence.py
+pytest -q tests/test_slice1_gate_robustness.py tests/test_slice2_scheduling_stability.py tests/test_issue_250_codex_p1_p2_fixes.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：新增 `tests/test_node_gate_receipt_convergence.py`（12 项测试覆盖 P1-P12 全场景：空 dict 门禁、显式 gate:false、自定义 gate 正则对齐、working/failed 任务回执自愈、文件同步异常透出、权威 DB 事件投影恢复、陈旧 epoch/candidate 拒绝、幂等防重推推进）。全部 153 项核心与回归测试 100% 通过。
+
+---
+
+## 187. 验证节点身份用字面量 id 判定，模板改名即静默失效（2026-10-22）
 
 ### 问题背景
 
@@ -7793,13 +7822,15 @@ git diff --check
 | `agent_router.py:505/547` | 跨阶段独立性（`exclude_stage_agents`）与 FR-6.1 fail-closed 默认排除不生效 |
 | `task_delivery.py:88` | 验证工位被当作可写任务 |
 
-全库扫描共 **15 处出现、12 个站点**（初判 7 处偏低）。另有一处同族但不同概念的判据 `task_cli_verification.py:_is_gate_task`，它自带第三套字面量表（含 `cleanroom_test`/`cleanroom_review`/`wrapup` 及正则 `(^|[_-])(gate|cleanroom)($|[_-])`）——同一个仓库里「门禁节点」存在三套互不知晓的词表。
+全库扫描共 **15 处出现、12 个站点**（初判 7 处偏低）。
+
+**同一缺陷已有三套并存的补丁式词表**（本次修复前）：`task_cli_verification.py:_is_gate_task` 自带一份字面量清单加正则；§186 又给 `node_policy.resolve_gate_config` 补了同一条正则 `(^|[_-])(gate|cleanroom)($|[_-])`；其余站点仍是裸 `{"test","review"}`。**按名字打补丁只能覆盖已被想到的名字**——模板把验证节点命名为 `audit`、`qa_gate`、`independent_check` 时，正则同样漏掉，缺陷原样复发。
 
 ### 经验教训
 
 | 问题 | 教训 | 规范 |
 |------|------|------|
-| 语义角色用字面量 id 判定 | 模板 id 是**命名**，不是**契约**。任何以 id 字面量为条件的保护，都会在模板改名时静默失效，且失效方式是「放行」而非「报错」 | 角色判定必须来自模板声明的语义字段（`default_task_type` / `gate`），收敛为单一权威纯函数，禁止在调用点散落字面量集合 |
+| 语义角色用字面量 id / 名字模式判定 | 模板 id 是**命名**，不是**契约**。以 id 字面量或名字正则为条件的保护，会在模板改名时静默失效，且失效方式是「放行」而非「报错」；逐个补名字只是把复发改晚一点 | 角色判定必须来自模板**声明的语义字段**（`default_task_type` / `gate`），收敛为单一权威纯函数，禁止在调用点散落字面量集合或名字正则 |
 | 判据只有一个形状 | 同一角色在模板原始节点、`normalize_node` 后的派发节点、持久化 Task 上是三种不同字段形状（`default_task_type` / `declared_task_type`+`task_type` / `task_type`），只吃一种形状的判据会在另一条链路上静默降级 | 权威判据必须同时提供 node 级、task 级、id+config 级三个入口，并分别有测试 |
 | 替换判据时未检查上下文可得性 | `agent_router.py:547` 若机械替换成 `stage in verifier_node_ids(wf_cfg)`，当 `wf_cfg` 为 None 时返回空集，legacy `test`/`review` 会**丢掉 FR-6.1 fail-closed 默认排除**——把一处静默失效换成另一处 | 替换判据必须逐站点核对「配置不可得时」的退化方向，fail-closed 语义要用不依赖 config 的 legacy 兜底保住 |
 | fail-closed 门禁跨执行模式复用 | 候选 SHA 是 Git 事实；context 模式模板（`bidding`、`business-research-v1`）全程无 Git 语义，对它们的验证节点强制候选证明会直接打断派发 | fail-closed 门禁必须显式声明适用范围，用权威 `execution_mode(workflow)` 守卫，而不是假定所有工作流都有候选 |
@@ -7817,4 +7848,4 @@ git diff --check
 
 **遗留（已记录未修）**：`coordinator_messages.py:261` 仍是字面量。该处只生成兜底路径给总指挥的**建议命令文本**（是否附 `--onto`），不是强制门禁；且 `build_stage_advance_context` 是有意的纯函数，只拿得到 `next_stage` 字符串、拿不到下一个节点的 dict，正确修需要改签名由调用方传入。其残余风险已被本次修好的 `validate_allocated_launch_baselines` 兜住：即便建议文本带了 `--onto`，洁净室节点仍会走候选基线门而非 selective 分支。
 
-**同源不同概念（未合并）**：`_is_gate_task` 回答「是否产出门禁结论」（含 `wrapup`、`acceptance`），`is_verifier_node` 回答「是否独立验证冻结候选」（不含 `wrapup`）。两者语义不同，不是平行事实源，但三套词表并存本身是债务，合并需要单独的规格决策。
+**同源不同概念（未合并）**：`_is_gate_task` 与 §186 对齐的 `resolve_gate_config` 回答「是否产出门禁结论 / 是否有门禁契约」（含 `wrapup`、`acceptance`），`is_verifier_node` 回答「是否独立验证冻结候选」（不含 `wrapup`）。两者语义不同，不是平行事实源；但**四套词表并存**本身是债务——`node_roles` 已消除其中按字面量判定的那一类，剩下按名字正则的两处仍应收敛到声明语义，需要单独的规格决策。

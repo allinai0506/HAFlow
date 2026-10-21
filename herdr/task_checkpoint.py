@@ -342,37 +342,39 @@ def record_business_acceptance(store, task_id, run_id, epoch, candidate_sha, ver
             'workflow_id': task['workflow_id'], 'task_id': task_id, 'run_id': run_id,
             'node_id': task.get('node') or task.get('stage'), 'source': 'checkpoint', 'payload': payload}, conn=conn)
 
-        try:
-            from .direct_dispatch import gate_verdict_path
-            vpath = Path(gate_verdict_path(task_id))
-            vpath.parent.mkdir(parents=True, exist_ok=True)
-            existing_doc = {}
-            if vpath.exists():
-                try:
-                    existing_doc = json.loads(vpath.read_text(encoding='utf-8')) or {}
-                except Exception:
-                    pass
-            note_text = existing_doc.get('note') or f"business acceptance recorded: {verdict}"
-            verdict_doc = {
-                'verdict': verdict,
-                'note': note_text,
-                'candidate_sha': candidate_sha,
-                'task_id': task_id,
-                'run_id': run_id,
-                'epoch': epoch,
-            }
-            if task.get('agent'):
-                verdict_doc['verifier_agent'] = task['agent']
-            token = task.get('execution_token') or (task.get('payload') or {}).get('execution_token')
-            if token:
-                verdict_doc['execution_token'] = token
-            tmp_vpath = vpath.with_name(f".tmp.{task_id}.{os.getpid()}")
-            tmp_vpath.write_text(json.dumps(verdict_doc, ensure_ascii=False, indent=2), encoding='utf-8')
-            tmp_vpath.replace(vpath)
-        except Exception:
-            pass
+    try:
+        from .direct_dispatch import gate_verdict_path
+        vpath = Path(gate_verdict_path(task_id))
+        vpath.parent.mkdir(parents=True, exist_ok=True)
+        existing_doc = {}
+        if vpath.exists():
+            try:
+                existing_doc = json.loads(vpath.read_text(encoding='utf-8')) or {}
+            except Exception:
+                pass
+        note_text = existing_doc.get('note') or f"business acceptance recorded: {verdict}"
+        verdict_doc = {
+            'verdict': verdict,
+            'note': note_text,
+            'candidate_sha': candidate_sha,
+            'task_id': task_id,
+            'run_id': run_id,
+            'epoch': epoch,
+        }
+        if task.get('agent'):
+            verdict_doc['verifier_agent'] = task['agent']
+        token = task.get('execution_token') or (task.get('payload') or {}).get('execution_token')
+        if token:
+            verdict_doc['execution_token'] = token
+        tmp_vpath = vpath.with_name(f".tmp.{task_id}.{os.getpid()}")
+        tmp_vpath.write_text(json.dumps(verdict_doc, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp_vpath.replace(vpath)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error("Failed to sync gate verdict file for task %s: %s", task_id, exc)
+        raise OSError(f"Failed to synchronize gate verdict file for task {task_id}: {exc}") from exc
 
-        return ev
+    return ev
 
 
 def business_acceptance_receipt(conn, task, candidate_sha):
@@ -413,3 +415,82 @@ def reject_verdict_only_override(task):
             and is_verifier_task(task)):
         raise ValueError('receipt-v1 business gate cannot be force-passed; rerun the gate '
                          'on the current candidate and publish acceptance-record with its own evidence')
+
+
+def project_gate_verdict_from_business_acceptance(store, task):
+    """Restore durable gate-verdict file projection from authoritative business_acceptance_recorded DB event.
+
+    Strictly validates:
+    - task_id, run_id, epoch, candidate_sha matching current task
+    - valid verdict in ('pass', 'blocked')
+    - valid artifacts
+    Returns the path to the restored verdict file if projected, else None.
+    """
+    if not task or not getattr(store, "db_path", None):
+        return None
+    task_id = task.get("task_id")
+    if not task_id:
+        return None
+    candidate_sha = task.get("candidate_sha")
+    if not candidate_sha:
+        return None
+    completion_epoch = task.get("completion_epoch")
+    run_id = task.get("run_id")
+
+    from . import state_db
+    conn = state_db.get_readonly_db_connection(store.db_path)
+    try:
+        receipt = business_acceptance_receipt(conn, task, candidate_sha)
+        if not receipt:
+            return None
+        payload = receipt.get("payload") or {}
+        verdict = payload.get("verdict")
+        if verdict not in ("pass", "blocked"):
+            return None
+        # Strict validation: epoch, run_id, candidate_sha
+        if completion_epoch and payload.get("epoch") != completion_epoch:
+            return None
+        if run_id and payload.get("run_id") != run_id:
+            return None
+        if payload.get("candidate_sha") != candidate_sha:
+            return None
+        # Verify artifacts
+        artifacts = payload.get("artifacts")
+        if not isinstance(artifacts, list) or not (1 <= len(artifacts) <= 20):
+            return None
+
+        # Project file atomically
+        from .direct_dispatch import gate_verdict_path
+        vpath = Path(gate_verdict_path(task_id))
+        vpath.parent.mkdir(parents=True, exist_ok=True)
+        existing_doc = {}
+        if vpath.exists():
+            try:
+                existing_doc = json.loads(vpath.read_text(encoding="utf-8")) or {}
+            except Exception:
+                pass
+        note_text = existing_doc.get("note") or f"business acceptance restored: {verdict}"
+        verdict_doc = {
+            "verdict": verdict,
+            "note": note_text,
+            "candidate_sha": candidate_sha,
+            "task_id": task_id,
+            "run_id": payload.get("run_id") or run_id,
+            "epoch": payload.get("epoch") or completion_epoch,
+        }
+        if task.get("agent"):
+            verdict_doc["verifier_agent"] = task["agent"]
+        token = task.get("execution_token") or (task.get("payload") or {}).get("execution_token")
+        if token:
+            verdict_doc["execution_token"] = token
+
+        tmp_vpath = vpath.with_name(f".tmp.{task_id}.{os.getpid()}")
+        tmp_vpath.write_text(json.dumps(verdict_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_vpath.replace(vpath)
+        return str(vpath)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to project gate verdict for %s: %s", task_id, exc)
+        return None
+    finally:
+        conn.close()

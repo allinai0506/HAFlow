@@ -3423,11 +3423,19 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Workflow 控制优先进入 100 Action 展示窗口，Operation 定位使用精确 Action 查询并隔离迟到响应；恢复回执先匹配 checkpoint 再限量。
 - Evidence：`herdr/workflow_control_store.py`、`tests/test_controller_cockpit_bounded_fix2.py`、`tests/test_console_controller_cockpit_e2e.py`。
 
-## [2026-10-21] Herdr Core | 验证节点身份改为模板声明语义（修 wf-haflow-1021-01 门禁验错版本）
+## [2026-10-21] Gate | 测试节点门禁判定对齐与业务验收回执 DB 投影收敛（V1）
+
+- 修复 Controller、Sentinel、CLI 门禁判定口径割裂：`services/controller/node_policy.py:resolve_gate_config` 补全 `(^|[_-])(gate|cleanroom)($|[_-])` 正则命名模式；`services/controller/auto_verdict.py` 废除局部 ad-hoc 门禁检查，统一复用 `ports.node_is_gate()`，确保未显式声明 gate 的测试节点与 `gate: {}` 节点均被正确作为门禁结算。
+- 业务验收异常透出与权威 DB 投影恢复：`herdr/task_checkpoint.py:record_business_acceptance` 在落库后透出文件同步异常（`OSError`）；新增 `project_gate_verdict_from_business_acceptance`，以数据库 `business_acceptance_recorded` 为唯一事实源，严格校验任务身份、epoch、候选 SHA、产物与裁决合法性，在裁决文件缺失或损坏时支持 Controller/CLI 自动自愈投影。
+- 自动化执行与推进闭环：在门禁回执就绪时，处于 `working` 或 Watchdog 误标 `failed` 的门禁任务均可正确由 Controller 采纳裁决（`auto_verdict`）、更新任务为终态并自动驱动后继节点派发，严格防范陈旧凭证并保持幂等。
+- Evidence：`tests/test_node_gate_receipt_convergence.py`（12 项测试全部通过，含真实测试执行、业务验收回执与 Controller 推进闭环）、Lesson 186。
+
+## [2026-10-22] Herdr Core | 验证节点身份改为模板声明语义（修 wf-haflow-1021-01 门禁验错版本）
 
 - Updated [[architecture]]：新增 `herdr/node_roles.py` 作为「是否独立验证冻结候选」的唯一权威判据，来自模板声明的 `default_task_type`（经 `resolve_task_type` 解析）而非节点 id 字面量；`candidate_identity_applies` 用权威 `execution_mode` 把 fail-closed 候选门禁限定在 Git 语义工作流。
 - 替换 11 个站点的 `{"test","review"}` 字面量（全库扫描为 15 处出现、12 个站点）：候选身份证明、分配后基线门、并行验证者分支归属、wrapup 双门禁汇聚、receipt-v1 force-pass 防护、acceptance-record 指令下发、跨阶段独立性、可写性判定。
 - 全模板分类断言固化：`software-development-v1` / `spec-development-v1` 的 `test`/`review` 判据前后完全等价（零行为变化）；`code-craft-v1` 的 `cleanroom_test`/`cleanroom_review` 新命中，`craft`/`wrapup` 不命中；context 模板（`bidding`、`business-research-v1`）的验证节点由 Git 守卫排除，派发不受影响。
 - 自审拦下一处回归：`agent_router.py` 的 FR-6.1 fail-closed 默认排除若机械替换为 `verifier_node_ids(wf_cfg)`，在 `wf_cfg` 为 None 时会返回空集而丢失 legacy 保护；改用不依赖 config 的 `is_verifier_node_id`。
+- 与 Lesson 186 的关系：该条给 `resolve_gate_config` 补的是**名字正则**，本条改为**声明语义**。两者互补（前者判「有无门禁契约」，后者判「是否独立验证候选」，`wrapup` 有 `gate:` 但不是 verifier），但按名字打补丁覆盖不到 `audit`/`qa_gate` 这类命名，剩余两处名字正则仍应收敛到声明语义。
 - 遗留已记录未修：`coordinator_messages.py:261` 仍是字面量，只影响兜底路径给总指挥的建议命令文本，正确修需改纯函数签名；其残余风险已被本次修好的分配后基线门兜住。
-- Evidence：`herdr/node_roles.py`、`tests/test_node_roles.py`、`tests/test_verifier_identity_parity.py`、`tests/test_task_cli_launch_preflight.py`、`tests/test_fix_bug1002_parallel_candidate.py`；受影响 66 个测试文件回归 `1542 passed, 2 skipped, 237 subtests passed`；`docs/lessons/lessons-learned.md` §186。
+- Evidence：`herdr/node_roles.py`、`tests/test_node_roles.py`、`tests/test_verifier_identity_parity.py`、`tests/test_task_cli_launch_preflight.py`、`tests/test_fix_bug1002_parallel_candidate.py`；受影响 66 个测试文件回归 `1542 passed, 2 skipped, 237 subtests passed`；`docs/lessons/lessons-learned.md` §187。
