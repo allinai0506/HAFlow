@@ -7642,3 +7642,30 @@ python3 scripts/check_state_db_split.py --final
 ```
 
 证据：`test_legacy_rollout_rejects_helper_moved_inside_transaction`、`test_import_value_assertions_reject_wrong_task_mapping`、`test_nested_upward_import_is_rejected`。本单承接基线为 `a56739e`（8169行、167绑定、35个time调用、119条matrix、45授权路径）；原候选基线 `a6b315a` 与门禁资产来源 `a1614e5` 只描述历史，不作本轮证明。迁移行号由 `--report --symbols` 的 symbol→line 生成，`register_workflow` 归属 transition_gate（300-500行目标 + 第9条例外）。
+
+## 182. 门禁配置判定口径一致性、双凭证自动同步与重放提交收编（2026-10-21）
+
+### 问题背景
+
+在 `wf-haflow-1020-02` 复杂长流程中，暴露出三项平台核心机制缺陷：
+1. **P1 门禁口径冲突**：工作流配置节点为 `gate: {}` 时，CLI/Sentinel 的 `_is_gate_task` 因空字典在布尔上下文为假而直接 `return False`，无法命中 legacy 兜底；而 Controller 判定为门禁，导致 Watchdog 判死后的实质性通过裁决无法被 `herdr-task set ... completed --verdict pass` 或 `adopt-verdict` 采纳。
+2. **P8 门禁双凭证割裂**：任务执行完 `acceptance-record` 后在数据库生成了 `business_acceptance_recorded` 事件，但未在磁盘落盘 `gate-verdicts/<task>.json`，Sentinel 与 Controller 无法感知裁决，导致 Agent 空转被 Watchdog 杀死。
+3. **P3 finalize 拒绝合法 replay**：cherry-pick 重放代码继承了旧提交的 `author_ts`，在控制器 `git_finalize` 调用 `herdr-task commit` 时未带 `--allow-rebase`，被当做旧于任务创建的非法篡改提交触发 `commit_predates_task` 拒绝收编。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 配置中空字典被当作 falsy 处理 | 配置项存在与否（is not None）不等同于配置项布尔求值 | 区分 `gate is False`（显式禁用）、`gate is not None`（显式启用）与 `gate is None`（回退默认阶段）；标准阶段 `test/review/wrapup` 必须维持门禁语义 |
+| 业务验收与门禁裁决分离为两套不同步系统 | 多套凭证不同步必然出现状态撕裂与死循环 | `record_business_acceptance` 在记录验收事件时，必须原子同步生成合规的 `gate-verdicts/<task>.json`，实现双凭证合一 |
+| 重放与更迭场景保留历史作者时间戳 | 平台自身驱动的 replay/supersede 必然产生早于 task 创建的 author_ts | 在软件适配层识别 `supersedes`、`onto_branch`、`is_replay`、`dispatch_round > 1` 为合法 rebase 场景，并在 finalize 时显式追加 `--allow-rebase` |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_slice1_gate_robustness.py
+pytest -q tests/test_issue_250_codex_p1_p2_fixes.py
+pytest -q -k finalize tests/
+```
+
+证据：新增 `tests/test_slice1_gate_robustness.py`（4 项通过），覆盖 `gate: {}` 对称判定、业务验收同步落盘 verdict 文件、软件适配器识别重放特征以及 `git_finalize` 自动传参 `--allow-rebase`。既有 95 项门禁专项与 100 项 finalize 场景测试全量通过。

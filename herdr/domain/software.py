@@ -108,6 +108,15 @@ class SoftwareDomainAdapter(BaseDomainAdapter):
         task_val = task.get("allow_rebase")
         if task_val is not None:
             return bool(task_val)
-        if bool(task.get("onto")):
+        if bool(task.get("onto")) or bool(task.get("onto_branch")):
             return True
+        if bool(task.get("supersedes")):
+            return True
+        if bool(task.get("is_replay")) or bool(task.get("replay")):
+            return True
+        try:
+            if int(task.get("dispatch_round") or 1) > 1:
+                return True
+        except (ValueError, TypeError):
+            pass
         return bool(env_flag)

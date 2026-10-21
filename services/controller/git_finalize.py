@@ -3,6 +3,25 @@
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
 
+def _should_allow_rebase(task):
+    if not task or not isinstance(task, dict):
+        return False
+    if task.get("allow_rebase") is not None:
+        return bool(task.get("allow_rebase"))
+    if bool(task.get("onto")) or bool(task.get("onto_branch")):
+        return True
+    if bool(task.get("supersedes")):
+        return True
+    if bool(task.get("is_replay")) or bool(task.get("replay")):
+        return True
+    try:
+        if int(task.get("dispatch_round") or 1) > 1:
+            return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
 def finalize_completed_task(ports, task_id):
     """Drive one git-finalize step; returns ``{"retryable": bool, ...}``.
 
@@ -77,14 +96,19 @@ def finalize_completed_task(ports, task_id):
             commit_env = dict(ports.os.environ)
             commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
 
+            commit_args = [
+                ports.TASK_MANAGER,
+                "commit",
+                task_id,
+                "--message",
+                f"task: {task_id}",
+            ]
+            check_rebase = getattr(ports, "_should_allow_rebase_for_finalize", _should_allow_rebase)
+            if check_rebase(task):
+                commit_args.append("--allow-rebase")
+
             result = ports.subprocess.run(
-                [
-                    ports.TASK_MANAGER,
-                    "commit",
-                    task_id,
-                    "--message",
-                    f"task: {task_id}"
-                ],
+                commit_args,
                 text=True,
                 capture_output=True,
                 env=commit_env
