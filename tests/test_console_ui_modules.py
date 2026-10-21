@@ -55,7 +55,6 @@ def test_all_original_function_bodies_survive_encapsulation():
                 'createWorkflowCheckpoint', 'restoreWorkflowCheckpoint', 'advanceStage',
                 'controllerActionCard', 'catMeta', 'canSteerTask', 'canForceReviewTask', 'canForcePassTask'}
     replaced.add('runOpsAnomalyAction')
-    replaced.add('visibleAlerts')
     replaced.add('renderOverview')
     replaced.add('paintCrumb')
     replaced.add('renderShellAlerts')

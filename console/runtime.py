@@ -209,17 +209,19 @@ def overview():
         if t.get('status') == 'superseded' or t.get('superseded_by') or t.get('task_id') in superseded_ids:
             continue
         wid = t.get('workflow_id')
+        wf = wfs.get(wid) if wid else None
         if wid:
-            wf = wfs.get(wid)
             if wf and wf.get('status') in terminal_wf_statuses:
                 continue
             if not wf and wid not in active_wf_ids:
                 continue
+        pid = t.get('project_id') or (wf.get('project_id') if wf else None)
+        pname = t.get('project_name') or (wf.get('project_name') if wf else None)
         alerts.append({
             'task_id': t.get('task_id'),
             'workflow_id': t.get('workflow_id'),
-            'project_id': t.get('project_id'),
-            'project_name': t.get('project_name'),
+            'project_id': pid,
+            'project_name': pname,
             'status': t.get('status'),
             'agent': t.get('agent'),
             'pane_id': t.get('pane_id'),

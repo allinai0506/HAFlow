@@ -98,6 +98,36 @@ class TestConsoleOverviewAlerts(unittest.TestCase):
             ov = runtime.overview()
             self.assertEqual(ov["alerts"], [])
 
+    def test_task_without_project_id_resolves_project_from_workflow(self):
+        """Tasks created without explicit project_id (e.g. router failure tasks)
+        must resolve project_id and project_name from the workflow."""
+        fake_tasks = [
+            {
+                "task_id": "router-failure-task-1",
+                "workflow_id": "wf-running-1",
+                "status": "failed",
+                "failure_reason": "router error",
+            }
+        ]
+        fake_workflows = {
+            "wf-running-1": {
+                "workflow_id": "wf-running-1",
+                "status": "running",
+                "project_id": "proj-resolved-1",
+                "project_name": "Project Resolved",
+            }
+        }
+        with patch("console.inventory.tasks", return_value=fake_tasks), \
+             patch("console.inventory.workflows", return_value=fake_workflows), \
+             patch("console.runtime.spaces", return_value=[]), \
+             patch("console.runtime.service_status", return_value={}):
+            ov = runtime.overview()
+            self.assertEqual(len(ov["alerts"]), 1)
+            alert = ov["alerts"][0]
+            self.assertEqual(alert["task_id"], "router-failure-task-1")
+            self.assertEqual(alert["project_id"], "proj-resolved-1")
+            self.assertEqual(alert["project_name"], "Project Resolved")
+
 
 if __name__ == "__main__":
     unittest.main()

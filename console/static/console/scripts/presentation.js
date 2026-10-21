@@ -190,15 +190,13 @@ if(typeof window!=='undefined'){
 
 function visibleAlerts(){
   const all=(state.overview&&state.overview.alerts)||[];
-  let rows=all;
-  if(state.projectId){
-    rows=rows.filter(a=>!a.project_id||a.project_id===state.projectId);
-  }
+  if(!state.projectId)return [];
+  let rows=all.filter(a=>a.project_id===state.projectId);
   if(state.workflowId){
     const exact=rows.filter(a=>a.workflow_id===state.workflowId);
-    if(exact.length)rows=exact;
+    if(exact.length)rows=exact
   }
-  return rows;
+  return rows
 }
 
 function formatElapsed(seconds){
