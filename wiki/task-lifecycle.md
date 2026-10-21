@@ -100,6 +100,11 @@ Evidence:
 - 该防御性收敛杜绝了从 `dispatched` 或 `blocked` 暂停的任务在恢复时产生非法状态转移（`Illegal transition: paused -> dispatched/blocked`），确保任务不会被卡死在暂停态。
 - 证据链：`herdr/task_cli_workflow.py:395-405`、`tests/test_resume_transition.py`。
 
+`FACT` **任务创建（add）单条写入与防状态回退保证（SC-017）**：
+- `herdr-task add` 注册新任务时仅将新增任务单条写入持久化层（`save_tasks({"tasks": [task]})`），杜绝了旧实现遍历全量已有任务重新 upsert 导致的并发状态回退（State Regression）与版本号（version）误自增；
+- `add_task` 对重复 `task_id` 施加内存快照与数据库双重强一致性拦截（`Task already exists: <task_id>`），拒绝重复注册并保护已有任务不被覆盖。
+- 证据链：`herdr/task_cli_tasks.py:140-174`、`tests/test_task_add_overwrite_verification.py`。
+
 `FACT` 当前内循环耗尽的blocked是等待仲裁的持久事实，Agent working/idle/done不能代替明确恢复决策。实时事件保留该状态；重启在已知运行信号下恢复仲裁队列。最新blocked转换reason优先于可遗留的sentinel_reason；历史缺失时保留legacy行为。证据：`tests/test_inner_loop_arbitration_recovery.py`。旧屏幕跨恢复epoch（C03c）仍单独待修。仲裁卡及人工升级提示使用现有合法blocked→working命令，不增状态边或force；真实CLI参数执行回归见`tests/test_blocked_recovery_command_contract.py`（C30）。
 
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop

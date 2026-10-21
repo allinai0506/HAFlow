@@ -3269,3 +3269,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `wiki/task-lifecycle.md`：在任务状态机章节补充 SC-016 恢复目标收敛规则与防卡死说明。
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-016 状态从“未验证”更新为“已解决（已验证）”。
 - Evidence：`herdr/task_cli_workflow.py:382-405`、`tests/test_resume_transition.py`（6/6 PASSED）、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Fix & Docs | 任务注册覆盖写并发防回退与单条写入收敛 (SC-017)
+
+- Updated `herdr/task_cli_tasks.py:add_task`：
+  - 消除全量任务重新持久化的并发状态回退漏洞：将历史残留的 `save_tasks(data)` 优化为仅保存新注册的单条任务 `save_tasks({"tasks": [task]})`，避免把内存快照中的旧任务全部遍历重新 upsert，彻底杜绝老任务状态被回退或其版本号无端自增的隐患；
+  - 增加内存快照与 SQLite 数据库（`store.get_task`）双重强一致性冲突拦截，若目标 `task_id` 已存在则立即阻断退出，防止覆盖现有任务数据。
+- Updated `wiki/task-lifecycle.md`：在任务生命周期章节增补 SC-017“任务创建单条写入与防状态回退保证”条款。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-017 状态从“未验证”更新为“已解决”。
+- Added `tests/test_task_add_overwrite_verification.py`：新增对老任务状态防护、版本号保护及重复注册拦截的端到端 CLI 回归测试（2/2 PASSED）。
+- Evidence：`herdr/task_cli_tasks.py:140-174`、`tests/test_task_add_overwrite_verification.py`、`ontology/tests/audit_ontology.py`。

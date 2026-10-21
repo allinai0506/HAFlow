@@ -21,7 +21,7 @@
 | SC-014 | fix-loop 可作废集合 | controller 注释要求与矩阵“→ superseded”一致 | FIX_LOOP_SUPERSEDEABLE 已补齐 paused 与 interrupted，与 TASK_TRANSITIONS 完全对齐 | — | **已解决**（D5 落地） |
 | SC-015 | 门禁豁免守卫 | 控制台 force-pass 带 expected_version（console/control_api.py L409） | CLI 与 factory 的 force-pass 不带 expected_version（bin/herdr-factory L652-656）；bypass 亦不带 | — | 确认（控制台确认提示未核对） |
 | SC-016 | resume 目标 | 矩阵：paused 不可达 dispatched、blocked | `herdr/task_cli_workflow.py:resume_task` 显式守卫仅在最新来源为 `rework` 时恢复为 `rework`，其余来源（含 `dispatched`、`blocked`、`working`）均安全收敛恢复至 `working`；`TASK_TRANSITIONS["paused"]` 允许流转至 `working`/`rework`，经 `tests/test_resume_transition.py` 验证无非法边风险 | — | **已解决**（已验证安全收敛至 working/rework 合法子集） |
-| SC-017 | `herdr-task add` 覆盖写 | — | bin/herdr-task L1199-1203 与 state_db.py L1714-1731 的覆盖写可能回退并发状态（子代理取证） | — | 未验证 |
+| SC-017 | `herdr-task add` 覆盖写 | — | `add_task` 历史上通过 `save_tasks(data)` 遍历全量任务 upsert，存在覆写并发状态与自增旧任务版本的隐患；现已优化为单条任务持久化 `save_tasks({"tasks": [task]})`，并施加内存与 DB 双重存在性拒绝守卫，经 `tests/test_task_add_overwrite_verification.py` 验证 | — | **已解决**（已修复单条写入隔离并验证防回退） |
 | SC-018 | 越权状态变更拦截 | wiki/task-lifecycle.md L15：“任何越权状态变更将被 CLI 直接拦截” | 8 类状态机外写入路径，见 states/task_lifecycle.yaml 的 out_of_matrix_writers | — | **已裁决**（ADR-0005 / OEP-0002） |
 | SC-019 | 控制台 force-review | 控制台写路由用于人工复审 | console/task_api.py L266-290 直接设置 status=agent_done，无守卫、无事件 | — | 确认 |
 
@@ -37,4 +37,5 @@
 8. SC-011、SC-012 已由 ADR-0006、ADR-0007 与 OEP-0002 裁决：工作流初始状态定案为 running（pending 为未装配/草稿态）；门禁解耦为 gate_spec 与 gate_verdict，DB 为调度第一事实源，文件为不可变快照。
 9. SC-013、SC-014 已解决：任务类型词表统一对齐为 CLI choices；补齐 fix-loop 可作废集合（D4、D5）。
 10. SC-016 已解决（已验证）：核查并验证 `resume_task` 防御性恢复逻辑，任务暂停恢复时仅在来源为 rework 时返回 rework，其余情况统一安全收敛为 working，完全遵循状态转移矩阵，专项测试 `tests/test_resume_transition.py`（6/6）全绿通过。
-11. SC-018 已由 ADR-0005 与 OEP-0002 裁决：状态机外写入显式收敛为 privileged_transitions 特权流转契约，严禁直写 SQL/save_task 绕过网关。
+11. SC-017 已解决：`add_task` 优化为仅保存新注册单条任务，消除遍历覆写已有任务的并发回退窗口，并通过双重存在性拦截防止重复覆盖；回归测试 `tests/test_task_add_overwrite_verification.py` 验证通过。
+12. SC-018 已由 ADR-0005 与 OEP-0002 裁决：状态机外写入显式收敛为 privileged_transitions 特权流转契约，严禁直写 SQL/save_task 绕过网关。
