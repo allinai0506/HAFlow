@@ -121,6 +121,19 @@ Evidence:
   3. **架构对称性**：消除历史版本中仅 Web 控制台携带 `expected_version` 而 CLI 无参数保护的非对称漏洞，使脚本与自动化管线同样享有数据库强一致性防踩踏保护。
 - 证据链：`herdr/kernel.py:839-868`、`bin/herdr-task:234-245`、`bin/herdr-factory:652-675`、`tests/test_gate_exemption_version_guard.py`。
 
+`FACT` **门禁豁免操作人规范与审计有效性契约（SC-010）**：
+- 门禁人工放行与特权变更必须具备明确归属与可追溯的操作人标识（`operator`），杜绝匿名或占位符形式的放行操作：
+  1. **纯逻辑校验器 (`herdr/transitions.py:validate_operator`)**：
+     - **非空与非空白限制**：禁止 `None`、空字符串或全空白字符；
+     - **长度与格式边界**：去除首尾空白后的有效长度必须在 1 至 128 字符之间；
+     - **注入与破坏性字符拦截**：严格拦截 ASCII 控制字符（`ord(c) < 32`）、路径遍历与路径分隔符（`/`、`\`、`..`）、脚本注入字符（`<`、`>`）及复合数据类型；
+     - **匿名与占位标识阻断**：大小写不敏感拒绝 `none`、`null`、`nil`、`undefined`、`unknown`、`anonymous` 等占位符；
+  2. **端到端接入与审计透传**：
+     - **核心写入通道**：在 `kernel.bypass_task_gate`、`kernel.force_pass_gate` 与 `state_db.force_pass_gate` 入口强制执行校验，规范化后记录至旁路凭证（`receipt`）、任务阶段说明（`stage_verdict_note: [GATE BYPASS by <operator>]` 或 `[FORCE PASS by <operator>]`）、工作流覆盖记录（`gate_overrides`）与审计轨迹事件中；
+     - **Web 控制台策略**：在 `console/workflow_policy.py:_validate_force_pass_params` 与 `console/task_api.py:api_task_force_review` 中执行校验，拦截非法操作人标识并转换为标准 `RuntimeError`，缺省时安全回退至已知上下文合法主体（`human` 或 `human_console`）；
+     - **CLI 门禁命令**：`bin/herdr-task bypass-gate` 与 `bin/herdr-factory force-pass` 透传 `--operator`，并在非法输入时以非零状态码 fail-closed 终止。
+- 证据链：`herdr/transitions.py:validate_operator`、`herdr/kernel.py:force_pass_gate`、`herdr/kernel.py:bypass_task_gate`、`herdr/state_db.py:force_pass_gate`、`console/workflow_policy.py:_validate_force_pass_params`、`console/task_api.py:api_task_force_review`、`tests/test_gate_exemption_operator_audit.py`。
+
 `FACT` 当前内循环耗尽的blocked是等待仲裁的持久事实，Agent working/idle/done不能代替明确恢复决策。实时事件保留该状态；重启在已知运行信号下恢复仲裁队列。最新blocked转换reason优先于可遗留的sentinel_reason；历史缺失时保留legacy行为。证据：`tests/test_inner_loop_arbitration_recovery.py`。旧屏幕跨恢复epoch（C03c）仍单独待修。仲裁卡及人工升级提示使用现有合法blocked→working命令，不增状态边或force；真实CLI参数执行回归见`tests/test_blocked_recovery_command_contract.py`（C30）。
 
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop

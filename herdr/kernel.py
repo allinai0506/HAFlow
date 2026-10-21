@@ -404,6 +404,8 @@ def force_pass_gate(
     expected_task_versions: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Forcibly mark a gate node verdict as passed/approved with an audit note."""
+    from .transitions import validate_operator
+    operator = validate_operator(operator)
     s = _get_store(store)
     if hasattr(s, "force_pass_gate"):
         res = s.force_pass_gate(
@@ -859,6 +861,9 @@ def bypass_task_gate(
     cleaned_reason = str(reason or "").strip()
     if not cleaned_reason:
         raise ValueError("Gate bypass reason must be provided")
+
+    from .transitions import validate_operator
+    operator = validate_operator(operator)
 
     s = _get_store(store)
     task = s.get_task(task_id)

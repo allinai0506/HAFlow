@@ -269,7 +269,14 @@ def api_task_force_review(b):
     tid = str(b.get('task_id') or '').strip()
     if not tid:
         raise RuntimeError('task_id 不能为空')
-    op = str(b.get('operator') or 'human_console').strip()
+    raw_op = b.get('operator')
+    if raw_op is None and 'operator' not in b:
+        raw_op = 'human_console'
+    from herdr.transitions import validate_operator, InvalidOperatorError
+    try:
+        op = validate_operator(raw_op)
+    except (InvalidOperatorError, ValueError) as exc:
+        raise RuntimeError(f"无效的操作人标识: {exc}")
     reason = str(b.get('reason') or 'console_force_review').strip()
     exp_ver_raw = b.get('expected_version')
     exp_ver = None

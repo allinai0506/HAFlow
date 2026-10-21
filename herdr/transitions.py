@@ -4,7 +4,7 @@ Functional Core: Pure-logic state transition matrices, validation functions,
 and classifications with zero external I/O or system side effects.
 """
 
-from typing import Dict, Set
+from typing import Any, Dict, Set
 
 
 class InvalidTransitionError(ValueError):
@@ -184,3 +184,74 @@ def validate_workflow_transition(old_status: str, new_status: str, force: bool =
         )
 
     return True
+
+
+# ============================================================
+# Gate Exemption & Operator Audit Contract (SC-010)
+# ============================================================
+
+class InvalidOperatorError(ValueError):
+    """Raised when an operator identity violates the operator audit contract (SC-010)."""
+    pass
+
+
+DISALLOWED_OPERATOR_NAMES: Set[str] = {
+    "",
+    "none",
+    "null",
+    "nil",
+    "undefined",
+    "unknown",
+    "anonymous",
+}
+
+
+def validate_operator(operator: Any) -> str:
+    """Validate and normalize an operator identity for audit-sensitive operations (SC-010).
+
+    Enforces minimum operator identity specifications:
+    1. Must not be None, empty, or whitespace-only.
+    2. Stripped length must be between 1 and 128 characters.
+    3. Must not contain control characters (ASCII < 32).
+    4. Must not contain path traversal / separator characters ('/', '\\', '..').
+    5. Must not contain script/HTML injection tags ('<', '>').
+    6. Case-insensitively rejects anonymous/placeholder tokens ('none', 'null', 'nil',
+       'undefined', 'unknown', 'anonymous').
+
+    Returns:
+        Cleaned, stripped operator string.
+    Raises:
+        InvalidOperatorError: If operator does not satisfy requirements.
+    """
+    if operator is None:
+        raise InvalidOperatorError("操作人标识（operator）不能为空或全为空白字符")
+
+    if isinstance(operator, bool):
+        raise InvalidOperatorError("操作人标识类型非法，禁止传入布尔值")
+
+    if not isinstance(operator, str):
+        if isinstance(operator, (dict, list, tuple, set)):
+            raise InvalidOperatorError("操作人标识必须为合法字符串，禁止传入复合数据类型")
+        operator = str(operator)
+
+    for ch in operator:
+        if ord(ch) < 32:
+            raise InvalidOperatorError("操作人标识包含非法控制字符")
+
+    op_clean = operator.strip()
+    if not op_clean:
+        raise InvalidOperatorError("操作人标识（operator）不能为空或全为空白字符")
+
+    if len(op_clean) > 128:
+        raise InvalidOperatorError(f"操作人标识过长（当前 {len(op_clean)} 字符，最大允许 128 字符）")
+
+    if "/" in op_clean or "\\" in op_clean or ".." in op_clean:
+        raise InvalidOperatorError("操作人标识包含非法路径遍历或分隔字符")
+
+    if "<" in op_clean or ">" in op_clean:
+        raise InvalidOperatorError("操作人标识包含非法字符（'<' 或 '>'）")
+
+    if op_clean.lower() in DISALLOWED_OPERATOR_NAMES:
+        raise InvalidOperatorError(f"操作人标识不能使用占位符或匿名标识: '{op_clean}'")
+
+    return op_clean
