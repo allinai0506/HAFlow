@@ -13,6 +13,7 @@ var {
 }){
 
 let dashTimer=null;
+let dashNavigationSequence=0;
 function stopDashTimer(){if(dashTimer){clearInterval(dashTimer);dashTimer=null}}
 let dashLinearKeyboardIdx = 0;
 
@@ -247,16 +248,21 @@ async function loadDashboard(){
 function dashSelectWorkflow(v){state.dashWorkflowId=v||null;saveViewState();loadDashboard()}
 async function dashOpenWorkflowOf(wid,target={}){
   if(!wid)return dashOpenWorkflow();
+  const navigation=++dashNavigationSequence;
+  const destination={...target,workflowId:wid};
   state.dashWorkflowId=wid;
-  await dashOpenWorkflow();
-  return openControllerCockpit({...target,workflowId:wid});
+  if(!await dashOpenWorkflow(navigation)||navigation!==dashNavigationSequence||state.workflow?.workflow?.workflow_id!==wid)return;
+  return openControllerCockpit(destination);
 }
-async function dashOpenWorkflow(){
+async function dashOpenWorkflow(navigation=++dashNavigationSequence){
   const wid=state.dashWorkflowId;
   if(!wid)return toast('请先在下拉框选择一个工作流',true);
+  const current=()=>navigation===dashNavigationSequence&&state.workflowId===wid&&!state.dashMode&&!state.opsMode;
   state.workflowId=wid;state.dashMode=false;state.shellView='workbench';state.dashWorkflowId=null;stopDashTimer();saveViewState();syncOpsUi();
-  try{await loadWorkflow(wid)}catch(e){toast(e.message,true)}
+  try{await loadWorkflow(wid)}catch(e){if(current())toast(e.message,true);return false;}
+  if(!current())return false;
   await refreshAll();
+  return current();
 }
 function dashPillFor(t){
   const s=t.status||'';

@@ -256,12 +256,17 @@ async function loadProject(id,rer=true){
     paintCrumb();
     const sysId=state.workflowId;
     if(sysId==='__ctl__'){
+      const target=state.controllerTarget;
+      const ownsTarget=()=>state.projectId===id&&state.projectLoadSequence===sequence&&state.controllerTarget===target;
       const anchor=state.controllerTarget?.workflowId||(state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id)||(state.project&&state.project.latest_workflow_id);
       if(anchor&&!(state.controllerActionsData&&state.workflow&&state.workflow.workflow&&state.workflow.workflow.workflow_id===anchor)){
+        const workflow=await pageRead('project-controller-workflow','/api/workflow?id='+encodeURIComponent(anchor)+'&lightweight=1');
+        if(!workflow||!ownsTarget()||state.workflowId!==sysId)return;
         if(!state.workflow||!state.workflow.workflow)state.workflow={workflow:{workflow_id:anchor}};
-        await loadWorkflow(anchor);
+        await loadWorkflow(anchor,workflow);
       }
       if(anchor){
+        if(!ownsTarget())return;
         if(state.workflowId!=='__ctl__'&&state.workflowId!==anchor)return;
         if(state.controllerTarget?.workflowId===anchor){state.workflowId='__ctl__';openControllerCockpit();}
         else openControllerCockpit({workflowId:anchor});

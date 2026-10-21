@@ -277,6 +277,59 @@ class TestControllerCockpitRuntime(unittest.TestCase):
         self.assertIn('"runId":"run-1"', out)
         self.assertIn('FOCUS=0', out)
 
+    def test_held_project_workflow_a_response_cannot_erase_explicit_cockpit_b_target(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='__ctl__';state.shellView='workbench';state.workflow={workflow:{workflow_id:'A'}};state.controllerTarget={workflowId:'A',taskId:'task-A'};state.controllerActionsData=null;
+                  let releaseA,startedA;const heldA=new Promise(resolve=>startedA=resolve);
+                  const response=data=>({ok:true,json:async()=>({ok:true,data})});
+                  globalThis.fetch=async(path)=>{
+                    if(path.startsWith('/api/project?id='))return response({project:{project_name:'demo'},workflows:[{workflow_id:'A'},{workflow_id:'B'}],latest_workflow_id:'A',agents:[],slots:[]});
+                    if(path.startsWith('/api/workflow?id=A'))return new Promise(resolve=>{releaseA=()=>resolve(response({workflow:{workflow_id:'A',config:{}},tasks:[],graph:{nodes:[],edges:[]}}));startedA()});
+                    if(path.startsWith('/api/workflow/controller-cockpit'))return response({...__cockpitFixture,workflow:{workflow_id:new URL('http://local'+path).searchParams.get('workflow_id')}});
+                    return response({});
+                  };
+                  const oldRefresh=loadProject('project-1',false);await heldA;
+                  await openControllerCockpit({workflowId:'B',taskId:'task-B'});
+                  const before=JSON.stringify(state.controllerTarget);releaseA();await oldRefresh;
+                  console.log('TARGET='+JSON.stringify(state.controllerTarget));console.log('UNCHANGED='+(before===JSON.stringify(state.controllerTarget)));console.log('PROJECTION='+state.controllerCockpit?.workflow?.workflow_id);
+                })();
+            """)
+        self.assertIn('"workflowId":"B"', out)
+        self.assertIn('"taskId":"task-B"', out)
+        self.assertIn('UNCHANGED=true', out)
+        self.assertIn('PROJECTION=B', out)
+
+    def test_held_dashboard_a_navigation_cannot_reopen_after_newer_b_navigation(self):
+        import tempfile
+        for newer in ("dashOpenWorkflowOf('B',{taskId:'task-B'})", "openControllerCockpit({workflowId:'B',taskId:'task-B'})"):
+            with self.subTest(newer=newer), tempfile.TemporaryDirectory() as tmp:
+                out = self._run_in(tmp, r"""
+                    (async()=>{
+                      state.workflowId='origin';state.shellView='workbench';state.workflow={workflow:{workflow_id:'origin'}};
+                      let releaseA,startedA,overviewCalls=0;const heldA=new Promise(resolve=>startedA=resolve);
+                      const response=data=>({ok:true,json:async()=>({ok:true,data})});
+                      globalThis.fetch=async(path)=>{
+                        if(path.startsWith('/api/workflow?id=')){
+                          const wid=new URL('http://local'+path).searchParams.get('id');const data={workflow:{workflow_id:wid,config:{}},tasks:[],graph:{nodes:[],edges:[]}};
+                          if(wid==='A')return new Promise(resolve=>{releaseA=()=>resolve(response(data));startedA()});return response(data);
+                        }
+                        if(path.startsWith('/api/workflow/controller-cockpit'))return response({...__cockpitFixture,workflow:{workflow_id:new URL('http://local'+path).searchParams.get('workflow_id')}});
+                        if(path.startsWith('/api/overview')){overviewCalls++;return response({spaces:[]})}return response({});
+                      };
+                      const oldNavigation=dashOpenWorkflowOf('A',{taskId:'task-A'});await heldA;
+                      await NEWER;
+                      const before=JSON.stringify(state.controllerTarget),reads=overviewCalls;releaseA();await oldNavigation;
+                      console.log('TARGET='+JSON.stringify(state.controllerTarget));console.log('UNCHANGED='+(before===JSON.stringify(state.controllerTarget)));console.log('OLD_REFRESH='+(overviewCalls>reads));
+                    })();
+                """.replace('NEWER', newer))
+                self.assertIn('"workflowId":"B"', out)
+                self.assertIn('"taskId":"task-B"', out)
+                self.assertIn('UNCHANGED=true', out)
+                self.assertIn('OLD_REFRESH=false', out)
+
     def test_task_row_opens_cockpit_with_complete_task_identity(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
