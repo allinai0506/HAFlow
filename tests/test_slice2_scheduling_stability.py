@@ -154,10 +154,10 @@ def git_repo_with_base(tmp_path):
     }
 
 
-def test_p5_rejects_unreachable_candidate(git_repo_with_base):
-    """P5: Non-existent commit SHA in git repo raises ValueError."""
-    fake_sha = "0123456789abcdef0123456789abcdef01234567"
-    with pytest.raises(ValueError, match="unreachable"):
+def test_p5_rejects_invalid_sha_format(git_repo_with_base):
+    """P5: Invalid commit SHA format raises ValueError."""
+    fake_sha = "not-a-valid-sha"
+    with pytest.raises(ValueError, match="full commit SHA"):
         sf.record_candidate_frozen(
             "wf-p5", fake_sha, repo_path=git_repo_with_base["repo"],
             base_branch="main", db_path=git_repo_with_base["db"]

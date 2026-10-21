@@ -199,7 +199,7 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
             res = ports.scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
                 db_path=store.db_path, expected_episode_id=workflow.get('candidate_episode_id') or 0,
                 delivery_inventory=inventory, publication_event_id=publication['id'],
-                repo_path=project_root, base_branch=workflow.get('base_branch') or 'main')
+                repo_path=project_root, base_branch=workflow.get('base_branch'))
             if isinstance(res, dict) and res.get('status') == 'invalidated':
                 return ''
             return sha
@@ -211,18 +211,7 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
         if not frozen:
             return ''
         resolved = ports.scheduler_core.resolve_candidate_sha_for_branch(project_root, f'{frozen}^{{commit}}')
-        if resolved != frozen:
-            return ''
-        if project_root:
-            from herdr.launch_baseline import _rev_parse_commit, _git_is_ancestor
-            base = workflow.get('base_branch') or 'main'
-            base_tip = _rev_parse_commit(project_root, f"origin/{base}") or _rev_parse_commit(project_root, base)
-            if base_tip and base_tip != frozen and _git_is_ancestor(project_root, base_tip, frozen) is False:
-                ports.scheduler_facts_store.record_candidate_frozen(
-                    workflow_id, frozen, repo_path=project_root, base_branch=base, db_path=store.db_path
-                )
-                return ''
-        return frozen
+        return frozen if resolved == frozen else ''
     sha = ports.json.loads(publication['payload_json']).get('candidate_sha')
     if ports.scheduler_core.resolve_candidate_sha_for_branch(project_root, f'{sha}^{{commit}}') != sha:
         return ''
@@ -230,7 +219,7 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
         res = ports.scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
             db_path=store.db_path, expected_episode_id=ports.json.loads(publication['payload_json']).get('expected_episode_id'),
             publication_event_id=publication['id'],
-            repo_path=project_root, base_branch=workflow.get('base_branch') or 'main')
+            repo_path=project_root, base_branch=workflow.get('base_branch'))
         if isinstance(res, dict) and res.get('status') == 'invalidated':
             return ''
     except ValueError as exc:

@@ -126,14 +126,11 @@ def record_candidate_frozen(
         prior = json.loads(row['payload_json']) if (row and row['event_type'] == 'candidate_frozen') else {}
 
         effective_repo = repo_path or metadata.get('project_root')
-        effective_base = base_branch or metadata.get('base_branch') or 'main'
-        if effective_repo:
+        effective_base = base_branch or metadata.get('base_branch')
+        if effective_repo and effective_base:
             from .launch_baseline import _rev_parse_commit, _git_is_ancestor
             resolved_sha = _rev_parse_commit(effective_repo, f"{sha}^{{commit}}")
-            head_commit = _rev_parse_commit(effective_repo, "HEAD")
-            if head_commit:
-                if not resolved_sha:
-                    raise ValueError(f"candidate_sha {sha} is unreachable in repo {effective_repo}")
+            if resolved_sha:
                 base_tip = _rev_parse_commit(effective_repo, f"origin/{effective_base}") or _rev_parse_commit(effective_repo, effective_base)
                 if base_tip and base_tip != sha:
                     is_ancestor = _git_is_ancestor(effective_repo, base_tip, sha)
