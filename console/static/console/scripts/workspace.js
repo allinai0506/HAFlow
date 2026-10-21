@@ -145,10 +145,11 @@ function renderOverview(){
     </button>`).join(''):'<div class="empty">暂无项目空间</div>';
 
   document.getElementById('alerts').innerHTML=alerts.length?alerts.map(a=>`
-    <div class="alert-row">
-      <div>
+    <div class="alert-row" onclick="openTaskDrawer('${esc(a.task_id||'')}')" style="cursor:pointer">
+      <div style="flex:1;min-width:0">
         <div class="task-name">${esc(taskDisplayName(a))}</div>
         <div class="task-id">${esc(a.task_id||'')}</div>
+        ${a.reason?`<div class="alert-reason" style="color:var(--danger,#f43f5e);font-size:11px;margin-top:2px">${esc(a.reason)}</div>`:''}
         <div class="task-meta">${esc(a.agent||'')} · ${esc(a.pane_id||'')}</div>
       </div>
       ${badge(a.status)}

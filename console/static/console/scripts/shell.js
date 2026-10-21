@@ -1,11 +1,13 @@
 /* Shell navigation, breadcrumbs and resource views. */
 var {
   toggleSpaceMenu, closeSpaceMenu, paintCrumb, showShellView,
-  paintShellPage, openShellWorkflow
+  paintShellPage, openShellWorkflow, renderShellAlerts, updateShellRail
 } = (function({
   state, saveViewState, syncOpsUi,
   toast, esc, relationText,
-  visibleAlerts, showTemplateLibrary, showOpsCenter,
+  visibleAlerts, activeAlerts, isAlertDismissed,
+  dismissAlert, dismissAllAlerts, clearDismissedAlerts,
+  showTemplateLibrary, showOpsCenter,
   stopDashTimer, showDashboard, refreshAll,
   selectSpace, loadProjectRuntime, workflowDisplayName,
   loadWorkflow, renderSidebarWorkflows, renderWorkflowTabs,
@@ -61,10 +63,7 @@ function paintCrumb(){
   const wfTotalEl=document.getElementById('sidebarWfTotalCount');
   if(wfTotalEl)wfTotalEl.textContent=String(totalWfCount);
   setCount('navAgentCount', o.active_agents);
-  const alertCnt=(typeof visibleAlerts==='function'?visibleAlerts():[]).length;
-  setCount('navAlertCount', alertCnt);
-  const railAlert=document.getElementById('railAlertDot');
-  if(railAlert){if(railAlert.style)railAlert.style.display=alertCnt>0?'block':'none';railAlert.hidden=alertCnt<=0;}
+  updateShellRail();
   const bw=document.getElementById('bottomActiveWorkers');
   if(bw)bw.textContent=String(o.active_agents||o.active_workers||0);
   const slotsCount=(state.project&&(state.project.slots||[]).length)||18;
@@ -136,11 +135,81 @@ function paintShellPage(view){
   else if(view==='workflows')renderShellWorkflows();
   else if(view==='experience')renderShellExperience();
 }
+function updateShellRail(){
+  const unackedAlerts=(typeof activeAlerts==='function'?activeAlerts():(typeof visibleAlerts==='function'?visibleAlerts():[]));
+  const alertCnt=unackedAlerts.length;
+  const navAlertEl=document.getElementById('navAlertCount');
+  if(navAlertEl){navAlertEl.textContent=String(alertCnt);navAlertEl.hidden=alertCnt<=0;}
+  const railAlert=document.getElementById('railAlertDot');
+  if(railAlert){if(railAlert.style)railAlert.style.display=alertCnt>0?'block':'none';railAlert.hidden=alertCnt<=0;}
+}
+if(typeof window!=='undefined'){
+  window.updateShellRail=updateShellRail;
+}
+
 function renderShellAlerts(){
   const el=document.getElementById('tasks');if(!el)return;
-  const src=document.getElementById('alerts');
-  const body=src&&src.innerHTML.trim()?src.innerHTML:'<div class="empty">当前项目 / 工作流暂无告警</div>';
-  el.innerHTML='<div class="shell-page"><h3>告警</h3>'+body+'</div>';
+  const list=(typeof visibleAlerts==='function'?visibleAlerts():[]);
+  const unacked=(typeof activeAlerts==='function'?activeAlerts():list);
+
+  if(!list.length){
+    el.innerHTML=`
+      <div class="shell-page">
+        <div class="shell-page-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <h3 style="margin:0">告警中心</h3>
+        </div>
+        <div class="empty" style="padding:48px 0;text-align:center;color:var(--text-secondary)">
+          <div style="font-size:24px;margin-bottom:8px">🎉</div>
+          <div>当前项目 / 工作流无活跃告警，系统运行正常</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const header=`
+    <div class="shell-page-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+      <div>
+        <h3 style="margin:0">告警中心</h3>
+        <div class="task-meta" style="margin-top:4px">共 ${list.length} 条告警 · ${unacked.length} 条未处理</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        ${unacked.length?`<button class="btn mini" onclick="dismissAllAlerts()">全部标记已知晓</button>`:''}
+        <button class="btn mini" onclick="clearDismissedAlerts()">重置已忽略</button>
+      </div>
+    </div>`;
+
+  const rows=list.map(a=>{
+    const dismissed=(typeof isAlertDismissed==='function'?isAlertDismissed(a):false);
+    const wid=a.workflow_id||'';
+    const tid=a.task_id||'';
+    const pid=a.pane_id||'';
+    return `
+      <div class="alert-card ${dismissed?'is-dismissed':''}" style="border:1px solid var(--border-subtle);border-radius:8px;padding:12px;margin-bottom:10px;background:var(--bg-subtle,var(--card-bg));${dismissed?'opacity:0.6;':''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+          <div style="flex:1;min-width:0;cursor:pointer" onclick="openTaskDrawer('${esc(tid)}')">
+            <div style="display:flex;align-items:center;gap:8px">
+              <strong style="font-size:14px">${esc(taskDisplayName(a))}</strong>
+              ${badge(a.status)}
+              ${dismissed?'<span class="badge muted">已知晓</span>':''}
+            </div>
+            <div class="task-id" style="margin-top:4px;color:var(--text-secondary);font-size:12px">${esc(tid)}${wid?' · 工作流: '+esc(wid):''}</div>
+            ${a.reason?`<div style="margin-top:6px;padding:6px 10px;border-radius:4px;background:rgba(239,68,68,0.1);color:var(--danger,#ef4444);font-size:12px;font-family:monospace">⚠️ 原因: ${esc(a.reason)}</div>`:''}
+            <div class="task-meta" style="margin-top:6px;font-size:11px">
+              ${a.stage_label?'阶段: '+esc(a.stage_label)+' · ':''}${a.agent?'执行者: '+esc(a.agent)+' · ':''}${pid?'工位: '+esc(pid):''}
+            </div>
+          </div>
+          <div class="alert-actions" style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+            <button class="btn mini primary" onclick="openTaskDrawer('${esc(tid)}')">任务详情</button>
+            ${wid?`<button class="btn mini" onclick="loadWorkflow('${esc(wid)}').then(()=>showShellView('workbench'))">前往工作流</button>`:''}
+            ${pid?`<button class="btn mini" onclick="showPane('${esc(pid)}','${esc(tid)}')">查看终端</button>`:''}
+            ${!dismissed?`<button class="btn mini" onclick="dismissAlert('${esc(tid)}')">忽略</button>`:''}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  el.innerHTML='<div class="shell-page">'+header+'<div class="alerts-list">'+rows+'</div></div>';
 }
 function renderShellAgents(){
   const el=document.getElementById('tasks');if(!el)return;
@@ -173,12 +242,14 @@ async function openShellWorkflow(id){
 }
 return {
   toggleSpaceMenu, closeSpaceMenu, paintCrumb, showShellView,
-  paintShellPage, openShellWorkflow
+  paintShellPage, openShellWorkflow, renderShellAlerts, updateShellRail
 };
 })({
   state, saveViewState, syncOpsUi,
   toast, esc, relationText,
-  visibleAlerts, showTemplateLibrary, showOpsCenter,
+  visibleAlerts, activeAlerts, isAlertDismissed,
+  dismissAlert, dismissAllAlerts, clearDismissedAlerts,
+  showTemplateLibrary, showOpsCenter,
   stopDashTimer, showDashboard, refreshAll,
   selectSpace, loadProjectRuntime, workflowDisplayName,
   loadWorkflow, renderSidebarWorkflows, renderWorkflowTabs:(...args)=>renderWorkflowTabs(...args),

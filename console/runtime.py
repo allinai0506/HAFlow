@@ -182,8 +182,29 @@ def spaces():
 
 def overview():
     ts = inventory.tasks()
-    alerts = [
-        {
+    wfs = inventory.workflows()
+    superseded_ids = {t['supersedes'] for t in ts if t.get('supersedes')}
+    terminal_wf_statuses = {'completed', 'archived', 'cancelled'}
+    active_wf_ids = {
+        t.get('workflow_id')
+        for t in ts
+        if t.get('status') in common.ACTIVE and t.get('workflow_id')
+    }
+
+    alerts = []
+    for t in ts:
+        if t.get('status') not in {'blocked', 'failed'}:
+            continue
+        if t.get('status') == 'superseded' or t.get('superseded_by') or t.get('task_id') in superseded_ids:
+            continue
+        wid = t.get('workflow_id')
+        if wid:
+            wf = wfs.get(wid)
+            if wf and wf.get('status') in terminal_wf_statuses:
+                continue
+            if not wf and wid not in active_wf_ids:
+                continue
+        alerts.append({
             'task_id': t.get('task_id'),
             'workflow_id': t.get('workflow_id'),
             'project_id': t.get('project_id'),
@@ -191,16 +212,17 @@ def overview():
             'status': t.get('status'),
             'agent': t.get('agent'),
             'pane_id': t.get('pane_id'),
+            'stage': t.get('stage') or t.get('node'),
+            'stage_label': t.get('stage_label') or t.get('node_label') or t.get('stage'),
+            'created_at': t.get('created_at'),
+            'updated_at': t.get('updated_at'),
             'reason': human_reason(
                 t.get('failure_reason')
                 or t.get('blocked_reason')
                 or t.get('sentinel_reason')
                 or ''
             ),
-        }
-        for t in ts
-        if t.get('status') in {'blocked', 'failed'}
-    ]
+        })
     ss = spaces()
     return {
         'projects': inventory.projects(),

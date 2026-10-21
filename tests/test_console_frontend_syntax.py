@@ -270,6 +270,71 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
         self.assertIn("executeControllerAction", js)
         self.assertIn("executeCockpitAction", js)
 
+    def test_shell_alerts_render_and_actionability(self):
+        """Alerts center must render reasons and actionable buttons, not dead text."""
+        script_match = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL)
+        self.assertIsNotNone(script_match)
+        js = script_match.group(1)
+        self.assertIn("function renderShellAlerts", js)
+        self.assertIn("openTaskDrawer", js)
+        self.assertIn("dismissAlert", js)
+        self.assertIn("dismissAllAlerts", js)
+        self.assertIn("activeAlerts", js)
+        self.assertIn("clearDismissedAlerts", js)
+
+        node = shutil.which("node")
+        if not node:
+            return
+        test_script = r"""
+const tasksContainer = {innerHTML: ''};
+const document = {
+  getElementById: id => id === 'tasks' ? tasksContainer : {textContent: '', hidden: false, style: {}},
+  querySelectorAll: () => [],
+  querySelector: () => null,
+  addEventListener: () => {}
+};
+const window = {
+  location: {search: ''},
+  getSelection: () => '',
+  addEventListener: () => {}
+};
+const localStorage = {
+  _store: {},
+  getItem: k => localStorage._store[k] || null,
+  setItem: (k, v) => { localStorage._store[k] = String(v); },
+  removeItem: k => { delete localStorage._store[k]; }
+};
+""" + js + r"""
+state.projectId = 'proj-1';
+state.shellView = 'alerts';
+state.overview = {
+  alerts: [
+    {
+      task_id: 'task-err-1',
+      workflow_id: 'wf-1',
+      project_id: 'proj-1',
+      status: 'failed',
+      reason: 'watchdog timeout',
+      agent: 'codex',
+      pane_id: 'w1:p1',
+      stage_label: '实现'
+    }
+  ]
+};
+renderShellAlerts();
+if (!tasksContainer.innerHTML.includes('task-err-1')) process.exit(1);
+if (!tasksContainer.innerHTML.includes('watchdog timeout')) process.exit(2);
+if (!tasksContainer.innerHTML.includes('openTaskDrawer')) process.exit(3);
+if (!tasksContainer.innerHTML.includes('dismissAlert')) process.exit(4);
+dismissAlert('task-err-1');
+renderShellAlerts();
+if (!tasksContainer.innerHTML.includes('已知晓')) process.exit(5);
+process.exit(0);
+"""
+        res = subprocess.run([node, "-e", test_script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"Node alert harness failed: {res.stderr}\n{res.stdout}")
+
+
 
 if __name__ == "__main__":
     unittest.main()
