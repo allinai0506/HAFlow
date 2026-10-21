@@ -34,6 +34,12 @@ TASK_TRANSITIONS: Dict[str, Set[str]] = {
     "superseded": set(),
 }
 
+# Task Lifecycle Active Statuses:
+# Represents tasks actively in the lifecycle pipeline after launch and before termination.
+# Includes paused and interrupted (managed tasks whose lifecycle is not complete).
+# Excludes pending (unlaunched/unassigned draft tasks).
+# Distinct from herdr.agent_router.ROUTER_OCCUPIED_STATUSES (SC-008), which measures
+# worker queue/capacity load and therefore includes pending while excluding paused/interrupted.
 ACTIVE_TASK_STATUSES: Set[str] = {
     "dispatched",
     "working",

@@ -12,7 +12,7 @@
 | SC-005 | 门禁打回字段 | docs/product-specs/workflow-template-schema.md 历史上使用 `retry_target` | 运行时与 Controller 原只读取 `retry_node`；已收敛统一为 `retry_node`（标准推荐）与 `retry_target`（等价兼容别名），DAG 校验与调度策略均双向支持 | — | **已解决**（双向透明兼容） |
 | SC-006 | Run 快照失败行为 | schema L38 历史版本称告警并回退共享文件 | herdr/projects.py L573-577：源文件可读时直接拒绝注册（fail-closed），仅源缺失时回退；schema 与代码注释已同步校准对齐 | — | **已解决**（确立源文件存在时 fail-closed 拒绝注册权威语义） |
 | SC-007 | 状态事件命名与写入权威 | wiki/task-lifecycle.md 历史上仅提及 `task_status_changed` | 权威事件为同事务原子落库的 `task_transition`（state_db.py L6820-6833）；`task_status_changed` 为事后 best-effort 轨迹事件（kernel.py L203-222）；wiki 已明确分层与写入权威 | — | **已解决**（明确同事务权威与轨迹旁路分层） |
-| SC-008 | “active”集合 | 同一词面 | 路由 active = {pending, dispatched, working, blocked, agent_done, rework}（agent_router.py L304-307）；状态机 ACTIVE 含 paused、interrupted，不含 pending（transitions.py L37-45） | — | 确认（同名不等于同义） |
+| SC-008 | “active”集合 | 同一词面 | 路由占用状态集 `ROUTER_OCCUPIED_STATUSES`（`pending`, `dispatched`, `working`, `blocked`, `agent_done`, `rework`，用于 Agent 容量统计）；状态机生命周期活跃态 `ACTIVE_TASK_STATUSES`（含 `paused`、`interrupted`，不含 `pending`，用于执行管线管理）；代码与文档已显式命名解耦 | — | **已解决**（解耦为状态机生命周期活跃态与路由负载占用态） |
 | SC-009 | 预占文件名 | docs/product-specs/agent-policy-spec.md L54、docs/operations/troubleshooting-faq.md L55、L58 历史文档写 `router-reservations.json` | herdr/agent_router.py L16 为 `agent-reservations.json`；文档已统一校准并更正 TTL 说明 | — | **已解决**（统一为 agent-reservations.json） |
 | SC-010 | 门禁豁免审批 | 设计意图为人工例外通道 | herdr/kernel.py L850-857 仅校验 reason；operator 为自由字符串；无二次审批；控制台写路由无鉴权 | — | 确认 |
 | SC-011 | 工作流初始状态 | herdr/transitions.py L89-97 以 pending 为起点 | herdr/projects.py L593 直接写 running；herdr/state_db.py L1617 占位工作流写 pending | — | **已裁决**（ADR-0007 / OEP-0002） |
@@ -32,8 +32,8 @@
 3. SC-004、SC-009 已解决：架构文档已补充“SQLite 为权威、JSON 为导出/只读投影”设计原则；预占文件名与 TTL 已统一为 agent-reservations.json。
 4. SC-005 已解决：规范定案为 `retry_node` 为标准推荐字段，`retry_target` 为完全等价兼容别名；DAG 校验与 Controller 调度均双向容错解析，消除打回降级隐患。SC-006 已解决：定案为源定义文件存在时快照失败直接拒绝注册（fail-closed），彻底杜绝模板切换并发污染，更新模板 Schema 与代码注释。
 5. SC-007 已解决：明确分层定义——`task_transition` 为 SQLite 强事务内原子写入的状态机单一权威事件；`task_status_changed` 为事务提交后的 best-effort 旁路轨迹事件，供 Observer 与重放分析消费。
-6. SC-008：为不同含义使用不同术语（路由负载、生命周期活跃、容量活跃），禁止同名合并。
-6. SC-010、SC-015、SC-019：把豁免与人工覆盖纳入权限模型，统一守卫，并为控制台写路由增加鉴权（代码变更）。
-7. SC-011、SC-012 已由 ADR-0006、ADR-0007 与 OEP-0002 裁决：工作流初始状态定案为 running（pending 为未装配/草稿态）；门禁解耦为 gate_spec 与 gate_verdict，DB 为调度第一事实源，文件为不可变快照。
-8. SC-013、SC-014 已解决：任务类型词表统一对齐为 CLI choices；补齐 fix-loop 可作废集合（D4、D5）。
+6. SC-008 已解决：显式解耦定义 `ROUTER_OCCUPIED_STATUSES` 与 `ACTIVE_TASK_STATUSES`，严格区分工位队列容量占用（含 pending，排队占配额；不含 paused/interrupted）与生命周期管线活跃（含 paused/interrupted，不含 pending），禁止同名混用并补齐全覆盖单元测试。
+7. SC-010、SC-015、SC-019：把豁免与人工覆盖纳入权限模型，统一守卫，并为控制台写路由增加鉴权（代码变更）。
+8. SC-011、SC-012 已由 ADR-0006、ADR-0007 与 OEP-0002 裁决：工作流初始状态定案为 running（pending 为未装配/草稿态）；门禁解耦为 gate_spec 与 gate_verdict，DB 为调度第一事实源，文件为不可变快照。
+9. SC-013、SC-014 已解决：任务类型词表统一对齐为 CLI choices；补齐 fix-loop 可作废集合（D4、D5）。
 9. SC-018 已由 ADR-0005 与 OEP-0002 裁决：状态机外写入显式收敛为 privileged_transitions 特权流转契约，严禁直写 SQL/save_task 绕过网关。

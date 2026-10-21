@@ -297,24 +297,48 @@ def release_agent_reservation(task_id):
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
+# Routing Occupied Statuses (SC-008):
+# Statuses that represent queue or active worker capacity load for an agent during routing.
+# Distinct from transitions.ACTIVE_TASK_STATUSES (lifecycle active statuses):
+# - Includes 'pending': a queued task assigned to an agent consumes queue capacity.
+# - Excludes 'paused' and 'interrupted': halted tasks do not consume active agent execution concurrency.
+ROUTER_OCCUPIED_STATUSES = {
+    "pending",
+    "dispatched",
+    "working",
+    "blocked",
+    "agent_done",
+    "rework",
+}
+# Backward compatibility alias
+ROUTER_ACTIVE_STATUSES = ROUTER_OCCUPIED_STATUSES
+
+
 def _active_agent_loads(project_id):
+    """Calculate per-agent load within a project based on ROUTER_OCCUPIED_STATUSES.
+
+    Note (SC-008):
+        This counts tasks in routing occupied statuses (ROUTER_OCCUPIED_STATUSES),
+        which includes 'pending' (assigned queue depth) and excludes 'paused'/'interrupted'
+        (halted execution). It is distinct from lifecycle active statuses
+        (transitions.ACTIVE_TASK_STATUSES).
+    """
     store = _get_store()
     tasks = store.list_tasks()
 
-    active = {
-        "pending", "dispatched", "working", "blocked", "agent_done",
-        "rework",
-    }
     loads = {}
     for task in tasks:
         if task.get("project_id") != project_id:
             continue
-        if task.get("status") not in active:
+        if task.get("status") not in ROUTER_OCCUPIED_STATUSES:
             continue
         agent = task.get("agent")
         if agent:
             loads[agent] = loads.get(agent, 0) + 1
     return loads
+
+
+_agent_occupied_loads = _active_agent_loads
 
 
 def _candidate_order(pool, stage, task_type, node_policy=None):

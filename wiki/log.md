@@ -3249,3 +3249,14 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `task_status_changed`：由 `kernel.py:transition_task` 在事务提交后通过 `TrajectoryLedger` 记录到轨迹账本，遵循 best-effort 旁路语义，供轨迹重放与 Trajectory Observer 消费。
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-007 状态标记为“已解决”。
 - Evidence：`herdr/state_db.py:6829-6842`、`herdr/kernel.py:206-225`、`tests/test_state_transition_gateway.py:130-135,173-180`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Refactor & Docs | “active”集合命名解耦与语义隔离 (SC-008)
+
+- Updated `herdr/agent_router.py`：显式定义 `ROUTER_OCCUPIED_STATUSES`（`{"pending", "dispatched", "working", "blocked", "agent_done", "rework"}`）与兼容别名 `ROUTER_ACTIVE_STATUSES`，明确其作为 Agent 工位与任务排队容量的占用状态集；提供 `_agent_occupied_loads` 别名。
+- Updated `herdr/transitions.py`：在 `ACTIVE_TASK_STATUSES`（`{"dispatched", "working", "blocked", "agent_done", "rework", "paused", "interrupted"}`）处强化注释，指明其为任务生命周期管线活跃态，与路由负载占用状态集完全正交。
+- Updated `wiki/agent-routing-and-pools.md`：校准 Least Loaded 选人算法说明，消除历史关于 `tasks.json` 及 `pending 到 cleanup_ready` 的模糊陈述，精确说明路由占用状态集与生命周期活跃态的区别（含 pending 计入排队配额，排除 paused/interrupted 休眠态）。
+- Updated `wiki/task-lifecycle.md`：在状态机章节显式增补 SC-008“状态集合语义解耦”条款。
+- Updated `ontology/states/task_lifecycle.yaml`：注释说明 `classification.active` 对应状态机生命周期活跃态，并与路由占用态正交区分。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-008 状态标记为“已解决”。
+- Added `tests/test_router_active_statuses_decoupling.py`：新增对两类集合定义、兼容别名、差集/交集正交关系及 `_active_agent_loads` 负载计算行为的专项回归测试。
+- Evidence：`herdr/agent_router.py`、`herdr/transitions.py`、`wiki/agent-routing-and-pools.md`、`wiki/task-lifecycle.md`、`tests/test_router_active_statuses_decoupling.py`、`ontology/tests/audit_ontology.py`。

@@ -23,6 +23,8 @@ states:
 - failed
 - superseded
 classification:
+  # Lifecycle active statuses (transitions.ACTIVE_TASK_STATUSES).
+  # Distinct from router capacity occupied statuses (agent_router.ROUTER_OCCUPIED_STATUSES, SC-008).
   active:
   - dispatched
   - working
