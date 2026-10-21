@@ -630,6 +630,7 @@ git commit -m "refactor(console): centralize controller entrypoints"
 
 **Files:**
 - Create: `tests/test_console_controller_cockpit_e2e.py`
+- Modify: `tests/test_dispatch_recovery_ui.py`（2026-10-21 用户授权：仅修复提取器漏注入 `cockpitWorkflowId` 的基线测试缺陷）
 - Modify: `docs/superpowers/specs/2026-10-21-controller-cockpit-design.md`
 - Modify: `wiki/architecture.md`
 - Modify: `wiki/log.md`
@@ -728,7 +729,7 @@ Run the repository health comparison, `google-code-review`, and spec-bearing `co
 - [ ] **Step 10: Commit Task 6**
 
 ```bash
-git add tests/test_console_controller_cockpit_e2e.py docs/superpowers/specs/2026-10-21-controller-cockpit-design.md wiki/architecture.md wiki/log.md
+git add tests/test_console_controller_cockpit_e2e.py tests/test_dispatch_recovery_ui.py docs/superpowers/specs/2026-10-21-controller-cockpit-design.md wiki/architecture.md wiki/log.md
 git commit -m "test(console): verify controller cockpit end to end"
 ```
 
