@@ -81,7 +81,7 @@ def test_action_id_executes_server_resume_and_persists_receipt(cockpit_store):
     kernel.pause_workflow('wf-1', store=cockpit_store)
     action = next(a for a in get_controller_cockpit('wf-1')['actions'] if a['action_id'] == 'wf-1:resume_workflow')
     result = control_api.api_controller_execute_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
-        'expected_identity': action['expected_identity'], 'type': 'supersede',
+        'expected_identity': action['expected_identity'], 'confirmed': True, 'type': 'supersede',
         'api_endpoint': '/malicious', 'commands': [['supersede', 'T1']], 'automation': {'mode': 'automatic'}})
     assert result['receipt']['status'] == 'applied'
     assert cockpit_store.get_workflow('wf-1')['status'] == 'running'
@@ -172,7 +172,7 @@ def test_review_halt_uses_own_interrupt_evidence_not_recovery(cockpit_store, mon
     recovery_store.reconcile(cockpit_store.db_path, 'wf-1')
     action = next(a for a in get_controller_cockpit('wf-1')['actions'] if a['action_id'] == 'T1:halt')
     result = control_api.api_controller_execute_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
-        'expected_identity': action['expected_identity'], 'reason': 'reviewed interrupt'})
+        'expected_identity': action['expected_identity'], 'reason': 'reviewed interrupt', 'confirmed': True})
     assert result['receipt']['status'] == ('applied' if interrupt_ok else 'rejected')
     assert cockpit_store.get_task('T1')['status'] == ('interrupted' if interrupt_ok else 'working')
     assert result['receipt'].get('operation_id') is None

@@ -325,7 +325,7 @@ function renderDashboard(){
   document.getElementById('slots').innerHTML='<div class="empty">点击任务可进入详情。</div>';
   document.getElementById('alerts').innerHTML='<div class="empty">卡住事项见上方。</div>';
 }
-async function dashSignoff(taskId,wid,node,act){if(act==='approve'){return openSignoffChamber(taskId)}try{await api('/api/task/signoff',{method:'POST',body:JSON.stringify({task_id:taskId,workflow_id:wid,node:node,action:act,operator:'仪表板'})});await loadDashboard()}catch(e){toast('操作失败：'+e.message,true)}}
+async function dashSignoff(taskId,wid,node,act){return dashOpenWorkflowOf(wid,{nodeId:node,taskId})}
 async function dashExec(endpoint,payload){payload=payload||{};return dashOpenWorkflowOf(payload.workflow_id||state.dashWorkflowId,{nodeId:payload.node_id||payload.node||'',taskId:payload.task_id||'',runId:payload.run_id||'',paneId:payload.pane_id||'',operationId:payload.operation_id||null})}
 return {
   stopDashTimer, toggleLinearSelectMenu, closeLinearSelectMenu, togglePopoverGroup,

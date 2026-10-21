@@ -180,6 +180,12 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
                 if op['status'] != status or any(op['detail'].get(k) != v for k, v in detail.items()):
                     _write(conn, op, status, detail, now)
                 continue
+            if (not op['started'] and core.active(workflow) and core.current(op, workflow, config)
+                    and core.confirmation_required(op, config)):
+                if op['status'] in {'pending', 'running'}:
+                    _write(conn, op, 'waiting_human', {'reason': 'dispatch_confirmation_required',
+                        'decision_needed': '模板要求确认此节点派发；核验范围后确认启动'}, now)
+                continue
             if (op['status'] == 'waiting_human' and not op['started']
                     and op['detail'].get('reason') == 'dispatch_prior_delivery_unknown'
                     and not _prior_delivery_unknown(conn, op)
@@ -232,6 +238,11 @@ def claim(db_path, operation_id, owner, now=None):
         if outcome:
             _write(conn, op, *outcome, now)
             return None
+        if core.confirmation_required(op, config):
+            if not op['started'] and op['status'] == 'pending' and core.active(workflow):
+                _write(conn, op, 'waiting_human', {'reason': 'dispatch_confirmation_required',
+                    'decision_needed': '模板要求确认此节点派发；核验范围后确认启动'}, now)
+            return None
         if (not owner or not core.active(workflow) or not core.current(op, workflow, config)
                 or not core.predecessors_current(op, workflow, tasks) or not core.ready(op, workflow, config, tasks)
                 or _prior_delivery_unknown(conn, op)
@@ -246,6 +257,8 @@ def start(db_path, operation_id, owner, now=None, *, expected_task_ids=None):
     with rs._transaction(db_path) as conn:
         op = rs._owned(conn, operation_id, owner, now)
         workflow, config, tasks = _snapshot(conn, op['workflow_id'])
+        if core.confirmation_required(op, config):
+            raise ValueError('dispatch confirmation required')
         outcome = core.result(op, workflow, config, tasks, now)
         if outcome and outcome[1].get('reason') in {'dispatch_existing_tasks', 'dispatch_verification_reused'}:
             _write(conn, op, *outcome, now)
@@ -339,6 +352,8 @@ def _launch_refusals(conn, op, workflow, config, tasks, node_id, now, *, allow_u
     node = next((n for n in config.get('nodes') or [] if n.get('id') == node_id), None)
     latest = _node_operation(conn, workflow, config, node) if node else None
     reasons = []
+    if core.confirmation_required(op, config):
+        reasons.append('dispatch confirmation required')
     if op['payload'].get('kind') != 'node_dispatch':
         reasons.append('operation kind is not node_dispatch')
     if op['workflow_id'] != workflow.get('workflow_id'):

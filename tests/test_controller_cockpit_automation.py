@@ -223,7 +223,13 @@ def test_a_new_pause_episode_can_resume(store):
     assert first[0]['status'] == 'applied'
     kernel.pause_workflow('wf-1', store=store)
     second = automation.run_automatic_controller_actions('wf-1', deps=deps_for(store))
-    assert second[0]['status'] == 'applied'
+    assert second == []
+    assert store.get_workflow('wf-1')['status'] == 'paused'
+    action = next(a for a in automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['actions']
+                  if a['action_id'] == 'wf-1:resume_workflow')
+    resumed = automation.execute_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity'], 'confirmed': True}, deps=deps_for(store))
+    assert resumed['receipt']['status'] == 'applied'
     assert store.get_workflow('wf-1')['status'] == 'running'
 
 
@@ -303,7 +309,10 @@ def test_review_external_cli_without_identity_cas_never_runs_automatically(store
     monkeypatch.setattr('subprocess.run', external)
     result = automation.run_automatic_controller_actions('wf-1', deps=deps_for(store))
     assert called == []
-    assert result[0]['reason_code'] == 'unsupported_handler'
+    assert result == []
+    action = next(a for a in automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['actions']
+                  if a['target'].get('task_id') == 'T')
+    assert action['execution'] == {'mode': 'manual', 'reason': 'automatic_handler_unavailable'}
     assert store.get_task('T')['run_id'] == 'old-run'
 
 

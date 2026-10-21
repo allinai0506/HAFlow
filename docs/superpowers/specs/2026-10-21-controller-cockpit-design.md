@@ -348,11 +348,24 @@ SQLite 配置快照解析。缺省策略为 automatic；半自动策略生成待
 `expected_identity`；服务端重新推导 Action，旧版本或 Pane 身份被拒绝。
 指导弹窗接受指导正文，指导队列回执绑定当前 Run。
 
-本轮新增的默认自动执行注册表只包含 Workflow `pause`、`resume`，写入前在
-同一 SQLite 事务中复查身份与策略。其他自动推荐不会调用终端或 Task CLI，
-没有注册执行能力时返回 `unsupported_handler`；存在未结恢复责任时先返回
-`recovery_conflict`。这不扩展或替代原有 Controller 的派发和恢复机制。不能
-将页面上的 automatic 策略标记解释为全部推荐动作均已实现自动执行。
+默认安全执行注册表只包含 Workflow `pause`、`resume`，写入前在同一 SQLite
+事务中复查身份与策略。暂停属于显式人工意图；存在 `pause_workflow` 或
+`step_workflow` 等人工暂停事件时，恢复必须再次确认，自动 sweep 不撤销暂停。
+其他 automatic 策略动作若没有注册自动 handler，投影保持策略值，并给出
+`execution.mode=manual`；Cockpit 显示“手动执行（后台未注册自动处理）”按钮。
+后台只执行符合条件且已注册的动作，不反复为未注册推荐制造拒绝回执。直接请求
+不支持的自动执行仍返回 `unsupported_handler`，恢复冲突仍 fail closed。
+
+真实节点派发从固定 Workflow 配置解析 launch 策略。要求确认时，现有
+`workflow_recovery_operations` 中保留 `waiting_human` 义务；Cockpit 的
+`confirm_dispatch` Action 在核对 Operation version、generation、依赖及旧派发责任后，
+把处理人、理由、时间和 identity_key 写入该 Operation 的持久确认记录和决策事件。
+reconcile、claim、start、launch intent 与 Task 登记共同消费它。普通 retry 不构成确认；
+重启和同一代次重试保留确认，新的 execution/config/candidate 代次不能继承旧确认。
+确认本身不宣称已经派发，也不改变 admission → lease → wait → launch → receipt 的顺序。
+
+执行查找按 Action ID 重新推导精确目标，独立于 100 项展示窗口；恢复、事件读取 N+1
+行才能判定截断。纯回执分类在 `herdr/controller_receipts.py`，Console 与 Controller 共用。
 
 回执在所选 StateStore 数据库的 `cockpit_action_receipts` 表持久保存，区分：
 
@@ -371,3 +384,24 @@ ego-browser 与临时 SQLite，覆盖指导、暂停恢复、模板确认、身�
 布局。终端传输与服务存活探测受控；真实 Agent 执行、付费模型、已安装服务、
 Git 交付全链路和生产 UAT 不在该 E2E 的证明范围。门禁部分失败用例验证既有
 兼容执行请求到真实 Kernel 的路径，未把受恢复责任禁止的操作重新加入界面。
+
+## 17. 可见入口盘点与迁移结果
+
+| 原入口 / 操作 | 当前入口与权威执行 | 回执 / 保留边界 |
+| --- | --- | --- |
+| 页头暂停 / 恢复 | 定位 Cockpit；`pause` / `resume` Action | SQLite 状态流转事件；人工暂停不会自动恢复 |
+| 页头单步 | 定位 Cockpit；`step` Action | 复用 Kernel 的就绪节点检查并保持暂停；明确提示尚未派发任务，不声称单步已启动 Agent |
+| 页头节点回溯 | 定位 Cockpit；每个节点独立 `rollback` Action | 目标节点、Workflow/Task 快照指纹、理由及确认；回读 rollback 历史 |
+| 页头快照中心 | 定位 Cockpit；`checkpoint` 与每个快照的 `restore_checkpoint` Action | 真实 checkpoint_created / checkpoint_restored 事件；恢复需显式确认 |
+| 页头进入下一阶段 | 定位 Cockpit；`advance` Action | 复用既有手动推进；没有业务证据时保留等待回执 |
+| Task / Drawer 成果会签、Dashboard 会签 | 定位对应 Workflow/Node 的 Cockpit | 原会签是 force-pass / rollback，不是独立业务签署；只提供当前允许的同源动作，恢复冲突不绕过；产物仍从 Task 详情查看 |
+| Canvas、Task、Pane 指导 / 催办 / 中断 / 返工 | 上下文定位 Cockpit，使用服务端 action_id | 自定义指导绑定 Run，催办等待，halt 的中断事件；默认 automatic 且无 handler 时可手动操作 |
+| Git pipeline / escalation / 关闭 | Cockpit 当前 Action | 既有 CLI 与安全限制；未注册自动 handler 不声称后台执行 |
+| 派发确认与恢复 | Cockpit 的 confirm_dispatch Action 和既有恢复裁决卡 | Operation 身份、版本与持久决策；确认不是 Task 登记 |
+| 人工业务裁决记录 | Cockpit 业务裁决区，复用共享文档决策账本 | 记录业务结论，不直接启动、force-pass 或改变 Controller 状态 |
+| 创建候选分支、指定后续执行者 | 保留既有仓库准备 / 执行者配置入口 | 这些是准备与配置操作，不作为 Controller Action 执行回执；不增加运行时 automatic/supervised 覆盖 |
+| 不再被页面渲染的旧全局兼容函数与 HTTP API | 保留历史调用兼容 | 不构成第二个可见 Controller 操作面；新页面通过 Cockpit Action 执行 |
+
+可执行盘点证据：`test_header_and_signoff_entrypoints_only_locate_cockpit` 验证旧入口不发 POST，
+`test_header_pause_checkpoint_rollback_and_step_use_cockpit_receipts` 验证真实页面与 SQLite 回执，
+`test_default_policy_keeps_steer_redrive_halt_operable` 验证默认策略的手动可用性。

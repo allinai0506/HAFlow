@@ -77,7 +77,8 @@ def action_automation(action, config, task, workflow, *, read_unknown=False, gra
     kind = controller_action_type(action)
     known = {"launch", "rework", "force_pass", "force_pass_advance", "redrive", "steer", "halt",
              "clear_escalation", "supersede", "close_workflow", "advance", "pause", "resume",
-             "accept_and_commit", "commit", "integrate", "finalize", "cleanup"}
+             "accept_and_commit", "commit", "integrate", "finalize", "cleanup",
+             "step", "rollback", "checkpoint", "restore_checkpoint", "confirm_dispatch"}
     target = action.get("target") or {}
     expected = action.get("expected_identity") or {}
     bypass = (action.get("category") == "bypass" or kind in {"force_pass", "force_pass_advance"}
@@ -118,6 +119,10 @@ def action_automation(action, config, task, workflow, *, read_unknown=False, gra
         return {"mode": "blocked", "source": "safety", "reason": reason}, risk
     if bypass or destructive:
         return {"mode": "confirmation_required", "source": "safety", "reason": risk}, risk
+    if kind == 'resume' and workflow.get('pause_requires_confirmation'):
+        return {"mode": "confirmation_required", "source": "human_pause", "reason": "explicit_pause"}, risk
+    if kind in {'pause', 'step', 'rollback', 'checkpoint', 'restore_checkpoint', 'confirm_dispatch'}:
+        return {"mode": "confirmation_required", "source": "human_intent", "reason": "explicit_operation"}, risk
     if workflow.get("status") in {"paused", "completed", "cleaned", "archived", "failed"} and kind != "resume":
         return {"mode": "blocked", "source": "safety", "reason": "workflow_inactive"}, risk
     return resolve_control_policy(config, target.get("node_id") or "", kind), risk

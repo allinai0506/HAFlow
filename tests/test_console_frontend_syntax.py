@@ -183,8 +183,8 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
         self.assertIn("toggleDeepDrawer()", self.html)
         self.assertIn("refreshDeepDrawer()", self.html)
 
-        # Artifact Signoff Chamber
-        self.assertIn("成果交付会签室", self.html)
+        # Signoff entry now locates the same Cockpit action surface. Runtime
+        # navigation and real gate receipts are covered by Cockpit tests.
         self.assertIn("openSignoffChamber", self.html)
         self.assertIn("submitSignoffDecision", self.html)
         self.assertIn("成果会签", self.html)

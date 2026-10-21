@@ -164,6 +164,38 @@ def _cockpit():
 class TestControllerCockpitRuntime(unittest.TestCase):
     """Drive the real JS; a green ``node --check`` is not enough."""
 
+    def test_unsupported_automatic_action_is_manually_operable_and_labelled_honestly(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                state.controllerCockpit=__cockpitFixture;
+                state.controllerCockpit.actions[0].automation={mode:'automatic',source:'default'};
+                state.controllerCockpit.actions[0].execution={mode:'manual',reason:'automatic_handler_unavailable'};
+                openControllerCockpit({workflowId:'wf-1'});
+                console.log('MANUAL='+document.getElementById('controllerTabView').innerHTML.includes('手动执行'));
+                executeCockpitAction('impl-x:integrate');
+                console.log('CONFIRM='+document.getElementById('modalBody').innerHTML.includes('cockpitActionConfirm'));
+            """)
+        self.assertIn('MANUAL=true', out)
+        self.assertIn('CONFIRM=true', out)
+
+    def test_header_and_signoff_entrypoints_only_locate_cockpit(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'},stages:[{key:'build'}]};state.controllerCockpit=__cockpitFixture;
+                  let locations=0,posts=0;globalThis.fetch=async(path,options)=>{if(options.method==='POST')posts++;return {ok:true,json:async()=>({ok:true,data:{}})}};
+                  for(const navigate of [toggleWorkflowPause,stepWorkflow,showRollbackModal,showCheckpointsModal,()=>openSignoffChamber('impl-x')]){
+                    state.workflowId='wf-1';await navigate();if(state.workflowId==='__ctl__'&&state.controllerTarget.workflowId==='wf-1')locations++;
+                  }
+                  console.log('LOCATIONS='+locations);console.log('POSTS='+posts);
+                })();
+            """)
+        self.assertIn('LOCATIONS=5', out)
+        self.assertIn('POSTS=0', out)
+
     def test_new_typed_target_clears_prior_focus_but_refresh_keeps_new_target(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

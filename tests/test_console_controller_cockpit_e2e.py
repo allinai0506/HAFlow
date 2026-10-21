@@ -6,6 +6,7 @@ unchanged. Each test owns and closes its Page so xdist workers cannot navigate
 another test's temporary service. No Agent is launched and no model is called.
 """
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -19,7 +20,7 @@ import pytest
 
 from herdr.state_store import SQLiteStateStore
 
-SPACE = "HAFlow Controller Cockpit Task 6 20261021"
+SPACE = f"HAFlow Controller Cockpit Task 6 20261021 process {os.getpid()}"
 
 
 def browser(script, *, page_label):
@@ -336,3 +337,58 @@ def test_unimplemented_automatic_action_rejects_without_terminal_effect(cockpit)
     assert result["receipt"]["status"] == "rejected"
     assert result["receipt"]["reason_code"] == "unsupported_handler"
     assert cockpit.effects == []
+
+
+def test_default_policy_keeps_steer_redrive_halt_operable(cockpit):
+    wf = cockpit.store.get_workflow('wf-e2e')
+    wf['config']['nodes'][0]['control_mode'] = 'automatic'
+    cockpit.store.save_workflow(wf)
+    open_cockpit(cockpit)
+    assert '手动执行' in cockpit.browser("console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));")
+    confirm_action(cockpit, 'working:steer', instruction='默认自动策略仍可留下自定义指导')
+    assert cockpit.store.list_steers(task_id='working')[0]['instruction'] == '默认自动策略仍可留下自定义指导'
+    confirm_action(cockpit, 'working:redrive')
+    assert any(effect['kind'] == 'prompt' for effect in cockpit.effects)
+    confirm_action(cockpit, 'working:halt')
+    assert cockpit.store.get_task('working')['status'] == 'interrupted'
+
+
+def test_cockpit_dispatch_confirmation_is_durable_before_controller_claim(cockpit):
+    from herdr import node_dispatch_store
+    cockpit.store.save_workflow({'workflow_id': 'wf-dispatch-confirm', 'status': 'running',
+        'execution_id': 'exec-e2e', 'config': {'control_policy': {'mode': 'supervised'},
+        'nodes': [{'id': 'build'}]}})
+    op = node_dispatch_store.reconcile_workflow(cockpit.store.db_path, 'wf-dispatch-confirm')[0]
+    assert node_dispatch_store.claim(cockpit.store.db_path, op['id'], 'test-controller') is None
+    open_cockpit(cockpit, 'wf-dispatch-confirm')
+    confirm_action(cockpit, f'wf-dispatch-confirm:confirm_dispatch:{op["id"]}')
+    approval = node_dispatch_store.operation_for_node(cockpit.store.db_path, 'wf-dispatch-confirm', 'build')
+    assert approval['detail']['dispatch_confirmation']['operator'] == 'human_console'
+    assert cockpit.read('wf-dispatch-confirm')['receipts'][0]['status'] == 'applied'
+    assert node_dispatch_store.claim(cockpit.store.db_path, op['id'], 'test-controller')
+    assert node_dispatch_store.start(cockpit.store.db_path, op['id'], 'test-controller')['started']
+
+
+def test_header_pause_checkpoint_rollback_and_step_use_cockpit_receipts(cockpit):
+    from services.controller.cockpit_automation import run_automatic_controller_actions
+    cockpit.store.save_workflow({'workflow_id': 'wf-controls', 'status': 'running',
+        'execution_id': 'exec-e2e', 'config': {'nodes': [{'id': 'build'}]}})
+    open_cockpit(cockpit, 'wf-controls')
+    cockpit.browser('await page.evaluate(()=>toggleWorkflowPause());')
+    confirm_action(cockpit, 'wf-controls:pause')
+    assert cockpit.store.get_workflow('wf-controls')['status'] == 'paused'
+    run_automatic_controller_actions('wf-controls', deps=SimpleNamespace(store=cockpit.store))
+    assert cockpit.store.get_workflow('wf-controls')['status'] == 'paused'
+    confirm_action(cockpit, 'wf-controls:resume_workflow')
+    confirm_action(cockpit, 'wf-controls:checkpoint')
+    cp = cockpit.store.list_checkpoints('wf-controls')[0]
+    assert cockpit.read('wf-controls')['receipts'][0]['status'] == 'applied'
+    confirm_action(cockpit, 'wf-controls:rollback:build')
+    assert cockpit.store.get_workflow('wf-controls')['history'][-1]['action'] == 'rollback'
+    assert cockpit.read('wf-controls')['receipts'][0]['status'] == 'applied'
+    confirm_action(cockpit, 'wf-controls:restore_checkpoint:' + cp['checkpoint_id'])
+    assert cockpit.read('wf-controls')['receipts'][0]['status'] == 'applied'
+    confirm_action(cockpit, 'wf-controls:step')
+    assert cockpit.store.get_workflow('wf-controls')['status'] == 'paused'
+    assert cockpit.store.list_tasks(workflow_id='wf-controls') == []
+    assert '尚未派发任务' in cockpit.read('wf-controls')['receipts'][0]['message']

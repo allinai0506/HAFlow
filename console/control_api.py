@@ -305,7 +305,8 @@ def api_controller_execute_action(payload):
         return execute_controller_action(payload)
     # Historical callers retain their result/exception contract; receipts add
     # authoritative outcome facts without changing transport success semantics.
-    from services.controller.cockpit_automation import (read_cockpit, classify_receipt, persist_receipt,
+    from herdr.controller_receipts import classify_receipt
+    from services.controller.cockpit_automation import (read_cockpit, persist_receipt,
         read_action_state, pending_action_receipt, checkpoint_result, _unknown_cockpit)
     store = herdr_kernel._get_store()
     wid = str((payload or {}).get('workflow_id') or '').strip()

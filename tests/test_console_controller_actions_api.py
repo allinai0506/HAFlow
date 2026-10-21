@@ -85,7 +85,11 @@ def test_api_workflow_controller_actions_query(console_actions_env):
     assert "wf-test-01-old" not in blocker_ids
     assert "wf-test-01-test" in blocker_ids
 
-    assert res['actions'] == []
+    # Recovery still excludes redispatch/bypass actions; workflow controls are
+    # now centralized here instead of executing from the page header.
+    assert not any(a['api_payload'].get('type') in {'launch', 'rework', 'force_pass_advance'}
+                   for a in res['actions'])
+    assert all(a['target']['workflow_id'] == 'wf-test-01' for a in res['actions'])
     assert len(res['recovery']) == 1
     assert res['recovery'][0]['payload']['task_ids'] == ['wf-test-01-test']
     assert res['recovery'][0]['status'] == 'waiting_human'

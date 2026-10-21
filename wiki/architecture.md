@@ -64,14 +64,18 @@ Evidence:
   Dashboard 用包含对象身份的上下文入口跳转并定位；返回恢复原节点或抽屉。
 - `FACT` 自动策略来自 StateStore 中的 Workflow 配置快照。缺省为 automatic，
   模板可设置 supervised 或指定动作确认。新增默认自动注册表仅启用在 SQLite
-  事务中复查身份的 Workflow 暂停/恢复；其他未注册自动动作显式拒绝。现有
-  Controller 的派发、恢复顺序保持原有职责。
+  事务中复查身份的 Workflow 暂停/恢复；显式人工暂停只能确认恢复，未注册自动
+  handler 的动作明确显示手动路径。真实派发的模板确认写入既有 Operation 决策，
+  claim/start/launch/registration 检查同一代次的持久批准；普通 retry 不能代替确认。
 - `FACT` 人工请求传 `action_id` 和 `expected_identity`，执行边界重新推导动作。
   旧 Task 版本或 Pane 身份拒绝后回读。指导按当前 Run 记录；中断须实际适配器
   成功与状态/事件回读一致。回执使用同一数据库中的 `cockpit_action_receipts`，
   区分 applied、accepted_waiting、partial、rejected。读失败保留 unknown。
 - `FACT` 派发通知成功仍可能等待 Task 登记。Operation 与 launch intent、Task、
   Run 的归属匹配后才能结案；页面刷新不重发已经执行的步骤。
+- `FACT` 页头暂停、推进、单步检查、回溯、快照及原会签入口集中到 Cockpit。
+  展示最多 100 个 Action，执行按精确 Action ID 重新查找；事件及恢复读 N+1 判定
+  截断。回执纯逻辑由 `herdr/controller_receipts.py` 供 Console 和 Controller 共用。
 - `UNKNOWN` 以上隔离测试不能证明已安装服务或生产 Agent 的运行结果。运行中
   Workflow 临时改自动策略、跨 Workflow 运维大屏和组织审批链尚未实现。
 
@@ -82,6 +86,10 @@ Evidence:
 - `services/controller/cockpit_automation.py#default_handlers`
 - `services/controller/cockpit_automation.py#execute_action`
 - `herdr/node_dispatch_store.py#reconcile_workflow`
+- `herdr/recovery_store.py#decide_operation`
+- `herdr/controller_receipts.py#classify_receipt`
+- `herdr/controller_workflow_actions.py#workflow_control_actions`
+- `tests/test_controller_cockpit_final_fixes.py`
 - `tests/test_console_controller_cockpit_e2e.py`
 - `tests/test_controller_cockpit_automation.py`
 

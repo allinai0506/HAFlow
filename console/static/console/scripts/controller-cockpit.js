@@ -20,8 +20,11 @@ var {
 }){
 
 function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><label for="overrideAgent">执行者策略</label><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi','grok','kimi'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}
-async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};window._signoffTask=t;const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:8px">${esc(a.path||'')}</div><div class="proj-txt ctl-pre-light">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b> · 版本: <b>v${esc(t.version!=null?t.version:'-')}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（通过必填原因，打回可选）</label><input id="signoffFeedback" placeholder="例如：经核验核心成果符合要求，特批放行"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
-async function submitSignoffDecision(taskId,wid,node,act){const feedback=(document.getElementById('signoffFeedback')?.value||'').trim();if(act==='approve'&&!feedback){return toast('通过并放行必须填写审批说明原因',true)}closeModal();try{toast(act==='approve'?'正在通过并放行…':'正在批注打回…');const body={task_id:taskId,workflow_id:wid,node:node,action:act,feedback:feedback,reason:feedback,operator:'总指挥'};if(act==='approve'){body.confirmed=true;const curT=window._signoffTask||{};if(curT.task_id===taskId){if(curT.version!==undefined&&curT.version!==null)body.expected_version=curT.version;if(curT.pane_id)body.expected_pane_id=curT.pane_id}}const res=await api('/api/task/signoff',{method:'POST',body:JSON.stringify(body)});if(res.ok){await loadWorkflow(wid);toast(act==='approve'?'已通过并放行门禁！':'已完成批注打回，已回退至上游重新推进')}else{toast('操作失败: '+(res.error||'未知错误'),true)}}catch(e){toast(e.message,true)}}
+async function openSignoffChamber(taskId){
+  const task=(state.workflow?.tasks||[]).find(t=>t.task_id===taskId)||(state.controllerCockpit?.nodes||[]).flatMap(n=>n.tasks||[]).find(t=>t.task_id===taskId);
+  return openControllerCockpit({workflowId:task?.workflow_id||cockpitWorkflowId(),...(task?.node||task?.stage?{nodeId:task.node||task.stage}:{taskId})});
+}
+async function submitSignoffDecision(taskId,wid,node){return openControllerCockpit({workflowId:wid,nodeId:node});}
 async function forceReviewTask(tid){
   try{
     toast('正在唤醒评审…');
@@ -45,10 +48,10 @@ async function refreshDeepDrawer(){const pre=document.getElementById('drawerPre'
 function showSteerModal(tid){openModal('留话指导',`<div class="form"><div class="muted" style="margin-bottom:8px">任务 ID：${esc(tid)}</div><label for="steerInput">想告诉它的话（排队等它空闲时读到，不打断当前执行）</label><textarea id="steerInput" rows="3" placeholder="例如：优先使用标准库，不要引入外部第三方包" style="width:100%;box-sizing:border-box;margin-bottom:8px"></textarea><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><input type="checkbox" id="steerUrgent" style="width:auto"><label for="steerUrgent" style="margin:0;cursor:pointer"><strong>现在就打断它，马上送进去</strong></label></div><button class="btn primary" onclick="submitSteer('${esc(tid)}')">发送指令</button></div>`)}
 async function submitSteer(tid){const inst=(document.getElementById('steerInput')?.value||'').trim();const urgent=!!document.getElementById('steerUrgent')?.checked;if(!inst)return toast('请输入指令内容',true);closeModal();try{toast('正在留言…');const res=await api('/api/task/steer',{method:'POST',body:JSON.stringify({task_id:tid,instruction:inst,urgent:urgent})});if(res.ok===false){toast(res.reason==='soft_steer_not_supported'?'当前工位不支持不打断的留言，指令已保留；可选择立即打断发送。':res.reason==='unknown_agent_no_adapter_registered'?'当前工位没有可用的指令适配能力，指令已保留，请检查工位配置。':'指令未送达，请查看任务现场后重试。',true);await loadWorkflow(state.workflowId);return}toast(res.status==='dispatched'?'已经打断它并送到手上了':'已放进留言队列，它空闲时会读到');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}
 function haltTaskPrompt(tid){showConfirmModal({title:'紧急叫停这个任务',message:'确定要立刻中断任务 '+tid+' 吗？正在做的事会停下，但代码和现场都会保留，之后你可以决定重新派人还是作废。',confirmText:'确认叫停',danger:true,onConfirm:async()=>{try{toast('正在叫停…');await api('/api/task/halt',{method:'POST',body:JSON.stringify({task_id:tid,reason:'人工在控制台紧急叫停'})});toast('工位已安全打断');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}})}
-async function toggleWorkflowPause(){if(!state.workflowId)return toast('当前没有工作流',true);const curSt=state.workflow&&state.workflow.workflow&&state.workflow.workflow.status;const isPaused=curSt==='paused';const act=isPaused?'resume':'pause';const label=isPaused?'恢复自动调度':'暂停自动调度';showConfirmModal({title:label,message:isPaused?'确认恢复该工作流的自动调度推进？':'确认暂停该工作流的自动推进？当前运行中的工位不会被强制终止。',confirmText:label,onConfirm:async()=>{try{await api('/api/kernel/'+act,{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});await loadWorkflow(state.workflowId);toast('工作流已'+(isPaused?'恢复':'暂停'))}catch(e){toast(e.message,true)}}})}
-async function stepWorkflow(){if(!state.workflowId)return toast('当前没有工作流',true);try{toast('正在单步推进…');const res=await api('/api/kernel/step',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});if(res.ok){await loadWorkflow(state.workflowId);toast('单步已推进: '+res.stepped_label+' ('+res.stepped_node+')')}else{toast('无法单步推进: '+(res.reason==='no_ready_nodes'?'当前无就绪节点':res.reason),true)}}catch(e){toast(e.message,true)}}
-function showRollbackModal(){if(!state.workflowId)return toast('当前没有工作流',true);const stages=(state.workflow&&state.workflow.stages)||[];if(!stages.length)return toast('工作流暂无节点',true);const options=stages.map(s=>`<option value="${esc(s.key)}">${esc(cleanStageLabel(s.label))} (${esc(s.key)})</option>`).join('');openModal('节点回溯 (Rollback)',`<div class="form"><label for="rbTarget">回溯目标节点（该节点及所有下游任务将被重置作废）</label><select id="rbTarget">${options}</select><label for="rbReason">回溯原因</label><input id="rbReason" type="text" value="人工核验需求变更或发现重大缺陷"><button class="btn primary" style="background:#dc2626;border-color:#ef4444" onclick="executeRollback()">确认回溯</button><div class="muted">警告：此操作不可撤销，下游所有产物与任务将被标记为作废。</div></div>`)}
-async function executeRollback(){const target=document.getElementById('rbTarget').value;const reason=document.getElementById('rbReason').value;closeModal();try{toast('正在执行回溯…');const res=await api('/api/kernel/rollback',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,target_node_id:target,reason:reason})});await loadWorkflow(state.workflowId);toast('已成功回溯至 '+target+'，作废 '+res.invalidated_tasks.length+' 个任务')}catch(e){toast(e.message,true)}}
+async function toggleWorkflowPause(){return openControllerCockpit({workflowId:cockpitWorkflowId()});}
+async function stepWorkflow(){return openControllerCockpit({workflowId:cockpitWorkflowId()});}
+function showRollbackModal(){return openControllerCockpit({workflowId:cockpitWorkflowId()});}
+async function executeRollback(){return openControllerCockpit({workflowId:cockpitWorkflowId()});}
 function forcePassTask(wid,nodeId,options){
   options=options||{};
   const widEsc=esc(wid||'');
@@ -139,9 +142,9 @@ function forcePassTask(wid,nodeId,options){
     };
   }
 }
-async function showCheckpointsModal(){if(!state.workflowId)return toast('当前没有工作流',true);try{const cps=await api('/api/kernel/checkpoints?workflow_id='+encodeURIComponent(state.workflowId));let listHtml='<div class="muted" style="margin-bottom:12px">暂无历史快照</div>';if(cps&&cps.length){listHtml=cps.map(c=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)"><div><strong>${esc(c.tag||'无标签')}</strong><div class="task-meta">${esc(c.checkpoint_id)} · ${c.task_count} 任务 · ${new Date(c.created_at*1000).toLocaleString()}</div></div><button class="btn" style="padding:3px 8px;font-size:12px;color:var(--danger)" onclick="restoreWorkflowCheckpoint('${esc(c.checkpoint_id)}')">恢复此快照</button></div>`).join('')}openModal('工作流快照中心',`<div class="form"><div style="display:flex;gap:8px;margin-bottom:16px"><input id="cpTagInput" type="text" placeholder="快照标签（如：修改前基准）" style="flex:1"><button class="btn primary" onclick="createWorkflowCheckpoint()">创建快照</button></div><h4>历史快照</h4><div style="max-height:240px;overflow-y:auto">${listHtml}</div></div>`)}catch(e){toast(e.message,true)}}
-async function createWorkflowCheckpoint(){const tag=document.getElementById('cpTagInput')?.value||'';try{toast('正在保存快照…');await api('/api/kernel/checkpoint',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,tag:tag})});toast('快照已保存');showCheckpointsModal()}catch(e){toast(e.message,true)}}
-async function restoreWorkflowCheckpoint(cpid){showConfirmModal({title:'恢复工作流快照',message:'确定要将工作流恢复到快照 '+cpid+' 吗？当前未保存的节点状态将被覆盖。',confirmText:'确认恢复',danger:true,onConfirm:async()=>{try{toast('正在恢复快照…');await api('/api/kernel/checkpoint/restore',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,checkpoint_id:cpid})});closeModal();await loadWorkflow(state.workflowId);toast('已恢复至快照 '+cpid)}catch(e){toast(e.message,true)}}})}
+async function showCheckpointsModal(){return openControllerCockpit({workflowId:cockpitWorkflowId()});}
+async function createWorkflowCheckpoint(){return openControllerCockpit({workflowId:cockpitWorkflowId()});}
+async function restoreWorkflowCheckpoint(){return openControllerCockpit({workflowId:cockpitWorkflowId()});}
 async function createCandidate(){
   showConfirmModal({
     title:'创建工作流候选分支',
@@ -243,9 +246,13 @@ function renderControllerTarget(data,target){
 function renderControllerNodes(data,target){
   return '<section class="controller-cockpit-section"><h3>节点与任务</h3><div class="controller-cockpit-nodes">'+(data.nodes||[]).map(n=>'<article class="controller-cockpit-node'+(target.nodeId===n.id?' is-target':'')+'"><div class="controller-cockpit-row"><strong>'+esc(n.label||n.id)+'</strong><span>'+esc(humanStatus(n.status)||n.status||'未确认')+'</span></div>'+((n.tasks||[]).map(t=>'<div class="controller-cockpit-task'+(controllerTaskMatches(t,target)?' is-target':'')+'"><button class="mini" onclick="locateControllerTask('+cockpitArg(t.task_id)+')">'+esc(t.task_id)+'</button><div>'+esc(humanStatus(t.status)||t.status||'未确认')+'</div><dl><dt>运行</dt><dd>'+esc(t.run_id||'未确认')+'</dd><dt>工位</dt><dd>'+esc(t.pane_id||t.runtime?.pane_id||'未确认')+'</dd><dt>执行身份</dt><dd>'+esc(t.execution_id||'未确认')+'</dd></dl></div>').join('')||'<p class="muted">未登记任务</p>')+'</article>').join('')+'</div>'+(data.nodes_truncated||data.tasks_truncated?'<p class="muted">仅显示服务端返回的部分节点 / 任务。</p>':'')+'</section>';
 }
+function cockpitExecutionMode(action){
+  const mode=action?.automation?.mode||'blocked';
+  return mode==='automatic'&&action?.execution?.mode==='manual'?'manual':mode;
+}
 function cockpitActionCard(a,located=false){
-  const mode=a.automation?.mode||'blocked';
-  const labels={automatic:'自动处理（由后台执行）',manual:'人工操作',confirmation_required:'需要确认',blocked:'暂不可执行'};
+  const mode=cockpitExecutionMode(a);
+  const labels={automatic:'自动处理（由后台执行）',manual:'手动执行（后台未注册自动处理）',confirmation_required:'需要确认',blocked:'暂不可执行'};
   const stale=isRejectedCockpitAction(a);
   return '<article class="controller-cockpit-action'+(located?' is-target':'')+(stale?' is-outdated':'')+'" tabindex="-1" data-action-id="'+esc(a.action_id)+'"><div class="controller-cockpit-row"><strong>'+esc(a.title||a.action_id)+'</strong><span>'+esc(labels[mode]||'暂不可执行')+'</span></div><p>'+esc(a.effect||a.description||'')+'</p><p class="muted">'+esc(a.automation?.reason||'')+'</p>'+(stale?'<p role="alert">此操作卡片已过期，请刷新后核对。</p>':'')+(mode==='automatic'?'<p class="muted">页面不触发自动执行；请查看后台回执。</p>':'<button class="btn '+(a.is_destructive?'danger-btn':'primary')+'" '+(!['manual','confirmation_required'].includes(mode)||stale?'disabled':'')+' onclick="executeCockpitAction('+cockpitArg(a.action_id)+')">'+(mode==='blocked'?'当前不可执行':'查看并确认')+'</button>')+'</article>';
 }
@@ -333,7 +340,7 @@ async function executeCockpitAction(actionId){
   const data=state.controllerCockpit;
   const action=(data?.actions||[]).find(a=>a.action_id===actionId);
   const wid=data?.workflow?.workflow_id;
-  if(!action||!controllerActionMatches(action,state.controllerTarget||{})||data.read_state!=='confirmed'||!['manual','confirmation_required'].includes(action.automation?.mode)||!action.expected_identity||isRejectedCockpitAction(action)){toast('操作条件未确认，请刷新',true);return;}
+  if(!action||!controllerActionMatches(action,state.controllerTarget||{})||data.read_state!=='confirmed'||!['manual','confirmation_required'].includes(cockpitExecutionMode(action))||!action.expected_identity||isRejectedCockpitAction(action)){toast('操作条件未确认，请刷新',true);return;}
   const snapshot=JSON.parse(JSON.stringify(action));
   const actionKey=cockpitActionKey(snapshot);
   const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk);
@@ -341,7 +348,7 @@ async function executeCockpitAction(actionId){
   openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+(isSteer?'<label for="cockpitInstruction">指导内容</label><textarea id="cockpitInstruction" rows="3"></textarea>':'')+'<label for="cockpitReason">处理依据</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
   const button=document.getElementById('cockpitActionConfirm');
   button.onclick=async()=>{
-    if(!controllerActionMatches(action,state.controllerTarget||{})||state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.automation?.mode)||cockpitWorkflowId()!==wid||cockpitActionKey((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId))!==actionKey){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
+    if(!controllerActionMatches(action,state.controllerTarget||{})||state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes(cockpitExecutionMode((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)))||cockpitWorkflowId()!==wid||cockpitActionKey((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId))!==actionKey){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
     const reason=(document.getElementById('cockpitReason')?.value||'').trim();
     const instruction=isSteer?(document.getElementById('cockpitInstruction')?.value||'').trim():null;
     if(isSteer&&!instruction){document.getElementById('cockpitActionError').textContent='请输入指导内容';return;}
@@ -437,20 +444,7 @@ function decideRecovery(id,version,action,wid){
     }});
   }});
 }
-async function advanceStage(){
-  showConfirmModal({
-    title:'进入下一阶段',
-    message:'让总指挥检查当前阶段门禁并尝试推进至下一阶段？',
-    confirmText:'确认推进',
-    onConfirm:async()=>{
-      try{
-        toast('正在请求阶段推进…');
-        await api('/api/workflow/advance',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});
-        toast('阶段推进请求已完成');
-      }catch(e){toast(e.message,true)}
-    }
-  });
-}
+async function advanceStage(){return openControllerCockpit({workflowId:cockpitWorkflowId()});}
 return {
   showAgentOverride, saveAgentOverride, openSignoffChamber, submitSignoffDecision,
   forceReviewTask, retryStageAdvance, toggleDeepDrawer, switchDrawerTab,

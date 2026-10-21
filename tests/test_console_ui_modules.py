@@ -50,6 +50,9 @@ def test_all_original_function_bodies_survive_encapsulation():
                 'openWorkflowTab', 'closeWorkflowTab', 'executeControllerAction', 'updateAttentionHub',
                 'renderTaskRow', 'flowOverviewHtml', 'renderFlowWorkbench', 'renderNodeInspector',
                 'taskDrawerMenuHtml', 'showPane', 'askCoordinator',
+                'dashSignoff', 'openSignoffChamber', 'submitSignoffDecision', 'toggleWorkflowPause',
+                'stepWorkflow', 'showRollbackModal', 'executeRollback', 'showCheckpointsModal',
+                'createWorkflowCheckpoint', 'restoreWorkflowCheckpoint', 'advanceStage',
                 'controllerActionCard', 'catMeta', 'canSteerTask', 'canForceReviewTask', 'canForcePassTask'}
     baseline = {name: entry for name, entry in baseline.items() if name not in replaced}
     script = re.findall(r'<script>(.*?)</script>', page.HTML_TEMPLATE, re.S)[0]

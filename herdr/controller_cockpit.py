@@ -56,12 +56,14 @@ def _event_order(event):
     return timestamp, event.get("id") if isinstance(event.get("id"), int) else 0
 
 
-def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unknown, graph_node_ids):
+def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unknown, graph_node_ids, action_id=None):
     wid = workflow.get("workflow_id")
     by_id = {task.get("task_id"): task for task in all_tasks if isinstance(task, dict) and task.get("task_id")}
     projected = []
     seen = set()
     for raw in actions:
+        if action_id is not None and (raw.action_id if hasattr(raw, 'action_id') else raw.get('action_id')) != action_id:
+            continue
         action = raw.to_dict() if hasattr(raw, "to_dict") else deepcopy(raw)
         target = action.get("target") or {}
         payload = action.get("api_payload") or {}
@@ -114,7 +116,7 @@ def _judgment(workflow, nodes, current, ready, unresolved, actions, read_unknown
     return {"now": now, "blocked_reason": blocked_reason, "next": next_step, "requires_user": requires_user}
 
 
-def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recovery, controller, events, errors=None):
+def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recovery, controller, events, errors=None, action_id=None):
     """Assemble a bounded read model; absent snapshots always remain unknown.
 
     Recovery, events and Tasks must be Workflow-scoped by the shell. Explicit
@@ -151,7 +153,7 @@ def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recover
     unresolved = [op for op in scoped_recovery if op.get("status") not in {"resolved", "superseded"}]
     projected_actions, actions_truncated = _project_actions(actions or [], workflow, config, all_tasks,
                                                            unresolved, read_unknown,
-                                                           {node.get("id") for node in graph.get("nodes") or []})
+                                                           {node.get("id") for node in graph.get("nodes") or []}, action_id)
     timeline = nlargest(MAX_TIMELINE + 1, (event for event in events or [] if _owned(event, wid)), key=_event_order)
     todos = [{"kind": "recovery", **deepcopy(op)} for op in unresolved[:MAX_RECOVERY]]
     todos.extend({"kind": "action", "action_id": a.get("action_id"), "title": a.get("title"),
