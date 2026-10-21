@@ -48,6 +48,49 @@ def test_roles_and_explicit_rework_are_distinct(tmp_path):
         assert claim(store, task_id='t-r2', round=2, supersedes='t')['status'] == 'claimed'
 
 
+def test_new_execution_does_not_deduplicate_against_historical_task_or_intent(tmp_path):
+    store = get_state_store(tmp_path / 'state.db')
+    with resources.workflow_launch_lock(store.db_path, 'wf'):
+        previous = api()(
+            store,
+            workflow_id='wf',
+            node_id='n',
+            role='worker',
+            candidate_sha='abc',
+            dispatch_round=1,
+            task_id='old-task',
+            execution_id='execution-old',
+            now=100,
+        )
+        assert previous['status'] == 'claimed'
+        store.save_task({
+            'task_id': 'old-task',
+            'workflow_id': 'wf',
+            'node': 'n',
+            'dispatch_role': 'worker',
+            'candidate_sha': 'abc',
+            'dispatch_round': 1,
+            'execution_id': 'execution-old',
+            'status': 'pending',
+        })
+
+        current = api()(
+            store,
+            workflow_id='wf',
+            node_id='n',
+            role='worker',
+            candidate_sha='abc',
+            dispatch_round=1,
+            task_id='new-task',
+            execution_id='execution-new',
+            now=101,
+        )
+
+    assert current['status'] == 'claimed'
+    assert current['intent']['task_id'] == 'new-task'
+    assert current['intent']['key'] != previous['intent']['key']
+
+
 def _racer(db, barrier, queue, task_id):
     store = get_state_store(db)
     barrier.wait(timeout=10)

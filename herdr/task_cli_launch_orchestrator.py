@@ -222,6 +222,7 @@ def launch_task_orchestrated(args, *, deps):
             args.dispatch_role,
             candidate,
             args.dispatch_round,
+            getattr(args, "execution_id", None),
         )
         if duplicate:
             if (
