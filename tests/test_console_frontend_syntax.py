@@ -282,7 +282,7 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
         self.assertIn("activeAlerts", js)
         self.assertIn("clearDismissedAlerts", js)
 
-        node = shutil.which("node")
+        node = shutil.which("node") or shutil.which("node", path="/Users/user/.volta/bin:/usr/local/bin:/opt/homebrew/bin")
         if not node:
             return
         test_script = r"""
@@ -310,29 +310,34 @@ state.shellView = 'alerts';
 state.overview = {
   alerts: [
     {
-      task_id: 'task-err-1',
-      workflow_id: 'wf-1',
+      task_id: "task'with'quote-1",
+      workflow_id: "wf'1",
       project_id: 'proj-1',
       status: 'failed',
-      reason: 'watchdog timeout',
+      reason: "watchdog 'timeout' error",
       agent: 'codex',
-      pane_id: 'w1:p1',
+      pane_id: "w1:p1'quote",
       stage_label: '实现'
     }
   ]
 };
 renderShellAlerts();
-if (!tasksContainer.innerHTML.includes('task-err-1')) process.exit(1);
-if (!tasksContainer.innerHTML.includes('watchdog timeout')) process.exit(2);
-if (!tasksContainer.innerHTML.includes('openTaskDrawer')) process.exit(3);
-if (!tasksContainer.innerHTML.includes('dismissAlert')) process.exit(4);
-dismissAlert('task-err-1');
-renderShellAlerts();
+if (!tasksContainer.innerHTML.includes("task&#39;with&#39;quote-1")) process.exit(1);
+if (!tasksContainer.innerHTML.includes("watchdog &#39;timeout&#39; error")) process.exit(2);
+if (!tasksContainer.innerHTML.includes("openTaskDrawer('task\\\'with\\\'quote-1')")) process.exit(3);
+if (!tasksContainer.innerHTML.includes("dismissAlert('task\\\'with\\\'quote-1')")) process.exit(4);
+dismissAlert("task'with'quote-1");
 if (!tasksContainer.innerHTML.includes('已知晓')) process.exit(5);
 process.exit(0);
 """
-        res = subprocess.run([node, "-e", test_script], capture_output=True, text=True)
-        self.assertEqual(res.returncode, 0, f"Node alert harness failed: {res.stderr}\n{res.stdout}")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(test_script)
+            temp_path = f.name
+        try:
+            res = subprocess.run([node, temp_path], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"Node alert harness failed: {res.stderr}\n{res.stdout}")
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
 
 
 

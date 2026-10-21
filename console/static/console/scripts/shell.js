@@ -4,7 +4,7 @@ var {
   paintShellPage, openShellWorkflow, renderShellAlerts, updateShellRail
 } = (function({
   state, saveViewState, syncOpsUi,
-  toast, esc, relationText,
+  toast, esc, jsArg, relationText,
   visibleAlerts, activeAlerts, isAlertDismissed,
   dismissAlert, dismissAllAlerts, clearDismissedAlerts,
   showTemplateLibrary, showOpsCenter,
@@ -186,7 +186,7 @@ function renderShellAlerts(){
     return `
       <div class="alert-card ${dismissed?'is-dismissed':''}" style="border:1px solid var(--border-subtle);border-radius:8px;padding:12px;margin-bottom:10px;background:var(--bg-subtle,var(--card-bg));${dismissed?'opacity:0.6;':''}">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
-          <div style="flex:1;min-width:0;cursor:pointer" onclick="openTaskDrawer('${esc(tid)}')">
+          <div style="flex:1;min-width:0;cursor:pointer" onclick="openTaskDrawer(${jsArg(tid)})">
             <div style="display:flex;align-items:center;gap:8px">
               <strong style="font-size:14px">${esc(taskDisplayName(a))}</strong>
               ${badge(a.status)}
@@ -199,10 +199,10 @@ function renderShellAlerts(){
             </div>
           </div>
           <div class="alert-actions" style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
-            <button class="btn mini primary" onclick="openTaskDrawer('${esc(tid)}')">任务详情</button>
-            ${wid?`<button class="btn mini" onclick="loadWorkflow('${esc(wid)}').then(()=>showShellView('workbench'))">前往工作流</button>`:''}
-            ${pid?`<button class="btn mini" onclick="showPane('${esc(pid)}','${esc(tid)}')">查看终端</button>`:''}
-            ${!dismissed?`<button class="btn mini" onclick="dismissAlert('${esc(tid)}')">忽略</button>`:''}
+            <button class="btn mini primary" onclick="openTaskDrawer(${jsArg(tid)})">任务详情</button>
+            ${wid?`<button class="btn mini" onclick="loadWorkflow(${jsArg(wid)}).then(()=>showShellView('workbench'))">前往工作流</button>`:''}
+            ${pid?`<button class="btn mini" onclick="showPane(${jsArg(pid)},${jsArg(tid)})">查看终端</button>`:''}
+            ${!dismissed?`<button class="btn mini" onclick="dismissAlert(${jsArg(tid)})">忽略</button>`:''}
           </div>
         </div>
       </div>
@@ -228,7 +228,7 @@ function renderShellSlots(){
 function renderShellWorkflows(){
   const el=document.getElementById('tasks');if(!el)return;
   const ws=(state.project&&state.project.workflows)||[];
-  el.innerHTML='<div class="shell-page"><h3>工作流</h3>'+(ws.length?ws.map(w=>`<button class="shell-row" onclick="openShellWorkflow('${esc(w.workflow_id)}')"><strong>${esc(workflowDisplayName(w))}</strong><small>${esc(w.workflow_id)}</small></button>`).join(''):'<div class="empty">当前空间暂无工作流</div>')+'</div>';
+  el.innerHTML='<div class="shell-page"><h3>工作流</h3>'+(ws.length?ws.map(w=>`<button class="shell-row" onclick="openShellWorkflow(${jsArg(w.workflow_id)})"><strong>${esc(workflowDisplayName(w))}</strong><small>${esc(w.workflow_id)}</small></button>`).join(''):'<div class="empty">当前空间暂无工作流</div>')+'</div>';
 }
 async function openShellWorkflow(id){
   state.shellView='workbench';state.workflowView='flow';saveViewState();
@@ -246,7 +246,7 @@ return {
 };
 })({
   state, saveViewState, syncOpsUi,
-  toast, esc, relationText,
+  toast, esc, jsArg, relationText,
   visibleAlerts, activeAlerts, isAlertDismissed,
   dismissAlert, dismissAllAlerts, clearDismissedAlerts,
   showTemplateLibrary, showOpsCenter,
