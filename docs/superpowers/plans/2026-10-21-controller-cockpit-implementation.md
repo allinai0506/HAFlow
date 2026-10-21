@@ -31,6 +31,7 @@
 - `console/controller_cockpit_api.py`：读取权威快照、运行状态、Action、Recovery 与事件，装配 Cockpit API；执行后重新读取回执。
 - `services/controller/cockpit_automation.py`：在 Controller sweep 中选择并提交当前可自动执行的 Action，使用持久幂等身份避免重复副作用。
 - `tests/test_controller_cockpit_projection.py`：纯投影、控制策略、unknown 和结果分类测试。
+- `tests/test_project_template_registration.py`：真实模板创建、注册、切换与 SQLite 配置快照测试。
 - `tests/test_console_controller_cockpit_api.py`：真实 SQLite/API 适配、身份校验、部分成功和读取失败测试。
 - `tests/test_controller_cockpit_automation.py`：自动执行、模板确认、破坏性拒绝、幂等和 Controller 顺序测试。
 - `tests/test_console_controller_cockpit_e2e.py`：本地 Console + 浏览器 + SQLite/Pane 适配器的自验证 E2E。
@@ -67,9 +68,11 @@
 
 **Files:**
 - Modify: `herdr/workflow.py`
+- Modify: `herdr/projects.py`
 - Modify: `docs/product-specs/workflow-template-schema.md`
 - Modify: `docs/guides/template-authoring-guide.md`
 - Test: `tests/test_workflow_engine.py`
+- Create: `tests/test_project_template_registration.py`
 
 **Interfaces:**
 - Produces: `normalize_control_policy(workflow: dict) -> dict`
@@ -139,22 +142,26 @@ Reject unknown modes, non-list `confirm_before`, duplicate action names and non-
 
 Add the approved example and state the exact order: action override → Node mode → Workflow mode → automatic default. Document that confirmation never bypasses Controller validation and that runtime override is out of scope.
 
-- [ ] **Step 5: Run Task 1 verification**
+- [ ] **Step 5: Preserve policy through real project provisioning**
+
+Update the existing project creation, `_register_project_workflow` and template-switching paths so the normalized top-level `control_policy` is copied into the immutable Workflow definition saved to SQLite. Add a test that starts from an actual template, provisions/registers the project Workflow, reads it back with `workflow_config_for`, and proves both supervised and explicit automatic Workflow policy plus provenance survive.
+
+- [ ] **Step 6: Run Task 1 verification**
 
 Run:
 
 ```bash
-pytest -q tests/test_workflow_engine.py
+pytest -q tests/test_workflow_engine.py tests/test_project_template_registration.py
 python3 -m compileall -q herdr tests
 git diff --check
 ```
 
 Expected: all commands exit 0.
 
-- [ ] **Step 6: Commit Task 1**
+- [ ] **Step 7: Commit Task 1**
 
 ```bash
-git add herdr/workflow.py docs/product-specs/workflow-template-schema.md docs/guides/template-authoring-guide.md tests/test_workflow_engine.py
+git add herdr/workflow.py herdr/projects.py docs/product-specs/workflow-template-schema.md docs/guides/template-authoring-guide.md tests/test_workflow_engine.py tests/test_project_template_registration.py
 git commit -m "feat(workflow): add controller automation policy"
 ```
 
