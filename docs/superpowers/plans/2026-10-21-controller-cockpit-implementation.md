@@ -739,6 +739,10 @@ Do not push, create a PR, merge, deploy or restart services without separate aut
 
 ## Implementation Checkpoints
 
+### Final review scope amendment (2026-10-21)
+
+The user authorized the final cross-layer correction to modify `herdr/node_dispatch_store.py`, its dispatch callers, and corresponding dispatch regression tests. The amendment is limited to enforcing the approved automatic/supervised confirmation policy in the real dispatch path and closing the final whole-branch findings; it does not add runtime policy overrides or new dispatch capabilities.
+
 1. **After Task 2:** review the template policy and pure Cockpit Projection before any HTTP/UI work.
 2. **After Task 3:** review Action identity, server-side re-derivation and four receipt outcomes before rendering them.
 3. **After Task 5:** visually review the shallow Console layout and prove old entrypoints no longer execute independent actions.
