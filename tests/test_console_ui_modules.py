@@ -7,6 +7,16 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / 'console/static'
 
 
+def test_cockpit_uses_shared_light_palette():
+    html = page.HTML_TEMPLATE
+    cockpit_css = (STATIC / 'console/styles/controller-cockpit.css').read_text()
+    assert 'var(--bg-page)' in html
+    assert 'var(--bg-surface)' in html
+    assert 'var(--primary)' in html
+    assert '#101828' not in cockpit_css
+    assert '.controller-cockpit-' in cockpit_css
+
+
 def test_console_sources_fit_review_budget():
     paths = [STATIC / 'console.html', *sorted((STATIC / 'console').rglob('*'))]
     sources = [p for p in paths if p.suffix in {'.html', '.js', '.css'}]
@@ -33,6 +43,10 @@ def test_all_original_function_bodies_survive_encapsulation():
     from tests.test_console_cockpit_runtime import PRELUDE
 
     baseline = json.loads((ROOT / 'tests/fixtures/console-ui-baseline.json').read_text())['functions']
+    # These functions intentionally changed under the Cockpit projection contract.
+    replaced = {'openControllerCockpitModal', 'renderSchedulerAttribution', 'renderPipelineActions',
+                'loadWorkflow', 'loadWorkflowExtras', 'clearWorkflow', 'currentRecovery', 'openRecoveryDecision', 'submitDecision'}
+    baseline = {name: entry for name, entry in baseline.items() if name not in replaced}
     script = re.findall(r'<script>(.*?)</script>', page.HTML_TEMPLATE, re.S)[0]
     for owner in {entry['owner'] for entry in baseline.values()}:
         source = (STATIC / 'console/scripts' / (owner + '.js')).read_text()

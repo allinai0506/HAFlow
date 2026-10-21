@@ -1,7 +1,7 @@
 /* Selected workflow reads, request coalescing and projection identity checks. */
 var {
   workflowSubject, workflowDisplayName, copyWorkflowId, editWorkflowTitle,
-  renderWorkflowSwitcher, loadWorkflow, clearWorkflow
+  renderWorkflowSwitcher, loadWorkflow, loadControllerCockpit, clearWorkflow
 } = (function({
   state, toast, showPromptModal,
   api, renderWorkflowTabs, renderSidebarWorkflows,
@@ -133,6 +133,7 @@ async function loadWorkflow(id,prefetched=null){
   if(loadSequence!==state.workflowLoadSequence)return;
   const keepController=state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===id;
   state.workflow=wfRes;
+  if(state.controllerCockpit?.workflow?.workflow_id!==id){state.controllerCockpit=null;state.controllerReceipt=null;}
   state.controllerActionsData={pending:true};
   state.decisionData={pending:true};
   const w=state.workflow.workflow;
@@ -165,7 +166,25 @@ function workflowExtraRequest(path,sequence){
   workflowExtraRequests.set(key,entry);
   return entry.promise;
 }
+async function loadControllerCockpit(workflowId){
+  const sequence=state.controllerCockpitSeq=(state.controllerCockpitSeq||0)+1;
+  const current=()=>sequence===state.controllerCockpitSeq&&(state.workflowId===workflowId||(state.workflowId==='__ctl__'&&(state.controllerTarget?.workflowId||state.workflow?.workflow?.workflow_id)===workflowId));
+  try{
+    const data=await api('/api/workflow/controller-cockpit?workflow_id='+encodeURIComponent(workflowId));
+    if(!current())return;
+    if(data.workflow?.workflow_id!==workflowId)throw new Error('工作流身份不匹配');
+    state.controllerCockpit=data;
+    const receipt=state.controllerReceipt;
+    if(receipt?.workflow_id===workflowId&&receipt.status==='accepted_waiting'){
+      const updated=receipt.operation_id!=null&&(data.receipts||[]).find(r=>r.action_id===receipt.action_id&&r.operation_id===receipt.operation_id);
+      if(updated)state.controllerReceipt=updated;
+      else if(receipt.operation_id!=null&&(data.recovery||[]).some(o=>o.id===receipt.operation_id&&['resolved','superseded'].includes(o.status)))state.controllerReceipt=null;
+    }
+  }catch(error){if(!current())return;state.controllerCockpit={...(state.controllerCockpit||{}),workflow:{workflow_id:workflowId},read_state:'unknown',controller:{status:'unknown'},errors:{cockpit:error.message}};}
+  if(state.workflowId==='__ctl__')openControllerCockpitModal();
+}
 function loadWorkflowExtras(id,sequence){
+  loadControllerCockpit(id);
   const current=()=>sequence===state.workflowLoadSequence&&state.workflow?.workflow?.workflow_id===id;
   const apply=(path,success,failure)=>workflowExtraRequest(path,sequence).then(data=>{
     if(current())success(data);
@@ -188,6 +207,8 @@ function loadWorkflowExtras(id,sequence){
 
 function clearWorkflow(){
   destroyFlowGraph();
+  state.controllerCockpitSeq=(state.controllerCockpitSeq||0)+1;
+  state.controllerCockpit=null;state.controllerTarget=null;state.controllerReceipt=null;
   state.workflow=null;
   state.workflowId=null;
   state.flowSelectedNodeId=null;
@@ -207,7 +228,7 @@ function clearWorkflow(){
 }
 return {
   workflowSubject, workflowDisplayName, copyWorkflowId, editWorkflowTitle,
-  renderWorkflowSwitcher, loadWorkflow, clearWorkflow
+  renderWorkflowSwitcher, loadWorkflow, loadControllerCockpit, clearWorkflow
 };
 })({
   state, toast, showPromptModal,

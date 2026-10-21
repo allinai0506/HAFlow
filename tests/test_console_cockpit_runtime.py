@@ -14,6 +14,7 @@ option-chip markup against realistic payloads.
 """
 
 import json
+import html
 import re
 import shutil
 import subprocess
@@ -106,6 +107,10 @@ def _action(action_id, **over):
         "command_base": "herdr-task",
         "old_task_id": "", "new_task_id": "", "new_agent": "",
         "stage": "implementation",
+        "target": {"workflow_id": "wf-1", "node_id": "build", "task_id": "impl-x", "run_id": "run-1", "pane_id": "pane-1"},
+        "expected_identity": {"task_version": 2, "pane_id": "pane-1", "execution_id": "exec-1"},
+        "automation": {"mode": "manual", "source": "default", "reason": "manual_policy"},
+        "risk": "normal",
     }
     action.update(over)
     return action
@@ -137,9 +142,224 @@ def _decision(decision_id="DU-10", options=("入", "不入"), recommended="入")
     }
 
 
+def _cockpit():
+    return {
+        'schema': 'controller-cockpit/v1', 'workflow': {'workflow_id': 'wf-1', 'status': 'running'},
+        'controller': {'status': 'running', 'last_check_at': '2026-10-21T10:00:00Z'},
+        'read_state': 'confirmed', 'errors': {}, 'missing_sources': [],
+        'judgment': {'now': 'build_running', 'blocked_reason': 'dependencies_incomplete', 'next': 'start_review', 'requires_user': True},
+        'nodes': [{'id': 'build', 'label': '实现', 'status': 'working', 'tasks': [
+            {'task_id': 'impl-x', 'workflow_id': 'wf-1', 'run_id': 'run-1', 'pane_id': 'pane-1',
+             'execution_id': 'exec-1', 'version': 2, 'status': 'working'}]}],
+        'tasks': [], 'current_nodes': ['build'], 'ready_nodes': [],
+        'todos': [{'kind': 'action', 'action_id': 'impl-x:integrate', 'target': {'task_id': 'impl-x'}}],
+        'actions': [_action('impl-x:integrate')],
+        'recovery': [], 'receipts': [{'workflow_id': 'wf-1', 'action_id': 'past', 'status': 'applied'}],
+        'timeline': [{'id': 1, 'workflow_id': 'wf-1', 'event_type': 'workflow_transition', 'timestamp': '2026-10-21T09:00:00Z'}],
+    }
+
+
 @unittest.skipIf(NODE is None, "node executable not found in PATH")
 class TestControllerCockpitRuntime(unittest.TestCase):
     """Drive the real JS; a green ``node --check`` is not enough."""
+
+    def test_projection_renders_service_judgment_identity_and_receipts(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, f"""
+                state.workflowId='wf-1';state.workflow={{workflow:{{workflow_id:'wf-1'}}}};
+                state.controllerCockpit={json.dumps(_cockpit(), ensure_ascii=False)};
+                openControllerCockpit({{workflowId:'wf-1',taskId:'impl-x',runId:'run-1'}});
+                console.log('HTML='+__probe.modal);
+            """)
+        for token in ('调度服务', '2026-10-21T10:00:00Z', 'build_running', 'dependencies_incomplete',
+                      'start_review', 'run-1', 'pane-1', 'impl-x', '待办', '执行记录', '已生效'):
+            self.assertIn(token, out)
+
+    def test_unknown_projection_never_claims_empty_or_healthy(self):
+        import tempfile
+        data = {**_cockpit(), 'read_state': 'unknown', 'todos': [], 'actions': [], 'controller': {'status': 'unknown'}}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, f"""
+                state.workflowId='wf-1';state.workflow={{workflow:{{workflow_id:'wf-1'}}}};
+                state.controllerCockpit={json.dumps(data, ensure_ascii=False)};
+                openControllerCockpit({{workflowId:'wf-1'}});console.log('HTML='+__probe.modal);
+            """)
+        self.assertIn('role="alert"', out)
+        self.assertIn('读取未确认', out)
+        self.assertNotIn('暂无待办', out)
+        self.assertNotIn('调度运转中', out)
+
+    def test_receipts_distinguish_waiting_partial_and_rejection(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                for(const status of ['applied','accepted_waiting','partial','rejected'])
+                  console.log(renderControllerReceipt({workflow_id:'wf-1',action_id:'a',status,
+                    applied_steps:['force_pass'],failed_step:'advance',reason_code:'identity_changed'}));
+            """)
+        for text in ('已生效', '已受理，等待核验', '部分生效', '已拒绝', 'force_pass', 'advance', '刷新'):
+            self.assertIn(text, out)
+
+    def test_slow_cockpit_response_cannot_replace_new_workflow(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                (async()=>{
+                  let finish;globalThis.fetch=()=>new Promise(resolve=>finish=resolve);
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                  const reading=loadControllerCockpit('wf-1');
+                  state.workflowId='wf-2';state.workflow={workflow:{workflow_id:'wf-2'}};
+                  finish({ok:true,json:async()=>({ok:true,data:{workflow:{workflow_id:'wf-1'}}})});
+                  await reading;console.log('STALE='+Boolean(state.controllerCockpit?.workflow?.workflow_id==='wf-1'));
+                })();
+            """)
+        self.assertIn('STALE=false', out)
+
+    def test_action_posts_server_identity_and_keeps_rejected_card_after_refresh(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                  state.controllerCockpit=__cockpitFixture;openControllerCockpit({workflowId:'wf-1'});
+                  const calls=[];
+                  globalThis.fetch=async(path,options)=>{
+                    calls.push({path,body:options.body&&JSON.parse(options.body)});
+                    return {ok:true,json:async()=>({ok:true,data:options.method==='POST'?
+                      {receipt:{workflow_id:'wf-1',action_id:'impl-x:integrate',status:'rejected',reason_code:'identity_changed'}}:
+                      {...__cockpitFixture,actions:[],todos:[]}})};
+                  };
+                  executeCockpitAction('impl-x:integrate');
+                  await document.getElementById('cockpitActionConfirm').onclick();
+                  console.log('CALLS='+JSON.stringify(calls));console.log('HTML='+document.getElementById('controllerTabView').innerHTML);
+                })();
+            """)
+        calls = json.loads(out.split('CALLS=', 1)[1].split('\n')[0])
+        self.assertEqual(calls[0]['path'], '/api/controller/execute-action')
+        self.assertEqual(calls[0]['body']['action_id'], 'impl-x:integrate')
+        self.assertEqual(calls[0]['body']['expected_identity'], {'task_version': 2, 'pane_id': 'pane-1', 'execution_id': 'exec-1'})
+        self.assertNotIn('type', calls[0]['body'])
+        self.assertIn('controller-cockpit?workflow_id=wf-1', calls[1]['path'])
+        self.assertIn('此操作卡片已过期', out)
+        self.assertIn('disabled', out)
+
+    def test_waiting_receipt_survives_unrelated_receipts_until_operation_resolves(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                  state.controllerReceipt={workflow_id:'wf-1',action_id:'a',status:'accepted_waiting',operation_id:42};
+                  let resolved=false;
+                  globalThis.fetch=async()=>({ok:true,json:async()=>({ok:true,data:{...__cockpitFixture,
+                    receipts:[{workflow_id:'wf-1',action_id:'a',status:'applied',operation_id:41}],
+                    recovery:[{id:42,status:resolved?'resolved':'waiting'}]}})});
+                  await loadControllerCockpit('wf-1');console.log('WAITING='+state.controllerReceipt?.status);
+                  resolved=true;await loadControllerCockpit('wf-1');console.log('RESOLVED='+Boolean(state.controllerReceipt));
+                })();
+            """)
+        self.assertIn('WAITING=accepted_waiting', out)
+        self.assertIn('RESOLVED=false', out)
+
+    def test_automatic_and_blocked_actions_cannot_be_executed_in_browser(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                state.controllerCockpit=__cockpitFixture;
+                let calls=0;globalThis.fetch=async()=>{calls++;throw new Error('unexpected action')};
+                for(const mode of ['automatic','blocked','unknown',undefined]){
+                  state.controllerCockpit.actions[0].automation.mode=mode;
+                  executeCockpitAction('impl-x:integrate');
+                }
+                console.log('CALLS='+calls);console.log('MODAL='+Boolean(__probe.modal));
+            """)
+        self.assertIn('CALLS=0', out)
+        self.assertIn('MODAL=false', out)
+
+    def test_recovery_form_uses_cockpit_operation_and_preserves_confirmations(self):
+        import tempfile
+        operation = {'id': 7, 'workflow_id': 'wf-1', 'version': 2, 'status': 'waiting_human',
+                     'payload': {'node_id': 'build'}, 'recovery': {
+                         'summary': '源仓库改动需要核查', 'next_step': '核查旧任务后恢复',
+                         'node_label': '实现', 'candidate_sha': 'candidate-1', 'explanation': '不能自动重发',
+                         'actions': [{'action': 'restore_scope', 'label': '确认恢复范围'}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, f"""
+                state.workflowId='wf-1';state.workflow={{workflow:{{workflow_id:'wf-1'}}}};
+                state.controllerCockpit=__cockpitFixture;
+                state.controllerCockpit.recovery=[{json.dumps(operation, ensure_ascii=False)}];
+                state.controllerCockpit.todos=[{{kind:'recovery',...state.controllerCockpit.recovery[0]}}];
+                openControllerCockpit({{workflowId:'wf-1',operationId:7}});
+                console.log('CARD='+document.getElementById('controllerTabView').innerHTML);
+                openRecoveryDecision(7,'restore_scope');console.log('FORM='+__probe.modal);
+            """)
+        for token in ('源仓库改动需要核查', '确认恢复范围', 'recoveryOperator', 'recoveryReason',
+                      'recoveryConfirmed', 'candidate-1'):
+            self.assertIn(token, out)
+
+    def test_explicit_workflow_target_survives_reader_repaint_and_bad_identity_is_unknown(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                (async()=>{
+                  state.workflowId='old';state.workflow={workflow:{workflow_id:'old'}};
+                  let mismatch=false;
+                  globalThis.fetch=async()=>({ok:true,json:async()=>({ok:true,data:{...__cockpitFixture,
+                    workflow:{workflow_id:mismatch?'foreign':'wf-1'}}})});
+                  await openControllerCockpit({workflowId:'wf-1',nodeId:'build'});
+                  console.log('TARGET='+state.controllerTarget.workflowId);
+                  console.log('LOADED='+state.controllerCockpit?.workflow?.workflow_id);
+                  mismatch=true;await loadControllerCockpit('wf-1');
+                  console.log('BAD='+state.controllerCockpit?.read_state);
+                })();
+            """)
+        self.assertIn('TARGET=wf-1', out)
+        self.assertIn('LOADED=wf-1', out)
+        self.assertIn('BAD=unknown', out)
+
+    def test_high_risk_reason_and_current_projection_are_required_at_confirmation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                  state.controllerCockpit=__cockpitFixture;openControllerCockpit({workflowId:'wf-1'});
+                  state.controllerCockpit.actions[0].risk='evidence_bypass';
+                  let calls=0;globalThis.fetch=async()=>{calls++;throw new Error('unexpected post')};
+                  executeCockpitAction('impl-x:integrate');
+                  await document.getElementById('cockpitActionConfirm').onclick();
+                  console.log('REASON='+document.getElementById('cockpitActionError').textContent);
+                  document.getElementById('cockpitReason').value='已核验';
+                  state.controllerCockpit.read_state='unknown';
+                  await document.getElementById('cockpitActionConfirm').onclick();
+                  console.log('UNKNOWN='+document.getElementById('cockpitActionError').textContent);
+                  console.log('CALLS='+calls);
+                })();
+            """)
+        self.assertIn('REASON=必须填写人工核验依据', out)
+        self.assertIn('UNKNOWN=目标已变化，请刷新', out)
+        self.assertIn('CALLS=0', out)
+
+    def test_decision_submission_uses_workflow_identity_not_controller_tab_id(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, f"""
+                (async()=>{{
+                  state.workflowId='wf-1';state.workflow={{workflow:{{workflow_id:'wf-1'}}}};
+                  state.controllerCockpit=__cockpitFixture;
+                  state.decisionData={{workflow_id:'wf-1',decisions:[{json.dumps(_decision(), ensure_ascii=False)}],advice:[]}};
+                  openControllerCockpit({{workflowId:'wf-1'}});document.getElementById('decChosen').value='入';
+                  globalThis.fetch=async(path,options)=>{{console.log('BODY='+options.body);throw new Error('stop at HTTP boundary')}};
+                  await submitDecision('DU-10');
+                  state.decisionData.workflow_id='foreign';openControllerCockpit({{workflowId:'wf-1'}});
+                  console.log('FOREIGN='+document.getElementById('controllerTabView').innerHTML.includes('DU-10'));
+                }})();
+            """)
+        body = json.loads(out.split('BODY=', 1)[1].split('\n')[0])
+        self.assertEqual(body['workflow_id'], 'wf-1')
+        self.assertIn('FOREIGN=false', out)
 
     def test_cockpit_opens_and_renders_pipeline_section_without_blockers(self):
         """The reported bug: healthy-but-unintegrated, zero blockers.
@@ -160,6 +380,8 @@ class TestControllerCockpitRuntime(unittest.TestCase):
             }};
             state.decisionData = {{workflow_id:'wf-1',decisions:[],advice:[]}};
             try {{
+              state.controllerCockpit=__cockpitFixture;
+              state.controllerCockpit.actions=state.controllerActionsData.actions;
               openControllerCockpitModal();
               console.log('OPEN_OK');
               console.log('HAS_PIPELINE=' + (String(__probe.modal||'').indexOf('继续推进') >= 0));
@@ -186,9 +408,11 @@ class TestControllerCockpitRuntime(unittest.TestCase):
             }};
             state.decisionData = {{workflow_id:'wf-1',decisions:[],advice:[]}};
             try {{
+              state.controllerCockpit=__cockpitFixture;
+              state.controllerCockpit.actions=state.controllerActionsData.actions;
               openControllerCockpitModal();
               console.log('OPEN_OK');
-              console.log('HAS_UNBLOCK=' + (String(__probe.modal||'').indexOf('一键解卡') >= 0));
+              console.log('HAS_UNBLOCK=' + (String(__probe.modal||'').indexOf('调度待办') >= 0));
             }} catch (e) {{
               console.log('THREW ' + e.constructor.name + ': ' + e.message);
             }}
@@ -264,6 +488,8 @@ class TestControllerCockpitRuntime(unittest.TestCase):
               advice: {json.dumps([_advice()], ensure_ascii=False)},
             }};
             try {{
+              state.controllerCockpit=__cockpitFixture;
+              state.controllerCockpit.actions=state.controllerActionsData.actions;
               openControllerCockpitModal();
               console.log('OPEN_OK');
               const m = String(__probe.modal||'');
@@ -310,7 +536,7 @@ class TestControllerCockpitRuntime(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for i, handler in enumerate(handlers):
                 f = Path(tmp) / f"h{i}.js"
-                f.write_text(f"({handler});", encoding="utf-8")
+                f.write_text(f"({html.unescape(handler)});", encoding="utf-8")
                 res = subprocess.run([NODE, "--check", str(f)],
                                      capture_output=True, text=True, timeout=30)
                 self.assertEqual(
@@ -356,6 +582,8 @@ class TestControllerCockpitRuntime(unittest.TestCase):
             }};
             state.decisionData = {{workflow_id:'wf-1',
               decisions:{json.dumps([_decision()], ensure_ascii=False)}, advice:[]}};
+            state.controllerCockpit=__cockpitFixture;
+            state.controllerCockpit.actions=state.controllerActionsData.actions;
             openControllerCockpitModal();
             console.log('MARKUP=' + String(__probe.modal || ''));
             """
@@ -366,7 +594,7 @@ class TestControllerCockpitRuntime(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for i, handler in enumerate(handlers):
                 f = Path(tmp) / f"h{i}.js"
-                f.write_text(f"({handler});", encoding="utf-8")
+                f.write_text(f"({html.unescape(handler)});", encoding="utf-8")
                 res = subprocess.run([NODE, "--check", str(f)],
                                      capture_output=True, text=True, timeout=30)
                 self.assertEqual(
@@ -413,7 +641,7 @@ class TestControllerCockpitRuntime(unittest.TestCase):
 
     def _run_in(self, tmpdir, driver):
         path = Path(tmpdir) / "cockpit.js"
-        path.write_text(PRELUDE + _script() + textwrap.dedent(driver), encoding="utf-8")
+        path.write_text(PRELUDE + _script() + "\nconst __cockpitFixture=" + json.dumps(_cockpit(), ensure_ascii=False) + ";\n" + textwrap.dedent(driver), encoding="utf-8")
         result = subprocess.run([NODE, str(path)], capture_output=True,
                                 text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr[:2000])

@@ -8,7 +8,7 @@ var {
   createCandidate, controllerActionCard, catMeta, openDecisionPanel,
   submitDecision, openControllerCockpitModal, currentRecovery, dispatchConfirmationHtml,
   recoveryUnavailable, recoveryCard, openRecoveryDecision, decideRecovery,
-  advanceStage
+  advanceStage, openControllerCockpit, renderControllerReceipt, executeCockpitAction
 } = (function({
   state, showConfirmModal, showPromptModal,
   api, toast, esc,
@@ -167,37 +167,6 @@ function controllerActionCard(act,tid,index){
 // shared by both the blocker and pipeline sections.
 const CTL_CAT_META={fix:['修复','working'],rework:['换人重派','rework'],bypass:['豁免推进','cleaned'],recovery:['恢复','waiting'],pipeline:['推进交付','working']};
 function catMeta(c){return CTL_CAT_META[c]||[c||'操作','waiting'];}
-// Pipeline actions must render even when there are zero blockers: a healthy task
-// that still owes `integrate` is exactly the case that used to render nothing.
-// Tasks the scheduler already owns have no action at all — they are shown as an
-// attribution instead, so nobody hunts for a button that would race the daemon (#253).
-function renderSchedulerAttribution(){
-  const ts=((state.workflow&&state.workflow.tasks)||[]).filter(deliveryOverridesStatus);
-  if(!ts.length)return {count:0,html:''};
-  const html=ts.map(t=>{
-    const note=String((deliveryOf(t)||{}).owner_note||'');
-    const reason=deliveryReason(t);
-    const detail=reason&&reason!==note?` · ${esc(reason)}`:'';
-    return `<div class="ctl-blocker" style="margin-bottom:8px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">${esc(taskDisplayName(t)||t.task_id)}</div><div class="ctl-blocker-id">${esc(t.task_id||'')}</div></div><div style="display:flex;gap:8px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(t.task_id||'')}')">查看任务详情</button></div></div><div class="ctl-effect">${esc(note)}${detail}</div></div>`;
-  }).join('');
-  return {count:ts.length,html};
-}
-function renderPipelineActions(acts){
-  const pipelineActs=acts.filter(a=>a.group==='pipeline');
-  const attributed=renderSchedulerAttribution();
-  if(!pipelineActs.length&&!attributed.count)return '';
-  const resumeAct=pipelineActs.find(a=>a.action_id.endsWith(':resume_workflow'));
-  const taskActs=pipelineActs.filter(a=>a!==resumeAct);
-  const byTask={};
-  taskActs.forEach(a=>{const k=a.blocker_task_id||String(a.action_id).split(':')[0];(byTask[k]=byTask[k]||[]).push(a)});
-  const groups=Object.keys(byTask).map(k=>{
-    const items=byTask[k].slice().sort((a,b)=>(b.recommended?1:0)-(a.recommended?1:0));
-    return `<div class="ctl-blocker" style="margin-bottom:8px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">${esc(taskDisplayName({task_id:k})||k)}</div><div class="ctl-blocker-id">${esc(k)}</div></div><div style="display:flex;gap:8px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(k)}')">查看任务详情</button></div></div></div><div class="ctl-actions">${items.map((a,i)=>controllerActionCard(a,k,i+1)).join('')}</div>`;
-  }).join('');
-  const resumeHtml=resumeAct?`<div class="ctl-actions" style="margin-bottom:12px">${controllerActionCard(resumeAct,'',1)}</div>`:'';
-  const count=pipelineActs.length+attributed.count;
-  return `<section><div class="ctl-section-title">继续推进 <span class="ctl-count">${count}</span></div><div class="ctl-sub">这些任务本身没有报错，只是还差一步就能收尾（保存版本 / 并入目标分支 / 归档），或者工位需要人推一把。点按钮即可。由调度器接管的任务不需要你操作，只列出当前等待原因。</div>${resumeHtml}${groups}${attributed.html}</section>`;
-}
 // Open decision asks must be impossible to miss: they block whole waves and
 // previously only existed as free text inside the coordinator's terminal.
 function renderDecisionPanel(){
@@ -230,89 +199,110 @@ function openDecisionPanel(decisionId){
   openModal('记录裁决 · '+d.decision_id,`<div class="ctl-wrap"><div class="ctl-dec-q">${esc(d.question||d.title)}</div>${opts?`<div class="ctl-dec-opts" style="flex-direction:column;align-items:stretch">${opts}</div>`:''}<div class="form"><label for="decChosen">你的结论（可直接选上面的选项，也可自己写）</label><input id="decChosen" value="${esc(d.recommended||'')}" placeholder="例如：MATCH 入 V1，但 T3 段需先过 G1c 的 DB/EXPLAIN 门禁"><label for="decNote">补充说明（可选）</label><input id="decNote" placeholder="给总指挥的执行约束"></div><div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="submitDecision('${esc(d.decision_id)}')">落库并通知总指挥</button></div></div>`);
 }
 async function submitDecision(decisionId){
+  const wid=state.workflowId==='__ctl__'?cockpitWorkflowId():state.workflowId;
+  if(state.decisionData?.workflow_id!==wid)return toast('裁决目标已变化，请刷新',true);
   const decision=(document.getElementById('decChosen')?.value||'').trim();
   const note=(document.getElementById('decNote')?.value||'').trim();
   if(!decision)return toast('请填写你的结论',true);
   closeModal();
   try{
     toast('正在记录裁决…');
-    await api('/api/workflow/decision',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,decision_id:decisionId,decision:decision+(note?('（'+note+'）'):''),operator:'human_console'})});
+    await api('/api/workflow/decision',{method:'POST',body:JSON.stringify({workflow_id:wid,decision_id:decisionId,decision:decision+(note?('（'+note+'）'):''),operator:'human_console'})});
     toast('裁决已落库，总指挥下一轮即可读到');
-    await loadWorkflow(state.workflowId);
+    await loadWorkflow(wid);
   }catch(e){toast('记录失败: '+e.message,true)}
 }
-function openControllerCockpitModal(){
-  const w=state.workflow&&state.workflow.workflow;
-  const picked=(w&&w.workflow_id)||state.workflowId||'';
-  const wid=picked&&!String(picked).startsWith('__')?picked:'未选择工作流';
-  const stall=state.workflow&&state.workflow.stall;
-  const allActs=(state.controllerActionsData&&state.controllerActionsData.actions)||[];
-  const blockers=(state.controllerActionsData&&state.controllerActionsData.blockers)||[];
-  const recoveryCount=currentRecovery().length;
-  const acts=allActs.filter(a=>a.group!=='pipeline');
-  if(!state.controllerActionsMap)state.controllerActionsMap={};
-  allActs.forEach(a=>{state.controllerActionsMap[a.action_id]=a;});
-  const isWfDone=['completed','cleaned','archived'].includes(w&&w.status);
-  const curStage=isWfDone?null:(state.workflow&&state.workflow.stages?state.workflow.stages.find(s=>['working','failed','blocked'].includes(s.status)):null);
-  const stageName=isWfDone?'已全部完成':(curStage?(curStage.label||curStage.key):'就绪/空闲');
-  const isStalled=Boolean(stall&&stall.is_stalled);
-
-  let statusCard=`<section class="ctl-status${isStalled?' is-stalled':''}"><div class="ctl-status-head"><span class="ctl-status-title"><span class="ctl-dot"></span>调度状态与等待条件</span><span class="badge ${isStalled?'failed':'cleaned'}">${isStalled?'推进停滞':'调度运转中'}</span></div><div class="ctl-status-grid"><div class="ctl-status-item"><span class="ctl-k">当前关注阶段</span><strong>${esc(stageName)}</strong></div><div class="ctl-status-item"><span class="ctl-k">活跃卡点</span><strong>${recoveryUnavailable()?'未确认':blockers.length+recoveryCount+' 项'}</strong></div><div class="ctl-status-item is-full"><span class="ctl-k">${isStalled?'停滞原因':'轮询状态'}</span><span class="ctl-note">${isStalled?`⚠️ ${esc(stall.message)}`:'✓ Controller 后台轮询正常，正在监控 DAG 拓扑门禁'}</span></div></div></section>`;
-
-  let unblockSection='';
-  if(blockers.length||acts.length){
-    const actionKey=a=>a.blocker_task_id||a.old_task_id||String(a.action_id||'').split(':')[0]||'';
-    const groups=blockers.length?blockers.map(b=>({blocker:b,items:acts.filter(a=>actionKey(a)===b.task_id)})):[{blocker:null,items:acts}];
-    if(!blockers.length&&acts.length)groups[0].items=acts;
-    const sections=groups.map((g,gi)=>{
-      const b=g.blocker||{};
-      const tid=b.task_id||(g.items[0]?actionKey(g.items[0]):'')||'';
-      const reason=humanReason(b.stage_verdict_note||b.blocker||b.blocked_reason||b.sentinel_reason||'');
-      const st=b.status||'';
-      const ag=b.agent||'';
-      const stageLabel=b.stage_label||b.stage||b.node||'';
-      const head=tid?`<div class="ctl-blocker" style="margin-bottom:8px"><div class="ctl-blocker-head"><div style="min-width:0"><div class="ctl-blocker-title">卡点任务 ${gi+1} · ${esc(taskDisplayName(b)||stageLabel||'任务')}</div><div class="ctl-blocker-id">${esc(tid)}${ag?` · 执行者 ${esc(ag)}`:''}${st?` · ${esc(humanStatus(st))}`:''}${stageLabel?` · ${esc(stageLabel)}`:''}</div></div><div style="display:flex;gap:8px;flex-shrink:0"><button class="mini" onclick="locateControllerTask('${esc(tid)}')">查看任务详情</button></div></div>${reason?`<div class="ctl-blocker-reason">卡点原因：${esc(reason)}</div>`:''}</div>`:`<div class="ctl-sub">以下为当前可执行的一键解卡操作（已按推荐度排序）。</div>`;
-      const cards=(g.items.length?g.items:[]).map((act,i)=>controllerActionCard(act,tid,i+1)).join('')||'<div class="muted" style="font-size:12px">该卡点暂无自动解卡按钮，请查看任务详情人工处理。</div>';
-      return `<section style="margin-bottom:16px">${head}<div class="ctl-actions">${cards}</div></section>`;
-    }).join('');
-    unblockSection=`<section><div class="ctl-section-title">按卡点任务一键解卡 <span class="ctl-count">${blockers.length||acts.length}</span></div><div class="ctl-sub">每个卡点任务独立分组：先看“卡点原因”，再点对应按钮即可执行，无需手动敲命令。</div>${sections}</section>`;
-  } else if(!recoveryCount&&!recoveryUnavailable()) {
-    unblockSection=`<div class="ctl-empty">✓ 当前没有报错卡点。<div class="muted">若只是还没收尾（保存版本 / 并入目标分支 / 归档），见下方“继续推进”一节。</div></div>`;
+function cockpitWorkflowId(){return (state.workflowId==='__ctl__'?state.controllerTarget?.workflowId:null)||state.workflow?.workflow?.workflow_id||'';}
+function cockpitArg(value){return esc(JSON.stringify(value));}
+function renderControllerHeader(data){
+  const c=data.controller||{};
+  const labels={running:'运行中',stopped:'已停止',unknown:'未确认'};
+  return '<header class="controller-cockpit-header"><div><div class="controller-cockpit-eyebrow">工作流驾驶舱</div><h2>'+esc(data.workflow?.title||data.workflow?.workflow_id||cockpitWorkflowId())+'</h2></div><div>调度服务 · '+esc(labels[c.status]||c.status||'未确认')+'<div class="muted">最后检查：'+esc(c.last_check_at||c.checked_at||'未提供')+'</div><button class="mini" onclick="loadControllerCockpit('+cockpitArg(cockpitWorkflowId())+')">刷新状态</button></div></header>';
+}
+function renderControllerJudgment(data){
+  const j=data.judgment||{};
+  return '<section class="controller-cockpit-judgment" aria-label="当前判断">'+[['现在',j.now],['阻塞原因',j.blocked_reason||'无'],['下一步',j.next]].map(([label,value])=>'<div><span class="muted">'+label+'</span><strong>'+esc(value||'未确认')+'</strong></div>').join('')+'<p class="muted">'+(j.requires_user?'需要人工确认':'按服务端判断推进')+'</p></section>';
+}
+function renderControllerNodes(data,target){
+  return '<section class="controller-cockpit-section"><h3>节点与任务</h3><div class="controller-cockpit-nodes">'+(data.nodes||[]).map(n=>'<article class="controller-cockpit-node'+(target.nodeId===n.id?' is-target':'')+'"><div class="controller-cockpit-row"><strong>'+esc(n.label||n.id)+'</strong><span>'+esc(humanStatus(n.status)||n.status||'未确认')+'</span></div>'+((n.tasks||[]).map(t=>'<div class="controller-cockpit-task'+(target.taskId===t.task_id?' is-target':'')+'"><button class="mini" onclick="locateControllerTask('+cockpitArg(t.task_id)+')">'+esc(t.task_id)+'</button><div>'+esc(humanStatus(t.status)||t.status||'未确认')+'</div><dl><dt>运行</dt><dd>'+esc(t.run_id||'未确认')+'</dd><dt>工位</dt><dd>'+esc(t.pane_id||t.runtime?.pane_id||'未确认')+'</dd><dt>执行身份</dt><dd>'+esc(t.execution_id||'未确认')+'</dd></dl></div>').join('')||'<p class="muted">未登记任务</p>')+'</article>').join('')+'</div>'+(data.nodes_truncated||data.tasks_truncated?'<p class="muted">仅显示服务端返回的部分节点 / 任务。</p>':'')+'</section>';
+}
+function cockpitActionCard(a){
+  const mode=a.automation?.mode||'blocked';
+  const labels={automatic:'自动处理（由后台执行）',manual:'人工操作',confirmation_required:'需要确认',blocked:'暂不可执行'};
+  const stale=state.controllerReceipt?.status==='rejected'&&state.controllerReceipt.action_id===a.action_id;
+  return '<article class="controller-cockpit-action'+(stale?' is-outdated':'')+'" data-action-id="'+esc(a.action_id)+'"><div class="controller-cockpit-row"><strong>'+esc(a.title||a.action_id)+'</strong><span>'+esc(labels[mode]||'暂不可执行')+'</span></div><p>'+esc(a.effect||a.description||'')+'</p><p class="muted">'+esc(a.automation?.reason||'')+'</p>'+(stale?'<p role="alert">此操作卡片已过期，请刷新后核对。</p>':'')+(mode==='automatic'?'<p class="muted">页面不触发自动执行；请查看后台回执。</p>':'<button class="btn '+(a.is_destructive?'danger-btn':'primary')+'" '+(!['manual','confirmation_required'].includes(mode)||stale?'disabled':'')+' onclick="executeCockpitAction('+cockpitArg(a.action_id)+')">'+(mode==='blocked'?'当前不可执行':'查看并确认')+'</button>')+'</article>';
+}
+function renderControllerTodos(data,target){
+  const recovery=(data.todos||[]).filter(t=>t.kind==='recovery');
+  const actions=[...(data.actions||[])];
+  const rejected=state.controllerReceipt;
+  if(rejected?.status==='rejected'&&rejected.workflow_id===data.workflow?.workflow_id&&rejected.stale_action&&!actions.some(a=>a.action_id===rejected.action_id))actions.push(rejected.stale_action);
+  const body=recovery.map(o=>'<div class="controller-cockpit-recovery'+(String(target.operationId)===String(o.id)?' is-target':'')+'">'+recoveryCard(o,data.workflow?.workflow_id)+'</div>').join('')+actions.map(cockpitActionCard).join('');
+  const decisions=state.decisionData?.workflow_id===data.workflow?.workflow_id?renderDecisionPanel():'<p class="muted">人工裁决状态尚未确认，请查看工作流详情。</p>';
+  return '<section class="controller-cockpit-section"><h3>调度待办 · 继续推进</h3>'+(data.read_state!=='confirmed'?'<div role="alert">读取未确认，尚不能确认是否存在待办。</div>':body||'<p class="muted">暂无待办</p>')+(data.actions_truncated||data.recovery_truncated?'<p class="muted">待办已截断，请查看对应节点的详情。</p>':'')+decisions+'</section>';
+}
+function renderControllerReceipt(receipt){
+  if(!receipt)return '';
+  const labels={applied:'已生效',accepted_waiting:'已受理，等待核验',partial:'部分生效',rejected:'已拒绝'};
+  return '<article class="controller-cockpit-receipt '+(receipt.status==='rejected'||receipt.status==='partial'?'is-warning':'')+'" role="status"><strong>'+esc(labels[receipt.status]||'结果未确认')+'</strong><span> · '+esc(receipt.action_id||'')+'</span><p>'+esc(receipt.message||receipt.reason_code||'')+'</p>'+(receipt.applied_steps?.length?'<p>已生效步骤：'+esc(receipt.applied_steps.join('、'))+'</p>':'')+(receipt.failed_step||receipt.failed_steps?.length?'<p>失败步骤：'+esc(receipt.failed_step||(receipt.failed_steps||[]).join('、'))+'</p>':'')+(receipt.status==='accepted_waiting'?'<p>已记录受理回执，实际结果尚未确认。刷新后继续核验。</p>':'')+(receipt.status==='rejected'?'<p>旧操作已过期，执行未获确认。</p>':'')+(['rejected','accepted_waiting','partial'].includes(receipt.status)?'<button class="mini" onclick="loadControllerCockpit('+cockpitArg(receipt.workflow_id||cockpitWorkflowId())+')">刷新核验</button>':'')+'</article>';
+}
+function renderControllerTimeline(data){
+  return '<section class="controller-cockpit-section"><h3>执行记录</h3>'+(data.receipts||[]).map(renderControllerReceipt).join('')+'<ol class="controller-cockpit-timeline">'+(data.timeline||[]).map(e=>'<li><time>'+esc(e.timestamp||'时间未确认')+'</time><span>'+esc(e.event_type||e.type||'事件')+'</span><span class="muted">'+esc(e.task_id||e.node_id||'')+'</span></li>').join('')+'</ol>'+(data.timeline_truncated?'<p class="muted">仅显示最近记录。</p>':'')+'</section>';
+}
+function paintControllerCockpit(){
+  const data=state.controllerCockpit;
+  const box=document.getElementById('controllerTabView');
+  if(!box)return;
+  if(!data||data.workflow?.workflow_id!==cockpitWorkflowId()){
+    box.innerHTML='<div class="controller-cockpit-wrap" role="status">正在读取调度状态…</div>';return;
   }
-  const resources=(state.workflow?.graph?.nodes||[]).filter(n=>n.resource_usage);
-  const resourceSection=resources.length?'<section><div class="ctl-section-title">节点任务与工位占用</div><div class="ctl-sub">累计包含已归档任务；工位计数为持久引用数，待回收引用单列。</div>'+resources.map(n=>{
-    const u=n.resource_usage;
-    return '<div class="ctl-status-item"'+(u.overflow?' style="color:var(--danger);font-weight:600"':'')+'><strong>'+esc(n.label||n.id)+'</strong><span>'+esc(flowCardFoot(n))+' · 待回收 '+u.orphan_pane_count+'</span></div>';
-  }).join('')+'</section>':'';
-  const pipelineSection=renderPipelineActions(allActs);
-  const decisionSection=renderDecisionPanel();
-  const recoverySection=renderRecoveryPanel(wid);
-
-  const cheatRows=[
-    {name:'原工位返工',cmd:`bin/herdr-task rework <task-id> --prompt '<修复指引>'`,desc:'保留 task_id 与工位，就地修复与自测'},
-    {name:'换执行者重派（例外）',cmd:`bin/herdr-task launch --task-id <new-task-id> --workflow-id ${wid} --stage <stage> --source . --agent <agent> --goal <goal> --prompt <prompt> --supersedes <old-task-id> --supersede-reason '<替换理由>'`,desc:'作废指定卡点旧任务，换执行者重派新任务'},
-    {name:'强制推进阶段',cmd:`bin/herdr-task advance ${wid}`,desc:'检查并强制推进工作流至下一阶段'},
-    {name:'解除升级锁定',cmd:'bin/herdr-task clear-escalation <task-id>',desc:'撤销机器终化升级锁，解除阻断重新流转'},
-    {name:'立刻推工位一把',cmd:`herdr agent prompt <pane-id> "提示内容" --wait --timeout 180000`,desc:'马上把指令送到工位并等回执（立即生效）'},
-    {name:'留话指导',cmd:'bin/herdr-task steer <task-id> "提示内容"',desc:'把指导放进留言队列，下一轮才生效（不打断当前执行）'},
-  ];
-  let cheatSheet=`<details class="ctl-tech"><summary>工程师命令参考（可选展开，终端用户无需使用）</summary><div class="ctl-tech-body"><section class="ctl-cheatsheet" style="box-shadow:none"><div class="ctl-sub">以下命令仅供审计与排查；日常使用请点上面的“一键执行”按钮。</div><div class="ctl-cheat-list">${cheatRows.map((r,i)=>`<div class="ctl-cheat-row"><span class="ctl-cheat-num">${i+1}</span><div><div class="ctl-cheat-name"><span>${esc(r.name)}</span><button class="mini" onclick="copyCliCommand(document.getElementById('ctlCheat${i}').textContent)">复制</button></div><div class="ctl-cheat-cmd"><code id="ctlCheat${i}">${esc(r.cmd)}</code></div><div class="ctl-cheat-desc">${esc(r.desc)}</div></div></div>`).join('')}</div></section></div></details>`;
-
-  const html=`<div class="ctl-wrap">${statusCard}${resourceSection}${recoverySection}${decisionSection}${unblockSection}${pipelineSection}${cheatSheet}</div>`;
-  const _ctlEl=document.getElementById('controllerTabView');
-  if(_ctlEl){_ctlEl.innerHTML=`<div class="ctl-panel-header"><strong>Controller 调度与解卡控制台</strong><span class="muted" style="margin-left:8px;font-weight:400">· ${esc(wid)}</span></div>`+html;_ctlEl.hidden=false;}
+  const receipt=state.controllerReceipt?.workflow_id===data.workflow.workflow_id?state.controllerReceipt:null;
+  box.innerHTML='<div class="controller-cockpit-wrap">'+renderControllerHeader(data)+(data.read_state!=='confirmed'?'<div class="controller-cockpit-error" role="alert">读取未确认：'+esc(Object.values(data.errors||{}).join('；')||'部分权威来源不可用')+'。请刷新核验。</div>':'')+renderControllerJudgment(data)+renderControllerReceipt(receipt)+'<div class="controller-cockpit-columns">'+renderControllerNodes(data,state.controllerTarget||{})+renderControllerTodos(data,state.controllerTarget||{})+'</div>'+renderControllerTimeline(data)+'</div>';
+  box.hidden=false;
+}
+function openControllerCockpit(target={}){
+  const wid=target.workflowId||(state.workflowId==='__ctl__'?state.controllerTarget?.workflowId:null)||state.workflow?.workflow?.workflow_id||(state.workflowId&&!state.workflowId.startsWith('__')?state.workflowId:'');
+  if(!wid){toast('请先选择工作流',true);return;}
+  const changed=state.controllerTarget?.workflowId!==wid;
+  state.controllerTarget={...(changed?{}:state.controllerTarget),...target,workflowId:wid};
+  if(changed&&state.controllerReceipt?.workflow_id!==wid)state.controllerReceipt=null;
   setWorkspaceMode('ctl');
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes('__ctl__'))state.openWorkflowTabIds.push('__ctl__');
-  state.workflowId='__ctl__';
-  renderWorkflowTabs();
+  state.workflowId='__ctl__';renderWorkflowTabs();paintControllerCockpit();
+  if(state.controllerCockpit?.workflow?.workflow_id!==wid)return loadControllerCockpit(wid);
+}
+function openControllerCockpitModal(){return openControllerCockpit();}
+async function executeCockpitAction(actionId){
+  const data=state.controllerCockpit;
+  const action=(data?.actions||[]).find(a=>a.action_id===actionId);
+  const wid=data?.workflow?.workflow_id;
+  if(!action||data.read_state!=='confirmed'||!['manual','confirmation_required'].includes(action.automation?.mode)||!action.expected_identity){toast('操作条件未确认，请刷新',true);return;}
+  const identity=JSON.stringify(action.expected_identity);
+  const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk);
+  openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+'<label for="cockpitReason">处理依据</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
+  const button=document.getElementById('cockpitActionConfirm');
+  button.onclick=async()=>{
+    if(state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.automation?.mode)||cockpitWorkflowId()!==wid||JSON.stringify((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)?.expected_identity)!==identity){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
+    const reason=(document.getElementById('cockpitReason')?.value||'').trim();
+    if((highRisk)&&!reason){document.getElementById('cockpitActionError').textContent='必须填写人工核验依据';return;}
+    button.disabled=true;
+    try{
+      const result=await api('/api/controller/execute-action',{method:'POST',body:JSON.stringify({workflow_id:wid,action_id:actionId,expected_identity:action.expected_identity,reason,confirmed:true,operator:'human_console'})});
+      if(state.workflowId!=='__ctl__'||cockpitWorkflowId()!==wid)return;
+      state.controllerReceipt=result.receipt?{...result.receipt,...(result.receipt.status==='rejected'?{stale_action:action}:{})}:{workflow_id:wid,action_id:actionId,status:'accepted_waiting',message:'回执缺失，结果未确认'};
+      closeModal();paintControllerCockpit();
+      await loadControllerCockpit(wid);
+    }catch(error){if(cockpitWorkflowId()===wid){document.getElementById('cockpitActionError').textContent=error.message;button.disabled=false;}}
+  };
 }
 function currentRecovery(nodeId){
-  const w=state.workflow?.workflow||state.workflow;
+  const cockpit=state.workflowId==='__ctl__'&&state.controllerCockpit?.workflow?.workflow_id===cockpitWorkflowId()?state.controllerCockpit:null;
+  const w=cockpit?.workflow||state.workflow?.workflow||state.workflow;
   if(w&&(w.status==='completed'||w.status==='failed'||w.status==='halted'||w.outcome==='delivered'||w.outcome==='abandoned'||w.completed_at)){
     return [];
   }
-  return (state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status)&&(!nodeId||o.payload?.node_id===nodeId));
+  return (cockpit?.recovery||state.controllerActionsData?.recovery||[]).filter(o=>!['resolved','superseded'].includes(o.status)&&(!nodeId||o.payload?.node_id===nodeId));
 }
 function dispatchConfirmations(nodeId){
   const w=state.workflow?.workflow||state.workflow;
@@ -359,7 +349,7 @@ function openRecoveryDecision(id,action){
   const partial=action==='abandon_partial_launch';
   openModal(choice.label,`<form id="recoveryForm" class="form"><p>${esc(o.recovery.summary)}</p><p>${esc(o.recovery.next_step)}</p><p class="muted">节点：${esc(cleanStageLabel(o.recovery.node_label||o.payload.node_id))} · 验收版本：${esc(o.recovery.candidate_sha||'未确认')}</p><label for="recoveryOperator">处理人</label><input id="recoveryOperator" required maxlength="128"><label for="recoveryReason">核查结果与处理依据</label><textarea id="recoveryReason" required maxlength="1000" rows="3"></textarea>${resend?'<label><input id="recoveryConfirmed" type="checkbox" required style="width:auto">我已查看任务列表及旧工位，确认没有旧任务执行，授权对当前版本重新派发。</label><p class="muted">这是人工核查回执，不代表业务验收通过。系统仍会复查启动记录、候选和依赖。</p>':''}${partial?`<p>旧工位：${esc(choice.pane_id)} · Terminal：${esc(choice.terminal_id)}</p><p>先在终端检查 <code>herdr pane read ${esc(choice.pane_id)}</code>，只允许归档明确停留在启动提示的现场；确认 transcript 未包含任务指令或工作产出后，将其 SHA-256 填入。</p><label for="recoveryTranscriptSha256">已复核 transcript SHA-256</label><input id="recoveryTranscriptSha256" required maxlength=64 pattern="[a-fA-F0-9]{64}"><label><input id="recoveryPartialConfirmed" type="checkbox" required style="width:auto">我已检查上方工位 transcript，确认仅有启动提示且没有开始执行任务。</label>`:''}${bindLineage?`<p>旧任务：${esc(o.recovery.lineage.map(t=>t.task_id+' / '+(t.run_id||'身份未确认')).join('；'))}</p><label><input id="recoveryLineage" type="checkbox" required style="width:auto">确认以上任务 / Run属于本次工作流执行，授权补齐其执行归属。</label>`:''}<p id="recoveryError" role="alert"></p><button id="recoverySubmit" type="submit" class="btn primary">${esc(choice.label)}</button><button type="button" class="btn" onclick="closeModal()">取消</button></form>`);
   const form=document.getElementById('recoveryForm');
-  const ownsForm=()=>form.isConnected&&document.getElementById('recoveryForm')===form&&document.getElementById('modal')?.classList.contains('open')&&(state.workflowId===wid||(state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===wid));
+  const ownsForm=()=>form.isConnected&&document.getElementById('recoveryForm')===form&&document.getElementById('modal')?.classList.contains('open')&&(state.workflowId===wid||(state.workflowId==='__ctl__'&&cockpitWorkflowId()===wid));
   form.onsubmit=async(event)=>{
     event.preventDefault();const button=document.getElementById('recoverySubmit');button.disabled=true;
     const body={workflow_id:wid,operation_id:o.id,expected_version:o.version,operator:document.getElementById('recoveryOperator').value.trim(),reason:document.getElementById('recoveryReason').value.trim(),action,candidate_sha:o.recovery.candidate_sha,confirmed_absent:document.getElementById('recoveryConfirmed')?.checked===true,confirmed_lineage:document.getElementById('recoveryLineage')?.checked===true,lineage_snapshot:(o.recovery.lineage||[]).map(t=>({task_id:t.task_id,run_id:t.run_id,version:t.version}))};
@@ -410,7 +400,7 @@ return {
   createCandidate, controllerActionCard, catMeta, openDecisionPanel,
   submitDecision, openControllerCockpitModal, currentRecovery, dispatchConfirmationHtml,
   recoveryUnavailable, recoveryCard, openRecoveryDecision, decideRecovery,
-  advanceStage
+  advanceStage, openControllerCockpit, renderControllerReceipt, executeCockpitAction
 };
 })({
   state, showConfirmModal, showPromptModal,
