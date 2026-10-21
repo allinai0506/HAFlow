@@ -68,32 +68,6 @@ def mark_stage_advance_queued(ports,
 
     return True
 
-def mark_stage_advance_notified(ports,
-    workflow_id,
-    target_node_id,
-    *,
-    clear_attention=True,
-):
-    key = ports.stage_advance_key(
-        workflow_id,
-        target_node_id
-    )
-
-    with ports.lock:
-        state = ports.load_stage_state()
-        state[key] = "notified"
-        ports.save_stage_state(state)
-
-    if clear_attention:
-        try:
-            ports.attention_clear(f"{workflow_id}:stage_advance:{target_node_id}")
-        except Exception as exc:
-            print(
-                f"[STAGE ADVANCE ATTENTION CLEAR ERROR] "
-                f"workflow={workflow_id} "
-                f"node={target_node_id}: {exc}"
-            )
-
 def clear_stage_advance(ports,
     workflow_id,
     stage
@@ -269,8 +243,6 @@ DEPENDENCIES = {'load_stage_state': ('STAGE_STATE_FILE', 'json', 'os'),
  'save_stage_state': ('STAGE_STATE_FILE', 'json', 'os'),
  'stage_advance_key': (),
  'mark_stage_advance_queued': ('load_stage_state', 'lock', 'save_stage_state', 'stage_advance_key'),
- 'mark_stage_advance_notified': ('attention_clear', 'load_stage_state', 'lock', 'save_stage_state',
-                                 'stage_advance_key'),
  'clear_stage_advance': ('load_stage_state', 'lock', 'save_stage_state', 'stage_advance_key'),
  'reset_queued_stage_states': ('load_stage_state', 'lock', 'save_stage_state'),
  'get_stage_status': ('TASK_MANAGER', 'json', 'subprocess'),

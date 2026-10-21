@@ -411,7 +411,11 @@ def try_direct_stage_advance(ports, item):
                 episode = ports.attention_get(key) or {}
                 ports.attention_note(
                     key,
-                    {"task_id": f"stage_advance:{ready_id}", "workflow_id": workflow_id},
+                    {
+                        "task_id": f"stage_advance:{ready_id}",
+                        "workflow_id": workflow_id,
+                        "execution_id": project_ctx.get("execution_id"),
+                    },
                     "stage_advance",
                     reason="direct_dispatch_delivery_unknown",
                     attempts=int(episode.get("attempts") or 0) + 1,

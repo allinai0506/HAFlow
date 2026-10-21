@@ -518,6 +518,41 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
         finally:
             self.controller.attention_clear(key)
 
+    def test_clearing_unknown_delivery_attention_releases_stage_latch(self):
+        import tempfile
+
+        workflow_id = "wf-unknown-reconciled"
+        target_node = "node1"
+        key = f"{workflow_id}:stage_advance:{target_node}"
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            self.controller, "STAGE_STATE_FILE", f"{tmp}/stage-state.json"
+        ):
+            self.controller.attention_note(
+                key,
+                {
+                    "task_id": f"stage_advance:{target_node}",
+                    "workflow_id": workflow_id,
+                    "execution_id": "execution-1",
+                },
+                "stage_advance",
+                reason="direct_dispatch_delivery_unknown",
+            )
+            self.controller.mark_stage_advance_notified(
+                workflow_id, target_node, clear_attention=False
+            )
+            self.assertEqual(
+                self.controller.attention_get(key)["execution_id"],
+                "execution-1",
+            )
+
+            self.controller.attention_clear(key)
+
+            self.assertIsNone(self.controller.attention_get(key))
+            self.assertNotIn(
+                f"{workflow_id}:{target_node}",
+                self.controller.load_stage_state(),
+            )
+
     def test_mark_stage_advance_notified_handles_clear_error_gracefully(self):
         """Verify that an exception in attention_clear does not crash mark_stage_advance_notified or leave silent failure."""
         workflow_id = "wf-clear-err"

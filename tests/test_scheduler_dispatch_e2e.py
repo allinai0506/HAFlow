@@ -25,7 +25,7 @@ import unittest
 import pytest
 from herdr.task_cli_resources import reclaim_unregistered_launch_resources
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERDR_ROOT))
@@ -638,6 +638,44 @@ class P1LatchRecoveryTest(unittest.TestCase):
 
         queued.assert_not_called()
         put.assert_not_called()
+
+    def test_previous_execution_attention_is_cleared_and_does_not_block(self):
+        wf_id, ctx = self._sweep_patches(
+            _scheduler_join_gate_allows=True,
+            _scheduler_freeze_candidate="b" * 40,
+            project_for_workflow={
+                "startup_ready": True,
+                "project_root": "/repo",
+                "execution_id": "current-execution",
+            },
+        )
+        ctx.append(patch.object(
+            _ctl,
+            "attention_get",
+            return_value={
+                "reason": "direct_dispatch_delivery_unknown",
+                "execution_id": "previous-execution",
+            },
+        ))
+        with patch.object(
+            _ctl, "attention_clear"
+        ) as clear, patch.object(
+            _ctl, "mark_stage_advance_queued", return_value=True
+        ) as queued, patch.object(_ctl.coordinator_queue, "put") as put:
+            for c in ctx:
+                c.start()
+            try:
+                _ctl.check_workflow_stage_advance(wf_id)
+            finally:
+                for c in reversed(ctx):
+                    c.stop()
+
+        clear.assert_has_calls([
+            call(f"{wf_id}:stage_advance:test"),
+            call(f"{wf_id}:stage_advance:review"),
+        ], any_order=True)
+        queued.assert_called()
+        put.assert_called()
 
 
 class FrozenCandidateFactTest(unittest.TestCase):

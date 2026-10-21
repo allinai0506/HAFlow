@@ -23,9 +23,15 @@ def _handle_stage_advance_item(ports, item):
             workflow_id = item["workflow_id"]
             key = f"{workflow_id}:stage_advance:{target_node_id}"
             episode = ports.attention_get(key) or {}
+            workflow = ports._get_store().get_workflow(workflow_id) or {}
+            attention_task = {
+                "task_id": f"stage_advance:{target_node_id}",
+                "workflow_id": workflow_id,
+                "execution_id": workflow.get("execution_id"),
+            }
             ports.attention_note(
                 key,
-                {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+                attention_task,
                 "stage_advance",
                 reason="human_decision_required",
                 attempts=int(episode.get("attempts") or 0) + 1,
@@ -34,7 +40,7 @@ def _handle_stage_advance_item(ports, item):
             ports.clear_stage_advance(workflow_id, target_node_id)
             ports.notify_attention(
                 "Herdr Factory · 需要人工决策",
-                {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+                attention_task,
                 f"节点 {target_node_id} 类型为 {node.get('node_type')}，"
                 "没有确定性执行器；请完成决策后清除 attention 以从原节点继续。",
                 "human_decision_required",

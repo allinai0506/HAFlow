@@ -299,7 +299,14 @@ def check_workflow_stage_advance(ports, workflow_id):
                 "human_decision_required",
                 "direct_dispatch_delivery_unknown",
             ):
-                continue
+                attention_execution = attention.get("execution_id")
+                current_execution = workflow_record.get("execution_id")
+                if (attention_execution and current_execution
+                        and attention_execution != current_execution):
+                    ports.attention_clear(attention_key)
+                    attention = {}
+                else:
+                    continue
             if ports.attention_blocks_retry(attention_key):
                 continue
 
@@ -404,7 +411,14 @@ def check_workflow_stage_advance(ports, workflow_id):
             "human_decision_required",
             "direct_dispatch_delivery_unknown",
         ):
-            continue
+            attention_execution = attention.get("execution_id")
+            current_execution = workflow_record.get("execution_id")
+            if (attention_execution and current_execution
+                    and attention_execution != current_execution):
+                ports.attention_clear(attention_key)
+                attention = {}
+            else:
+                continue
         if ports.attention_blocks_retry(attention_key):
             continue
 
@@ -451,7 +465,7 @@ DEPENDENCIES = {'enqueue_stage_advance': ('check_workflow_stage_advance',),
                                   '_scheduler_resolve_candidate_and_plan',
                                   '_selective_replan_awaiting_redispatch',
                                   '_workflow_complete_logged', '_workflow_entry',
-                                  'attention_blocks_retry', 'attention_get', 'attention_note',
+                                  'attention_blocks_retry', 'attention_clear', 'attention_get', 'attention_note',
                                   'blocked_gate_dependency', 'blocked_verdict_dep',
                                   'clear_stage_advance', 'coordinator_intake_enabled',
                                   'coordinator_queue',

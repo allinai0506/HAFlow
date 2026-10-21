@@ -35,7 +35,7 @@ pytest -q tests/test_direct_stage_dispatch.py \
   tests/test_coordinator_auto_heal.py \
   tests/test_node_dispatch_contract.py
 
-327 passed, 44 subtests passed
+329 passed, 44 subtests passed
 ```
 
 关键合同：
