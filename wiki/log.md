@@ -3306,3 +3306,21 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-015 状态从“确认”更新为“已解决（CLI 与 Web 控制台版本守卫能力完全对称）”。
 - Added `tests/test_gate_exemption_version_guard.py`：新增对 `herdr-task bypass-gate` 与 `herdr-factory force-pass` 的匹配放行、陈旧版本拒绝、节点级单版本拦截以及多任务字典映射校验等 7 项专项回归测试（7/7 PASSED）。
 - Evidence：`bin/herdr-factory:652-675`、`bin/herdr-task:234-245`、`herdr/kernel.py:839-868`、`tests/test_gate_exemption_version_guard.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Refactor & Tests | 门禁豁免操作人规范与审计有效性契约收敛 (SC-010)
+
+- Updated `herdr/transitions.py:validate_operator`：
+  - 新增 `InvalidOperatorError(ValueError)` 与 `validate_operator(operator: Any) -> str` 标准化纯逻辑校验函数；
+  - 确立操作人有效性与最小格式规范：拒绝 `None`、空字符串与全空白字符；要求有效长度介于 1 至 128 字符之间；
+  - 拦截高风险输入：拒绝控制字符（`ord(c) < 32`）、路径遍历/分隔符（`/`、`\`、`..`）、脚本注入字符（`<`、`>`）及复合数据类型；
+  - 阻断匿名与占位标识：大小写不敏感拒绝 `none`、`null`、`nil`、`undefined`、`unknown`、`anonymous`。
+- Updated `herdr/kernel.py` & `herdr/state_db.py`：
+  - 在 `kernel.bypass_task_gate`、`kernel.force_pass_gate` 及 `state_db.force_pass_gate` 门禁放行入口前置调用 `validate_operator`；
+  - 将合规规范化后的操作人标识透传至放行回执（`receipt`）、阶段说明（`stage_verdict_note`）、工作流覆盖（`gate_overrides`）与审计轨迹事件，杜绝匿名豁免。
+- Updated `console/workflow_policy.py` & `console/task_api.py`：
+  - 在 Web 控制台门禁放行前置校验 `_validate_force_pass_params` 与任务强制复审 `api_task_force_review` 中接入 `validate_operator`；
+  - 拦截非法操作人标识并统一转换为标准 `RuntimeError`，缺省时安全回退至已知上下文合法主体（`human` 或 `human_console`）。
+- Updated `wiki/task-lifecycle.md`：在任务生命周期章节增补 SC-010“门禁豁免操作人规范与审计有效性契约”条款。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-010 状态从“确认”更新为“已解决（确立操作人审计契约与全写入点有效性校验）”，全系统 19 项语义冲突实现 100% 解决与裁决闭环。
+- Added `tests/test_gate_exemption_operator_audit.py`：新增对纯逻辑校验、内核门禁放行、数据库事务、Web 控制台端点及 CLI 命令行工具等 18 项专项测试（涵盖 85 个 subtest 断言，100% PASSED）。
+- Evidence：`herdr/transitions.py:validate_operator`、`herdr/kernel.py:force_pass_gate`、`herdr/kernel.py:bypass_task_gate`、`herdr/state_db.py:force_pass_gate`、`console/workflow_policy.py:_validate_force_pass_params`、`console/task_api.py:api_task_force_review`、`tests/test_gate_exemption_operator_audit.py`、`ontology/tests/audit_ontology.py`。

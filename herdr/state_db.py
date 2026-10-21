@@ -7495,6 +7495,8 @@ def force_pass_gate(
     expected_task_versions: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Atomically check and force-pass a gate node within a single immediate transaction."""
+    from .transitions import validate_operator
+    operator = validate_operator(operator)
     should_close = False
     if conn is None:
         conn = get_db_connection(db_path)

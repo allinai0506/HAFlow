@@ -96,5 +96,12 @@ def _validate_force_pass_params(payload, wid, wf=None, task=None):
                     f'任务 {tid} 版本已变化（期望版本 {exp_v}，当前版本 {cur_v}），请刷新页面'
                 )
 
-    op = str(payload.get('operator') or 'human').strip()
+    raw_op = payload.get('operator')
+    if raw_op is None and 'operator' not in payload:
+        raw_op = 'human'
+    from herdr.transitions import validate_operator, InvalidOperatorError
+    try:
+        op = validate_operator(raw_op)
+    except (InvalidOperatorError, ValueError) as exc:
+        raise RuntimeError(f"无效的操作人标识: {exc}")
     return gate, reason, op
