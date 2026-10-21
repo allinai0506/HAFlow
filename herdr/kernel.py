@@ -842,6 +842,7 @@ def bypass_task_gate(
     operator: str = "human",
     note: Optional[str] = None,
     store: Optional[StateStore] = None,
+    expected_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Universal human-in-the-loop gate bypass.
 
@@ -863,6 +864,11 @@ def bypass_task_gate(
     task = s.get_task(task_id)
     if not task:
         raise ValueError(f"Task '{task_id}' not found")
+
+    if expected_version is not None and task.get("version") != expected_version:
+        raise ValueError(
+            f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {task.get('version')}），写入已拒绝"
+        )
 
     from .task_checkpoint import reject_verdict_only_override
     reject_verdict_only_override(task)
@@ -935,6 +941,7 @@ def bypass_task_gate(
         metadata["failure_reason"] = None
 
     def _apply_bypass():
+        target_expected_version = expected_version if expected_version is not None else task.get("version")
         if hasattr(s, "compare_and_set_task_transition"):
             res = s.compare_and_set_task_transition(
                 task_id=task_id,
@@ -944,15 +951,19 @@ def bypass_task_gate(
                 metadata=metadata,
                 intent="operator-bypass",
                 expected_status=previous_status,
-                expected_version=task.get("version"),
+                expected_version=target_expected_version,
             )
             if not res.get("ok", True):
                 raise ValueError(
                     f"[GATE BYPASS CAS FAILED] task={task_id}: {res.get('reason')} "
-                    f"(expected status={previous_status}, version={task.get('version')})"
+                    f"(expected status={previous_status}, version={target_expected_version})"
                 )
             return res.get("task") or s.get_task(task_id)
         else:
+            if expected_version is not None and task.get("version") != expected_version:
+                raise ValueError(
+                    f"任务版本已在写入边界发生变化（期望版本 {expected_version}，当前版本 {task.get('version')}），写入已拒绝"
+                )
             task["status"] = new_status
             task.update(metadata)
             task["updated_at"] = now

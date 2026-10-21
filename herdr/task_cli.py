@@ -329,6 +329,7 @@ def main(argv=None, *, handlers):
             operator=args.operator,
             note=getattr(args, "note", None),
             as_json=getattr(args, "json", False),
+            expected_version=getattr(args, "expected_version", None),
         )
     elif args.command == "stage-status":
         stage_status(args.workflow_id, args.stage)

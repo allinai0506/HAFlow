@@ -231,11 +231,17 @@ from herdr.task_cli_verification_bindings import build_verification_bindings
 globals().update(build_verification_bindings(globals()))
 
 
-def bypass_gate_cli(task_id, reason, operator="human", note=None, as_json=False):
+def bypass_gate_cli(task_id, reason, operator="human", note=None, as_json=False, expected_version=None):
     """Universal human-in-the-loop gate bypass CLI entrypoint."""
     from herdr import kernel
     try:
-        res = kernel.bypass_task_gate(task_id, reason=reason, operator=operator, note=note)
+        res = kernel.bypass_task_gate(
+            task_id,
+            reason=reason,
+            operator=operator,
+            note=note,
+            expected_version=expected_version,
+        )
         if as_json:
             print(json.dumps(res, indent=2, ensure_ascii=False))
             return 0
