@@ -10,7 +10,8 @@
 
 ## Global Constraints
 
-- 默认控制模式必须是 `automatic`；只有模板明确声明的 Node/Action 才进入 `confirmation_required`。
+- 默认控制模式必须是 `automatic`；Controller 自动执行满足确定性前提的非破坏性动作，只有模板明确声明的 Node/Action 才进入 `confirmation_required`。
+- `automatic` 不是“按钮免确认”：自动动作不等待用户点击。证据不足、身份未知、恢复冲突和 `is_destructive=true` 的动作不得自动执行，分别保持 blocked 或进入具备领域判断能力的人工入口。
 - 人工确认不能绕过 Workflow、Task、Run、Pane、version、candidate 或 recovery identity 校验。
 - 前端不能从 Task status 自行推断动作可用性；动作与 automation 状态由后端投影提供。
 - 读取失败必须显示 `unknown` 或 `unavailable`，不能显示“暂无卡点”。
@@ -28,8 +29,10 @@
 
 - `herdr/controller_cockpit.py`：纯函数生成 Workflow-scoped Cockpit Projection、控制策略和结构化执行结果。
 - `console/controller_cockpit_api.py`：读取权威快照、运行状态、Action、Recovery 与事件，装配 Cockpit API；执行后重新读取回执。
+- `services/controller/cockpit_automation.py`：在 Controller sweep 中选择并提交当前可自动执行的 Action，使用持久幂等身份避免重复副作用。
 - `tests/test_controller_cockpit_projection.py`：纯投影、控制策略、unknown 和结果分类测试。
 - `tests/test_console_controller_cockpit_api.py`：真实 SQLite/API 适配、身份校验、部分成功和读取失败测试。
+- `tests/test_controller_cockpit_automation.py`：自动执行、模板确认、破坏性拒绝、幂等和 Controller 顺序测试。
 - `tests/test_console_controller_cockpit_e2e.py`：本地 Console + 浏览器 + SQLite/Pane 适配器的自验证 E2E。
 
 ### Modified files
@@ -39,6 +42,7 @@
 - `console/control_api.py`：复用统一 Action 查找/执行函数，不再让不同入口独立拼接动作；保留兼容函数。
 - `console/http_server.py`：增加 `/api/workflow/controller-cockpit`，并让 execute-action 返回结构化 receipt。
 - `console/herdr_factory_console.py`：保持动态加载兼容导出，暴露新增 Cockpit API owner。
+- `services/controller/registry.py`：在恢复处理之后接入 Cockpit automation，同时保持既有 Controller 关键顺序。
 - `console/static/console.html`：引入 Cockpit 专用样式模块并保留现有脚本顺序。
 - `console/static/console/styles/operations.css`：保留通用操作样式，移出或删除被新 Cockpit 样式取代的重复规则。
 - `console/static/console/styles/controller-cockpit.css`：驾驶舱浅色布局、状态、卡片、时间线和响应式样式。
@@ -70,7 +74,7 @@
 **Interfaces:**
 - Produces: `normalize_control_policy(workflow: dict) -> dict`
 - Produces: `resolve_control_policy(config: dict, node_id: str, action_type: str) -> dict`
-- Output contract: `{"mode": "automatic" | "confirmation_required", "source": "default" | "workflow" | "node" | "action"}`
+- Output contract: `{"mode": "automatic" | "confirmation_required" | "blocked", "source": "default" | "workflow" | "node" | "action" | "safety"}`
 
 - [ ] **Step 1: Add failing normalization tests**
 
@@ -272,21 +276,25 @@ git commit -m "feat(controller): project cockpit actions and judgment"
 
 ---
 
-### Task 3: Workflow-scoped Cockpit API 与真实执行回执
+### Task 3: Workflow-scoped Cockpit API、Controller 自动执行与真实回执
 
 **Files:**
 - Create: `console/controller_cockpit_api.py`
+- Create: `services/controller/cockpit_automation.py`
 - Modify: `console/control_api.py`
 - Modify: `console/http_server.py`
 - Modify: `console/herdr_factory_console.py`
+- Modify: `services/controller/registry.py`
 - Test: `tests/test_console_controller_cockpit_api.py`
 - Test: `tests/test_console_controller_actions_api.py`
+- Test: `tests/test_controller_cockpit_automation.py`
 - Test: `tests/test_console_module_boundaries.py`
 
 **Interfaces:**
 - Consumes: `build_cockpit_projection(...)` from Task 2
 - Produces: `get_controller_cockpit(workflow_id: str) -> dict`
 - Produces: `execute_controller_action(payload: dict) -> {"receipt": dict, "cockpit": dict}`
+- Produces: `run_automatic_controller_actions(workflow_id: str, *, deps) -> list[dict]`
 - HTTP: `GET /api/workflow/controller-cockpit?workflow_id=<id>`
 - HTTP: existing `POST /api/controller/execute-action` remains compatible and gains `receipt`
 
@@ -320,23 +328,36 @@ Required cases:
 - `partial`: force-pass applied and advance failed;
 - `rejected`: expected Task version or Pane identity changed, with no mutation.
 
-- [ ] **Step 3: Run focused tests and capture RED**
+- [ ] **Step 3: Add failing Controller automation tests**
+
+Prove that the Controller, without a browser request:
+
+- executes an eligible `automatic` non-destructive action;
+- does not execute `confirmation_required` and exposes it as a pending human action;
+- never auto-executes `is_destructive=true`, force-pass or evidence-bypass actions;
+- persists an idempotency identity before the external side effect and does not send it twice after restart;
+- re-reads action identity immediately before execution and rejects stale Task/Pane/candidate facts;
+- runs recovery reconciliation before automation and preserves the existing continuation → fix-loop → stage → Task event order.
+
+Use controlled dependencies and a real temporary SQLite store; do not start a real Agent.
+
+- [ ] **Step 4: Run focused tests and capture RED**
 
 Run:
 
 ```bash
-pytest -q tests/test_console_controller_cockpit_api.py tests/test_console_controller_actions_api.py
+pytest -q tests/test_console_controller_cockpit_api.py tests/test_console_controller_actions_api.py tests/test_controller_cockpit_automation.py
 ```
 
 Expected: FAIL for missing API and receipt schema.
 
-- [ ] **Step 4: Implement one read adapter**
+- [ ] **Step 5: Implement one read adapter**
 
 `get_controller_cockpit()` must read the authoritative Workflow/config/Tasks snapshot first, then bounded controller runtime and event facts. Optional runtime failures become `errors` entries passed to the pure projection; they do not erase the authoritative snapshot.
 
 Do not call `workflow_detail()` and `api_workflow_controller_actions()` independently if that can observe different Task versions. Reuse one snapshot for graph, blockers, actions and recovery correlation.
 
-- [ ] **Step 5: Centralize Action lookup and execution**
+- [ ] **Step 6: Centralize Action lookup and execution**
 
 Add a helper in `console/control_api.py`:
 
@@ -351,7 +372,7 @@ def api_controller_execute_action(payload):
 
 The server must ignore client-authored `api_endpoint`, `commands`, `recommended`, `automation` and `risk`. It accepts `workflow_id`, `action_id`, required user input and expected identity, then re-derives the Action server-side.
 
-- [ ] **Step 6: Add post-action authoritative readback**
+- [ ] **Step 7: Add post-action authoritative readback**
 
 Classify the receipt from facts, not from HTTP status:
 
@@ -369,27 +390,33 @@ receipt = {
 
 For `partial`, include `applied_steps` and `failed_step`. For `rejected`, include `reason_code` and `refresh_required`; do not report a mutation receipt.
 
-- [ ] **Step 7: Preserve compatibility exports and routes**
+- [ ] **Step 8: Add the Controller-owned automatic execution path**
+
+`services/controller/cockpit_automation.py` consumes the same current Action projection as the UI, filters `automation.mode == "automatic"`, rejects destructive/bypass actions, and claims a persistent idempotency record before invoking the shared execution boundary. It records the same four-state receipt consumed by the Cockpit.
+
+The registry/sweep integration must be fail-safe: an automation projection or execution failure records attention/receipt evidence and leaves the Workflow state unchanged. It must not call Console HTTP or import browser/Console rendering code.
+
+- [ ] **Step 9: Preserve compatibility exports and routes**
 
 Keep `/api/workflow/controller-actions` operational as a compatibility view over the new Cockpit Projection. Update `console/herdr_factory_console.py` dynamic compatibility bindings and module-boundary tests so historical import/monkeypatch callers still resolve the correct owner.
 
-- [ ] **Step 8: Run Task 3 verification**
+- [ ] **Step 10: Run Task 3 verification**
 
 Run:
 
 ```bash
-pytest -q tests/test_console_controller_cockpit_api.py tests/test_console_controller_actions_api.py tests/test_console_module_boundaries.py tests/test_dispatch_recovery_ui.py
+pytest -q tests/test_console_controller_cockpit_api.py tests/test_console_controller_actions_api.py tests/test_controller_cockpit_automation.py tests/test_console_module_boundaries.py tests/test_dispatch_recovery_ui.py
 python3 -m compileall -q console herdr tests
 git diff --check
 ```
 
 Expected: all commands exit 0.
 
-- [ ] **Step 9: Commit Task 3**
+- [ ] **Step 11: Commit Task 3**
 
 ```bash
-git add console/controller_cockpit_api.py console/control_api.py console/http_server.py console/herdr_factory_console.py tests/test_console_controller_cockpit_api.py tests/test_console_controller_actions_api.py tests/test_console_module_boundaries.py
-git commit -m "feat(console): expose controller cockpit receipts"
+git add console/controller_cockpit_api.py console/control_api.py console/http_server.py console/herdr_factory_console.py services/controller/cockpit_automation.py services/controller/registry.py tests/test_console_controller_cockpit_api.py tests/test_console_controller_actions_api.py tests/test_controller_cockpit_automation.py tests/test_console_module_boundaries.py
+git commit -m "feat(controller): automate cockpit actions with receipts"
 ```
 
 ---
@@ -616,7 +643,7 @@ Start Console on a temporary port with temporary `HERDR_STATE_DB`, project files
 Exercise these journeys against the real page:
 
 1. open Canvas → blocked Node → Controller Cockpit target;
-2. automatic action displays no mechanical confirmation;
+2. eligible automatic action executes through Controller without a browser click;
 3. supervised action displays evidence and confirmation;
 4. steer/redrive/halt use the current Task/Run/Pane identity;
 5. stale version is rejected and UI refreshes;
@@ -658,7 +685,7 @@ Run:
 
 ```bash
 pytest -q tests/test_workflow_engine.py tests/test_controller_actions.py tests/test_controller_progress_actions.py tests/test_controller_cockpit_projection.py
-pytest -q tests/test_console_controller_cockpit_api.py tests/test_console_controller_actions_api.py tests/test_dispatch_recovery_ui.py
+pytest -q tests/test_console_controller_cockpit_api.py tests/test_console_controller_actions_api.py tests/test_controller_cockpit_automation.py tests/test_dispatch_recovery_ui.py
 pytest -q tests/test_console_cockpit_runtime.py tests/test_console_task_detail.py tests/test_workflow_graph_projection.py tests/test_console_frontend_syntax.py tests/test_console_ui_modules.py tests/test_console_module_boundaries.py
 pytest -q tests/test_console_controller_cockpit_e2e.py
 python3 -m compileall -q herdr console services tests
