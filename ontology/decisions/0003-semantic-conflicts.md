@@ -23,7 +23,7 @@
 | SC-016 | resume 目标 | 矩阵：paused 不可达 dispatched、blocked | `herdr/task_cli_workflow.py:resume_task` 显式守卫仅在最新来源为 `rework` 时恢复为 `rework`，其余来源（含 `dispatched`、`blocked`、`working`）均安全收敛恢复至 `working`；`TASK_TRANSITIONS["paused"]` 允许流转至 `working`/`rework`，经 `tests/test_resume_transition.py` 验证无非法边风险 | — | **已解决**（已验证安全收敛至 working/rework 合法子集） |
 | SC-017 | `herdr-task add` 覆盖写 | — | `add_task` 历史上通过 `save_tasks(data)` 遍历全量任务 upsert，存在覆写并发状态与自增旧任务版本的隐患；现已优化为单条任务持久化 `save_tasks({"tasks": [task]})`，并施加内存与 DB 双重存在性拒绝守卫，经 `tests/test_task_add_overwrite_verification.py` 验证 | — | **已解决**（已修复单条写入隔离并验证防回退） |
 | SC-018 | 越权状态变更拦截 | wiki/task-lifecycle.md L15：“任何越权状态变更将被 CLI 直接拦截” | 8 类状态机外写入路径，见 states/task_lifecycle.yaml 的 out_of_matrix_writers | — | **已裁决**（ADR-0005 / OEP-0002） |
-| SC-019 | 控制台 force-review | 控制台写路由用于人工复审 | console/task_api.py L266-290 直接设置 status=agent_done，无守卫、无事件 | — | 确认 |
+| SC-019 | 控制台 force-review | 控制台写路由用于人工干预推进至复审态（agent_done），需受特权流转契约约束、CAS 乐观锁守卫与审计事件记录 | `console/task_api.py:api_task_force_review` 历史上直接写 `status=agent_done`（无守卫、无事件）；经 D1 改造及 CAS 强化，现已统一调用 `compare_and_set_task_transition`，受 `console-force-review` 特权契约约束（严格拒绝终态跃迁、支持 `expected_version`/`expected_status` 防并发踩踏），并在强事务内原子落库 `task_transition` 权威审计事件与记录 `operator`，经回归测试全覆盖验证 | — | **已解决**（已收敛至特权状态流转与 CAS 守卫闭环） |
 
 ## 处置建议（属人工决策，不在本轮落地）
 
@@ -33,9 +33,10 @@
 4. SC-005 已解决：规范定案为 `retry_node` 为标准推荐字段，`retry_target` 为完全等价兼容别名；DAG 校验与 Controller 调度均双向容错解析，消除打回降级隐患。SC-006 已解决：定案为源定义文件存在时快照失败直接拒绝注册（fail-closed），彻底杜绝模板切换并发污染，更新模板 Schema 与代码注释。
 5. SC-007 已解决：明确分层定义——`task_transition` 为 SQLite 强事务内原子写入的状态机单一权威事件；`task_status_changed` 为事务提交后的 best-effort 旁路轨迹事件，供 Observer 与重放分析消费。
 6. SC-008 已解决：显式解耦定义 `ROUTER_OCCUPIED_STATUSES` 与 `ACTIVE_TASK_STATUSES`，严格区分工位队列容量占用（含 pending，排队占配额；不含 paused/interrupted）与生命周期管线活跃（含 paused/interrupted，不含 pending），禁止同名混用并补齐全覆盖单元测试。
-7. SC-010、SC-015、SC-019：把豁免与人工覆盖纳入权限模型，统一守卫，并为控制台写路由增加鉴权（代码变更）。
+7. SC-010、SC-015：把门禁豁免与人工覆盖纳入权限模型与统一版本守卫（SC-019 已收敛至特权状态流转与 CAS 守卫闭环）。
 8. SC-011、SC-012 已由 ADR-0006、ADR-0007 与 OEP-0002 裁决：工作流初始状态定案为 running（pending 为未装配/草稿态）；门禁解耦为 gate_spec 与 gate_verdict，DB 为调度第一事实源，文件为不可变快照。
 9. SC-013、SC-014 已解决：任务类型词表统一对齐为 CLI choices；补齐 fix-loop 可作废集合（D4、D5）。
 10. SC-016 已解决（已验证）：核查并验证 `resume_task` 防御性恢复逻辑，任务暂停恢复时仅在来源为 rework 时返回 rework，其余情况统一安全收敛为 working，完全遵循状态转移矩阵，专项测试 `tests/test_resume_transition.py`（6/6）全绿通过。
 11. SC-017 已解决：`add_task` 优化为仅保存新注册单条任务，消除遍历覆写已有任务的并发回退窗口，并通过双重存在性拦截防止重复覆盖；回归测试 `tests/test_task_add_overwrite_verification.py` 验证通过。
 12. SC-018 已由 ADR-0005 与 OEP-0002 裁决：状态机外写入显式收敛为 privileged_transitions 特权流转契约，严禁直写 SQL/save_task 绕过网关。
+13. SC-019 已解决：控制台强制复审接口 `api_task_force_review` 接入 `console-force-review` 特权流转契约，建立非终态合法跃迁白名单（严格拒绝 `completed`/`superseded` 终态跃迁），强化 `expected_version` 与 `expected_status` CAS 乐观锁防并发踩踏，原子落库 `task_transition` 权威事件与 `operator` 审计记录；专项测试 `tests/test_console_force_review_guard.py`（9/9）与 `tests/test_d1_privileged_transitions.py` 全绿通过。

@@ -105,6 +105,13 @@ Evidence:
 - `add_task` 对重复 `task_id` 施加内存快照与数据库双重强一致性拦截（`Task already exists: <task_id>`），拒绝重复注册并保护已有任务不被覆盖。
 - 证据链：`herdr/task_cli_tasks.py:140-174`、`tests/test_task_add_overwrite_verification.py`。
 
+`FACT` **控制台强制复审（force-review）特权契约与 CAS 守卫保证（SC-019）**：
+- 控制台通过 `/api/task/force-review` 接口触发人工强制转入复审状态（`agent_done`），已收敛至受控特权流转契约 `console-force-review`（见 `herdr/transitions.py:PRIVILEGED_TASK_TRANSITIONS["console-force-review"]`）；
+- **跃迁边界防护**：仅允许处于非终态（`working`, `blocked`, `paused`, `dispatched`, `rework`）的任务跃迁至 `agent_done`，严格拦截并拒绝任何终态任务（`completed`, `superseded`）非法跃迁；
+- **并发 CAS 乐观锁守卫**：支持客户端显式传递 `expected_version` 与 `expected_status`，底层统一在 `compare_and_set_task_transition` 独占事务内完成原子核验与流转，版本或状态不匹配时 fail-closed 拒绝踩踏并发写；
+- **权威事件与审计记录**：在同一事务内原子记录 `task_transition` 权威审计事件，透传操作人 `operator`、原因 `reason`、来源 `source: "console-force-review"` 与意图 `intent: "console-force-review"`，杜绝无守卫或无审计事件的裸写。
+- 证据链：`console/task_api.py:266-320`、`herdr/transitions.py:84-87`、`tests/test_d1_privileged_transitions.py`、`tests/test_console_force_review_guard.py`。
+
 `FACT` 当前内循环耗尽的blocked是等待仲裁的持久事实，Agent working/idle/done不能代替明确恢复决策。实时事件保留该状态；重启在已知运行信号下恢复仲裁队列。最新blocked转换reason优先于可遗留的sentinel_reason；历史缺失时保留legacy行为。证据：`tests/test_inner_loop_arbitration_recovery.py`。旧屏幕跨恢复epoch（C03c）仍单独待修。仲裁卡及人工升级提示使用现有合法blocked→working命令，不增状态边或force；真实CLI参数执行回归见`tests/test_blocked_recovery_command_contract.py`（C30）。
 
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop
