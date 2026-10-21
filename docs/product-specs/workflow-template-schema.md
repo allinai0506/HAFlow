@@ -14,6 +14,7 @@
 | `description` | `string` | 否 | `""` | 模板的业务场景与流程概述。 |
 | `execution` | `ExecutionSpec` | 否 | `{"mode": "git"}` | 运行环境契约（见 1.1）。缺省即 legacy Git 执行路径，行为与旧模板完全一致。 |
 | `context` | `ContextContract` | 否 | 无 | 业务上下文契约（见 1.2），声明任务需要的业务输入（只读引用）。 |
+| `control_policy` | `ControlPolicy` | 否 | 无 | Controller 自动或半自动控制策略（见 1.3）；未声明时解析为自动模式。 |
 | `nodes` | `List[Node]` | **是** | - | 工作流包含的节点数组（定义 DAG 的拓扑图）。 |
 
 ### 1.1 ExecutionSpec (执行模式)
@@ -37,6 +38,36 @@
 
 **Workflow Run Definition Snapshot**：项目共享 `workflow.json` 只代表"下一次 Run 的当前模板"，切换时会被覆盖；Workflow Run 在注册时把创建时刻的完整执行定义固化到 `~/.herdr-controller/workflows/<workflow_id>/workflow.json`（Run 私有、与 `shared/` 同级共存），registry 的 `workflow_file` 指向该快照，历史 Run 的 DAG 定义永不读出新模板的配置。运行期现场修复（tab/anchor 映射）写入 Run 本地快照而非共享文件。源定义文件存在时，Run 定义快照失败将直接拒绝注册（fail-closed，抛出 RuntimeError），绝不静默降级为共享文件，彻底杜绝后续模板切换覆盖进行中 Run 的执行拓扑；可读取的 Git 和 context Run 均在注册时执行私有快照冻结。
 
+### 1.3 ControlPolicy (Controller 控制策略)
+
+`control_policy` 必须是对象。其可选字段 `mode` 仅接受 `automatic` 或 `supervised`，未知值或错误类型在 `normalize_workflow` 时抛出 `ValueError`。空对象与未声明模式均使用自动默认值。
+
+`normalize_control_policy(workflow)` 校验并复制策略字段；`resolve_control_policy(config, node_id, action_type)` 接收规范化配置，按以下顺序解析：动作覆盖 → Node 模式 → Workflow 模式 → 自动默认。
+
+| 首个匹配条件 | 返回 `mode` | 返回 `source` |
+| --- | --- | --- |
+| 动作在 Node 的 `confirm_before` 中 | `confirmation_required` | `action` |
+| Node 显式声明 `control_mode: supervised` | `confirmation_required` | `node` |
+| Node 显式声明 `control_mode: automatic` | `automatic` | `node` |
+| Workflow 显式声明 `mode: supervised` | `confirmation_required` | `workflow` |
+| Workflow 显式声明 `mode: automatic` | `automatic` | `workflow` |
+| 均未声明 | `automatic` | `default` |
+
+显式 Node `automatic` 可以覆盖 Workflow `supervised`。`confirm_before` 仅影响匹配的动作，其余动作继续按 Node 或 Workflow 模式解析。历史 `stages` 模板可在 `stage_policies.<node_id>` 中声明相同的 Node 字段。
+
+```yaml
+control_policy:
+  mode: automatic
+nodes:
+  - id: acceptance
+    control_mode: supervised
+    confirm_before: [advance]
+```
+
+策略随规范化定义写入既有 Workflow 配置快照，修改模板不会改变已注册 Run 的策略；本契约不提供运行期覆盖。`automatic` 的执行语义是 Controller 校验通过后无需浏览器点击，`supervised` 对应执行前确认。确认不能绕过 Controller 的身份、状态、候选版本或门禁校验。
+
+当前能力仅包含模板规范化、校验和解析，尚未接入 Controller 执行或确认流程。输出契约预留的 `blocked` 模式及 `safety` 来源由后续安全执行层处理；本解析器不判断未知动作或破坏性动作是否可执行。
+
 ---
 
 ## 2. Node (工作流节点) Schema
@@ -49,6 +80,8 @@
 | `depends_on` | `List[string]`| 否 | `[]` | 当前节点依赖的前置节点 `id` 列表。为空表示起始根节点。 |
 | `parallel` | `boolean` | 否 | `false` | 是否允许该节点内部同时并发派发并运行多个 Task。 |
 | `purpose` | `string` | 否 | `""` | 节点的执行目的与职责简述，用于初始化 Coordinator 提示词。 |
+| `control_mode` | `string` | 否 | 继承 Workflow | 仅 `automatic` 或 `supervised`；显式值覆盖 Workflow 模式。 |
+| `confirm_before` | `List[string]` | 否 | `[]` | 指定需要确认的动作名；必须为无重复的非空字符串列表。非列表、非字符串、空白项或重复项在规范化时拒绝。 |
 | `default_integration_mode` | `string` | 否 | `"none"` | 产出物的合并模式：`none` (无需合并), `branch` (合并到分支), `commit` (提交)。 |
 | `default_task_type` | `string` | 否 | `"docs"` | 默认任务类型，必须属于 launch 技术任务类型枚举：`fix`, `feat`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`（系统对历史别名 `plan`/`explore`/`code` 自动映射为 `docs`，`review` 自动映射为 `test`；业务任务类型通过 `business_task_type` 声明）。 |
 | `agent_policy` | `AgentPolicy` | 否 | `{}` | 该节点专有的 Agent 调度与路由约束配置（同 `worker_policy`）。 |

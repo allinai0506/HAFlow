@@ -352,7 +352,9 @@ def check_workflow_stage_advance(ports, workflow_id):
 
             dispatch_claim = None
             if not deps or ports._get_store().get_workflow(workflow_id):
+                from herdr.node_dispatch import policy_requires_confirmation
                 from herdr.node_dispatch_store import operation_for_node, claim
+                durable_required = deps or ports.coordinator_intake_enabled() or policy_requires_confirmation(workflow_cfg, ready_id)
                 agent_node = ready_node.get("node_type", "agent") == "agent"
                 op = (
                     operation_for_node(
@@ -361,12 +363,12 @@ def check_workflow_stage_advance(ports, workflow_id):
                     if agent_node
                     else None
                 )
-                if (agent_node and (deps or ports.coordinator_intake_enabled())
+                if (agent_node and durable_required
                         and not op and ports._get_store().get_workflow(workflow_id)):
                     continue
-                if op and not deps and not ports.coordinator_intake_enabled() and op['status'] not in ('resolved', 'superseded'):
+                if op and not durable_required and op['status'] not in ('resolved', 'superseded'):
                     continue
-                if op and (deps or ports.coordinator_intake_enabled()):
+                if op and durable_required:
                     import uuid
                     dispatch_claim = claim(ports._get_store().db_path, op['id'], uuid.uuid4().hex)
                     if dispatch_claim is None:

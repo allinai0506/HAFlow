@@ -1,6 +1,6 @@
 /* 任务详情、轨迹分页与轮询；保持任务身份隔离。 */
 var {
-  canSteerTask, canForceReviewTask, canForcePassTask, toggleTaskDrawerMenu,
+  toggleTaskDrawerMenu,
   closeTaskDrawerMenu, traceDotClass, toggleTraceEvent, retryTaskTrace,
   loadMoreTaskTrace, openTaskDrawer, closeTaskDrawer, switchTaskDrawerTab,
   showTask, showPane, askCoordinator
@@ -17,9 +17,6 @@ function taskExecStart(t){t=t||{};const rt=t.runtime||{};return taskDrawerNumTs(
 function taskDisplayStart(t){const e=taskExecStart(t);if(e!==null)return {label:'开始时间',ts:e};const c=taskDrawerNumTs((t||{}).created_at);if(c!==null)return {label:'创建时间',ts:c};return null}
 function taskUpdatedAt(t){t=t||{};return taskDrawerNumTs(t.updated_at??t.last_activity_at)}
 function taskDurationSecs(t){const s=taskExecStart(t);const u=taskUpdatedAt(t);if(s===null||u===null)return null;return Math.max(0,Math.round(u-s))}
-function canSteerTask(t){return ['working','dispatched','rework','blocked','paused'].includes((t||{}).status)}
-function canForceReviewTask(t){return (t||{}).status==='rework'}
-function canForcePassTask(t){return (t||{}).stage_verdict==='blocked'}
 function buildTaskEvents(task,proj){
   task=task||{};proj=proj||{};
   const evs=[];
@@ -134,12 +131,10 @@ function taskDrawerMenuHtml(t){
   const id=esc(t.task_id||'');
   const rt=(t.runtime||{});
   const paneId=esc(t.pane_id||rt.pane_id||'');
+  const target={workflowId:t.workflow_id||state.workflowId,nodeId:t.node||t.stage||'',taskId:t.task_id,runId:t.run_id||'',paneId:t.pane_id||rt.pane_id||''};
   let h='';
-  if(paneId)h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();showPane('${paneId}')">查看工位</button>`;
-  h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();askCoordinator('${id}')">让总指挥处理</button>`;
-  if(canSteerTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--primary)" onclick="closeTaskDrawerMenu();showSteerModal('${id}')">留话指导</button><button class="task-dropdown-item danger" onclick="closeTaskDrawerMenu();haltTaskPrompt('${id}')">紧急叫停</button>`}
-  if(canForceReviewTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item" style="color:var(--warning);font-weight:600" onclick="closeTaskDrawerMenu();forceReviewTask('${id}')">唤醒评审</button>`}
-  if(canForcePassTask(t)){h+=`<div class="task-dropdown-divider"></div><button class="task-dropdown-item primary" onclick="closeTaskDrawerMenu();forcePassTask('${esc(t.workflow_id||state.workflowId||'')}','${esc(t.node||t.stage||'')}',{task_id:'${esc(t.task_id||id||'')}',expected_version:${t.version!==undefined&&t.version!==null?t.version:'null'},expected_pane_id:'${esc(paneId||t.pane_id||'')}',pane_id:'${esc(paneId||t.pane_id||'')}'})">强制放行</button>`}
+  if(paneId)h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();showPane('${paneId}','${id}')">查看工位</button>`;
+  h+=`<button class="task-dropdown-item" onclick="closeTaskDrawerMenu();openControllerCockpit(${esc(JSON.stringify(target))})">在 Controller 中处理</button>`;
   return h;
 }
 function toggleTaskDrawerMenu(e){if(e)e.stopPropagation();const m=document.getElementById('taskDrawerMenu');if(m)m.classList.toggle('open')}
@@ -475,9 +470,22 @@ function switchTaskDrawerTab(tab){
   if(tab==='trace'){loadTaskTrace(state.selectedTaskId);startTaskTracePoll()}
   else stopTaskTracePoll();
 }
-async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.map(humanReason).join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:8px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
+async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.map(humanReason).join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:8px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id,taskId){
+  if(!id)return toast('没有工位',true);
+  const tasks=[...((state.workflow&&state.workflow.tasks)||[]),state.selectedTaskDetail?.task].filter(Boolean);
+  const task=taskId?tasks.find(t=>t.task_id===taskId&&(t.pane_id||t.runtime?.pane_id)===id):null;
+  const target=task?{workflowId:task.workflow_id||state.workflow?.workflow?.workflow_id,nodeId:task.node||task.stage||'',taskId:task.task_id,runId:task.run_id||'',paneId:id}:null;
+  try{
+    const d=await api('/api/pane/read?id='+encodeURIComponent(id));
+    const shortcut=target?'<button class="mini" onclick="closeModal();openControllerCockpit('+esc(JSON.stringify(target))+')">在 Controller 中处理</button>':'';
+    openModal('工位 '+id,shortcut+'<pre>'+esc(d.output)+'</pre>');
+  }catch(e){toast(e.message,true)}
+}async function askCoordinator(id){
+  const task=((state.workflow&&state.workflow.tasks)||[]).find(t=>t.task_id===id)||(state.selectedTaskDetail?.task?.task_id===id?state.selectedTaskDetail.task:null);
+  return openControllerCockpit({workflowId:task?.workflow_id||state.workflow?.workflow?.workflow_id,nodeId:task?.node||task?.stage||'',taskId:id,runId:task?.run_id||'',paneId:task?.pane_id||task?.runtime?.pane_id||''});
+}
 return {
-  canSteerTask, canForceReviewTask, canForcePassTask, toggleTaskDrawerMenu,
+  toggleTaskDrawerMenu,
   closeTaskDrawerMenu, traceDotClass, toggleTraceEvent, retryTaskTrace,
   loadMoreTaskTrace, openTaskDrawer, closeTaskDrawer, switchTaskDrawerTab,
   showTask, showPane, askCoordinator

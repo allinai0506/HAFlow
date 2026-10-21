@@ -151,6 +151,12 @@ def _ensure_schema_ddl_transaction(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_checkpoint_identity ON events("
+                 "workflow_id,event_type,source,json_extract(payload_json,'$.checkpoint_id'),id) "
+                 "WHERE json_valid(payload_json)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_control_reason ON events("
+                 "workflow_id,event_type,source,json_extract(payload_json,'$.reason'),id) "
+                 "WHERE json_valid(payload_json)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, sequence, id);")
     # Exact canary-bucket reads (the Controlled Rollout guard) must be
     # served by an index, not by scanning route_decision history while

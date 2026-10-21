@@ -57,6 +57,17 @@ def _workflow_snapshot(conn, workflow_id):
         workflow['candidate_sha'] = None
         workflow['candidate_episode_id'] = 0
     workflow['config'] = config
+    if workflow['status'] == 'paused':
+        transition = conn.execute("SELECT event_type,payload_json FROM events WHERE workflow_id=? "
+            "AND event_type IN ('workflow_transition','checkpoint_restored') ORDER BY id DESC LIMIT 1", (workflow_id,)).fetchone()
+        try:
+            decoded = json.loads(transition['payload_json']) if transition else {}
+        except (json.JSONDecodeError, TypeError):
+            decoded = {}
+        pause = decoded if isinstance(decoded, dict) else {}
+        workflow['pause_requires_confirmation'] = bool(transition and (
+            transition['event_type'] == 'checkpoint_restored' or pause.get('reason') in {
+                'pause_workflow', 'step_workflow', 'rollback_workflow'}))
     return workflow, config
 
 
@@ -385,8 +396,8 @@ def finish_operation(db_path, operation_id, owner, status, detail, now):
         return op
 
 
-def decide_operation(db_path, operation_id, expected_version, operator, action, reason, now, until=None):
-    if not isinstance(operator, str) or not operator.strip() or not isinstance(reason, str) or not reason.strip() or action not in ('retry', 'hold', 'verify'):
+def decide_operation(db_path, operation_id, expected_version, operator, action, reason, now, until=None, *, confirmed=False):
+    if not isinstance(operator, str) or not operator.strip() or not isinstance(reason, str) or not reason.strip() or action not in ('retry', 'hold', 'verify', 'confirm_dispatch'):
         raise ValueError('operator, reason and retry/hold/verify action required')
     if action == 'hold' and (until is None or until <= now):
         raise ValueError('future hold deadline required')
@@ -421,7 +432,18 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
             if facts.get('identity') and recovery_identity(dict(workflow, candidate_sha=facts.get('candidate_sha')), facts.get('facts') or []) != facts['identity']:
                 raise ValueError('stale recovery generation or candidate')
         detail = {**op['detail'], 'operator': operator, 'action': action, 'reason': reason}
-        conn.execute('UPDATE workflow_recovery_operations SET status=?,next_due_at=?,detail_json=?,attempts=0,version=version+1,updated_at=? WHERE id=? AND version=?', ('pending' if action in ('retry', 'verify') else 'waiting', now if action in ('retry', 'verify') else until, json.dumps(detail), now, operation_id, expected_version))
+        if action == 'confirm_dispatch':
+            from .node_dispatch import confirmation_required, ready
+            if (confirmed is not True or op['payload'].get('kind') != 'node_dispatch'
+                    or op['started'] or op['status'] != 'waiting_human'
+                    or op['detail'].get('reason') != 'dispatch_confirmation_required'
+                    or not confirmation_required(op, config) or not ready(op, workflow, config, dispatch_tasks)
+                    or _prior_delivery_unknown(conn, op)):
+                raise ValueError('current unstarted dispatch and explicit confirmation required')
+            detail['dispatch_confirmation'] = {'identity_key': op['identity_key'],
+                'operator': operator, 'reason': reason, 'confirmed_at': now}
+        pending = action in ('retry', 'verify', 'confirm_dispatch')
+        conn.execute('UPDATE workflow_recovery_operations SET status=?,next_due_at=?,detail_json=?,attempts=0,version=version+1,updated_at=? WHERE id=? AND version=?', ('pending' if pending else 'waiting', now if pending else until, json.dumps(detail), now, operation_id, expected_version))
         result = _get(conn, operation_id)
         _event(conn, result, 'decided', now, detail)
         return result

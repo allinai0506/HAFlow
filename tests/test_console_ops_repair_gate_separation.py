@@ -1059,11 +1059,9 @@ def test_scenario_17_controller_action_snapshot_binding_and_rejection(ops_test_e
             assert res.get("ok") is True
             assert res.get("gate_passed") is True
 
-    # 5. Frontend template source verification: executeControllerAction and forcePassTask bind snapshot
-    src = console_source(Path.cwd())
-    assert "payload.expected_version=matchedTask.version" in src
-    assert "payload.expected_pane_id=matchedTask.pane_id" in src
-    assert "expVer=matchedTask.version" in src
+    # The migrated Cockpit carries server-authored identity; execute its real JS.
+    from tests.test_console_cockpit_runtime import TestControllerCockpitRuntime
+    TestControllerCockpitRuntime().test_high_risk_reason_and_current_projection_are_required_at_confirmation()
 
 
 # 18. 会签接口 /api/task/signoff 防护与统一校验
@@ -1176,12 +1174,9 @@ def test_scenario_18_task_signoff_force_pass_parity_and_protections(ops_test_env
     assert t_pass["stage_verdict"] == "pass"
     assert "经过专家组复核成果无误" in t_pass["stage_verdict_note"]
 
-    # 18.8 Frontend template checks: submitSignoffDecision requires non-empty reason and passes snapshot
-    src = console_source(Path.cwd())
-    assert "submitSignoffDecision" in src
-    assert "body.confirmed=true" in src
-    assert "body.expected_version" in src
-    assert "openSignoffChamber" in src
+    # The old signoff UI now locates the authoritative Cockpit action inventory.
+    from tests.test_console_cockpit_runtime import TestControllerCockpitRuntime
+    TestControllerCockpitRuntime().test_header_and_signoff_entrypoints_only_locate_cockpit()
 
 
 # 19. 较早任务失败、较新任务获准放行：多任务节点不得误判为完成

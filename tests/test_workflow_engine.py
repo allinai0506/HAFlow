@@ -1,8 +1,12 @@
+import copy
+import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
 
 # Ensure herdr root is on sys.path
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -17,6 +21,7 @@ from herdr.workflow import (
     normalize_workflow,
 )
 from herdr.agent_router import choose_agent, _candidate_order
+from herdr import workflow as workflow_engine
 
 
 class TestWorkflowTemplates(unittest.TestCase):
@@ -238,6 +243,140 @@ class TestNodeAgentPolicyRouting(unittest.TestCase):
         }
         order = _candidate_order(pool, "review", "review", node_policy=None)
         self.assertEqual(order[0], "claude")
+
+
+def test_control_policy_defaults_to_automatic():
+    cfg = normalize_workflow({"name": "x", "nodes": [{"id": "build"}]})
+    assert workflow_engine.resolve_control_policy(cfg, "build", "advance") == {
+        "mode": "automatic", "source": "default",
+    }
+
+
+@pytest.mark.parametrize("workflow_mode,node_mode,expected", [
+    ("supervised", None, {"mode": "confirmation_required", "source": "workflow"}),
+    ("automatic", None, {"mode": "automatic", "source": "workflow"}),
+    (None, "supervised", {"mode": "confirmation_required", "source": "node"}),
+    (None, "automatic", {"mode": "automatic", "source": "node"}),
+    ("supervised", "automatic", {"mode": "automatic", "source": "node"}),
+    ("automatic", "supervised", {"mode": "confirmation_required", "source": "node"}),
+])
+def test_control_policy_inheritance_and_node_override(workflow_mode, node_mode, expected):
+    workflow = {"name": "x", "nodes": [{"id": "build"}]}
+    if workflow_mode is not None:
+        workflow["control_policy"] = {"mode": workflow_mode}
+    if node_mode is not None:
+        workflow["nodes"][0]["control_mode"] = node_mode
+    cfg = normalize_workflow(workflow)
+    assert workflow_engine.resolve_control_policy(cfg, "build", "advance") == expected
+
+
+@pytest.mark.parametrize("node_mode", ["automatic", "supervised"])
+def test_control_policy_action_confirmation_overrides_node_mode(node_mode):
+    cfg = normalize_workflow({
+        "name": "x",
+        "control_policy": {"mode": "automatic"},
+        "nodes": [{"id": "acceptance", "control_mode": node_mode,
+                   "confirm_before": ["advance"]}],
+    })
+    assert workflow_engine.resolve_control_policy(cfg, "acceptance", "advance") == {
+        "mode": "confirmation_required", "source": "action",
+    }
+    assert workflow_engine.resolve_control_policy(cfg, "acceptance", "retry") == {
+        "mode": "automatic" if node_mode == "automatic" else "confirmation_required",
+        "source": "node",
+    }
+
+
+@pytest.mark.parametrize("mode", ["manual", "AUTO", "", None, False, 1, [], {}])
+@pytest.mark.parametrize("level", ["workflow", "node"])
+def test_control_policy_rejects_unknown_modes(mode, level):
+    workflow = {"nodes": [{"id": "build"}]}
+    if level == "workflow":
+        workflow["control_policy"] = {"mode": mode}
+    else:
+        workflow["nodes"][0]["control_mode"] = mode
+    with pytest.raises(ValueError, match="control_policy.mode|control_mode"):
+        normalize_workflow(workflow)
+
+
+@pytest.mark.parametrize("policy", [None, False, "automatic", [], 1])
+def test_control_policy_rejects_non_mapping_policy(policy):
+    with pytest.raises(ValueError, match="control_policy"):
+        normalize_workflow({"control_policy": policy, "nodes": [{"id": "build"}]})
+
+
+@pytest.mark.parametrize("actions", [
+    "advance", None, False, {}, ("advance",), ["advance", "advance"],
+    [1], [None], [[]], [""], ["   "],
+])
+def test_control_policy_rejects_invalid_confirm_before(actions):
+    with pytest.raises(ValueError, match="confirm_before"):
+        normalize_workflow({"nodes": [{"id": "build", "confirm_before": actions}]})
+
+
+def test_control_policy_normalization_preserves_input_and_is_idempotent():
+    workflow = {
+        "control_policy": {"mode": "automatic"},
+        "nodes": [{"id": "build", "control_mode": "supervised",
+                   "confirm_before": ["advance", "retry"]}],
+    }
+    original = copy.deepcopy(workflow)
+    normalized = workflow_engine.normalize_control_policy(workflow)
+    assert workflow == original
+    assert normalized == original
+    assert workflow_engine.normalize_control_policy(normalized) == normalized
+    normalized["control_policy"]["mode"] = "supervised"
+    normalized["nodes"][0]["confirm_before"].append("replan")
+    assert workflow == original
+    cfg = normalize_workflow(workflow)
+    assert normalize_workflow(cfg) == cfg
+
+
+def test_control_policy_legacy_stage_policy_is_preserved():
+    cfg = normalize_workflow({
+        "control_policy": {"mode": "supervised"},
+        "stages": ["build"],
+        "stage_policies": {"build": {"control_mode": "automatic",
+                                     "confirm_before": ["advance"]}},
+    })
+    assert workflow_engine.resolve_control_policy(cfg, "build", "advance") == {
+        "mode": "confirmation_required", "source": "action",
+    }
+    assert workflow_engine.resolve_control_policy(cfg, "build", "retry") == {
+        "mode": "automatic", "source": "node",
+    }
+
+
+def test_control_policy_is_pinned_in_registered_workflow_snapshot(tmp_path, monkeypatch):
+    from herdr import projects, workflow_docs
+    from herdr.state_store import SQLiteStateStore
+
+    monkeypatch.setenv(workflow_docs.DOCS_DIR_ENV, str(tmp_path / "workflows"))
+    store = SQLiteStateStore(db_path=tmp_path / "state.db")
+    monkeypatch.setattr(projects, "_get_store", lambda: store)
+    source = tmp_path / "workflow.json"
+    source.write_text(json.dumps({
+        "control_policy": {"mode": "supervised"},
+        "nodes": [{"id": "build", "control_mode": "automatic",
+                   "confirm_before": ["advance"]}],
+    }), encoding="utf-8")
+    project = {
+        "project_id": "policy-test", "project_name": "Policy test",
+        "project_root": str(tmp_path), "workspace_id": "test-workspace",
+        "coordinator_pane_id": None, "workflow_file": str(source),
+    }
+    projects.register_workflow("wf-control-policy", project)
+    source.write_text(json.dumps({"nodes": [{"id": "build"}]}), encoding="utf-8")
+    cfg = projects.workflow_config_for("wf-control-policy")
+    assert cfg["control_policy"] == {"mode": "supervised"}
+    assert cfg["nodes"][0]["control_mode"] == "automatic"
+    assert cfg["nodes"][0]["confirm_before"] == ["advance"]
+    assert workflow_engine.resolve_control_policy(cfg, "build", "advance") == {
+        "mode": "confirmation_required", "source": "action",
+    }
+    assert workflow_engine.resolve_control_policy(cfg, "build", "retry") == {
+        "mode": "automatic", "source": "node",
+    }
 
 
 if __name__ == "__main__":

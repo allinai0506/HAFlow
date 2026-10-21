@@ -183,8 +183,8 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
         self.assertIn("toggleDeepDrawer()", self.html)
         self.assertIn("refreshDeepDrawer()", self.html)
 
-        # Artifact Signoff Chamber
-        self.assertIn("成果交付会签室", self.html)
+        # Signoff entry now locates the same Cockpit action surface. Runtime
+        # navigation and real gate receipts are covered by Cockpit tests.
         self.assertIn("openSignoffChamber", self.html)
         self.assertIn("submitSignoffDecision", self.html)
         self.assertIn("成果会签", self.html)
@@ -256,18 +256,19 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
         self.assertIsNotNone(script_match)
         js = script_match.group(1)
         self.assertIn("openControllerCockpitModal", js)
-        self.assertIn("bin/herdr-task", js)
+        self.assertIn("/api/workflow/controller-cockpit", js)
 
     def test_controller_cockpit_is_button_first_and_task_bound(self):
         """End-user console: buttons first, grouped by blocked task; CLI only in collapsed tech details."""
         script_match = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL)
         self.assertIsNotNone(script_match)
         js = script_match.group(1)
-        for token in ("locateControllerTask", "一键执行", "查看任务详情", "卡点任务", "卡点原因", "工程师命令参考"):
+        for token in ("locateControllerTask", "节点与任务", "阻塞原因", "调度待办", "执行记录", "查看并确认"):
             self.assertIn(token, js, f"missing task-bound button UI token: {token}")
         self.assertNotIn("底层命令 · 可全选复制", js)
         self.assertIn("copyCliCommandByActionId", js)
         self.assertIn("executeControllerAction", js)
+        self.assertIn("executeCockpitAction", js)
 
 
 if __name__ == "__main__":

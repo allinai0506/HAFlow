@@ -19,6 +19,11 @@ def check_all_workflows_stage_advance(ports):
             ports.check_workflow_stage_advance(wf)
         except Exception as e:
             print(f"[ADVANCE CHECK ERROR] workflow={wf}: {e}")
+    from services.controller.cockpit_automation import schedule_automatic_controller_actions
+    try:
+        schedule_automatic_controller_actions(ports._get_store(), workflow_ids)
+    except Exception as exc:
+        print(f"[COCKPIT SCHEDULE ERROR] {type(exc).__name__}")
 
 def sync_awake_guard(ports, active_workflows):
     """有活跃 workflow 时持有 caffeinate,避免机器休眠冻结整条流水线。
@@ -309,7 +314,7 @@ def registry_watcher(ports):
         ports.time.sleep(1)
 
 
-DEPENDENCIES = {'check_all_workflows_stage_advance': ('_continuation_scan_at', 'active_registered_workflows',
+DEPENDENCIES = {'check_all_workflows_stage_advance': ('_continuation_scan_at', '_get_store', 'active_registered_workflows',
                                        'check_workflow_stage_advance', 'redeliver_pending_fix_loop',
                                        'schedule_workflow_continuations', 'time'),
  'sync_awake_guard': ('_awake_guard_proc', 'os', 'shutil', 'subprocess', 'sys'),

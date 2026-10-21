@@ -127,6 +127,28 @@ commit/integrate 路径；验收以 Task Workspace 产物与 verify-baseline 文
 
 ---
 
+### 2.2 配置 Controller 自动与半自动策略
+
+在 Workflow 上声明默认模式，在需要人工确认的 Node 上覆盖：
+
+```yaml
+name: controller-policy-example
+control_policy:
+  mode: automatic
+nodes:
+  - id: acceptance
+    control_mode: supervised
+    confirm_before: [advance]
+```
+
+解析优先级为：动作覆盖 → Node 模式 → Workflow 模式 → 自动默认。此例中，`advance` 返回 `confirmation_required`，来源为 `action`；其他动作继承 Node 的 `supervised`，来源为 `node`。若把 Node 改为 `automatic`，仅 `advance` 仍需确认。显式 Node `automatic` 也可覆盖 Workflow `supervised`。
+
+只使用 `automatic` 和 `supervised`。将 `confirm_before` 写成无重复的非空动作名列表；错误类型、空白项和重复项都会导致模板加载失败。完整字段契约见 [ControlPolicy](../product-specs/workflow-template-schema.md#13-controlpolicy-controller-控制策略)。
+
+`automatic` 表示 Controller 校验通过后无需浏览器点击，`supervised` 表示执行前需要确认；确认始终不能绕过 Controller 校验。当前实现只保存并解析这些策略，Controller 自动执行、确认流程和安全动作拦截尚待接入。
+
+在启动 Run 前确定模式。策略保存在该 Run 的配置快照中，之后修改模板只影响新 Run；运行期覆盖不在本次范围内。
+
 ## 3. 编写技巧与最佳实践
 
 ### 3.1 充分利用并发与汇聚

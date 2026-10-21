@@ -45,7 +45,6 @@ async function triggerOpsRefresh(){
   await loadOpsCenter();
   if(btn){btn.disabled=false;btn.textContent='⟳ 立即刷新'}
 }
-
 function showOpsCenter(){
   state.opsMode=true;state.dashMode=false;state.shellView='ops';stopDashTimer();
   saveViewState();
@@ -90,7 +89,6 @@ function filterOpsWorkflows(filter){
   state.opsWfFilter=filter;
   renderOpsCenter();
 }
-
 function toggleOpsCardNodes(e,wid){
   if(e)e.stopPropagation();
   state.opsExpandedNodes=state.opsExpandedNodes||{};
@@ -103,7 +101,6 @@ function toggleOpsCardNodes(e,wid){
     if(textEl)textEl.textContent=open?'收起详情 ▲':'节点明细 ▼';
   }
 }
-
 let _opsActionBusy=false;
 async function runOpsAnomalyAction(actType,wid,tid,node,options){
   options=options||{};
@@ -142,6 +139,16 @@ async function runOpsAnomalyAction(actType,wid,tid,node,options){
       payload.expected_pane_id=options.expected_pane_id||options.pane_id;
       payload.pane_id=options.pane_id||options.expected_pane_id;
     }
+    const cockpit=await api('/api/workflow/controller-cockpit?workflow_id='+encodeURIComponent(wid));
+    const action=(cockpit.actions||[]).find(candidate=>{
+      const candidateType=candidate.api_payload?.type||candidate.api_payload?.action_type;
+      if(candidateType!==actType)return false;
+      if(tid&&candidate.target?.task_id!==tid)return false;
+      return !node||!candidate.target?.node_id||candidate.target.node_id===node;
+    });
+    if(!action)throw new Error('当前驾驶舱没有匹配的可执行操作，请刷新后在 Controller 中处理');
+    payload.action_id=action.action_id;
+    payload.expected_identity=action.expected_identity;
     const res=await api('/api/controller/execute-action',{
       method:'POST',
       body:JSON.stringify(payload)
@@ -170,7 +177,6 @@ async function runOpsAnomalyAction(actType,wid,tid,node,options){
     _opsActionBusy=false;
   }
 }
-
 function confirmOpsForcePass(wid,tid,node,options){
   options=options||{};
   const widEsc=esc(wid||'');
@@ -221,7 +227,6 @@ function confirmOpsForcePass(wid,tid,node,options){
     };
   }
 }
-
 function renderOpsCenter(){
   const d=state.ops||{},b=d.boss||{},cards=d.workflow_cards||[],fleet=d.agent_fleet||[],anoms=d.anomalies||[];
   document.getElementById('mProjects').textContent=b.running_workflows||0;

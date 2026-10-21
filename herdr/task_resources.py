@@ -217,7 +217,7 @@ def _launch_event(store, intent, now=None, *, conn=None):
         return record_event({"event_type":"launch_intent", "payload":dict(intent),
             "workflow_id":intent["workflow_id"], "node_id":intent["node_id"],
             "task_id":intent["key"], "source":"launch", "timestamp":now}, conn=conn)
-    if intent.get('dispatch_operation_id') is not None and intent['phase'] == 'allocating':
+    if intent['phase'] == 'allocating':
         from .node_dispatch_store import record_intent
         record_intent(store.db_path, intent, time.time() if now is None else now)
         return

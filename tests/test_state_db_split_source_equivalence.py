@@ -4,6 +4,7 @@ import copy
 import inspect
 import subprocess
 import textwrap
+from collections import Counter
 from pathlib import Path
 
 from herdr import state_db
@@ -39,8 +40,11 @@ def test_moved_function_bodies_preserve_authorized_ast():
     for original in BASELINE.body:
         if not isinstance(original, (ast.FunctionDef, ast.ClassDef)):
             continue
-        if original.name == '_ensure_schema':
-            continue  # Its five ordered slices have the runtime DDL contract.
+        if original.name in {'_ensure_schema', 'save_task', 'create_checkpoint', 'restore_checkpoint'}:
+            # _ensure_schema has the runtime DDL contract. The other three are
+            # intentionally changed by Controller Cockpit identity/admission
+            # fencing and have dedicated real-SQLite regression tests.
+            continue
         function = getattr(state_db, original.name)
         actual = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
         actual = UndoExtractionBindings().visit(actual)
@@ -54,7 +58,7 @@ def test_moved_function_bodies_preserve_authorized_ast():
             expected = RemoveInlineTransitionImport().visit(expected)
         assert ast.dump(actual) == ast.dump(expected), original.name
         compared.append(original.name)
-    assert len(compared) == 153
+    assert len(compared) == 150
 
 
 def test_time_calls_remain_35_unchanged_expressions():
@@ -66,4 +70,9 @@ def test_time_calls_remain_35_unchanged_expressions():
     files = [ROOT / 'herdr/state_db.py'] + list((ROOT / 'herdr/state').glob('*.py'))
     actual = [call for path in files for call in calls(ast.parse(path.read_text()))]
     assert len(expected) == 35
-    assert sorted(actual) == expected
+    expected_counts = Counter(expected)
+    actual_counts = Counter(actual)
+    assert not (expected_counts - actual_counts)
+    assert actual_counts - expected_counts == Counter({
+        "Call(func=Attribute(value=Name(id='time', ctx=Load()), attr='time', ctx=Load()))": 3,
+    })

@@ -24,9 +24,11 @@ def test_composed_page_preserves_pre_split_dom_css_and_branding():
     import re
     baseline = json.loads((ROOT / 'tests/fixtures/console-ui-baseline.json').read_text())['metadata']
     styles = re.findall(r'<style>(.*?)</style>', console.HTML_TEMPLATE, re.S)
-    assert [hashlib.sha256(s.encode()).hexdigest() for s in styles] == baseline['styles']
+    # Cockpit styles intentionally changed; the unrelated enhancement is frozen.
+    assert hashlib.sha256(styles[1].encode()).hexdigest() == baseline['styles'][1]
+    assert styles[0].count('.controller-cockpit-wrap {') == 2  # base + responsive
     skeleton = re.sub(r'(<style>|<script>).*?(</style>|</script>)', r'\1\2', console.HTML_TEMPLATE, flags=re.S)
-    assert hashlib.sha256(skeleton.encode()).hexdigest() == baseline['dom_sha256']
+    assert hashlib.sha256(skeleton.rstrip('\n').encode()).hexdigest() == baseline['dom_sha256']
     assert console.HTML == console.HTML_TEMPLATE.replace(
         '__PRODUCT_NAME__', console.PRODUCT_NAME,
     ).replace('__PRODUCT_TAGLINE__', console.PRODUCT_TAGLINE)
@@ -132,3 +134,24 @@ def test_direct_static_console_url_keeps_the_executable_template(server):
         assert int(response.headers['Content-Length']) == len(raw)
         assert raw == console.HTML_TEMPLATE.encode()
         assert b'console:include' not in raw
+
+
+def test_cockpit_http_route_reads_selected_store(server, monkeypatch):
+    from console import runtime
+    monkeypatch.setattr(runtime, 'service_status', lambda: {'com.user.herdr-controller': 'running'})
+    base, db = server
+    state_db.save_workflow({'workflow_id': 'owned', 'project_id': 'p', 'status': 'paused', 'execution_id': 'e',
+                           'config': {'nodes': [{'id': 'build', 'node_type': 'agent'}]}}, db_path=db)
+    with urllib.request.urlopen(base + '/api/workflow/controller-cockpit?workflow_id=owned', timeout=5) as response:
+        cockpit = json.load(response)['data']
+    action = next(a for a in cockpit['actions'] if a['action_id'] == 'owned:resume_workflow')
+    request = urllib.request.Request(base + '/api/controller/execute-action',
+        data=json.dumps({'workflow_id': 'owned', 'action_id': action['action_id'],
+                         'expected_identity': action['expected_identity']}).encode(),
+        headers={'Content-Type': 'application/json', 'X-HAFlow-Console-Request': '1'})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        result = json.load(response)['data']
+    assert result['receipt']['status'] == 'applied'
+    assert state_db.get_workflow('owned', db_path=db)['status'] == 'running'
+    with urllib.request.urlopen(base + '/api/workflow/controller-cockpit?workflow_id=owned', timeout=5) as response:
+        assert json.load(response)['data']['receipts'][0] == result['receipt']

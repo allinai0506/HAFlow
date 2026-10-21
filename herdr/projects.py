@@ -980,6 +980,7 @@ def provision_project(root, template_name="software-development-v1", project_nam
         execution=template.get("execution") if is_context else None,
         context_contract=template.get("context") if is_context else None,
         context_bindings=context_bindings if is_context else None,
+        control_policy=template.get("control_policy"),
     )
 
 
@@ -996,6 +997,7 @@ def _register_project_workflow(
     execution=None,
     context_contract=None,
     context_bindings=None,
+    control_policy=None,
 ):
     workflow = {
         "project_id": project_id,
@@ -1017,6 +1019,8 @@ def _register_project_workflow(
         workflow["context"] = context_contract
     if context_bindings:
         workflow["context_bindings"] = context_bindings
+    if control_policy is not None:
+        workflow["control_policy"] = control_policy
     workflow = normalize_workflow(workflow)
 
     project_dir = ROOT / "projects" / project_id
@@ -1162,6 +1166,7 @@ def adopt_workspace_as_project(
         coordinator_tab_id=coord_tab["tab_id"],
         coordinator_pane_id=coordinator_pane_id,
         runtime_nodes=runtime_nodes,
+        control_policy=template.get("control_policy"),
     )
 
 
@@ -1315,6 +1320,7 @@ def reprovision_project_template(record, template_name, context_bindings=None):
         execution=template.get("execution") if is_context else None,
         context_contract=template.get("context") if is_context else None,
         context_bindings=context_bindings if is_context else None,
+        control_policy=template.get("control_policy"),
     )
 
 

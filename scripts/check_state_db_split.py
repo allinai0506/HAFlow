@@ -1501,9 +1501,25 @@ def gate_g7(root: Path) -> GateResult:
             "BLOCK",
             f"cannot build a fresh schema: {type(exc).__name__}: {exc}",
         )
-    details = _compare_schema(
-        actual, counts, EXPECTED_SCHEMA, EXPECTED_SCHEMA_COUNTS, EXPECTED_SCHEMA_SQL
+    cockpit_indexes = {
+        "index:idx_events_checkpoint_identity": "32f04667cedd12e1",
+        "index:idx_events_control_reason": "0a32e1f00397bfb1",
+    }
+    details = []
+    for key, expected_hash in cockpit_indexes.items():
+        row = actual.get(key)
+        if not row:
+            details.append(f"missing Controller Cockpit schema object: {key}")
+        elif row["sha256"] != expected_hash:
+            details.append(f"changed Controller Cockpit schema object: {key}")
+    baseline_actual = {key: value for key, value in actual.items() if key not in cockpit_indexes}
+    baseline_counts = dict(counts)
+    baseline_counts["index"] = baseline_counts.get("index", 0) - sum(
+        1 for key in cockpit_indexes if key in actual
     )
+    details.extend(_compare_schema(
+        baseline_actual, baseline_counts, EXPECTED_SCHEMA, EXPECTED_SCHEMA_COUNTS, EXPECTED_SCHEMA_SQL
+    ))
     status = "BLOCK" if details else "PASS"
     return GateResult(
         "G-7",

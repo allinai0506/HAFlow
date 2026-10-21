@@ -9,18 +9,18 @@ def api_kernel_pause(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     nid=str(b.get('node_id') or '').strip() or None
-    return herdr_kernel.pause_workflow(wid,node_id=nid)
+    return herdr_kernel.pause_workflow(wid,node_id=nid,expected_identity=b.get('expected_identity'))
 
 def api_kernel_resume(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     nid=str(b.get('node_id') or '').strip() or None
-    return herdr_kernel.resume_workflow(wid,node_id=nid)
+    return herdr_kernel.resume_workflow(wid,node_id=nid,expected_identity=b.get('expected_identity'))
 
 def api_kernel_step(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
-    return herdr_kernel.step_workflow(wid)
+    return herdr_kernel.step_workflow(wid, expected_identity=b.get('expected_identity'))
 
 def api_kernel_rollback(b):
     wid=str(b.get('workflow_id') or '').strip()
@@ -28,7 +28,7 @@ def api_kernel_rollback(b):
     if not wid:raise RuntimeError('workflow_id 不能为空')
     if not target:raise RuntimeError('target_node_id 不能为空')
     reason=str(b.get('reason') or 'manual_rollback').strip()
-    return herdr_kernel.rollback_workflow(wid,target_node_id=target,reason=reason)
+    return herdr_kernel.rollback_workflow(wid,target_node_id=target,reason=reason,expected_identity=b.get('expected_identity'))
 
 
 
@@ -78,7 +78,7 @@ def api_kernel_checkpoint_create(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     tag=str(b.get('tag') or '').strip() or None
-    return herdr_kernel.create_checkpoint(wid,tag=tag)
+    return herdr_kernel.create_checkpoint(wid,tag=tag,expected_identity=b.get('expected_identity'))
 
 def api_kernel_checkpoint_list(wid):
     return herdr_kernel.list_checkpoints(wid)
@@ -88,7 +88,7 @@ def api_kernel_checkpoint_restore(b):
     cpid=str(b.get('checkpoint_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     if not cpid:raise RuntimeError('checkpoint_id 不能为空')
-    return herdr_kernel.restore_checkpoint(wid,checkpoint_id=cpid)
+    return herdr_kernel.restore_checkpoint(wid,checkpoint_id=cpid,expected_identity=b.get('expected_identity'))
 
 def api_workflow_retry_advance(b):
     wid=str(b.get('workflow_id') or '').strip()
@@ -105,25 +105,18 @@ def api_workflow_controller_actions(wid):
     """
     wid = str(wid or '').strip()
     if not wid: raise RuntimeError('workflow_id 不能为空')
-    from herdr.recovery_store import read_snapshot
-    wf, _, ts = read_snapshot(herdr_kernel._get_store().db_path, wid)
-    blockers = herdr_controller_actions.resolve_workflow_blockers(ts, wf)
-    p = inventory.project_by_id(wf.get('project_id')) or wf
-    proj_root = p.get('project_root') or wf.get('project_root') or ''
-    operations = workflow_api.api_workflow_recovery(wid).get('operations',[])
+    from services.controller.cockpit_automation import read_cockpit
+    # Preserve legacy obligation discovery, then read all facts coherently.
+    workflow_api.api_workflow_recovery(wid)
+    cockpit = read_cockpit(herdr_kernel._get_store(), wid, controller={'status': 'unknown'})
+    operations = cockpit['recovery']
     managed = {tid for op in operations if op['status'] not in {'resolved','superseded'}
                for tid in op['payload'].get('task_ids') or []}
-    actions_list = [
-        act.to_dict()
-        for act in herdr_controller_actions.collect_workflow_actions(
-            ts, wf, project_root=proj_root,
-            workflow_paused=str(wf.get('status') or '') == 'paused',
-        )
-    ]
+    actions_list = cockpit['actions']
     actions_list = [a for a in actions_list if a.get('blocker_task_id') not in managed]
     return {
         'workflow_id': wid,
-        'blockers': blockers,
+        'blockers': cockpit['blockers'],
         'actions': actions_list,
         'recovery': operations,
     }
@@ -298,7 +291,76 @@ def _launch_experience_inherit(payload, old_task):
         flags += ["--mandatory-experience-rules"]
     return flags
 
+def resolve_controller_action(workflow_id, action_id, *, snapshot=None):
+    """Look up only the exact current server-authored Action."""
+    from console.controller_cockpit_api import get_controller_cockpit
+    cockpit = snapshot if snapshot is not None else get_controller_cockpit(workflow_id)
+    return next((action for action in cockpit['actions'] if action['action_id'] == action_id), None)
+
+
 def api_controller_execute_action(payload):
+    payload = payload or {}
+    from console.controller_cockpit_api import execute_controller_action
+    if (payload or {}).get('action_id'):
+        return execute_controller_action(payload)
+    # Historical callers retain their result/exception contract; receipts add
+    # authoritative outcome facts without changing transport success semantics.
+    from herdr.controller_receipts import classify_receipt
+    from services.controller.cockpit_automation import (read_cockpit, persist_receipt,
+        read_action_state, pending_action_receipt, checkpoint_result, _unknown_cockpit)
+    store = herdr_kernel._get_store()
+    wid = str((payload or {}).get('workflow_id') or '').strip()
+    try:
+        before = read_cockpit(store, wid, controller={'status': 'running'}) if wid else None
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    aid = str(payload.get('task_id') or wid) + ':' + str(payload.get('type') or payload.get('action_type') or '')
+    action = {'action_id': aid, 'target': {'workflow_id': wid, 'task_id': payload.get('task_id')}, 'api_payload': payload}
+    if not wid:
+        return _execute_legacy_controller_action(payload)  # Preserve historical missing-id validation.
+    initial = read_action_state(store, action)
+    task = initial['action_readback']['task']
+    action['target'].update({key: task[key] for key in ('run_id', 'execution_id', 'candidate_sha') if task.get(key)})
+    pending = pending_action_receipt(action, before, payload, initial)
+    from uuid import uuid4
+    key = 'legacy:' + uuid4().hex
+    try:
+        _execute_legacy_controller_action(payload, validate_only=True)
+    except Exception as exc:
+        if wid:
+            receipt = {'status': 'rejected', 'action_id': aid, 'workflow_id': wid, 'target': action['target'],
+                       'outcome': 'rejected' if isinstance(exc, RuntimeError) else 'failed',
+                       'reason_code': 'legacy_action_rejected', 'refresh_required': True}
+            persist_receipt(store, receipt, key=key)
+            exc.receipt = receipt
+        raise
+    persist_receipt(store, pending, key=key)
+    try:
+        result = _execute_legacy_controller_action(payload)
+    except Exception as exc:
+        receipt = {**pending, 'outcome': 'unknown', 'reason_code': 'effect_unknown', 'refresh_required': True}
+        persist_receipt(store, receipt, key=key)
+        exc.receipt = receipt
+        raise
+    pending = checkpoint_result(pending, result)
+    persist_receipt(store, pending, key=key)
+    context = pending['reconciliation']
+    try:
+        after = read_cockpit(store, wid, controller={'status': 'running'})
+        after['action_readback'] = read_action_state(store, action, result, since=context['started_at'],
+            intent_digest=context['intent_digest'], event_watermark=context['event_watermark'])['action_readback']
+        receipt = classify_receipt(action, before, after, result)
+        if receipt.get('reason_code') in {'effect_unconfirmed', 'readback_identity_changed'}:
+            receipt = {**pending, 'reason_code': receipt['reason_code'], 'refresh_required': True}
+    except Exception:
+        receipt = {**pending, 'reason_code': 'readback_unavailable', 'refresh_required': True}
+        receipt, _ = persist_receipt(store, receipt, key=key)
+        return {**result, 'receipt': receipt, 'cockpit': _unknown_cockpit(wid, receipt)}
+    receipt, _ = persist_receipt(store, receipt, key=key)
+    return {**result, 'receipt': receipt, 'cockpit': after}
+
+
+def _execute_legacy_controller_action(payload, *, validate_only=False):
     payload = payload or {}
     act_type = str(payload.get('type') or payload.get('action_type') or '').strip()
     wid = str(payload.get('workflow_id') or '').strip()
@@ -361,6 +423,9 @@ def api_controller_execute_action(payload):
             cur_pane = str(task.get('pane_id') or '').strip()
             if req_pane and cur_pane and req_pane != cur_pane:
                 raise RuntimeError(f'任务运行实例已变化（请求实例 {req_pane}，当前实例 {cur_pane}），请刷新页面')
+
+    if validate_only:
+        return None
 
     if act_type == 'launch':
         stage = str(payload.get('stage') or 'implementation').strip()

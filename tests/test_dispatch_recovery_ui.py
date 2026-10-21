@@ -293,7 +293,8 @@ def test_open_recovery_form_binds_original_workflow_even_if_user_switches(outcom
     op={'id':7,'version':1,'workflow_id':'wf','payload':{'node_id':'test'}}
     op['recovery']={'summary':'取消范围','next_step':'核实现场','candidate_sha':SHA,
         'actions':[{'action':'restore_scope','label':'恢复范围'}]}
-    script='const state='+json.dumps({'workflowId':'__ctl__','workflow':{'workflow':{'workflow_id':'wf'}},'controllerActionsData':{'recovery':[op]}})+';\n'+functions+'''
+    workflow_identity='function cockpitWorkflowId(){'+source.split('function cockpitWorkflowId(){',1)[1].split('\nfunction ',1)[0]
+    script='const state='+json.dumps({'workflowId':'__ctl__','workflow':{'workflow':{'workflow_id':'wf'}},'controllerActionsData':{'recovery':[op]}})+';\n'+workflow_identity+'\n'+functions+'''
 const nodes={recoveryForm:{isConnected:true},modal:{classList:{contains(){return nodes.open}}},open:true,recoverySubmit:{disabled:false},recoveryOperator:{value:'human'},recoveryReason:{value:'恢复已取消范围'},recoveryConfirmed:{checked:true},recoveryError:{}};
 const document={getElementById:id=>nodes[id]};const esc=x=>String(x);const cleanStageLabel=x=>x;
 let closeCount=0,loadCount=0,cockpitCount=0;function openModal(){}function closeModal(){closeCount++;}function toast(){}function openControllerCockpitModal(){cockpitCount++;}

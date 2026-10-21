@@ -176,8 +176,59 @@ def validate_workflow_dag(nodes: List[Dict[str, Any]]) -> None:
 
 
 def normalize_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize workflow dict and apply the Execution & Context contract."""
-    return _normalize_execution_contract(_normalize_workflow_body(workflow))
+    """Normalize the DAG, execution contract, and template control policy."""
+    return normalize_control_policy(_normalize_execution_contract(_normalize_workflow_body(workflow)))
+
+
+CONTROL_MODES = {"automatic", "supervised"}
+
+
+def normalize_control_policy(workflow: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and copy policy fields without inventing explicit defaults."""
+    result = dict(workflow)
+    if "control_policy" in result:
+        policy = result["control_policy"]
+        if not isinstance(policy, dict):
+            raise ValueError("control_policy must be a mapping")
+        if "mode" in policy:
+            mode = policy["mode"]
+            if not isinstance(mode, str) or mode not in CONTROL_MODES:
+                raise ValueError(f"unknown control_policy.mode: {mode!r}")
+        result["control_policy"] = dict(policy)
+
+    if "nodes" in result:
+        nodes = []
+        for node in result["nodes"]:
+            normalized = dict(node)
+            if "control_mode" in normalized:
+                mode = normalized["control_mode"]
+                if not isinstance(mode, str) or mode not in CONTROL_MODES:
+                    raise ValueError(f"node={node.get('id')}: unknown control_mode: {mode!r}")
+            if "confirm_before" in normalized:
+                actions = normalized["confirm_before"]
+                if (not isinstance(actions, list)
+                        or any(not isinstance(action, str) or not action.strip() for action in actions)
+                        or len(set(actions)) != len(actions)):
+                    raise ValueError(f"node={node.get('id')}: confirm_before must be a unique list of nonempty strings")
+                normalized["confirm_before"] = list(actions)
+            nodes.append(normalized)
+        result["nodes"] = nodes
+    return result
+
+
+def resolve_control_policy(config: Dict[str, Any], node_id: str, action_type: str) -> Dict[str, str]:
+    """Resolve a normalized template policy; execution safety is checked by callers."""
+    workflow_policy = config.get("control_policy") or {}
+    node = next((n for n in config.get("nodes", []) if n.get("id") == node_id), {})
+    if action_type in (node.get("confirm_before") or []):
+        return {"mode": "confirmation_required", "source": "action"}
+    if "control_mode" in node:
+        mode = "confirmation_required" if node["control_mode"] == "supervised" else "automatic"
+        return {"mode": mode, "source": "node"}
+    if "mode" in workflow_policy:
+        mode = "confirmation_required" if workflow_policy["mode"] == "supervised" else "automatic"
+        return {"mode": mode, "source": "workflow"}
+    return {"mode": "automatic", "source": "default"}
 
 
 EXECUTION_MODES = {"git", "context"}
@@ -363,6 +414,9 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            for field in ("control_mode", "confirm_before"):
+                if field in node:
+                    norm_node[field] = node[field]
             # Enterprise experience attribution (optional template keys).
             if str(node.get("customer") or "").strip():
                 norm_node["customer"] = str(node.get("customer")).strip()
@@ -467,6 +521,9 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(policy.get("rules") or []),
                 "gate": dict(policy.get("gate") or {}),
             }
+            for field in ("control_mode", "confirm_before"):
+                if field in policy:
+                    norm_node[field] = policy[field]
             # Enterprise experience attribution (optional policy keys).
             if str(policy.get("customer") or "").strip():
                 norm_node["customer"] = str(policy.get("customer")).strip()
