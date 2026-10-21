@@ -149,6 +149,11 @@ if(typeof window!=='undefined'){
 
 function renderShellAlerts(){
   const el=document.getElementById('tasks');if(!el)return;
+  if(state.projectId&&state.project?.runtime_pending&&typeof loadProjectRuntime==='function'){
+    loadProjectRuntime(state.projectId,state.projectLoadSequence).then(()=>{
+      if(state.shellView==='alerts')renderShellAlerts();
+    });
+  }
   const list=(typeof visibleAlerts==='function'?visibleAlerts():[]);
   const unacked=(typeof activeAlerts==='function'?activeAlerts():list);
 

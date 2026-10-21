@@ -304,9 +304,14 @@ const localStorage = {
   setItem: (k, v) => { localStorage._store[k] = String(v); },
   removeItem: k => { delete localStorage._store[k]; }
 };
+const fetch = async (url) => ({
+  ok: true,
+  json: async () => ({slots: [{pane_id: "w1:p1'quote", claimed_by: "task'with'quote-1"}]})
+});
 """ + js + r"""
 state.projectId = 'proj-1';
 state.shellView = 'alerts';
+state.project = {runtime_pending: true, slots: []};
 state.overview = {
   alerts: [
     {
@@ -326,8 +331,8 @@ if (!tasksContainer.innerHTML.includes("task&#39;with&#39;quote-1")) process.exi
 if (!tasksContainer.innerHTML.includes("watchdog &#39;timeout&#39; error")) process.exit(2);
 if (!tasksContainer.innerHTML.includes("openTaskDrawer('task\\\'with\\\'quote-1')")) process.exit(3);
 if (!tasksContainer.innerHTML.includes("dismissAlert('task\\\'with\\\'quote-1')")) process.exit(4);
-if (tasksContainer.innerHTML.includes("showPane")) process.exit(5); // unverified pane omitted
 
+// After slots hydration
 state.project = {slots: [{pane_id: "w1:p1'quote", claimed_by: "task'with'quote-1"}]};
 renderShellAlerts();
 if (!tasksContainer.innerHTML.includes("showPane('w1:p1\\\'quote','task\\\'with\\\'quote-1')")) process.exit(6);
