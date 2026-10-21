@@ -1,0 +1,19 @@
+id: console_http_api
+name: 控制台 HTTP API
+description: herdr-factory-console 的 HTTP 服务端 API（experience hub 代理与控制动作）。
+lifecycle: experimental
+type: http_api
+entrypoint: console/http_server.py
+operations:
+  - id: api_experience_review
+    kind: function
+  - id: api_experience_revoke
+    kind: function
+timeout_ms: 30000
+retry:
+  mode: none
+evidence:
+  - kind: implemented
+    source: console/http_server.py
+    locator: api_experience_review L58 / api_experience_revoke L66
+    confidence: high

@@ -1,0 +1,17 @@
+id: finding_severity_actionable
+name: 高级别诊断须有修复动作
+description: severity 为 warning 或 critical 的 Finding 必须具备非 inspect 的明确 recommended_action（replan/retry/change_agent/request_human/interrupt），以保证高优先级问题有可执行的处置路径。
+lifecycle: experimental
+inputs:
+  - finding
+returns: boolean
+logic_ref: herdr/observer/signals.py:detect_signals
+evidence:
+  - kind: implemented
+    source: herdr/observer/signals.py
+    locator: detect_signals L564
+    confidence: high
+  - kind: implemented
+    source: herdr/observer/models.py
+    locator: SEVERITIES L27 / RECOMMENDED_ACTIONS L29
+    confidence: high

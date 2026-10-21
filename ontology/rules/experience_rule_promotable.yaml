@@ -1,0 +1,17 @@
+id: experience_rule_promotable
+name: 经验规则晋升条件
+description: pending_review 状态的 Experience Rule 只有在通过授权审核（reviewer 非空、review 操作由 admin 角色执行）后才允许流转至 approved/published 状态。
+lifecycle: experimental
+inputs:
+  - experience_rule
+returns: boolean
+logic_ref: herdr/experience/hub_server.py:review_candidate
+evidence:
+  - kind: implemented
+    source: herdr/experience/hub_server.py
+    locator: review_candidate L398
+    confidence: high
+  - kind: implemented
+    source: herdr/experience/models.py
+    locator: ExperienceStatus L20
+    confidence: high

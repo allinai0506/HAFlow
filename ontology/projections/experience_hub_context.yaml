@@ -1,0 +1,46 @@
+id: experience_hub_context
+name: 经验枢纽学习投影
+description: 面向 Experience Hub 管理员的规则审核与撤销上下文投影，聚合待审规则列表及其来源任务摘要。不暴露敏感字段（content 需脱敏处理后才可呈现）。
+lifecycle: experimental
+consumers:
+- role: experience_hub_admin
+  role_implemented: false
+objects:
+  experience_rule:
+    properties:
+    - experience_id
+    - title
+    - status
+    - contributor
+    - type
+    - version
+  task:
+    properties:
+    - task_id
+    - node
+    - status
+    - workflow_id
+  finding:
+    properties:
+    - finding_id
+    - finding_type
+    - severity
+    - summary
+relations:
+- experience_rule_originates_from_task
+- finding_evaluates_task
+rules:
+- experience_rule_promotable
+actions: []
+policies: []
+exclude_by_default: true
+evidence:
+- kind: implemented
+  source: console/http_server.py
+  locator: api_experience_rules L46 / api_experience_review L58 / api_experience_revoke L66
+  confidence: high
+- kind: implemented
+  source: herdr/experience/hub_server.py
+  locator: review_candidate L398 / revoke_rule L461
+  confidence: high
+notes: 本投影不提供 content 字段（规则正文），防止未脱敏内容流出；管理员获取 content 须通过独立详情端点。

@@ -1,0 +1,64 @@
+id: observation
+name: 诊断证据观察记录
+description: Observer 引擎从 Agent 运行日志或事件流中提取的不可变证据快照。observation_id 由 content sha256 派生，保证内容唯一性。通过 ObservationStore 落盘至 SQLite，证据与轨迹发现解耦存储。
+lifecycle: experimental
+identity:
+  primary_key: observation_id
+  format: "{sha256(content)[:20]}"
+aliases:
+- Observation
+- 观察记录
+- 证据快照
+properties:
+- id: observation_id
+  name: 观察 ID
+  type: string
+  required: true
+- id: run_id
+  name: 运行 ID
+  type: string
+  required: true
+- id: task_id
+  name: 归属任务
+  type: string
+  required: false
+- id: source_type
+  name: 来源类型
+  type: enum
+  required: true
+  notes: log|event|transcript|runtime
+- id: source_ref
+  name: 来源引用
+  type: string
+  required: true
+- id: content_ref
+  name: 内容引用
+  type: string
+  required: true
+  notes: 不可变内容文件路径
+- id: sha256
+  name: 内容哈希
+  type: string
+  required: true
+- id: size_bytes
+  name: 内容字节数
+  type: integer
+  required: true
+- id: excerpt
+  name: 摘录
+  type: string
+  required: false
+  notes: 脱敏后的预览片段
+evidence:
+- kind: implemented
+  source: herdr/observation.py
+  locator: Observation L115 / ObservationStore L152
+  confidence: high
+- kind: implemented
+  source: herdr/observer/engine.py
+  locator: _materialize_observations L312
+  confidence: high
+- kind: implemented
+  source: herdr/observer/context.py
+  locator: build_observation_context L262 / bound_transcript L60
+  confidence: high

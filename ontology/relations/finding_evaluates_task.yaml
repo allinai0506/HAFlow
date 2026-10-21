@@ -1,0 +1,13 @@
+id: finding_evaluates_task
+name: 诊断发现评估任务
+description: Observer 引擎对指定 Task 运行轨迹的诊断分析关联。Finding 是任务运行的二阶分析结论，不是事实本身。
+lifecycle: experimental
+from: finding
+to: task
+cardinality: many_to_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/observer/models.py
+  locator: TrajectoryFinding L72
+  confidence: high

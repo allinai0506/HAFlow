@@ -1,0 +1,18 @@
+id: console_action_permitted
+name: 控制台操作权限校验
+description: 控制台操作（force-pass、force-review 等）必须通过 workflow_policy 校验，包括：版本 CAS 匹配、任务状态符合特权流转契约、操作者 token 授权验证。
+lifecycle: experimental
+inputs:
+  - console_view
+  - task
+returns: boolean
+logic_ref: console/workflow_policy.py:_validate_force_pass_params
+evidence:
+  - kind: implemented
+    source: console/workflow_policy.py
+    locator: _validate_force_pass_params L34
+    confidence: high
+  - kind: implemented
+    source: console/http_server.py
+    locator: Handler L73
+    confidence: high

@@ -1,0 +1,51 @@
+id: experience_rule
+name: 经验沉淀规则
+description: HAFlow Experience Hub 中经过审核的业务规则经验实体。由 Agent 执行过程中的教训提炼，经人工审核（promoted）后注入到下一次 Task 的 prompt 上下文。experience_id 全局唯一，status 驱动晋升与撤销生命周期。
+lifecycle: experimental
+identity:
+  primary_key: experience_id
+  format: "{uuid}"
+aliases:
+- BusinessRuleExperience
+- 经验规则
+- 业务规则
+properties:
+- id: experience_id
+  name: 经验 ID
+  type: string
+  required: true
+- id: title
+  name: 规则标题
+  type: string
+  required: true
+- id: content
+  name: 规则内容
+  type: string
+  required: true
+- id: contributor
+  name: 贡献者
+  type: string
+  required: true
+- id: status
+  name: 状态
+  type: enum
+  required: true
+  notes: pending_review|approved|published|rejected|revoked
+- id: type
+  name: 规则类型
+  type: enum
+  required: true
+  notes: business_rule（V1 唯一类型）
+- id: version
+  name: 版本号
+  type: integer
+  required: true
+evidence:
+- kind: implemented
+  source: herdr/experience/models.py
+  locator: BusinessRuleExperience L141 / ExperienceStatus L20
+  confidence: high
+- kind: implemented
+  source: console/http_server.py
+  locator: api_experience_rules L46 / api_experience_review L58 / api_experience_revoke L66
+  confidence: high

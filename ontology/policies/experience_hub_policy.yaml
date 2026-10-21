@@ -1,0 +1,29 @@
+id: experience_hub_policy
+name: Experience Hub 审核权限
+description: Experience Hub 管理员（admin 角色）的经验规则审核与撤销权限策略。
+lifecycle: experimental
+subjects:
+  roles:
+    - experience_hub_admin
+  roles_implemented: false
+  note: 通过 /api/experience/review 与 /api/experience/revoke 端点认证
+resources:
+  objects:
+    - experience_rule
+allowed_actions:
+  - promote_experience_rule
+  - revoke_experience_rule
+conditions:
+  - 操作者必须持有有效 Bearer Token（admin 角色）；Experience Hub 数据库记录完整 audit_trail
+agent_execution:
+  mode: inherit_user
+  note: 经验规则审核以人工操作者身份执行
+evidence:
+  - kind: implemented
+    source: console/http_server.py
+    locator: api_experience_review L58 / api_experience_revoke L66
+    confidence: high
+  - kind: implemented
+    source: herdr/experience/hub_server.py
+    locator: review_candidate L398 / revoke_rule L461
+    confidence: high

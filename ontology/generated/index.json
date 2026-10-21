@@ -33,10 +33,28 @@
         "path": "objects/checkpoint.yaml"
       },
       {
+        "id": "console_view",
+        "name": "控制台交互视图模型",
+        "lifecycle": "experimental",
+        "path": "objects/console_view.yaml"
+      },
+      {
         "id": "event",
         "name": "事实事件",
         "lifecycle": "experimental",
         "path": "objects/event.yaml"
+      },
+      {
+        "id": "experience_rule",
+        "name": "经验沉淀规则",
+        "lifecycle": "experimental",
+        "path": "objects/experience_rule.yaml"
+      },
+      {
+        "id": "finding",
+        "name": "旁路诊断发现",
+        "lifecycle": "experimental",
+        "path": "objects/finding.yaml"
       },
       {
         "id": "gate",
@@ -55,6 +73,12 @@
         "name": "门禁执行裁决事实",
         "lifecycle": "experimental",
         "path": "objects/gate_verdict.yaml"
+      },
+      {
+        "id": "observation",
+        "name": "诊断证据观察记录",
+        "lifecycle": "experimental",
+        "path": "objects/observation.yaml"
       },
       {
         "id": "project",
@@ -93,6 +117,30 @@
         "name": "准入池授权 Agent",
         "lifecycle": "experimental",
         "path": "relations/agent_pool_authorizes_agent.yaml"
+      },
+      {
+        "id": "console_view_projects_workflow",
+        "name": "控制台视图投影工作流",
+        "lifecycle": "experimental",
+        "path": "relations/console_view_projects_workflow.yaml"
+      },
+      {
+        "id": "experience_rule_originates_from_task",
+        "name": "经验规则源于任务",
+        "lifecycle": "experimental",
+        "path": "relations/experience_rule_originates_from_task.yaml"
+      },
+      {
+        "id": "finding_evaluates_task",
+        "name": "诊断发现评估任务",
+        "lifecycle": "experimental",
+        "path": "relations/finding_evaluates_task.yaml"
+      },
+      {
+        "id": "finding_references_observation",
+        "name": "诊断发现引用观察证据",
+        "lifecycle": "experimental",
+        "path": "relations/finding_references_observation.yaml"
       },
       {
         "id": "gate_verdict_evaluates_gate_spec",
@@ -219,6 +267,24 @@
         "path": "rules/anchor_pane_never_assigned.yaml"
       },
       {
+        "id": "console_action_permitted",
+        "name": "控制台操作权限校验",
+        "lifecycle": "experimental",
+        "path": "rules/console_action_permitted.yaml"
+      },
+      {
+        "id": "experience_rule_promotable",
+        "name": "经验规则晋升条件",
+        "lifecycle": "experimental",
+        "path": "rules/experience_rule_promotable.yaml"
+      },
+      {
+        "id": "finding_severity_actionable",
+        "name": "高级别诊断须有修复动作",
+        "lifecycle": "experimental",
+        "path": "rules/finding_severity_actionable.yaml"
+      },
+      {
         "id": "gate_bypass_audited",
         "name": "门禁豁免可审计",
         "lifecycle": "experimental",
@@ -335,10 +401,22 @@
         "path": "actions/launch_task.yaml"
       },
       {
+        "id": "promote_experience_rule",
+        "name": "晋升经验规则",
+        "lifecycle": "experimental",
+        "path": "actions/promote_experience_rule.yaml"
+      },
+      {
         "id": "provision_project",
         "name": "供给项目空间",
         "lifecycle": "experimental",
         "path": "actions/provision_project.yaml"
+      },
+      {
+        "id": "publish_finding",
+        "name": "发布诊断发现",
+        "lifecycle": "experimental",
+        "path": "actions/publish_finding.yaml"
       },
       {
         "id": "purge_task",
@@ -369,6 +447,12 @@
         "name": "预占执行 Agent",
         "lifecycle": "experimental",
         "path": "actions/reserve_agent.yaml"
+      },
+      {
+        "id": "revoke_experience_rule",
+        "name": "撤销经验规则",
+        "lifecycle": "experimental",
+        "path": "actions/revoke_experience_rule.yaml"
       },
       {
         "id": "rollback_workflow",
@@ -409,10 +493,22 @@
         "path": "policies/controller_service_policy.yaml"
       },
       {
+        "id": "experience_hub_policy",
+        "name": "Experience Hub 审核权限",
+        "lifecycle": "experimental",
+        "path": "policies/experience_hub_policy.yaml"
+      },
+      {
         "id": "gate_bypass_policy",
         "name": "门禁豁免权限",
         "lifecycle": "experimental",
         "path": "policies/gate_bypass_policy.yaml"
+      },
+      {
+        "id": "observer_service_policy",
+        "name": "Observer 服务权限",
+        "lifecycle": "experimental",
+        "path": "policies/observer_service_policy.yaml"
       },
       {
         "id": "operator_cli_policy",
@@ -448,6 +544,12 @@
       }
     ],
     "connectors": [
+      {
+        "id": "console_http_api",
+        "name": "控制台 HTTP API",
+        "lifecycle": "experimental",
+        "path": "connectors/console_http_api.yaml"
+      },
       {
         "id": "herdr_controller_service",
         "name": "herdr-controller 守护进程",
@@ -543,6 +645,12 @@
     ],
     "projections": [
       {
+        "id": "console_cockpit_view",
+        "name": "控制台操作舱上下文投影",
+        "lifecycle": "experimental",
+        "path": "projections/console_cockpit_view.yaml"
+      },
+      {
         "id": "console_operator_projection",
         "name": "运维控制台只读投影",
         "lifecycle": "experimental",
@@ -553,6 +661,12 @@
         "name": "协调器工作流上下文投影",
         "lifecycle": "experimental",
         "path": "projections/coordinator_workflow_projection.yaml"
+      },
+      {
+        "id": "experience_hub_context",
+        "name": "经验枢纽学习投影",
+        "lifecycle": "experimental",
+        "path": "projections/experience_hub_context.yaml"
       },
       {
         "id": "task_executor_projection",

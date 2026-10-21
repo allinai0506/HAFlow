@@ -1,0 +1,13 @@
+id: experience_rule_originates_from_task
+name: 经验规则源于任务
+description: Experience Rule 由 Agent 执行 Task 时的教训提炼而来，source.task_id 与 source.run_id 记录原始归属。
+lifecycle: experimental
+from: experience_rule
+to: task
+cardinality: many_to_one
+object_backed: false
+evidence:
+- kind: implemented
+  source: herdr/experience/models.py
+  locator: ExperienceSource L56
+  confidence: high
