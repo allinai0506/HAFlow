@@ -3356,3 +3356,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[architecture]]：真实节点派发消费 Operation 的持久确认，人工暂停不能被自动 sweep 撤销，未注册自动能力保留明确的手动路径。
 - 页头与会签控制统一到 Cockpit Action/receipt；动作精确查找与展示上限分离，N+1 报告截断，回执分类下沉纯核心。
 - Evidence：`tests/test_controller_cockpit_final_fixes.py`、`tests/test_console_controller_cockpit_e2e.py`、设计文档 §17 的可见入口盘点。
+
+## [2026-10-21] Controller | 有限修复第二轮的确认、事务与定位边界
+
+- Updated [[architecture]]：intake 关闭的兼容派发仍执行持久确认；工作流控制在 SQLite 写入边界校验指纹，快照去重覆盖持久元数据。
+- Workflow 控制优先进入 100 Action 展示窗口，Operation 定位使用精确 Action 查询并隔离迟到响应；恢复回执先匹配 checkpoint 再限量。
+- Evidence：`herdr/workflow_control_store.py`、`tests/test_controller_cockpit_bounded_fix2.py`、`tests/test_console_controller_cockpit_e2e.py`。

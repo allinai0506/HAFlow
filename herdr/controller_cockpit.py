@@ -61,7 +61,10 @@ def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unkn
     by_id = {task.get("task_id"): task for task in all_tasks if isinstance(task, dict) and task.get("task_id")}
     projected = []
     seen = set()
-    for raw in actions:
+    # Reserve the front of the same bounded inventory for Workflow controls.
+    # Tasks can otherwise consume the entire window before resume is visited.
+    ordered = sorted(actions, key=lambda a: bool((a.target if hasattr(a, 'target') else a.get('target', {})).get('task_id')))
+    for raw in ordered:
         if action_id is not None and (raw.action_id if hasattr(raw, 'action_id') else raw.get('action_id')) != action_id:
             continue
         action = raw.to_dict() if hasattr(raw, "to_dict") else deepcopy(raw)

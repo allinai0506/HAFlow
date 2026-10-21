@@ -697,6 +697,10 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_checkpoint_identity ON events("
+                 "workflow_id,event_type,source,json_extract(payload_json,'$.checkpoint_id'),id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_control_reason ON events("
+                 "workflow_id,event_type,source,json_extract(payload_json,'$.reason'),id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, sequence, id);")
     # Exact canary-bucket reads (the Controlled Rollout guard) must be
     # served by an index, not by scanning route_decision history while
@@ -1672,6 +1676,12 @@ def save_task(
             if previous.get('dispatch_operation_id') != task_dict.get('dispatch_operation_id'):
                 raise ValueError('cannot rebind an existing task to another dispatch operation')
 
+            if previous.get('dispatch_operation_id') is None and (
+                    existing['workflow_id'] != wid or existing['node'] != node
+                    or any(previous.get(key) != task_dict.get(key) for key in ('run_id', 'execution_id'))):
+                from .node_dispatch_store import validate_task_registration
+                validate_task_registration(conn, task_dict, now)
+
             if previous.get('dispatch_operation_id') is not None and (
                     existing['workflow_id'] != wid or existing['node'] != node
                     or any(previous.get(key) != task_dict.get(key) for key in ('run_id', 'execution_id', 'launch_intent_id', 'supersedes'))):
@@ -1716,7 +1726,7 @@ def save_task(
                 else:
                     if task_dict.get('supersedes') is not None and task_dict.get('supersedes') != intent_supersedes:
                         raise ValueError('cannot change dispatch task registration identity')
-        elif task_dict.get('dispatch_operation_id') is not None:
+        else:
             from .node_dispatch_store import validate_task_registration
             validate_task_registration(conn, task_dict, now)
         if fail_if_exists:
@@ -7687,10 +7697,14 @@ def create_checkpoint(
     metadata: Optional[Dict[str, Any]] = None,
     db_path: Optional[Path] = None,
     checkpoint_id: Optional[str] = None,
+    expected_identity=None,
 ) -> Dict[str, Any]:
     """Capture an atomic point-in-time snapshot of a workflow and all its tasks."""
     conn = get_db_connection(db_path)
     try:
+        conn.execute('BEGIN IMMEDIATE')
+        from .workflow_control_store import validate_identity
+        validate_identity(conn, workflow_id, expected_identity)
         cur_wf = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
         wf_row = cur_wf.fetchone()
         if not wf_row:
@@ -7749,7 +7763,6 @@ def create_checkpoint(
         }
 
         # Atomic insertion within a single transaction
-        conn.execute("BEGIN TRANSACTION;")
         try:
             conn.execute("""
                 INSERT INTO checkpoints (
@@ -7843,6 +7856,7 @@ def restore_checkpoint(
     workflow_id: str,
     checkpoint_id: str,
     db_path: Optional[Path] = None,
+    expected_identity=None,
 ) -> Dict[str, Any]:
     """Restore workflow state and tasks atomically from a checkpoint snapshot in SQLite."""
     snapshot = get_checkpoint(workflow_id, checkpoint_id, db_path)
@@ -7854,15 +7868,21 @@ def restore_checkpoint(
 
     conn = get_db_connection(db_path)
     try:
-        conn.execute("BEGIN TRANSACTION;")
+        conn.execute("BEGIN IMMEDIATE;")
         try:
+            from .workflow_control_store import validate_identity
+            validate_identity(conn, workflow_id, expected_identity)
             # 1. Restore workflow record
             save_workflow(restored_wf, db_path, conn=conn)
 
             # 2. Delete existing tasks for this workflow and insert restored tasks
             conn.execute("DELETE FROM tasks WHERE workflow_id = ?;", (workflow_id,))
+            # Replay the immutable snapshot inventory; this does not allocate or
+            # authorize a new launch. Normal save_task admission still gates new Runs.
             for t in restored_tasks:
-                save_task(t, db_path, conn=conn)
+                _restore_checkpoint_task(conn, t)
+            from .recovery_store import ensure_for_workflow
+            ensure_for_workflow(conn, workflow_id, now=time.time())
 
             # 3. Record event
             record_event({
@@ -7886,6 +7906,17 @@ def restore_checkpoint(
         }
     finally:
         conn.close()
+
+
+def _restore_checkpoint_task(conn, task):
+    columns = ('task_id', 'workflow_id', 'node', 'stage', 'agent', 'status', 'stage_verdict',
+               'stage_verdict_note', 'pane_id', 'goal', 'blocker', 'created_at')
+    values = [task.get(key) for key in columns]
+    values[-1] = task.get('created_at') or time.time()
+    payload = {key: value for key, value in task.items() if key not in {*columns, 'version'}}
+    conn.execute('INSERT INTO tasks (' + ','.join(columns) + ',payload_json,updated_at,version) '
+                 'VALUES (' + ','.join('?' for _ in range(len(columns) + 3)) + ')',
+                 (*values, json.dumps(payload, ensure_ascii=False), time.time(), 1))
 
 
 def fork_workflow_from_checkpoint(

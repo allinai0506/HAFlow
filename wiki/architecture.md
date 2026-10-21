@@ -67,6 +67,8 @@ Evidence:
   事务中复查身份的 Workflow 暂停/恢复；显式人工暂停只能确认恢复，未注册自动
   handler 的动作明确显示手动路径。真实派发的模板确认写入既有 Operation 决策，
   claim/start/launch/registration 检查同一代次的持久批准；普通 retry 不能代替确认。
+  关闭 coordinator intake 的兼容根节点也受同一策略约束；supervised 节点建立
+  Operation 并等待确认，automatic 无 Operation 的兼容路径仍可用。
 - `FACT` 人工请求传 `action_id` 和 `expected_identity`，执行边界重新推导动作。
   旧 Task 版本或 Pane 身份拒绝后回读。指导按当前 Run 记录；中断须实际适配器
   成功与状态/事件回读一致。回执使用同一数据库中的 `cockpit_action_receipts`，
@@ -74,8 +76,13 @@ Evidence:
 - `FACT` 派发通知成功仍可能等待 Task 登记。Operation 与 launch intent、Task、
   Run 的归属匹配后才能结案；页面刷新不重发已经执行的步骤。
 - `FACT` 页头暂停、推进、单步检查、回溯、快照及原会签入口集中到 Cockpit。
-  展示最多 100 个 Action，执行按精确 Action ID 重新查找；事件及恢复读 N+1 判定
+  展示最多 100 个 Action，Workflow 控制优先于 Task 动作；执行及 Operation
+  定位按精确 Action ID 重新查找。恢复深链接只显示匹配的派发确认动作。事件及恢复读 N+1 判定
   截断。回执纯逻辑由 `herdr/controller_receipts.py` 供 Console 和 Controller 共用。
+- `FACT` 回溯、暂停/恢复、单步与快照在实际 SQLite 写事务中校验 expected execution
+  和持久状态指纹；回溯的 Task 失效与 Workflow 元数据一起提交。快照意图指纹覆盖
+  Workflow/Task 全部持久行，包括 agent_override；相同快照意图仍去重。恢复回执先
+  按 checkpoint 身份查询再 LIMIT，不依赖最新两个其他快照的事件。
 - `UNKNOWN` 以上隔离测试不能证明已安装服务或生产 Agent 的运行结果。运行中
   Workflow 临时改自动策略、跨 Workflow 运维大屏和组织审批链尚未实现。
 
@@ -89,6 +96,8 @@ Evidence:
 - `herdr/recovery_store.py#decide_operation`
 - `herdr/controller_receipts.py#classify_receipt`
 - `herdr/controller_workflow_actions.py#workflow_control_actions`
+- `herdr/workflow_control_store.py#validate_identity`
+- `tests/test_controller_cockpit_bounded_fix2.py`
 - `tests/test_controller_cockpit_final_fixes.py`
 - `tests/test_console_controller_cockpit_e2e.py`
 - `tests/test_controller_cockpit_automation.py`

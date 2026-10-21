@@ -229,7 +229,7 @@ function controllerTaskMatches(task,target){
   return fields.some(([key])=>target[key])&&fields.every(([key,value])=>!target[key]||target[key]===value);
 }
 function controllerActionMatches(action,target){
-  if(target.operationId!=null)return false;
+  if(target.operationId!=null&&(action.api_payload?.type!=='confirm_dispatch'||String(target.operationId)!==String(action.target?.operation_id)))return false;
   const fields=[['nodeId','node_id'],['taskId','task_id'],['runId','run_id'],['paneId','pane_id']];
   return fields.every(([key,field])=>!target[key]||target[key]===action.target?.[field]);
 }
@@ -302,6 +302,7 @@ function openControllerCockpit(target={}){
     state.controllerReturnContext={workflowId:state.workflow?.workflow?.workflow_id||wid,nodeId:state.flowSelectedNodeId,taskId:state.selectedTaskId,taskDrawerTab:state.taskDrawerTab,taskDetail:state.selectedTaskDetail,workflowView:state.workflowView||'flow',drawerHidden:document.getElementById('taskDrawer')?.hidden!==false,focusElement:document.activeElement};
   }
   if(navigating){
+    state.controllerCockpitSeq=(state.controllerCockpitSeq||0)+1;
     state.controllerTarget={...Object.fromEntries(['nodeId','taskId','runId','paneId','operationId'].filter(key=>target[key]!=null&&target[key]!=='').map(key=>[key,target[key]])),workflowId:wid};
     state.controllerFocusPending=true;
     closeModal();
@@ -312,7 +313,10 @@ function openControllerCockpit(target={}){
   if(!state.openWorkflowTabIds)state.openWorkflowTabIds=[];
   if(!state.openWorkflowTabIds.includes('__ctl__'))state.openWorkflowTabIds.push('__ctl__');
   state.workflowId='__ctl__';renderWorkflowTabs();paintControllerCockpit();
-  if(state.controllerCockpit?.workflow?.workflow_id!==wid)return loadControllerCockpit(wid);
+  const actionId=state.controllerTarget?.operationId!=null?wid+':confirm_dispatch:'+state.controllerTarget.operationId:'';
+  const missingAction=actionId&&!state.controllerCockpit?.actions?.some(a=>a.action_id===actionId);
+  if(state.controllerCockpit?.workflow?.workflow_id!==wid||(navigating&&(
+      missingAction||(state.controllerCockpit?.action_lookup&&!actionId))))return loadControllerCockpit(wid);
 }
 function openControllerCockpitModal(){return openControllerCockpit();}
 async function returnFromControllerCockpit(){

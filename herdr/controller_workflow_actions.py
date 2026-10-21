@@ -5,13 +5,12 @@ import json
 from .controller_actions import ControllerAction, _bind_actions
 
 
-def workflow_control_actions(workflow, config, tasks, operations, checkpoints):
+def workflow_control_actions(workflow, config, tasks, operations, checkpoints, *, fingerprint=None):
     wid = workflow['workflow_id']
     actions = []
-    fingerprint = hashlib.sha256(json.dumps({
-        'config': config, 'status': workflow.get('status'),
-        'tasks': sorted((t['task_id'], t.get('version')) for t in tasks),
-        'history': workflow.get('history', []),
+    fingerprint = fingerprint or hashlib.sha256(json.dumps({
+        'workflow': workflow, 'config': config,
+        'tasks': sorted(tasks, key=lambda task: task['task_id']),
     }, sort_keys=True).encode()).hexdigest()
 
     def add(kind, title, *, node=None, checkpoint=None, operation=None, destructive=False):

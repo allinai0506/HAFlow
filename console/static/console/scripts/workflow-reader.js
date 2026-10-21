@@ -168,12 +168,14 @@ function workflowExtraRequest(path,sequence){
 }
 async function loadControllerCockpit(workflowId){
   const sequence=state.controllerCockpitSeq=(state.controllerCockpitSeq||0)+1;
+  const target=state.controllerTarget;
+  const actionId=target?.workflowId===workflowId&&target.operationId!=null?workflowId+':confirm_dispatch:'+target.operationId:'';
   const current=()=>sequence===state.controllerCockpitSeq&&(state.workflowId===workflowId||(state.workflowId==='__ctl__'&&(state.controllerTarget?.workflowId||state.workflow?.workflow?.workflow_id)===workflowId));
   try{
-    const data=await api('/api/workflow/controller-cockpit?workflow_id='+encodeURIComponent(workflowId));
+    const data=await api('/api/workflow/controller-cockpit?workflow_id='+encodeURIComponent(workflowId)+(actionId?'&action_id='+encodeURIComponent(actionId):''));
     if(!current())return;
     if(data.workflow?.workflow_id!==workflowId)throw new Error('工作流身份不匹配');
-    state.controllerCockpit=data;
+    state.controllerCockpit={...data,action_lookup:actionId};
     const receipt=state.controllerReceipt;
     if(receipt?.workflow_id===workflowId&&receipt.status==='accepted_waiting'){
       const updated=receipt.operation_id!=null&&(data.receipts||[]).find(r=>r.action_id===receipt.action_id&&r.operation_id===receipt.operation_id);

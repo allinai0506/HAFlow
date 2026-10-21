@@ -55,7 +55,7 @@ def cockpit(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "service_status", lambda: {"com.user.herdr-controller": "running"})
 
     config = {"name": "cockpit-e2e", "nodes": [
-        {"id": "build", "label": "实现", "node_type": "agent", "control_mode": "supervised"},
+        {"id": "build", "label": "实现", "node_type": "agent"},
         {"id": "gate", "label": "验收门禁", "node_type": "agent", "depends_on": ["build"]},
         {"id": "dispatch", "label": "等待派发", "node_type": "agent", "depends_on": ["gate"]}]}
     for wid, cfg in (("wf-e2e", config), ("wf-auto", {"nodes": [{"id": "build"}]}),
@@ -67,6 +67,10 @@ def cockpit(tmp_path, monkeypatch):
         store.save_task({"task_id": tid, "workflow_id": "wf-e2e", "project_id": project["project_id"],
             "node": node, "stage": node, "run_id": tid + "-run", "pane_id": tid + "-pane",
             "execution_id": "exec-e2e", "version": 2, "status": status, "agent": "codex"})
+    # Adopt supervision for already registered Runs; new supervised launches
+    # must obtain a durable dispatch approval through the production boundary.
+    config['nodes'][0]['control_mode'] = 'supervised'
+    store.save_workflow({**store.get_workflow('wf-e2e'), 'config': config})
     effects = []
 
     def interrupt(pane_id, *, reason):
@@ -392,3 +396,37 @@ def test_header_pause_checkpoint_rollback_and_step_use_cockpit_receipts(cockpit)
     assert cockpit.store.get_workflow('wf-controls')['status'] == 'paused'
     assert cockpit.store.list_tasks(workflow_id='wf-controls') == []
     assert '尚未派发任务' in cockpit.read('wf-controls')['receipts'][0]['message']
+
+
+def test_resume_control_visible_and_executable_with_101_tasks(cockpit):
+    from herdr import kernel
+    for i in range(101):
+        cockpit.store.save_task({'task_id': f'many-{i}', 'workflow_id': 'wf-auto', 'node': 'build',
+            'run_id': f'run-{i}', 'pane_id': f'pane-{i}', 'execution_id': 'exec-e2e', 'status': 'working'})
+    kernel.pause_workflow('wf-auto', store=cockpit.store)
+    open_cockpit(cockpit, 'wf-auto')
+    out = cockpit.browser("console.log('CARDS='+await page.evaluate(()=>document.querySelectorAll('[data-action-id]').length));")
+    assert int(out.split('CARDS=')[1].splitlines()[0]) <= 100
+    confirm_action(cockpit, 'wf-auto:resume_workflow')
+    assert cockpit.store.get_workflow('wf-auto')['status'] == 'running'
+
+
+def test_operation_deep_link_fetches_confirmation_outside_display_window(cockpit):
+    from herdr import node_dispatch_store
+    wid = 'wf-target'
+    cockpit.store.save_workflow({'workflow_id': wid, 'status': 'running', 'execution_id': 'exec-e2e',
+        'startup_ready': True, 'config': {'control_policy': {'mode': 'supervised'},
+            'nodes': [{'id': f'n{i:03}'} for i in range(105)]}})
+    operations = node_dispatch_store.reconcile_workflow(cockpit.store.db_path, wid)
+    target = min(operations, key=lambda op: op['id'])
+    aid = f"{wid}:confirm_dispatch:{target['id']}"
+    assert not any(a['action_id'] == aid for a in cockpit.read(wid)['actions'])
+    open_cockpit(cockpit, wid)
+    cockpit.browser(f"""
+        await page.evaluate(()=>openControllerCockpit({{workflowId:'{wid}',operationId:{target['id']}}}));
+        await page.waitForFunction(()=>!!document.querySelector('[data-action-id="{aid}"]'),undefined,{{timeout:5000}});
+        console.log('CARDS='+await page.evaluate(()=>document.querySelectorAll('[data-action-id]').length));
+    """)
+    confirm_action(cockpit, aid)
+    current = node_dispatch_store.operation_for_node(cockpit.store.db_path, wid, target['payload']['node_id'])
+    assert current['detail']['dispatch_confirmation']['identity_key'] == target['identity_key']

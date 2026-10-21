@@ -8,12 +8,15 @@ CHECK_SECONDS = 30
 TERMINAL = frozenset({'resolved', 'superseded'})
 
 
+def policy_requires_confirmation(config, node_id):
+    from .workflow import resolve_control_policy
+    return resolve_control_policy(config, node_id, 'launch')['mode'] == 'confirmation_required'
+
+
 def confirmation_required(operation, config):
     """Approval is scoped to this immutable dispatch generation, across retries."""
-    from .workflow import resolve_control_policy
-    policy = resolve_control_policy(config, operation['payload']['node_id'], 'launch')
     approval = operation.get('detail', {}).get('dispatch_confirmation') or {}
-    return (policy['mode'] == 'confirmation_required'
+    return (policy_requires_confirmation(config, operation['payload']['node_id'])
             and approval.get('identity_key') != operation['identity_key'])
 
 

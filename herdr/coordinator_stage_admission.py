@@ -20,8 +20,10 @@ def admit_stage_dispatch(
     workflow_id = item["workflow_id"]
     store = get_store()
     workflow = store.get_workflow(workflow_id)
+    from herdr.node_dispatch import policy_requires_confirmation
+    supervised = bool(workflow and policy_requires_confirmation(workflow.get('config') or {}, target_node_id))
 
-    if item.get("stage") in (None, "", "start") and not coordinator_intake_enabled():
+    if item.get("stage") in (None, "", "start") and not coordinator_intake_enabled() and not supervised:
         if workflow:
             from herdr.node_dispatch_store import operation_for_node
 
@@ -36,7 +38,7 @@ def admit_stage_dispatch(
                 return None
 
     # Native workflows require durable responsibility for intake and downstream dispatch.
-    if ((node or {}).get("depends_on") or coordinator_intake_enabled()) and workflow:
+    if ((node or {}).get("depends_on") or coordinator_intake_enabled() or supervised) and workflow:
         from herdr.node_dispatch_store import claim, operation_for_node
 
         reconcile_node_dispatches(workflow_id)

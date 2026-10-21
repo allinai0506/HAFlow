@@ -164,6 +164,43 @@ def _cockpit():
 class TestControllerCockpitRuntime(unittest.TestCase):
     """Drive the real JS; a green ``node --check`` is not enough."""
 
+    def test_operation_deep_link_retains_only_matching_dispatch_action(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                state.controllerCockpit=__cockpitFixture;
+                const base=state.controllerCockpit.actions[0];
+                state.controllerCockpit.actions.push(...[7,8].map(id=>({...base,
+                  action_id:'wf-1:confirm_dispatch:'+id,title:'Confirm dispatch '+id,
+                  target:{workflow_id:'wf-1',node_id:'build',operation_id:id},
+                  automation:{mode:'confirmation_required'},api_payload:{type:'confirm_dispatch'}})));
+                openControllerCockpit({workflowId:'wf-1',operationId:7,nodeId:'build'});
+                console.log('MARKUP='+document.getElementById('controllerTabView').innerHTML);
+            """)
+        self.assertIn('data-action-id="wf-1:confirm_dispatch:7"', out)
+        self.assertNotIn('data-action-id="wf-1:confirm_dispatch:8"', out)
+        self.assertNotIn('data-action-id="impl-x:integrate"', out)
+
+    def test_delayed_operation_lookup_cannot_replace_later_node_navigation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, r"""
+                (async()=>{
+                  state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                  state.controllerCockpit=__cockpitFixture;
+                  let release;globalThis.fetch=async()=>new Promise(resolve=>{release=resolve});
+                  const loading=openControllerCockpit({workflowId:'wf-1',operationId:7});
+                  openControllerCockpit({workflowId:'wf-1',nodeId:'build'});
+                  release({ok:true,json:async()=>({ok:true,data:{...__cockpitFixture,actions:[]}})});
+                  await loading;
+                  console.log('LOOKUP='+String(state.controllerCockpit.action_lookup||''));
+                  console.log('ACTIONS='+state.controllerCockpit.actions.length);
+                })();
+            """)
+        self.assertIn('LOOKUP=\n', out)
+        self.assertIn('ACTIONS=1', out)
+
     def test_unsupported_automatic_action_is_manually_operable_and_labelled_honestly(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

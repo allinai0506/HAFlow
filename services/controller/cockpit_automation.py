@@ -17,16 +17,13 @@ from herdr.controller_cockpit import build_cockpit_projection
 from herdr.controller_receipts import _receipt, classify_receipt
 from herdr.controller_workflow_actions import workflow_control_actions
 from herdr.workflow_graph import workflow_graph_projection
+from herdr.workflow_control_store import WorkflowIdentityChanged as _IdentityChanged, fingerprint
 
 MAX_PER_TICK = 4
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='cockpit')
 _inflight = set()
 _lock = threading.Lock()
 _scan_cursor = 0
-
-
-class _IdentityChanged(ValueError):
-    """Raised before the atomic Workflow handler mutates anything."""
 
 
 def _has_table(conn, name):
@@ -39,6 +36,7 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
     try:
         conn.execute('BEGIN')
         workflow, config, tasks = recovery_store._snapshot(conn, workflow_id)
+        control_fingerprint = fingerprint(conn, workflow_id)
         epoch = conn.execute("SELECT id FROM events WHERE workflow_id=? AND event_type='workflow_transition' "
                              "AND json_extract(payload_json,'$.to_status')=? ORDER BY timestamp DESC,id DESC LIMIT 1",
                              (workflow_id, workflow['status'])).fetchone()
@@ -86,7 +84,11 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
             errors['controller'] = 'runtime_unavailable'
     actions = collect_workflow_actions(tasks, workflow, project_root=workflow.get('project_root') or '',
                                        workflow_paused=workflow.get('status') == 'paused')
-    actions.extend(workflow_control_actions(workflow, config, tasks, operations, checkpoints))
+    actions.extend(workflow_control_actions(workflow, config, tasks, operations, checkpoints,
+                                            fingerprint=control_fingerprint))
+    for action in actions:
+        if not action.target.get('task_id'):
+            action.expected_identity['workflow_fingerprint'] = control_fingerprint
     graph = workflow_graph_projection({**config, **workflow}, tasks)
     result = build_cockpit_projection(workflow=workflow, config=config, tasks=tasks, graph=graph,
                                       actions=actions, recovery=operations, controller=controller,
@@ -170,8 +172,12 @@ def _intent(action, payload):
 
 
 def _claim_key(action, before, intent_digest):
+    expected = dict(action['expected_identity'])
+    if controller_action_type(action) in {'pause', 'resume'}:
+        # A metadata edit must not replay an uncertain transition in the same epoch.
+        expected.pop('workflow_fingerprint', None)
     return hashlib.sha256(json.dumps({'workflow_id': before['workflow']['workflow_id'],
-        'action_id': action['action_id'], 'target': action['target'], 'expected': action['expected_identity'],
+        'action_id': action['action_id'], 'target': action['target'], 'expected': expected,
         'intent_digest': intent_digest, 'workflow_status_epoch': before.get('workflow_status_epoch', 0)
         if not action['target'].get('task_id') else None}, sort_keys=True).encode()).hexdigest()
 
@@ -200,15 +206,15 @@ def read_action_state(store, action, result=None, *, since=0, intent_digest=None
         if kind in {'checkpoint', 'restore_checkpoint', 'step'}:
             event_type = {'checkpoint': 'checkpoint_created', 'restore_checkpoint': 'checkpoint_restored',
                           'step': 'workflow_transition'}[kind]
-            for event in conn.execute('SELECT * FROM events WHERE workflow_id=? AND event_type=? AND id>? '
-                    'AND timestamp>=? ORDER BY id DESC LIMIT 2', (wid, event_type, event_watermark, since)):
-                body = json.loads(event['payload_json'])
-                matches = (body.get('reason') == 'step_workflow' and event['source'] == 'kernel_step') if kind == 'step' else (
-                    body.get('checkpoint_id') == (result.get('checkpoint_id') or target.get('checkpoint_id'))
-                    and event['source'] == 'checkpoint_store')
-                if matches:
-                    facts['control_event'] = {'id': event['id'], 'event_type': event_type}
-                    break
+            identity_field = 'reason' if kind == 'step' else 'checkpoint_id'
+            identity = 'step_workflow' if kind == 'step' else result.get('checkpoint_id') or target.get('checkpoint_id')
+            source = 'kernel_step' if kind == 'step' else 'checkpoint_store'
+            event = conn.execute('SELECT id FROM events WHERE workflow_id=? AND event_type=? AND source=? '
+                    f"AND json_extract(payload_json,'$.{identity_field}')=? AND id>? "
+                    'AND timestamp>=? ORDER BY id DESC LIMIT 1',
+                    (wid, event_type, source, identity, event_watermark, since)).fetchone()
+            if event:
+                facts['control_event'] = {'id': event['id'], 'event_type': event_type}
         if kind == 'rollback':
             history = [h for h in workflow.get('history', []) if h.get('action') == 'rollback'
                 and h.get('target_node_id') == target.get('node_id') and h.get('timestamp', 0) >= since]
@@ -328,6 +334,10 @@ def default_handlers(store):
             workflow, _, tasks = recovery_store._snapshot(conn, wid)
             candidates = collect_workflow_actions(tasks, workflow, workflow_paused=workflow.get('status') == 'paused')
             candidates.extend(workflow_control_actions(workflow, workflow['config'], tasks, [], []))
+            current_fingerprint = fingerprint(conn, wid)
+            for candidate in candidates:
+                if not candidate.target.get('task_id'):
+                    candidate.expected_identity['workflow_fingerprint'] = current_fingerprint
             current = next((a.to_dict() for a in candidates if a.action_id == action['action_id']), None)
             if (not current or current['expected_identity'] != action['expected_identity']
                     or current['target'] != action['target'] or current['automation'] != action['automation']):

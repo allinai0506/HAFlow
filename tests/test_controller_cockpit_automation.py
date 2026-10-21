@@ -15,8 +15,9 @@ def _race_resume(db_path, barrier, queue):
             first = False
             barrier.wait(timeout=10)
         return result
+    action = automation.read_cockpit(selected, 'wf-1', controller={'status': 'running'})['actions'][0]
     result = automation.execute_action({'workflow_id': 'wf-1', 'action_id': 'wf-1:resume_workflow',
-        'expected_identity': {'execution_id': 'exec-1'}}, deps=deps_for(selected, project=project), automatic=True)
+        'expected_identity': action['expected_identity']}, deps=deps_for(selected, project=project), automatic=True)
     queue.put((result['receipt']['status'], result.get('duplicate', False)))
 
 

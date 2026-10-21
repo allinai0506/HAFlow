@@ -20,6 +20,7 @@ def execute_controller_action(payload: dict) -> dict:
     def handler(action):
         canonical = {**action['api_payload'], **action.get('user_input', {})}
         canonical['expected_version'] = action['expected_identity'].get('task_version')
+        canonical['expected_identity'] = action['expected_identity']
         if action['expected_identity'].get('pane_id'):
             canonical['expected_pane_id'] = action['expected_identity']['pane_id']
         kind = controller_action_type(action)

@@ -334,9 +334,10 @@ def test_real_sqlite_snapshot_and_kernel_transition_invalidate_old_action(tmp_pa
 
     store = SQLiteStateStore(tmp_path / "state.db")
     values = _inputs()
-    values["config"]["nodes"][0]["control_mode"] = "supervised"
     store.save_workflow({**values["workflow"], "config": values["config"]})
     store.save_task(values["tasks"][0])
+    values["config"]["nodes"][0]["control_mode"] = "supervised"
+    store.save_workflow({**values["workflow"], "config": values["config"]})
     workflow, config, tasks = store.read_workflow_snapshot("wf-1")
     old_actions = generate_progress_actions(tasks[0], workflow)
     assert old_actions[0].expected_identity["task_version"] == 1

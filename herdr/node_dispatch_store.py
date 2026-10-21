@@ -121,7 +121,8 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
                 if not isinstance(node, dict):
                     continue
                 if (not node.get('id') or node.get('node_type', 'agent') != 'agent'
-                        or (not node.get('depends_on') and not intake_enabled)
+                        or (not node.get('depends_on') and not intake_enabled
+                            and not core.policy_requires_confirmation(config, node['id']))
                         or not core.dependencies_ready(workflow, config, node, current_tasks)
                         or core.verification_reused(workflow, config, node['id'], current_tasks)):
                     continue
@@ -161,7 +162,8 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
         for op in _operations(conn, wid):
             if op['status'] in core.TERMINAL:
                 continue
-            if (not intake_enabled and not op['payload'].get('dependency_runs') and not op['started'] and op['status'] in {'pending', 'running'}
+            if (not intake_enabled and not core.policy_requires_confirmation(config, op['payload']['node_id'])
+                    and not op['payload'].get('dependency_runs') and not op['started'] and op['status'] in {'pending', 'running'}
                     and core.current(op, workflow, config)):
                 _write(conn, op, 'superseded', {'reason': 'dispatch_direct_mode',
                     'responsibility_transferred_to': 'direct_scheduler'}, now)
@@ -411,6 +413,21 @@ def record_intent(db_path, intent, now):
     # Historical absence means first attempt only, never the latest retry.
     intent = {'dispatch_attempt': 1, **intent}
     with rs._transaction(db_path) as conn:
+        if intent.get('dispatch_operation_id') is None:
+            prior = conn.execute("SELECT payload_json FROM events WHERE task_id=? AND event_type='launch_intent' "
+                "AND source='launch' ORDER BY id DESC LIMIT 1", (intent['key'],)).fetchone()
+            prior = json.loads(prior['payload_json']) if prior else {}
+            if prior.get('intent_id') == intent['intent_id'] and prior.get('phase') == 'allocating':
+                # Resource evidence for an existing allocation must survive a
+                # policy change; it grants no new Task registration authority.
+                if any(prior.get(key) != intent.get(key) for key in ('workflow_id', 'node_id', 'task_id', 'execution_id')):
+                    raise ValueError('launch resource evidence identity changed')
+            else:
+                validate_unbound_launch(conn, intent['workflow_id'], intent['node_id'])
+            state_db.record_event({'event_type': 'launch_intent', 'payload': intent,
+                'workflow_id': intent['workflow_id'], 'node_id': intent['node_id'], 'task_id': intent['key'],
+                'source': 'launch', 'timestamp': now}, conn=conn)
+            return
         op, workflow = validate_launch(conn, intent['dispatch_operation_id'], intent['workflow_id'], intent['node_id'], now, intent=intent)
         if intent.get('execution_id') != workflow['execution_id'] or not intent['resources'].get('run_id'):
             raise ValueError('dispatch launch intent requires current execution and run identity')
@@ -424,9 +441,18 @@ def record_intent(db_path, intent, now):
             'source': 'launch', 'timestamp': now}, conn=conn)
 
 
+def validate_unbound_launch(conn, workflow_id, node_id):
+    if not conn.execute('SELECT 1 FROM workflows WHERE workflow_id=?', (workflow_id,)).fetchone():
+        return
+    _, config = rs._workflow_snapshot(conn, workflow_id)
+    if core.policy_requires_confirmation(config, node_id):
+        raise ValueError('dispatch confirmation required: launch must bind a confirmed dispatch operation')
+
+
 def validate_task_registration(conn, task, now):
     operation_id = task.get('dispatch_operation_id')
     if operation_id is None:
+        validate_unbound_launch(conn, task['workflow_id'], task.get('node') or task.get('stage'))
         return
     op, workflow = validate_launch(conn, operation_id, task['workflow_id'],
                                    task.get('node') or task.get('stage'), now,

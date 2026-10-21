@@ -9,18 +9,18 @@ def api_kernel_pause(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     nid=str(b.get('node_id') or '').strip() or None
-    return herdr_kernel.pause_workflow(wid,node_id=nid)
+    return herdr_kernel.pause_workflow(wid,node_id=nid,expected_identity=b.get('expected_identity'))
 
 def api_kernel_resume(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     nid=str(b.get('node_id') or '').strip() or None
-    return herdr_kernel.resume_workflow(wid,node_id=nid)
+    return herdr_kernel.resume_workflow(wid,node_id=nid,expected_identity=b.get('expected_identity'))
 
 def api_kernel_step(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
-    return herdr_kernel.step_workflow(wid)
+    return herdr_kernel.step_workflow(wid, expected_identity=b.get('expected_identity'))
 
 def api_kernel_rollback(b):
     wid=str(b.get('workflow_id') or '').strip()
@@ -28,7 +28,7 @@ def api_kernel_rollback(b):
     if not wid:raise RuntimeError('workflow_id 不能为空')
     if not target:raise RuntimeError('target_node_id 不能为空')
     reason=str(b.get('reason') or 'manual_rollback').strip()
-    return herdr_kernel.rollback_workflow(wid,target_node_id=target,reason=reason)
+    return herdr_kernel.rollback_workflow(wid,target_node_id=target,reason=reason,expected_identity=b.get('expected_identity'))
 
 
 
@@ -78,7 +78,7 @@ def api_kernel_checkpoint_create(b):
     wid=str(b.get('workflow_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     tag=str(b.get('tag') or '').strip() or None
-    return herdr_kernel.create_checkpoint(wid,tag=tag)
+    return herdr_kernel.create_checkpoint(wid,tag=tag,expected_identity=b.get('expected_identity'))
 
 def api_kernel_checkpoint_list(wid):
     return herdr_kernel.list_checkpoints(wid)
@@ -88,7 +88,7 @@ def api_kernel_checkpoint_restore(b):
     cpid=str(b.get('checkpoint_id') or '').strip()
     if not wid:raise RuntimeError('workflow_id 不能为空')
     if not cpid:raise RuntimeError('checkpoint_id 不能为空')
-    return herdr_kernel.restore_checkpoint(wid,checkpoint_id=cpid)
+    return herdr_kernel.restore_checkpoint(wid,checkpoint_id=cpid,expected_identity=b.get('expected_identity'))
 
 def api_workflow_retry_advance(b):
     wid=str(b.get('workflow_id') or '').strip()
