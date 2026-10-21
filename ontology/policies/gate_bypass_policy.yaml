@@ -6,7 +6,7 @@ subjects:
   roles:
   - human_operator
   roles_implemented: false
-  note: 设计意图为人工例外通道；实现中操作者标识为自由字符串
+  note: 设计意图为人工例外通道；操作者标识受 validate_operator 规范约束与审计透传（SC-010），企业级凭据鉴权转入 #307 跟踪
 resources:
   objects:
   - gate
@@ -15,17 +15,22 @@ allowed_actions:
 - bypass_gate
 - force_pass_gate
 conditions:
-- reason 必填（kernel.py L850-852）
-- 无二次审批与身份核验（SC-010）
+- reason 必填（kernel.py:bypass_task_gate）
+- operator 格式与非空审计校验（transitions.py:validate_operator, SC-010）
+- expected_version CAS 乐观锁版本保护（SC-015）
 agent_execution:
   mode: inherit_user
-  note: Agent 不应持有该权限；当前未在策略执行点强制
+  note: Agent 不应持有该权限；当前通过 validate_operator 规范与审计轨迹溯源
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: bypass-gate parser L87-90（--operator 默认 human）
+  locator: bypass-gate parser
   confidence: high
 - kind: implemented
   source: herdr/kernel.py
-  locator: bypass_task_gate 原因校验 L832-857
+  locator: bypass_task_gate 原因与操作人校验
+  confidence: high
+- kind: implemented
+  source: herdr/transitions.py
+  locator: validate_operator 规范校验（SC-010）
   confidence: high
