@@ -4,7 +4,9 @@ var {
   humanNodeStatus, badge, cleanStageLabel, deliveryOf,
   deliveryReason, deliveryOverridesStatus, taskStatusLabel, taskBadge,
   deliveryWaitHtml, deliveryPipelineLine, relationText, relationClass,
-  taskDisplayName, visibleAlerts, formatElapsed, opsHealthClass,
+  taskDisplayName, visibleAlerts, activeAlerts, isAlertDismissed,
+  dismissAlert, dismissAllAlerts, clearDismissedAlerts,
+  formatElapsed, opsHealthClass,
   healthLabel, agentStatusLabel, authHintLabel, taskDrawerNumTs
 } = (function({
   state
@@ -133,6 +135,59 @@ function taskDisplayName(t){
   const n=taskSequence(t);
   return n?`${taskKind(t)} #${n}`:taskKind(t)
 }
+function alertKey(a){
+  return (a.task_id||'') + ':' + (a.status||'') + ':' + (a.updated_at||'');
+}
+function getDismissedAlertKeys(){
+  try{
+    return JSON.parse(localStorage.getItem('haflow_dismissed_alerts')||'[]');
+  }catch(e){return [];}
+}
+function isAlertDismissed(a){
+  if(!a)return false;
+  return getDismissedAlertKeys().includes(alertKey(a));
+}
+function activeAlerts(){
+  return visibleAlerts().filter(a=>!isAlertDismissed(a));
+}
+function dismissAlert(tid){
+  const all=(state.overview&&state.overview.alerts)||[];
+  const target=all.find(a=>a.task_id===tid);
+  const k=target?alertKey(target):(tid+':dismissed');
+  try{
+    const list=getDismissedAlertKeys();
+    if(!list.includes(k)){
+      list.push(k);
+      localStorage.setItem('haflow_dismissed_alerts',JSON.stringify(list));
+    }
+  }catch(e){}
+  if(typeof updateShellRail==='function')updateShellRail();
+  if(state.shellView==='alerts'&&typeof renderShellAlerts==='function')renderShellAlerts();
+  else if(typeof renderOverview==='function')renderOverview();
+}
+function dismissAllAlerts(){
+  const list=visibleAlerts().map(alertKey);
+  try{
+    const existing=getDismissedAlertKeys();
+    const merged=Array.from(new Set([...existing,...list]));
+    localStorage.setItem('haflow_dismissed_alerts',JSON.stringify(merged));
+  }catch(e){}
+  if(typeof updateShellRail==='function')updateShellRail();
+  if(state.shellView==='alerts'&&typeof renderShellAlerts==='function')renderShellAlerts();
+  else if(typeof renderOverview==='function')renderOverview();
+}
+function clearDismissedAlerts(){
+  try{localStorage.removeItem('haflow_dismissed_alerts');}catch(e){}
+  if(typeof updateShellRail==='function')updateShellRail();
+  if(state.shellView==='alerts'&&typeof renderShellAlerts==='function')renderShellAlerts();
+  else if(typeof renderOverview==='function')renderOverview();
+}
+if(typeof window!=='undefined'){
+  window.dismissAlert=dismissAlert;
+  window.dismissAllAlerts=dismissAllAlerts;
+  window.clearDismissedAlerts=clearDismissedAlerts;
+}
+
 function visibleAlerts(){
   const all=(state.overview&&state.overview.alerts)||[];
   if(!state.projectId)return [];
@@ -169,7 +224,9 @@ return {
   humanNodeStatus, badge, cleanStageLabel, deliveryOf,
   deliveryReason, deliveryOverridesStatus, taskStatusLabel, taskBadge,
   deliveryWaitHtml, deliveryPipelineLine, relationText, relationClass,
-  taskDisplayName, visibleAlerts, formatElapsed, opsHealthClass,
+  taskDisplayName, visibleAlerts, activeAlerts, isAlertDismissed,
+  dismissAlert, dismissAllAlerts, clearDismissedAlerts,
+  formatElapsed, opsHealthClass,
   healthLabel, agentStatusLabel, authHintLabel, taskDrawerNumTs
 };
 })({

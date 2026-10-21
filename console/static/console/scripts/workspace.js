@@ -8,8 +8,8 @@ var {
   closeMoreMenu, stopOpsTimer, stopDashTimer,
   loadWorkflow, toast, startOpsTimer,
   loadOpsCenter, loadDashboard, pageRead,
-  paintShellPage, paintCrumb, visibleAlerts,
-  esc, relationClass, relationText,
+  paintShellPage, paintCrumb, visibleAlerts, activeAlerts,
+  esc, jsArg, relationClass, relationText,
   taskDisplayName, badge, closeSpaceMenu,
   destroyFlowGraph, setWorkspaceMode, populateTemplateSelect,
   showTemplateLibrary, renderAgents, renderSlots,
@@ -125,7 +125,7 @@ async function refreshAll(){
 function renderOverview(){
   const o=state.overview;
   const ss=o.spaces||[];
-  const alerts=visibleAlerts();
+  const alerts=activeAlerts();
 
   document.getElementById('mProjects').textContent=ss.length;
   document.getElementById('mWorkflows').textContent=o.active_workflows;
@@ -145,10 +145,11 @@ function renderOverview(){
     </button>`).join(''):'<div class="empty">暂无项目空间</div>';
 
   document.getElementById('alerts').innerHTML=alerts.length?alerts.map(a=>`
-    <div class="alert-row">
-      <div>
+    <div class="alert-row" onclick="openTaskDrawer(${jsArg(a.task_id||'')})" style="cursor:pointer">
+      <div style="flex:1;min-width:0">
         <div class="task-name">${esc(taskDisplayName(a))}</div>
         <div class="task-id">${esc(a.task_id||'')}</div>
+        ${a.reason?`<div class="alert-reason" style="color:var(--danger,#f43f5e);font-size:11px;margin-top:2px">${esc(a.reason)}</div>`:''}
         <div class="task-meta">${esc(a.agent||'')} · ${esc(a.pane_id||'')}</div>
       </div>
       ${badge(a.status)}
@@ -298,6 +299,7 @@ async function loadProjectRuntime(id,sequence){
     }
   }
 }
+if(typeof window!=='undefined')window.renderOverview=renderOverview;
 
 return {
   saveViewState, loadViewState, syncOpsUi, openWorkflowFromOps,
@@ -309,8 +311,8 @@ return {
   closeMoreMenu, stopOpsTimer:(...args)=>stopOpsTimer(...args), stopDashTimer:(...args)=>stopDashTimer(...args),
   loadWorkflow:(...args)=>loadWorkflow(...args), toast, startOpsTimer:(...args)=>startOpsTimer(...args),
   loadOpsCenter:(...args)=>loadOpsCenter(...args), loadDashboard:(...args)=>loadDashboard(...args), pageRead,
-  paintShellPage:(...args)=>paintShellPage(...args), paintCrumb:(...args)=>paintCrumb(...args), visibleAlerts,
-  esc, relationClass, relationText,
+  paintShellPage:(...args)=>paintShellPage(...args), paintCrumb:(...args)=>paintCrumb(...args), visibleAlerts, activeAlerts,
+  esc, jsArg, relationClass, relationText,
   taskDisplayName, badge, closeSpaceMenu:(...args)=>closeSpaceMenu(...args),
   destroyFlowGraph:(...args)=>destroyFlowGraph(...args), setWorkspaceMode:(...args)=>setWorkspaceMode(...args), populateTemplateSelect:(...args)=>populateTemplateSelect(...args),
   showTemplateLibrary:(...args)=>showTemplateLibrary(...args), renderAgents:(...args)=>renderAgents(...args), renderSlots:(...args)=>renderSlots(...args),

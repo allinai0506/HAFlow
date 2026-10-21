@@ -270,6 +270,87 @@ if (!container.innerHTML.includes('新的需求主题')) process.exit(3);
         self.assertIn("executeControllerAction", js)
         self.assertIn("executeCockpitAction", js)
 
+    def test_shell_alerts_render_and_actionability(self):
+        """Alerts center must render reasons and actionable buttons, not dead text."""
+        script_match = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL)
+        self.assertIsNotNone(script_match)
+        js = script_match.group(1)
+        self.assertIn("function renderShellAlerts", js)
+        self.assertIn("openTaskDrawer", js)
+        self.assertIn("dismissAlert", js)
+        self.assertIn("dismissAllAlerts", js)
+        self.assertIn("activeAlerts", js)
+        self.assertIn("clearDismissedAlerts", js)
+
+        node = shutil.which("node") or shutil.which("node", path="/Users/user/.volta/bin:/usr/local/bin:/opt/homebrew/bin")
+        if not node:
+            return
+        test_script = r"""
+const tasksContainer = {innerHTML: ''};
+const document = {
+  getElementById: id => id === 'tasks' ? tasksContainer : {textContent: '', hidden: false, style: {}},
+  querySelectorAll: () => [],
+  querySelector: () => null,
+  addEventListener: () => {}
+};
+const window = {
+  location: {search: ''},
+  getSelection: () => '',
+  addEventListener: () => {}
+};
+const localStorage = {
+  _store: {},
+  getItem: k => localStorage._store[k] || null,
+  setItem: (k, v) => { localStorage._store[k] = String(v); },
+  removeItem: k => { delete localStorage._store[k]; }
+};
+const fetch = async (url) => ({
+  ok: true,
+  json: async () => ({slots: [{pane_id: "w1:p1'quote", claimed_by: "task'with'quote-1"}]})
+});
+""" + js + r"""
+state.projectId = 'proj-1';
+state.shellView = 'alerts';
+state.project = {runtime_pending: true, slots: []};
+state.overview = {
+  alerts: [
+    {
+      task_id: "task'with'quote-1",
+      workflow_id: "wf'1",
+      project_id: 'proj-1',
+      status: 'failed',
+      reason: "watchdog 'timeout' error",
+      agent: 'codex',
+      pane_id: "w1:p1'quote",
+      stage_label: '实现'
+    }
+  ]
+};
+renderShellAlerts();
+if (!tasksContainer.innerHTML.includes("task&#39;with&#39;quote-1")) process.exit(1);
+if (!tasksContainer.innerHTML.includes("watchdog &#39;timeout&#39; error")) process.exit(2);
+if (!tasksContainer.innerHTML.includes("openTaskDrawer('task\\\'with\\\'quote-1')")) process.exit(3);
+if (!tasksContainer.innerHTML.includes("dismissAlert('task\\\'with\\\'quote-1')")) process.exit(4);
+
+// After slots hydration
+state.project = {slots: [{pane_id: "w1:p1'quote", claimed_by: "task'with'quote-1"}]};
+renderShellAlerts();
+if (!tasksContainer.innerHTML.includes("showPane('w1:p1\\\'quote','task\\\'with\\\'quote-1')")) process.exit(6);
+
+dismissAlert("task'with'quote-1");
+if (!tasksContainer.innerHTML.includes('已知晓')) process.exit(7);
+process.exit(0);
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(test_script)
+            temp_path = f.name
+        try:
+            res = subprocess.run([node, temp_path], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, f"Node alert harness failed: {res.stderr}\n{res.stdout}")
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
+
 
 if __name__ == "__main__":
     unittest.main()
