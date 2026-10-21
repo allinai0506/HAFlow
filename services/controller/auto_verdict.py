@@ -38,29 +38,22 @@ def process_gate_verdict_reconciliations(ports):
         status = task.get("status")
         workflow_id = task.get("workflow_id")
         node_id = task.get("node") or task.get("stage")
-        is_gate = False
-        if workflow_id and node_id:
-            try:
-                wf_cfg = ports.workflow_config_for(workflow_id) or {}
-                node_match = next((n for n in wf_cfg.get("nodes", []) if n.get("id") == node_id), None)
-            except Exception:
-                node_match = None
-            if node_match:
-                if node_match.get("gate") or node_match.get("node_type") == "gate":
-                    is_gate = True
-                elif node_match.get("node_type") in ("agent", "implementation", "worker", "code") and not node_match.get("gate"):
-                    is_gate = False
-                else:
-                    is_gate = bool(task.get("gate")) or ports.node_is_gate(workflow_id, node_id)
-            else:
-                is_gate = bool(task.get("gate")) or ports.node_is_gate(workflow_id, node_id)
+        if task.get("gate") is False:
+            continue
+        if task.get("gate") is not None:
+            is_gate = True
+        elif workflow_id and node_id:
+            is_gate = ports.node_is_gate(workflow_id, node_id)
         else:
-            is_gate = bool(task.get("gate"))
+            is_gate = False
         if not is_gate:
             continue
 
         task_id = task.get("task_id")
         if status in {"working", "dispatched", "rework"}:
+            if not ports._gate_verdict_is_fresh(task):
+                if hasattr(ports, "sync_verdict_from_business_acceptance"):
+                    ports.sync_verdict_from_business_acceptance(task)
             if not ports._gate_verdict_is_fresh(task):
                 continue
             pane_id = task.get("pane_id")
@@ -88,6 +81,9 @@ def process_gate_verdict_reconciliations(ports):
                     ports.emit_done_if_allowed(ports.get_task(task_id))
                     processed += 1
         elif status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog":
+            if not ports._gate_verdict_is_fresh(task):
+                if hasattr(ports, "sync_verdict_from_business_acceptance"):
+                    ports.sync_verdict_from_business_acceptance(task)
             if not ports._gate_verdict_is_fresh(task):
                 continue
             verdict, _, _ = ports.read_gate_verdict(task)
@@ -125,6 +121,10 @@ def try_auto_verdict(ports, task_id):
         return False
 
     verdict, note, source = ports.read_gate_verdict(task)
+    if verdict not in ("pass", "blocked"):
+        if hasattr(ports, "sync_verdict_from_business_acceptance"):
+            ports.sync_verdict_from_business_acceptance(task)
+            verdict, note, source = ports.read_gate_verdict(task)
     if verdict not in ("pass", "blocked"):
         return False
     if verdict == "blocked" and not note:
@@ -220,11 +220,12 @@ DEPENDENCIES = {'max_clock_skew_seconds': ('DEFAULT_MAX_CLOCK_SKEW_SECONDS', 'ma
                                           'gate_verdict_ready', 'get_agent_runtime_status',
                                           'get_task', 'load_tasks', 'max_clock_skew_seconds',
                                           'node_is_gate', 'read_gate_verdict',
+                                          'sync_verdict_from_business_acceptance',
                                           'task_gate_handoff_grace_seconds', 'time',
                                           'try_auto_verdict', 'workflow_config_for'),
  'try_auto_verdict': ('TASK_MANAGER', '_gate_verdict_is_fresh', '_verdict_affected_task_ids',
                       'auto_verdict_enabled', 'get_task', 'node_is_gate', 'read_gate_verdict',
-                      'subprocess', 'sys'),
+                      'subprocess', 'sync_verdict_from_business_acceptance', 'sys'),
  'classify_verdict_deferral': ('re',),
  'verdict_defer_reason': ('auto_accept_enabled', 'auto_verdict_enabled',
                           'classify_verdict_deferral', 'node_is_gate', 'read_gate_verdict',

@@ -3423,6 +3423,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Workflow 控制优先进入 100 Action 展示窗口，Operation 定位使用精确 Action 查询并隔离迟到响应；恢复回执先匹配 checkpoint 再限量。
 - Evidence：`herdr/workflow_control_store.py`、`tests/test_controller_cockpit_bounded_fix2.py`、`tests/test_console_controller_cockpit_e2e.py`。
 
+## [2026-10-21] Gate | 测试节点门禁判定对齐与业务验收回执 DB 投影收敛（V1）
+
+- 修复 Controller、Sentinel、CLI 门禁判定口径割裂：`services/controller/node_policy.py:resolve_gate_config` 补全 `(^|[_-])(gate|cleanroom)($|[_-])` 正则命名模式；`services/controller/auto_verdict.py` 废除局部 ad-hoc 门禁检查，统一复用 `ports.node_is_gate()`，确保未显式声明 gate 的测试节点与 `gate: {}` 节点均被正确作为门禁结算。
+- 业务验收异常透出与权威 DB 投影恢复：`herdr/task_checkpoint.py:record_business_acceptance` 在落库后透出文件同步异常（`OSError`）；新增 `project_gate_verdict_from_business_acceptance`，以数据库 `business_acceptance_recorded` 为唯一事实源，严格校验任务身份、epoch、候选 SHA、产物与裁决合法性，在裁决文件缺失或损坏时支持 Controller/CLI 自动自愈投影。
+- 自动化执行与推进闭环：在门禁回执就绪时，处于 `working` 或 Watchdog 误标 `failed` 的门禁任务均可正确由 Controller 采纳裁决（`auto_verdict`）、更新任务为终态并自动驱动后继节点派发，严格防范陈旧凭证并保持幂等。
+- Evidence：`tests/test_node_gate_receipt_convergence.py`（12 项测试全部通过，含真实测试执行、业务验收回执与 Controller 推进闭环）、Lesson 186。
+
 ## [2026-10-22] Controller / Herdr Core | 补派活锁四处修复（wf-haflow-1021-01）
 
 - Updated [[architecture]]：补派谱系的两条判定（`lineage_redispatch_candidates` 取叶子 / `predecessors_current` 校验 operation 前驱）必须共用同一份事实；新增 `_declared_successor` 同时接受正反指针并按 workflow / node / execution 三重作用域隔离。
@@ -3433,4 +3440,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   4. 操作绑定路径 launch 失败即 `return True`，永久拒绝也不升级 → 新增纯函数 `permanent_refusal_escalation`，外壳只做两次副作用调用，写 attention 且**不**开第二条 transport。
 - 修正原方案：不再「通知总指挥」。薄编排改造（`7d3ab69`）已把总指挥移出 durable operation 失败路径，再投递等于给同一节点开第二条 transport；本次真正缺口是 attention 一条都没写（现场 0 次 attention、0 次 COORDINATOR INTAKE）。
 - 实现过程中 `tests/test_controller_modularity.py` 的 500 行上限真实拦下一次越界（514 行），据此把拒绝分类与升级构造下沉到 `herdr/direct_dispatch.py`。遗留：该模块现为 500 行、正好压上限（改动前 495，`cockpit_automation.py` 亦为 500），下次 +1 行即失败，需单独抽取重构恢复余量。
-- Evidence：`tests/test_predecessor_lineage_consistency.py`（RED 用例照抄 op 211810 的 `predecessors` 与两个 task 的真实指针状态）、`tests/test_stage_advance_and_supersede.py`、`tests/test_direct_stage_dispatch.py`（夹具绑定 durable operation，复现日志行与事故现场逐字一致）、`tests/test_controller_modularity.py`；受影响 73 个测试文件回归 `2083 passed, 3 skipped, 203 subtests passed`，收尾修正后直接受影响 6 个文件重跑 `215 passed, 45 subtests`；`docs/lessons/lessons-learned.md` §187。
+- Evidence：`tests/test_predecessor_lineage_consistency.py`（RED 用例照抄 op 211810 的 `predecessors` 与两个 task 的真实指针状态）、`tests/test_stage_advance_and_supersede.py`、`tests/test_direct_stage_dispatch.py`（夹具绑定 durable operation，复现日志行与事故现场逐字一致）、`tests/test_controller_modularity.py`；受影响 73 个测试文件回归 `2083 passed, 3 skipped, 203 subtests passed`，收尾修正后直接受影响 6 个文件重跑 `215 passed, 45 subtests`；`docs/lessons/lessons-learned.md` §188。

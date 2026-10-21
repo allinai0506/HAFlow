@@ -3,6 +3,8 @@
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
 
+import re
+
 DEFAULT_GATE_NODES = (
     "test",
     "review",
@@ -33,7 +35,7 @@ def resolve_gate_config(ports, node, node_id):
             gate = stage_policy_gate if isinstance(stage_policy_gate, dict) else {}
         elif hasattr(ports, "GATE_DEFAULTS") and node_id in ports.GATE_DEFAULTS:
             gate = ports.GATE_DEFAULTS.get(node_id) or {}
-        elif str(node_id or "").lower() in DEFAULT_GATE_NODES:
+        elif str(node_id or "").lower() in DEFAULT_GATE_NODES or bool(re.search(r"(^|[_-])(gate|cleanroom)($|[_-])", str(node_id or "").lower())):
             gate = {}
         else:
             return None

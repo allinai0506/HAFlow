@@ -154,7 +154,7 @@ Evidence:
   `herdr/direct_dispatch.py#lineage_redispatch_candidates` 保证同一替换谱系
   （`x` / `x-r2` / …）最多只补派一发；旧逻辑会把历史作废任务反复补派，
   fix-loop 每轮 2→4→8 放大并发重复任务（[[dag-workflow-engine]] §4.3）。
-- `FACT` **补派谱系的两条判定必须共用同一份事实（2026-10-22 引入，lessons §187）**:
+- `FACT` **补派谱系的两条判定必须共用同一份事实（2026-10-22 引入，lessons §188）**:
   `lineage_redispatch_candidates` 双向建链、只补派谱系**叶子**；
   `herdr/node_dispatch.py#predecessors_current` 判定 operation 记录的前驱是否仍然有效。
   两者必须对「这条谱系是否已被替代」给出同一答案，否则 operation 冻结的
