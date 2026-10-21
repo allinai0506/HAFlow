@@ -228,7 +228,7 @@ function renderShellSlots(){
 function renderShellWorkflows(){
   const el=document.getElementById('tasks');if(!el)return;
   const ws=(state.project&&state.project.workflows)||[];
-  el.innerHTML='<div class="shell-page"><h3>工作流</h3>'+(ws.length?ws.map(w=>`<button class="shell-row" onclick="openShellWorkflow(${jsArg(w.workflow_id)})"><strong>${esc(workflowDisplayName(w))}</strong><small>${esc(w.workflow_id)}</small></button>`).join(''):'<div class="empty">当前空间暂无工作流</div>')+'</div>';
+  el.innerHTML='<div class="shell-page"><h3>工作流</h3>'+(ws.length?ws.map(w=>`<button class="shell-row" onclick="openShellWorkflow('${esc(w.workflow_id)}')"><strong>${esc(workflowDisplayName(w))}</strong><small>${esc(w.workflow_id)}</small></button>`).join(''):'<div class="empty">当前空间暂无工作流</div>')+'</div>';
 }
 async function openShellWorkflow(id){
   state.shellView='workbench';state.workflowView='flow';saveViewState();

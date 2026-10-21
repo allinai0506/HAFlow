@@ -59,7 +59,6 @@ def test_all_original_function_bodies_survive_encapsulation():
     replaced.add('renderOverview')
     replaced.add('paintCrumb')
     replaced.add('renderShellAlerts')
-    replaced.add('renderShellWorkflows')
     baseline = {name: entry for name, entry in baseline.items() if name not in replaced}
     script = re.findall(r'<script>(.*?)</script>', page.HTML_TEMPLATE, re.S)[0]
     for owner in {entry['owner'] for entry in baseline.values()}:
