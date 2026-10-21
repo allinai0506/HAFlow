@@ -2,7 +2,8 @@
 
 Requires the local ego-browser service. Only terminal transport and service
 probes are controlled; projection, actions, identity, receipts and storage run
-unchanged. No Agent is launched and no model is called.
+unchanged. Each test owns and closes its Page so xdist workers cannot navigate
+another test's temporary service. No Agent is launched and no model is called.
 """
 import json
 import shutil
@@ -21,11 +22,13 @@ from herdr.state_store import SQLiteStateStore
 SPACE = "HAFlow Controller Cockpit Task 6 20261021"
 
 
-def browser(script):
+def browser(script, *, page_label):
     binary = shutil.which("ego-browser")
     if not binary:
         pytest.skip("real browser E2E requires ego-browser and its local browser service")
-    prelude = f"const task=await taskSpace({json.dumps(SPACE)}); const page=task.page('p1');"
+    prelude = f"const task=await taskSpace({json.dumps(SPACE)});"
+    if page_label is not None:
+        prelude += f"const page=task.page({json.dumps(page_label)});"
     result = subprocess.run([binary, "nodejs", "-e", prelude + script],
                             capture_output=True, text=True, timeout=45)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -99,14 +102,25 @@ def cockpit(tmp_path, monkeypatch):
         with urlopen(url + "/api/workflow/controller-cockpit?workflow_id=" + wid, timeout=10) as response:
             return json.load(response)["data"]
 
-    yield SimpleNamespace(store=store, url=url, read=read, effects=effects, artifacts=tmp_path)
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
+    page_label = None
+    try:
+        created = browser("const owned=await task.newPage();console.log('OWNED_PAGE='+JSON.stringify(owned.label));",
+                          page_label=None)
+        page_label = json.loads(created.split("OWNED_PAGE=", 1)[1].splitlines()[0])
+        yield SimpleNamespace(store=store, url=url, read=read, effects=effects, artifacts=tmp_path,
+                              browser=lambda script: browser(script, page_label=page_label))
+    finally:
+        try:
+            if page_label is not None:
+                browser("await page.close();", page_label=page_label)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 def open_cockpit(fixture, wid="wf-e2e"):
-    browser(f"""
+    fixture.browser(f"""
         await page.cdp('Emulation.setDeviceMetricsOverride',{{width:1440,height:1800,deviceScaleFactor:1,mobile:false}});
         await page.goto({json.dumps(fixture.url + '/?workflow_id=' + wid)});
         await page.waitForFunction(()=>typeof openControllerCockpit==='function'&&state.overview&&state.workflow?.workflow?.workflow_id==={json.dumps(wid)}&&!state.controllerActionsData?.pending,undefined,{{timeout:15000}});
@@ -115,8 +129,8 @@ def open_cockpit(fixture, wid="wf-e2e"):
     """)
 
 
-def confirm_action(aid, *, instruction=None, reason="人工核查当前身份和证据"):
-    browser(f"""
+def confirm_action(fixture, aid, *, instruction=None, reason="人工核查当前身份和证据"):
+    fixture.browser(f"""
         await page.press('loc=css:[data-action-id="{aid}"] button','Enter');
         {f'await page.fill("#cockpitInstruction",{json.dumps(instruction)});' if instruction is not None else ''}
         await page.fill('#cockpitReason',{json.dumps(reason)});
@@ -130,20 +144,20 @@ def confirm_action(aid, *, instruction=None, reason="人工核查当前身份和
 def test_steer_custom_instruction_roundtrips_to_current_run(cockpit):
     """Catches an Action modal that silently sends the core's generic default."""
     open_cockpit(cockpit)
-    out = browser("""
+    out = cockpit.browser("""
         await page.click('loc=css:[data-action-id="working:steer"] button');
         console.log('INSTRUCTION_FIELD='+await page.evaluate(()=>!!document.getElementById('cockpitInstruction')));
     """)
     assert "INSTRUCTION_FIELD=true" in out, "steer confirmation must accept the human instruction"
-    browser("await page.evaluate(()=>closeModal());")
-    confirm_action("working:steer", instruction="请先核查 SQLite 回执再继续")
+    cockpit.browser("await page.evaluate(()=>closeModal());")
+    confirm_action(cockpit, "working:steer", instruction="请先核查 SQLite 回执再继续")
     queued = cockpit.store.list_steers(task_id="working")
     assert len(queued) == 1
     assert (queued[0]["instruction"], queued[0]["run_id"], queued[0]["status"]) == (
         "请先核查 SQLite 回执再继续", "working-run", "pending")
     receipt = cockpit.read()["receipts"][0]
     assert (receipt["status"], receipt["steer_id"]) == ("applied", queued[0]["steer_id"])
-    assert "已生效" in browser("console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));")
+    assert "已生效" in cockpit.browser("console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));")
 
 
 def test_controller_automatic_default_and_template_confirmation(cockpit):
@@ -157,7 +171,7 @@ def test_controller_automatic_default_and_template_confirmation(cockpit):
     open_cockpit(cockpit, "wf-confirm")
     action = next(a for a in cockpit.read("wf-confirm")["actions"] if a["action_id"] == "wf-confirm:resume_workflow")
     assert action["automation"] == {"mode": "confirmation_required", "source": "workflow"}
-    confirm_action("wf-confirm:resume_workflow")
+    confirm_action(cockpit, "wf-confirm:resume_workflow")
     assert cockpit.store.get_workflow("wf-confirm")["status"] == "running"
     assert cockpit.read("wf-confirm")["receipts"][0]["status"] == "applied"
     # Re-open the store: receipts must survive browser/Store lifetime, not live in JS.
@@ -167,9 +181,9 @@ def test_controller_automatic_default_and_template_confirmation(cockpit):
 
 def test_stale_identity_rejected_then_halt_uses_current_pane(cockpit):
     open_cockpit(cockpit)
-    browser("await page.press('loc=css:[data-action-id=\"working:halt\"] button','Enter');")
+    cockpit.browser("await page.press('loc=css:[data-action-id=\"working:halt\"] button','Enter');")
     cockpit.store.update_task_metadata("working", {"pane_id": "replacement-pane"})
-    browser("""
+    cockpit.browser("""
         await page.fill('#cockpitReason','核查旧快照'); await page.click('#cockpitActionConfirm');
         await page.waitForFunction(()=>state.controllerReceipt?.status==='rejected');
         await page.waitForFunction(()=>state.controllerCockpit.tasks.some(t=>t.task_id==='working'&&t.pane_id==='replacement-pane'));
@@ -177,7 +191,7 @@ def test_stale_identity_rejected_then_halt_uses_current_pane(cockpit):
     assert cockpit.effects == []
     assert cockpit.store.get_task("working")["status"] == "working"
     assert cockpit.read()["receipts"][0]["reason_code"] == "identity_changed"
-    confirm_action("working:halt")
+    confirm_action(cockpit, "working:halt")
     assert cockpit.effects == [{"kind": "interrupt", "pane_id": "replacement-pane", "reason": "人工核查当前身份和证据"}]
     assert cockpit.store.get_task("working")["status"] == "interrupted"
     assert cockpit.read()["receipts"][0]["status"] == "applied"
@@ -185,7 +199,7 @@ def test_stale_identity_rejected_then_halt_uses_current_pane(cockpit):
 
 def test_redrive_transport_ack_is_not_fabricated_completion(cockpit):
     open_cockpit(cockpit)
-    confirm_action("working:redrive")
+    confirm_action(cockpit, "working:redrive")
     assert len(cockpit.effects) == 1
     assert cockpit.effects[0]["kind"] == "prompt"
     assert cockpit.effects[0]["pane_id"] == "working-pane"
@@ -195,7 +209,7 @@ def test_redrive_transport_ack_is_not_fabricated_completion(cockpit):
 
 def test_canvas_deeplink_and_responsive_cockpit(cockpit):
     open_cockpit(cockpit)
-    out = browser("""
+    out = cockpit.browser("""
         await page.evaluate(()=>returnFromControllerCockpit());
         await page.click('loc=css:.x6-node[data-cell-id="gate"]');
         await page.waitForFunction(()=>state.flowSelectedNodeId==='gate'&&state.selectedTaskId==='blocked');
@@ -203,13 +217,13 @@ def test_canvas_deeplink_and_responsive_cockpit(cockpit):
         console.log(await page.snapshot());
     """)
     assert "Controller" in out
-    browser("""
+    cockpit.browser("""
         await page.press('loc=css:#flowInspectorBody .flow-act-group > button','Enter');
         await page.waitForFunction(()=>state.workflowId==='__ctl__'&&state.controllerTarget.nodeId==='gate');
         console.log(await page.snapshot());
     """)
     for width in (1440, 390):
-        out = browser(f"""
+        out = cockpit.browser(f"""
             await page.cdp('Emulation.setDeviceMetricsOverride',{{width:{width},height:900,deviceScaleFactor:1,mobile:false}});
             console.log('FIT='+await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
             await page.screenshot({{path:{json.dumps(str(cockpit.artifacts / ('cockpit-' + str(width) + '.png')))}}});
@@ -228,7 +242,7 @@ def test_recovery_read_failure_shows_unknown(cockpit, monkeypatch):
         return original(path)
 
     monkeypatch.setattr(state_db, "get_readonly_db_connection", unavailable)
-    out = browser("""
+    out = cockpit.browser("""
         await page.evaluate(()=>loadControllerCockpit('wf-e2e'));
         console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));
         console.log('ENABLED='+await page.evaluate(()=>[...document.querySelectorAll('[data-action-id] button')].filter(b=>!b.disabled).length));
@@ -253,7 +267,7 @@ def test_dispatch_waits_for_registered_task_and_never_resends(cockpit):
     assert operation["status"] == "awaiting_result"
     assert cockpit.store.list_tasks(workflow_id=wid) == []
     open_cockpit(cockpit, wid)
-    out = browser("console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));")
+    out = cockpit.browser("console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));")
     assert "等待总指挥建立任务" in out
     assert "未登记任务" in out
     # Only the controlled launch transport is replaced: real intent and registration
@@ -269,7 +283,7 @@ def test_dispatch_waits_for_registered_task_and_never_resends(cockpit):
     nd.reconcile_workflow(cockpit.store.db_path, wid)
     assert nd.operation_for_node(cockpit.store.db_path, wid, "dispatch")["status"] == "resolved"
     assert nd.claim(cockpit.store.db_path, operation["id"], "duplicate") is None
-    out = browser("""
+    out = cockpit.browser("""
         await page.evaluate(()=>loadControllerCockpit('wf-dispatch'));
         console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));
     """)
@@ -290,7 +304,7 @@ def test_force_pass_advance_failure_is_durable_partial_without_repeat(cockpit):
     request = {"workflow_id": wid, "type": "force_pass_advance", "task_id": "partial-task",
         "gate_node_id": "gate", "expected_version": task["version"], "expected_pane_id": "partial-pane",
         "reason": "核验现有产物，测试无下一阶段的失败回执", "confirmed": True}
-    out = browser(f"""
+    out = cockpit.browser(f"""
         console.log(JSON.stringify(await page.evaluate(async payload=>{{
             const response=await fetch('/api/controller/execute-action',{{method:'POST',headers:{{'Content-Type':'application/json','X-HAFlow-Console-Request':'1'}},body:JSON.stringify(payload)}});
             return await response.json();
@@ -302,7 +316,7 @@ def test_force_pass_advance_failure_is_durable_partial_without_repeat(cockpit):
     assert "部分生效" in out and "force_pass" in out and "advance" in out
     assert cockpit.store.get_task("partial-task")["stage_verdict"] == "pass"
     before = cockpit.store.list_events(workflow_id=wid)
-    browser(f"await page.evaluate(()=>loadControllerCockpit({json.dumps(wid)}));")
+    cockpit.browser(f"await page.evaluate(()=>loadControllerCockpit({json.dumps(wid)}));")
     assert cockpit.store.list_events(workflow_id=wid) == before
     assert cockpit.read(wid)["receipts"][0]["applied_steps"] == ["force_pass"]
 
