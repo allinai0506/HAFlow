@@ -12,6 +12,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from console import herdr_factory_console as c
+from tests.test_node_dispatch_contract import scene
 
 
 @pytest.fixture
@@ -84,7 +85,11 @@ def test_api_workflow_controller_actions_query(console_actions_env):
     assert "wf-test-01-old" not in blocker_ids
     assert "wf-test-01-test" in blocker_ids
 
-    assert res['actions'] == []
+    # Recovery still excludes redispatch/bypass actions; workflow controls are
+    # now centralized here instead of executing from the page header.
+    assert not any(a['api_payload'].get('type') in {'launch', 'rework', 'force_pass_advance'}
+                   for a in res['actions'])
+    assert all(a['target']['workflow_id'] == 'wf-test-01' for a in res['actions'])
     assert len(res['recovery']) == 1
     assert res['recovery'][0]['payload']['task_ids'] == ['wf-test-01-test']
     assert res['recovery'][0]['status'] == 'waiting_human'
@@ -145,3 +150,34 @@ def test_api_controller_execute_action_force_pass_advance(console_actions_env):
             c.api_controller_execute_action(payload)
         mock_gate.assert_not_called()
         mock_adv.assert_not_called()
+
+
+def test_advance_receipt_waits_for_durable_dispatch_not_http_success(scene, monkeypatch):
+    from herdr import recovery_store
+    def deliver(wid):
+        scene.ctrl._handle_coordinator_item(scene.item)
+        operation = next(op for op in recovery_store.list_operations(scene.store.db_path, wid)
+                         if op['payload']['kind'] == 'node_dispatch')
+        return {'ok': True, 'task_id': 'not-registered', 'operation_id': operation['id']}
+    monkeypatch.setattr(c.workflow_api, 'manual_advance', deliver)
+    result = c.api_controller_execute_action({'workflow_id': 'wf', 'type': 'advance'})
+    assert result['receipt']['status'] == 'accepted_waiting'
+    assert result['receipt']['task_id'] == 'not-registered'
+    assert scene.store.get_task('not-registered') is None
+    operation = next(op for op in recovery_store.list_operations(scene.store.db_path, 'wf')
+                     if op['id'] == result['receipt']['operation_id'])
+    assert operation['status'] == 'awaiting_result'
+    assert operation['started'] == 1
+    from services.controller.cockpit_automation import read_cockpit
+    assert read_cockpit(scene.store, 'wf', controller={'status': 'running'})['receipts'][0] == result['receipt']
+
+
+def test_legacy_version_rejection_stays_queryable_without_changing_exception_contract(console_actions_env):
+    from services.controller.cockpit_automation import read_cockpit
+    with pytest.raises(RuntimeError, match='版本已变化'):
+        c.api_controller_execute_action({'workflow_id': 'wf-test-01', 'type': 'halt',
+                                        'task_id': 'wf-test-01-test', 'expected_version': 999})
+    cockpit = read_cockpit(c.herdr_kernel._get_store(), 'wf-test-01', controller={'status': 'running'})
+    assert cockpit['receipts'][0]['status'] == 'rejected'
+    assert cockpit['receipts'][0]['outcome'] == 'rejected'
+    assert c.herdr_kernel._get_store().get_task('wf-test-01-test')['status'] == 'failed'

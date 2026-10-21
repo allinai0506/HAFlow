@@ -205,6 +205,12 @@ def save_task(
             if previous.get('dispatch_operation_id') != task_dict.get('dispatch_operation_id'):
                 raise ValueError('cannot rebind an existing task to another dispatch operation')
 
+            if task_dict.get('workflow_id') is not None and previous.get('dispatch_operation_id') is None and (
+                    existing['workflow_id'] != wid or existing['node'] != node
+                    or any(previous.get(key) != task_dict.get(key) for key in ('run_id', 'execution_id'))):
+                from herdr.node_dispatch_store import validate_task_registration
+                validate_task_registration(conn, task_dict, now)
+
             if previous.get('dispatch_operation_id') is not None and (
                     existing['workflow_id'] != wid or existing['node'] != node
                     or any(previous.get(key) != task_dict.get(key) for key in ('run_id', 'execution_id', 'launch_intent_id', 'supersedes'))):
@@ -249,7 +255,7 @@ def save_task(
                 else:
                     if task_dict.get('supersedes') is not None and task_dict.get('supersedes') != intent_supersedes:
                         raise ValueError('cannot change dispatch task registration identity')
-        elif task_dict.get('dispatch_operation_id') is not None:
+        elif task_dict.get('workflow_id') is not None:
             from herdr.node_dispatch_store import validate_task_registration
             validate_task_registration(conn, task_dict, now)
         if fail_if_exists:

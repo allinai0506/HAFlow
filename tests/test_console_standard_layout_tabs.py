@@ -358,7 +358,7 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
         self.assertIsNotNone(load_proj_match)
         load_proj_body = load_proj_match.group(0)
         self.assertIn("isSysTab", load_proj_body)
-        self.assertIn("openControllerCockpitModal()", load_proj_body)
+        self.assertIn("openControllerCockpit({workflowId:anchor})", load_proj_body)
         self.assertNotIn(">🎮<", self.html)
 
         # 6. Backend service_status fast launchctl list

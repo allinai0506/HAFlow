@@ -33,6 +33,16 @@ from console.control_api import api_kernel_pause, api_kernel_resume, api_kernel_
 from console.workflow_policy import _resolve_target_node, _validate_force_pass_params, DEFAULT_DISALLOWED_NOTES
 from console.task_api import api_task_steer, api_task_halt, api_task_steer_queue, api_agent_adapters, _check_task_interaction, api_task_interaction_get, api_task_interaction_respond, api_task_force_review, api_task_signoff
 from console.http_server import _get_console_hub_client, _hub_error_status, api_experience_candidates, api_experience_candidate, api_experience_rules, api_experience_review, api_experience_revoke, Handler
+from console import controller_cockpit_api
+
+def get_controller_cockpit(workflow_id):
+    return controller_cockpit_api.get_controller_cockpit(workflow_id)
+
+def execute_controller_action(payload):
+    return controller_cockpit_api.execute_controller_action(payload)
+
+def resolve_controller_action(workflow_id, action_id, *, snapshot=None):
+    return control_api.resolve_controller_action(workflow_id, action_id, snapshot=snapshot)
 
 def main():
     try:

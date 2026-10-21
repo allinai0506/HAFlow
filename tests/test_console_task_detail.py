@@ -43,7 +43,7 @@ def _extract_fn(html, name):
 
 
 STUB_GLOBALS = (
-    "function esc(s){return String(s??'');}"
+    "function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/\"/g,'&quot;');}"
     "function humanStatus(s){return s||'unknown';}"
     "var state={selectedTaskDetail:null,workflowId:null};"
 )
@@ -114,7 +114,7 @@ class TestTaskDetailDrawer(unittest.TestCase):
         node_bin = shutil.which("node")
         if not node_bin:
             self.skipTest("node not found; skipping JS execution test")
-        fns = ["taskDrawerMenuHtml", "canSteerTask", "canForceReviewTask", "canForcePassTask"]
+        fns = ["taskDrawerMenuHtml"]
         parts = []
         for fn in fns:
             src = _extract_fn(self.html, fn)
@@ -133,7 +133,7 @@ class TestTaskDetailDrawer(unittest.TestCase):
 
     def test_view_pane_uses_pane_id(self):
         html = self._menu_html_via_node(json.dumps({"task_id": "T1", "pane_id": "p9", "status": "working"}))
-        self.assertIn("showPane('p9')", html)
+        self.assertIn("showPane('p9','T1')", html)
         self.assertNotIn("showPane('T1')", html)
         self.assertIn("查看工位", html)
 
@@ -141,6 +141,21 @@ class TestTaskDetailDrawer(unittest.TestCase):
         html = self._menu_html_via_node(json.dumps({"task_id": "T1", "status": "working"}))
         self.assertNotIn("查看工位", html)
         self.assertNotIn("showPane", html)
+
+    def test_drawer_menu_has_one_controller_shortcut_with_task_identity(self):
+        markup = self._menu_html_via_node(json.dumps({
+            "task_id": "T1", "workflow_id": "wf-1", "node": "build",
+            "run_id": "run-1", "pane_id": "p9", "status": "rework", "stage_verdict": "blocked",
+        }))
+        self.assertEqual(markup.count('在 Controller 中处理'), 1)
+        handlers = [html for html in re.findall(r'onclick="([^"]*)"', markup)
+                    if 'openControllerCockpit' in html]
+        self.assertEqual(len(handlers), 1)
+        for value in ('wf-1', 'T1', 'build', 'run-1', 'p9'):
+            self.assertIn(value, handlers[0])
+        for legacy in ('forcePassTask(', 'forceReviewTask(', 'showSteerModal(', 'haltTaskPrompt('):
+            self.assertNotIn(legacy, markup)
+        self.assertNotIn('askCoordinator(', markup)
 
     def test_escape_closes_topmost_layer_first(self):
         seg_start = self.html.find("if(e.key==='Escape')")

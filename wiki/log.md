@@ -3371,3 +3371,22 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 新增 1 connector：`console_http_api`（http_api 类型，api_experience_review/revoke）。
 - 全量机械审计：`MAJOR=0, MINOR=0, INFO=2`（与基线一致）；第一切片状态机不变量未被触碰。
 - Evidence：`ontology/proposals/OEP-0003-second-business-slice-expansion.md`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Console | Workflow Controller 驾驶舱与真实状态回读
+
+- Updated [[architecture]]：明确 Controller 控制权、Workflow 配置策略、统一 Action 身份、四类持久回执和其他页面的上下文定位入口。
+- 新增本地 Console HTTP → 核心 → 临时 SQLite → 浏览器回读 E2E，覆盖自动恢复、模板确认、指导、中断、陈旧身份、派发登记、部分成功与读取失败；不将隔离测试等同于生产 Agent 或部署验收。
+- 明确新增默认自动注册表只支持事务校验的 Workflow 暂停/恢复，其他自动能力显式拒绝；运行时策略覆盖及跨 Workflow 运维仍未实现。
+- Evidence：`tests/test_console_controller_cockpit_e2e.py`、`services/controller/cockpit_automation.py`、`docs/superpowers/specs/2026-10-21-controller-cockpit-design.md` §16。
+
+## [2026-10-21] Controller | 派发确认与 Cockpit 最终执行边界修复
+
+- Updated [[architecture]]：真实节点派发消费 Operation 的持久确认，人工暂停不能被自动 sweep 撤销，未注册自动能力保留明确的手动路径。
+- 页头与会签控制统一到 Cockpit Action/receipt；动作精确查找与展示上限分离，N+1 报告截断，回执分类下沉纯核心。
+- Evidence：`tests/test_controller_cockpit_final_fixes.py`、`tests/test_console_controller_cockpit_e2e.py`、设计文档 §17 的可见入口盘点。
+
+## [2026-10-21] Controller | 有限修复第二轮的确认、事务与定位边界
+
+- Updated [[architecture]]：intake 关闭的兼容派发仍执行持久确认；工作流控制在 SQLite 写入边界校验指纹，快照去重覆盖持久元数据。
+- Workflow 控制优先进入 100 Action 展示窗口，Operation 定位使用精确 Action 查询并隔离迟到响应；恢复回执先匹配 checkpoint 再限量。
+- Evidence：`herdr/workflow_control_store.py`、`tests/test_controller_cockpit_bounded_fix2.py`、`tests/test_console_controller_cockpit_e2e.py`。

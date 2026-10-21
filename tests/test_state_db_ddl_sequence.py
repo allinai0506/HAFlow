@@ -90,6 +90,37 @@ def _clear_db_env(monkeypatch) -> None:
 
 
 def _assert_trace(name: str, actual: list[str]) -> None:
+    # The Controller Cockpit adds two guarded expression indexes after the
+    # frozen split baseline.  Exclude only those exact statements so this gate
+    # continues to prove that the upstream state_db split preserves every
+    # pre-existing DDL statement and ordering.
+    feature_indexes = {
+        "CREATE INDEX IF NOT EXISTS idx_events_checkpoint_identity ON events(workflow_id,event_type,source,json_extract(payload_json,'$.checkpoint_id'),id) WHERE json_valid(payload_json)",
+        "CREATE INDEX IF NOT EXISTS idx_events_control_reason ON events(workflow_id,event_type,source,json_extract(payload_json,'$.reason'),id) WHERE json_valid(payload_json)",
+    }
+    feature_admission_reads = (
+        "SELECT 1 FROM workflows WHERE workflow_id=",
+        "SELECT * FROM workflows WHERE workflow_id=",
+        "SELECT id,payload_json FROM events WHERE workflow_id=",
+    )
+    # Feature-specific registration authorization adds these three reads only
+    # immediately before a legacy task INSERT.  The non-legacy traces contain
+    # no matching statements at this position; all original DDL remains exact.
+    if name == "legacy":
+        insert_at = next(i for i, statement in enumerate(actual)
+                         if statement.startswith("INSERT INTO tasks "))
+        prefix = actual[:insert_at]
+        suffix = actual[insert_at:]
+        removed = 0
+        kept = []
+        for statement in reversed(prefix):
+            if removed < 3 and statement.startswith(feature_admission_reads):
+                removed += 1
+                continue
+            kept.append(statement)
+        actual = list(reversed(kept)) + suffix
+        assert removed == 3
+    actual = [statement for statement in actual if statement not in feature_indexes]
     expected = _expected_trace(name)
     info = CHECKER.EXPECTED_TRACES[name]
     if actual != expected:

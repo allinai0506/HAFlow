@@ -17,6 +17,36 @@ from herdr.controller_actions import (
 )
 
 
+def test_replacement_action_binds_source_identity_without_changing_payload():
+    task = {"task_id": "T1", "workflow_id": "wf-1", "node": "test",
+            "status": "failed", "version": 0, "run_id": "run-9",
+            "execution_id": "exec-1", "candidate_sha": "a" * 40}
+    actions = generate_controller_actions(task, {"workflow_id": "wf-1"})
+    replacement = next(a for a in actions if a.api_payload.get("type") == "launch")
+    assert replacement.target == {"workflow_id": "wf-1", "node_id": "test",
+                                  "task_id": "T1", "run_id": "run-9"}
+    assert replacement.api_payload["task_id"] != "T1"
+    assert replacement.expected_identity == {
+        "task_version": 0, "execution_id": "exec-1",
+        "candidate_sha": "a" * 40,
+    }
+    bypass = next(a for a in actions if a.category == "bypass")
+    assert bypass.automation == {"mode": "confirmation_required", "source": "safety",
+                                 "reason": "evidence_bypass"}
+    assert bypass.risk == "evidence_bypass"
+    assert bypass.to_dict()["target"] == bypass.target
+
+
+def test_legacy_action_defaults_are_independent():
+    first = ControllerAction("a", "title", "desc", "fix", "", "")
+    second = ControllerAction("b", "title", "desc", "fix", "", "")
+    first.target["task_id"] = "T1"
+    first.evidence_refs.append({"task_id": "T1"})
+    assert second.target == {}
+    assert second.evidence_refs == []
+    assert second.to_dict()["automation"] == {"mode": "automatic", "source": "default"}
+
+
 def test_next_replacement_id_lineage():
     assert next_replacement_id("wf-01-test") == "wf-01-test-r2"
     assert next_replacement_id("wf-01-test-r2") == "wf-01-test-r3"

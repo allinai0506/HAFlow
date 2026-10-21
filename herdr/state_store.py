@@ -484,6 +484,7 @@ class StateStore(ABC):
         parent_checkpoint_id: Optional[str] = None,
         checkpoint_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        expected_identity=None,
     ) -> Dict[str, Any]:
         """Capture an atomic point-in-time snapshot of a workflow and its tasks."""
         pass
@@ -499,7 +500,7 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
-    def restore_checkpoint(self, workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
+    def restore_checkpoint(self, workflow_id: str, checkpoint_id: str, expected_identity=None) -> Dict[str, Any]:
         """Restore workflow state and tasks atomically from checkpoint."""
         pass
 
@@ -1069,6 +1070,7 @@ class SQLiteStateStore(StateStore):
         parent_checkpoint_id: Optional[str] = None,
         checkpoint_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        expected_identity=None,
     ) -> Dict[str, Any]:
         return state_db.create_checkpoint(
             workflow_id=workflow_id,
@@ -1077,6 +1079,7 @@ class SQLiteStateStore(StateStore):
             checkpoint_id=checkpoint_id,
             metadata=metadata,
             db_path=self.db_path,
+            expected_identity=expected_identity,
         )
 
     # Semantic ContextPack working memory
@@ -1131,8 +1134,9 @@ class SQLiteStateStore(StateStore):
     def get_checkpoint(self, workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
         return state_db.get_checkpoint(workflow_id=workflow_id, checkpoint_id=checkpoint_id, db_path=self.db_path)
 
-    def restore_checkpoint(self, workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
-        return state_db.restore_checkpoint(workflow_id=workflow_id, checkpoint_id=checkpoint_id, db_path=self.db_path)
+    def restore_checkpoint(self, workflow_id: str, checkpoint_id: str, expected_identity=None) -> Dict[str, Any]:
+        return state_db.restore_checkpoint(workflow_id=workflow_id, checkpoint_id=checkpoint_id,
+                                           db_path=self.db_path, expected_identity=expected_identity)
 
     def fork_workflow_from_checkpoint(
         self,

@@ -7669,3 +7669,36 @@ pytest -q -k finalize tests/
 ```
 
 证据：新增 `tests/test_slice1_gate_robustness.py`（4 项通过），覆盖 `gate: {}` 对称判定、业务验收同步落盘 verdict 文件、软件适配器识别重放特征以及 `git_finalize` 自动传参 `--allow-rebase`。既有 95 项门禁专项与 100 项 finalize 场景测试全量通过。
+
+---
+
+## 183. 自动策略的展示、执行能力和持久确认必须分别验证（2026-10-21）
+
+### 问题背景
+
+Controller Cockpit 最终审查发现，页面把 supervised 显示为待确认，但节点派发仍能直接 claim/start；automatic 标签隐藏了未注册 handler 的手动入口，自动恢复还撤销了人工暂停。真实 SQLite 反例说明页面状态不能证明执行授权成立。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 策略只在投影解析 | 后台入口可绕过页面确认 | 在真实 claim/start/intent/registration 边界读取同一持久确认 |
+| automatic 标签等同执行能力 | 未注册 handler 的常用操作不可用 | 策略与已注册能力分别表达，安全手动路径显式保留 |
+| 暂停被自动恢复 | 系统状态不能抹掉人的操作意图 | 用权威暂停事件区分显式暂停，恢复再次确认 |
+| 展示窗口用于执行查找 | 第 101 个有效动作被当作不存在 | 精确身份查找独立于展示预算；N+1 或 count 判断截断 |
+
+### 操作规范（已固化到 Controller 派发与 Cockpit 执行边界）
+
+1. 模板确认写入现有 Operation 决策及事件，绑定 generation identity；普通 retry 不构成批准。
+2. 所有 confirmation_required 请求都要求严格的 `confirmed is True`，不依赖浏览器检查。
+3. 禁止把未知 handler 注册为自动 CLI；人工操作使用同一个服务端 Action ID 和权威回执。
+4. UI 重构同时盘点旧入口，并验证默认策略下仍可操作，而非只测试 supervised 场景。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_controller_cockpit_final_fixes.py tests/test_controller_cockpit_automation.py
+pytest -q -n 2 tests/test_console_controller_cockpit_e2e.py
+```
+
+证据：`herdr/node_dispatch_store.py`、`herdr/recovery_store.py#decide_operation`、`herdr/controller_receipts.py`、Controller Cockpit 设计 §17 入口盘点。

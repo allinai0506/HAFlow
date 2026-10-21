@@ -1,7 +1,7 @@
 /* Selected workflow reads, request coalescing and projection identity checks. */
 var {
   workflowSubject, workflowDisplayName, copyWorkflowId, editWorkflowTitle,
-  renderWorkflowSwitcher, loadWorkflow, clearWorkflow
+  renderWorkflowSwitcher, loadWorkflow, loadControllerCockpit, clearWorkflow
 } = (function({
   state, toast, showPromptModal,
   api, renderWorkflowTabs, renderSidebarWorkflows,
@@ -133,6 +133,7 @@ async function loadWorkflow(id,prefetched=null){
   if(loadSequence!==state.workflowLoadSequence)return;
   const keepController=state.workflowId==='__ctl__'&&state.workflow?.workflow?.workflow_id===id;
   state.workflow=wfRes;
+  if(state.controllerCockpit?.workflow?.workflow_id!==id){state.controllerCockpit=null;state.controllerReceipt=null;}
   state.controllerActionsData={pending:true};
   state.decisionData={pending:true};
   const w=state.workflow.workflow;
@@ -165,8 +166,32 @@ function workflowExtraRequest(path,sequence){
   workflowExtraRequests.set(key,entry);
   return entry.promise;
 }
+async function loadControllerCockpit(workflowId){
+  const sequence=state.controllerCockpitSeq=(state.controllerCockpitSeq||0)+1;
+  const target=state.controllerTarget;
+  const actionId=target?.workflowId===workflowId&&target.operationId!=null?workflowId+':confirm_dispatch:'+target.operationId:'';
+  const current=()=>sequence===state.controllerCockpitSeq&&(state.workflowId===workflowId||(state.workflowId==='__ctl__'&&(state.controllerTarget?.workflowId||state.workflow?.workflow?.workflow_id)===workflowId));
+  try{
+    const data=await api('/api/workflow/controller-cockpit?workflow_id='+encodeURIComponent(workflowId)+(actionId?'&action_id='+encodeURIComponent(actionId):''));
+    if(!current())return;
+    if(data.workflow?.workflow_id!==workflowId)throw new Error('工作流身份不匹配');
+    state.controllerCockpit={...data,action_lookup:actionId};
+    const receipt=state.controllerReceipt;
+    if(receipt?.workflow_id===workflowId&&receipt.status==='accepted_waiting'){
+      const updated=receipt.operation_id!=null&&(data.receipts||[]).find(r=>r.action_id===receipt.action_id&&r.operation_id===receipt.operation_id);
+      if(updated)state.controllerReceipt=updated;
+      else if(receipt.operation_id!=null&&(data.recovery||[]).some(o=>o.id===receipt.operation_id&&['resolved','superseded'].includes(o.status)))state.controllerReceipt=null;
+    }
+  }catch(error){
+    if(!current())return;
+    const cached=state.controllerCockpit?.workflow?.workflow_id===workflowId?state.controllerCockpit:{nodes:[],tasks:[],actions:[],recovery:[],todos:[],receipts:[],timeline:[]};
+    state.controllerCockpit={...cached,workflow:{...cached.workflow,workflow_id:workflowId},read_state:'unknown',controller:{status:'unknown'},errors:{cockpit:error.message},judgment:cached.judgment||{now:'unknown',blocked_reason:'read_unknown',next:'refresh'}};
+  }
+  if(state.workflowId==='__ctl__')openControllerCockpitModal();
+}
 function loadWorkflowExtras(id,sequence){
-  const current=()=>sequence===state.workflowLoadSequence&&state.workflow?.workflow?.workflow_id===id;
+  loadControllerCockpit(id);
+  const current=()=>sequence===state.workflowLoadSequence&&state.workflow?.workflow?.workflow_id===id&&(!state.workflowId||state.workflowId===id||(state.workflowId==='__ctl__'&&state.controllerTarget?.workflowId===id));
   const apply=(path,success,failure)=>workflowExtraRequest(path,sequence).then(data=>{
     if(current())success(data);
   }).catch(()=>{if(current())failure();});
@@ -176,11 +201,12 @@ function loadWorkflowExtras(id,sequence){
     state.workflow.deliverables={items:[],counts:{},error:'成果目录读取失败'};renderDeliverables();renderNodeInspector();
   });
   apply('/api/workflow/controller-actions?workflow_id='+encodeURIComponent(id),data=>{
-    state.controllerActionsData=data;renderTasks();renderFlowWorkbench();
-  },()=>{state.controllerActionsData=null;renderFlowWorkbench();});
+    state.controllerActionsData=data;if(state.workflowId!=='__ctl__'){renderTasks();renderFlowWorkbench();}
+  },()=>{state.controllerActionsData=null;if(state.workflowId!=='__ctl__')renderFlowWorkbench();});
   apply('/api/workflow/decisions?workflow_id='+encodeURIComponent(id),data=>{
-    state.decisionData=data;renderTasks();
-  },()=>{state.decisionData={error:'决策读取失败'};renderTasks();});
+    const scoped=data.workflow_id===id||(!data.workflow_id&&(data.decisions||[]).every(item=>item.workflow_id===id));
+    state.decisionData=scoped?data:{error:'裁决身份不匹配'};if(state.workflowId==='__ctl__')openControllerCockpitModal();else renderTasks();
+  },()=>{state.decisionData={error:'决策读取失败'};if(state.workflowId==='__ctl__')openControllerCockpitModal();else renderTasks();});
   apply('/api/workflow/runtime?id='+encodeURIComponent(id),data=>{
     state.workflow.coordinator=data.coordinator;state.workflow.coordinator_pending=false;
   },()=>{state.workflow.coordinator_pending=false;state.workflow.coordinator_error='运行状态读取失败';});
@@ -188,6 +214,8 @@ function loadWorkflowExtras(id,sequence){
 
 function clearWorkflow(){
   destroyFlowGraph();
+  state.controllerCockpitSeq=(state.controllerCockpitSeq||0)+1;
+  state.controllerCockpit=null;state.controllerTarget=null;state.controllerReceipt=null;
   state.workflow=null;
   state.workflowId=null;
   state.flowSelectedNodeId=null;
@@ -207,7 +235,7 @@ function clearWorkflow(){
 }
 return {
   workflowSubject, workflowDisplayName, copyWorkflowId, editWorkflowTitle,
-  renderWorkflowSwitcher, loadWorkflow, clearWorkflow
+  renderWorkflowSwitcher, loadWorkflow, loadControllerCockpit, clearWorkflow
 };
 })({
   state, toast, showPromptModal,

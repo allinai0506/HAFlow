@@ -15,10 +15,14 @@ def create_checkpoint(
     metadata: Optional[Dict[str, Any]] = None,
     db_path: Optional[Path] = None,
     checkpoint_id: Optional[str] = None,
+    expected_identity: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Capture an atomic point-in-time snapshot of a workflow and all its tasks."""
     conn = _facade().get_db_connection(db_path)
     try:
+        conn.execute('BEGIN IMMEDIATE')
+        from herdr.workflow_control_store import validate_identity
+        validate_identity(conn, workflow_id, expected_identity)
         cur_wf = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
         wf_row = cur_wf.fetchone()
         if not wf_row:
@@ -76,8 +80,7 @@ def create_checkpoint(
             "metadata": metadata or {},
         }
 
-        # Atomic insertion within a single transaction
-        conn.execute("BEGIN TRANSACTION;")
+        # Atomic insertion within the identity-guarded transaction.
         try:
             conn.execute("""
                 INSERT INTO checkpoints (
@@ -168,6 +171,7 @@ def restore_checkpoint(
     workflow_id: str,
     checkpoint_id: str,
     db_path: Optional[Path] = None,
+    expected_identity: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Restore workflow state and tasks atomically from a checkpoint snapshot in SQLite."""
     snapshot = get_checkpoint(workflow_id, checkpoint_id, db_path)
@@ -179,15 +183,21 @@ def restore_checkpoint(
 
     conn = _facade().get_db_connection(db_path)
     try:
-        conn.execute("BEGIN TRANSACTION;")
+        conn.execute("BEGIN IMMEDIATE;")
         try:
+            from herdr.workflow_control_store import validate_identity
+            validate_identity(conn, workflow_id, expected_identity)
             # 1. Restore workflow record
             _facade().save_workflow(restored_wf, db_path, conn=conn)
 
             # 2. Delete existing tasks for this workflow and insert restored tasks
             conn.execute("DELETE FROM tasks WHERE workflow_id = ?;", (workflow_id,))
+            # Replay the immutable snapshot inventory; this does not allocate or
+            # authorize a new launch. Normal save_task admission still gates new Runs.
             for t in restored_tasks:
-                _facade().save_task(t, db_path, conn=conn)
+                _restore_checkpoint_task(conn, t)
+            from herdr.recovery_store import ensure_for_workflow
+            ensure_for_workflow(conn, workflow_id, now=time.time())
 
             # 3. Record event
             _facade().record_event({
@@ -211,6 +221,17 @@ def restore_checkpoint(
         }
     finally:
         conn.close()
+
+
+def _restore_checkpoint_task(conn, task):
+    columns = ('task_id', 'workflow_id', 'node', 'stage', 'agent', 'status', 'stage_verdict',
+               'stage_verdict_note', 'pane_id', 'goal', 'blocker', 'created_at')
+    values = [task.get(key) for key in columns]
+    values[-1] = task.get('created_at') or time.time()
+    payload = {key: value for key, value in task.items() if key not in {*columns, 'version'}}
+    conn.execute('INSERT INTO tasks (' + ','.join(columns) + ',payload_json,updated_at,version) '
+                 'VALUES (' + ','.join('?' for _ in range(len(columns) + 3)) + ')',
+                 (*values, json.dumps(payload, ensure_ascii=False), time.time(), 1))
 
 def fork_workflow_from_checkpoint(
     checkpoint_id: str,
