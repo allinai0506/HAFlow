@@ -35,6 +35,21 @@ def test_cockpit_status_epoch_ignores_malformed_legacy_event(scene):
     assert view['workflow_id'] == 'wf'
 
 
+@pytest.mark.parametrize('event_type', ['workflow_transition', 'checkpoint_restored'])
+def test_paused_snapshot_treats_malformed_transition_reason_as_unknown(scene, event_type):
+    kernel.pause_workflow('wf', store=scene)
+    conn = state_db.get_db_connection(scene.db_path)
+    conn.execute("INSERT INTO events(workflow_id,event_type,payload_json,timestamp,source) VALUES(?,?,?,?,?)",
+                 ('wf', event_type, '{bad', 2, 'legacy'))
+    conn.commit()
+
+    workflow, _, _ = recovery_store.read_snapshot(scene.db_path, 'wf')
+
+    assert workflow['status'] == 'paused'
+    assert workflow['pause_requires_confirmation'] is (event_type == 'checkpoint_restored')
+    assert automation.read_cockpit(scene, 'wf', controller={'status': 'running'})['workflow_id'] == 'wf'
+
+
 def test_ops_controls_resolve_a_current_cockpit_action_before_execution():
     source = (Path(__file__).parents[1] / 'console/static/console/scripts/operations.js').read_text()
     assert '/api/workflow/controller-cockpit?workflow_id=' in source

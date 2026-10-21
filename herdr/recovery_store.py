@@ -56,7 +56,11 @@ def _workflow_snapshot(conn, workflow_id):
     if workflow['status'] == 'paused':
         transition = conn.execute("SELECT event_type,payload_json FROM events WHERE workflow_id=? "
             "AND event_type IN ('workflow_transition','checkpoint_restored') ORDER BY id DESC LIMIT 1", (workflow_id,)).fetchone()
-        pause = json.loads(transition['payload_json']) if transition else {}
+        try:
+            decoded = json.loads(transition['payload_json']) if transition else {}
+        except (json.JSONDecodeError, TypeError):
+            decoded = {}
+        pause = decoded if isinstance(decoded, dict) else {}
         workflow['pause_requires_confirmation'] = bool(transition and (
             transition['event_type'] == 'checkpoint_restored' or pause.get('reason') in {
                 'pause_workflow', 'step_workflow', 'rollback_workflow'}))
