@@ -179,6 +179,9 @@ def try_direct_stage_advance(ports, item):
                 f"inventory injection skipped: {exc}"
             )
     try:
+        from herdr.task_resources import outstanding_launch_task_ids
+        reserved_task_ids = {task.get("task_id") for task in all_tasks if task.get("task_id")}
+        reserved_task_ids.update(outstanding_launch_task_ids(ports._get_store(), workflow_id))
         plan = ports.direct_dispatch_planner.plan_stage_dispatch(
             workflow_id,
             node,
@@ -192,9 +195,7 @@ def try_direct_stage_advance(ports, item):
             redispatch_blocker_notes=ports._selective_redispatch_blocker_notes(
                 workflow_id, ready_id
             ),
-            reserved_task_ids={
-                task.get("task_id") for task in all_tasks if task.get("task_id")
-            },
+            reserved_task_ids=reserved_task_ids,
         )
     except ValueError as exc:
         print(

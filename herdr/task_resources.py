@@ -235,6 +235,23 @@ def _latest_intent(store, key, *, conn=None):
     return events[0]['payload'] if events else None
 
 
+def outstanding_launch_task_ids(store, workflow_id, limit=1000):
+    """Reserve task/resource names owned by the latest non-absent intents."""
+    events = store.list_events(workflow_id=workflow_id, event_type='launch_intent',
+                               source='launch', desc=True, limit=limit)
+    seen = set()
+    reserved = set()
+    for event in events:
+        payload = event.get('payload') or {}
+        identity = payload.get('key') or payload.get('intent_id')
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        if payload.get('phase') != 'resources_absent' and payload.get('task_id'):
+            reserved.add(payload['task_id'])
+    return reserved
+
+
 def find_dispatch_task(store, workflow_id, node_id, role, candidate_sha, dispatch_round,
                        execution_id=None):
     dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round,

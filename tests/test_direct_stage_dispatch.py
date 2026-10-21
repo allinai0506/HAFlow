@@ -484,6 +484,23 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         task_id = self.commands[0][self.commands[0].index("--task-id") + 1]
         self.assertNotEqual(task_id, "wf-1-test-auto")
 
+    def test_outstanding_launch_intent_reserves_its_task_id(self):
+        from herdr.state_store import get_state_store
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = get_state_store(Path(tempdir.name) / "state.db")
+        store.record_event("launch_intent", {
+                "key": "launch:old",
+                "phase": "allocating",
+                "task_id": "wf-1-test-auto",
+            }, workflow_id="wf-1", source="launch")
+        with patch.object(self.ctrl, "_get_store", return_value=store):
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        task_id = self.commands[0][self.commands[0].index("--task-id") + 1]
+        self.assertNotEqual(task_id, "wf-1-test-auto")
+
     def test_direct_dispatch_does_not_require_coordinator_pane(self):
         """A fully specified Worker launch must not depend on coordinator liveness."""
         with patch.object(
