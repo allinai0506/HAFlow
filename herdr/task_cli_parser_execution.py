@@ -66,6 +66,7 @@ def add_execution_parsers(sub):
     launch_reconcile.add_argument('--dispatch-role', default='worker')
     launch_reconcile.add_argument('--candidate-sha', default='')
     launch_reconcile.add_argument('--dispatch-round', type=int, default=1)
+    launch_reconcile.add_argument('--execution-id', help='Workflow execution identity for generation-scoped launch recovery')
     launch_reconcile.add_argument('--apply', action='store_true')
     launch_reconcile.add_argument('--authorize-terminal-id', help='Bind an inspected native terminal_id to a legacy never-started allocation; does not close it')
     launch_reconcile.add_argument('--confirm-agent-never-started', action='store_true', help='Explicit operator attestation; idle or missing agent alone is insufficient')

@@ -3324,3 +3324,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-010 状态从“确认”更新为“已解决（确立操作人审计契约与全写入点有效性校验）”，全系统 19 项语义冲突实现 100% 解决与裁决闭环。
 - Added `tests/test_gate_exemption_operator_audit.py`：新增对纯逻辑校验、内核门禁放行、数据库事务、Web 控制台端点及 CLI 命令行工具等 18 项专项测试（涵盖 85 个 subtest 断言，100% PASSED）。
 - Evidence：`herdr/transitions.py:validate_operator`、`herdr/kernel.py:force_pass_gate`、`herdr/kernel.py:bypass_task_gate`、`herdr/state_db.py:force_pass_gate`、`console/workflow_policy.py:_validate_force_pass_params`、`console/task_api.py:api_task_force_review`、`tests/test_gate_exemption_operator_audit.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Fix | 确定性节点推进解除总指挥 Pane 前置依赖
+
+- Controller 对根节点和后续 agent 节点统一先执行既有 direct-dispatch planner；工作流 sweep 与 Worker launch 不再要求 `coordinator_pane_id`。
+- 节点合同不足、业务歧义、人工门禁及不确定启动仍沿用 coordinator/human fallback、持久 operation、成果门禁和有界恢复，不新增调度器或 LLM 判定路径。
+- 自动化专项为 `329 passed, 44 subtests passed`；真实三节点 Agent E2E 因可用 Agent 深度预检超时/认证与端口阻塞未完成，未宣称生产级验证通过。
+- Evidence：`services/controller/advancement.py`、`services/controller/direct_dispatch.py`、`services/controller/stage_delivery.py`、`tests/test_direct_stage_dispatch.py`、`tests/test_scheduler_dispatch_e2e.py`、`docs/walkthroughs/thin-orchestrator-v1.md`。

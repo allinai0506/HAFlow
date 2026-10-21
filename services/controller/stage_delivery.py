@@ -20,8 +20,33 @@ def _handle_stage_advance_item(ports, item):
     if node:
         item = dict(item, node=node)
         if node.get("node_type", "agent") != "agent":
+            workflow_id = item["workflow_id"]
+            key = f"{workflow_id}:stage_advance:{target_node_id}"
+            episode = ports.attention_get(key) or {}
+            workflow = ports._get_store().get_workflow(workflow_id) or {}
+            attention_task = {
+                "task_id": f"stage_advance:{target_node_id}",
+                "workflow_id": workflow_id,
+                "execution_id": workflow.get("execution_id"),
+            }
+            ports.attention_note(
+                key,
+                attention_task,
+                "stage_advance",
+                reason="human_decision_required",
+                attempts=int(episode.get("attempts") or 0) + 1,
+                detail=f"node_type={node.get('node_type')}; native executor unavailable",
+            )
+            ports.clear_stage_advance(workflow_id, target_node_id)
+            ports.notify_attention(
+                "Herdr Factory · 需要人工决策",
+                attention_task,
+                f"节点 {target_node_id} 类型为 {node.get('node_type')}，"
+                "没有确定性执行器；请完成决策后清除 attention 以从原节点继续。",
+                "human_decision_required",
+            )
             print(
-                f"[STAGE ADVANCE BLOCKED] workflow={item['workflow_id']} "
+                f"[STAGE ADVANCE BLOCKED] workflow={workflow_id} "
                 f"node={target_node_id} node_type={node.get('node_type')}: "
                 "native executor unavailable; manual handling required"
             )
@@ -43,28 +68,13 @@ def _handle_stage_advance_item(ports, item):
     if admission is None:
         return
     item, node, dispatch_op, dispatch_owner = admission
-    # 总指挥接单:新工作流首个节点(start -> first)默认交总指挥理解
-    # 需求后再派发;HERDR_COORDINATOR_INTAKE=0 或非首节点保持直派。
-    # 当总指挥持续异常/停滞时(例如 Agent 无法拉活或反复失败), 回退到直派快路径避免死锁。
-    intake_key = f"{item['workflow_id']}:stage_advance:{target_node_id}"
-    intake_stalled = False
-    if item.get("stage") in (None, "", "start"):
-        ep = ports.attention_get(intake_key) or {}
-        last_attempt = float(ep.get("last_attempt_at") or 0)
-        is_recent = last_attempt == 0 or (ports.time.time() - last_attempt) <= ports.liveness.task_stall_after()
-        if int(ep.get("attempts") or 0) >= 2 and ep.get("reason") == "coordinator_stalled" and is_recent:
-            intake_stalled = True
-            print(
-                f"[COORDINATOR INTAKE FALLBACK] "
-                f"workflow={item['workflow_id']} "
-                f"node={target_node_id}: coordinator stalled {ep.get('attempts')} times, falling back to direct dispatch"
-            )
+    # Deterministic agent nodes use the persisted direct-dispatch contract for
+    # roots and downstream stages alike. Coordinator intake remains the
+    # compatibility fallback when the planner cannot prove a safe launch.
+    if ports.try_direct_stage_advance(item):
+        return
 
-    if (
-        item.get("stage") in (None, "", "start")
-        and ports.coordinator_intake_enabled()
-        and not intake_stalled
-    ):
+    if item.get("stage") in (None, "", "start") and ports.coordinator_intake_enabled():
         item = dict(item, intake=True)
         print(
             f"[COORDINATOR INTAKE] "
@@ -72,17 +82,13 @@ def _handle_stage_advance_item(ports, item):
             f"node={target_node_id} "
             "-> dispatch via coordinator"
         )
-    # 常规推进会:优先规则化直接派发(不再等待总指挥 LLM 回合);
-    # 配置不足/需求缺失/launch 失败时回落既有总指挥路径。
-    elif ports.try_direct_stage_advance(item):
-        return
-
     workflow_id = item["workflow_id"]
     coord_pane = ports.coordinator_pane_for_workflow(workflow_id)
     if not coord_pane:
+        fallback_reason = item.get("direct_dispatch_fallback_reason") or "coordinator_missing"
         if dispatch_op:
             from herdr.node_dispatch_store import defer
-            defer(ports._get_store().db_path, dispatch_op['id'], 'coordinator_missing', owner=dispatch_owner)
+            defer(ports._get_store().db_path, dispatch_op['id'], fallback_reason, owner=dispatch_owner)
             ports.clear_stage_advance(workflow_id, target_node_id)
         else:
             ports.clear_stage_advance(workflow_id, target_node_id)
@@ -93,10 +99,10 @@ def _handle_stage_advance_item(ports, item):
             key,
             {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
             "stage_advance",
-            reason="coordinator_stalled",
+            reason=fallback_reason,
             attempts=attempts,
             next_retry_at=ports.time.time() + ports.liveness.attention_retry_interval(),
-            detail="coordinator pane missing",
+            detail=f"coordinator pane missing after {fallback_reason}",
         )
         print(
             f"[STAGE ADVANCE SKIP] "

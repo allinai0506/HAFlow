@@ -87,8 +87,8 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
         import importlib
         self.controller = importlib.import_module("services.herdr-controller")
 
-    def test_intake_stalled_fallback_with_coordinator_stalled(self):
-        """When coordinator_stalled has >= 2 attempts, fallback to direct dispatch must trigger."""
+    def test_direct_dispatch_precedes_stale_coordinator_attention(self):
+        """A deterministic launch does not wait on historical coordinator attention."""
         workflow_id = "wf-fallback-coord"
         node_id = "first_node"
         item = {
@@ -106,10 +106,10 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
              patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"):
             self.controller._handle_coordinator_item(item)
             mock_direct.assert_called_once_with(item)
-            mock_get.assert_called_with(f"{workflow_id}:stage_advance:{node_id}")
+            mock_get.assert_not_called()
 
-    def test_intake_stalled_not_triggered_for_stage_advance_stalled(self):
-        """When reason is stage_advance_stalled (notification-only identifier), intake must NOT fall back to direct dispatch."""
+    def test_direct_dispatch_precedes_stage_advance_attention(self):
+        """Notification-only attention does not block deterministic dispatch."""
         workflow_id = "wf-no-fallback-stage"
         node_id = "first_node"
         item = {
@@ -127,10 +127,10 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
              patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"), \
              patch.object(self.controller, "project_for_workflow", return_value={}):
             self.controller._handle_coordinator_item(item)
-            mock_direct.assert_not_called()
+            mock_direct.assert_called_once_with(item)
 
-    def test_missing_coordinator_pane_accumulates_attempts_and_falls_back(self):
-        """When coordinator pane is repeatedly missing, attempts accumulate and fallback triggers on >= 2 attempts."""
+    def test_missing_coordinator_pane_accumulates_bounded_fallback_attempts(self):
+        """Planner refusal falls back to coordinator attention without a second transport."""
         workflow_id = "wf-missing-pane"
         node_id = "node1"
         key = f"{workflow_id}:stage_advance:{node_id}"
@@ -144,32 +144,34 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
         self.controller.attention_clear(key)
 
         try:
+            def refuse_direct(event):
+                event["direct_dispatch_fallback_reason"] = "worker_candidate_unavailable"
+                return False
+
             with patch.object(self.controller, "coordinator_intake_enabled", return_value=True), \
-                 patch.object(self.controller, "try_direct_stage_advance", return_value=True) as mock_direct, \
+                 patch.object(self.controller, "try_direct_stage_advance", side_effect=refuse_direct) as mock_direct, \
                  patch.object(self.controller, "coordinator_pane_for_workflow", return_value=None):
 
-                # First failure: attempts becomes 1, direct dispatch must NOT be triggered
+                # Each delivery first checks the deterministic planner, then records fallback failure.
                 self.controller._handle_coordinator_item(item)
                 ep1 = self.controller.attention_get(key)
                 self.assertIsNotNone(ep1)
                 self.assertEqual(ep1["attempts"], 1)
-                self.assertEqual(ep1["reason"], "coordinator_stalled")
-                mock_direct.assert_not_called()
+                self.assertEqual(ep1["reason"], "worker_candidate_unavailable")
+                self.assertEqual(mock_direct.call_count, 1)
 
-                # Second failure: attempts becomes 2, direct dispatch still not called on this run
                 self.controller._handle_coordinator_item(item)
                 ep2 = self.controller.attention_get(key)
                 self.assertEqual(ep2["attempts"], 2)
-                mock_direct.assert_not_called()
+                self.assertEqual(mock_direct.call_count, 2)
 
-                # Third invocation: attempts >= 2 detected at intake entry, fallback triggers!
                 self.controller._handle_coordinator_item(item)
-                mock_direct.assert_called_once_with(item)
+                self.assertEqual(mock_direct.call_count, 3)
         finally:
             self.controller.attention_clear(key)
 
-    def test_prompt_crash_accumulates_attempts_and_falls_back(self):
-        """When coordinator agent prompt fails/crashes (returncode != 0), attempts accumulate and fallback triggers on >= 2 attempts."""
+    def test_prompt_crash_accumulates_attempts_after_planner_refusal(self):
+        """Coordinator prompt crashes remain bounded after deterministic refusal."""
         workflow_id = "wf-prompt-crash"
         node_id = "node1"
         key = f"{workflow_id}:stage_advance:{node_id}"
@@ -189,35 +191,34 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
 
         try:
             with patch.object(self.controller, "coordinator_intake_enabled", return_value=True), \
-                 patch.object(self.controller, "try_direct_stage_advance", return_value=True) as mock_direct, \
+                 patch.object(self.controller, "try_direct_stage_advance", return_value=False) as mock_direct, \
                  patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"), \
                  patch.object(self.controller, "project_for_workflow", return_value={"project_name": "test", "project_root": "/tmp", "coordinator_pane_id": "w1:p1"}), \
                  patch.object(self.controller, "coordinator_status", return_value="idle"), \
                  patch.object(self.controller, "workflow_closed", return_value=False), \
                  patch("subprocess.run", return_value=crash_result):
 
-                # First failure: attempts becomes 1, no direct dispatch
+                # First fallback failure: attempts becomes 1.
                 self.controller._handle_coordinator_item(item)
                 ep1 = self.controller.attention_get(key)
                 self.assertIsNotNone(ep1)
                 self.assertEqual(ep1["attempts"], 1)
                 self.assertEqual(ep1["reason"], "coordinator_stalled")
-                mock_direct.assert_not_called()
+                self.assertEqual(mock_direct.call_count, 1)
 
-                # Second failure: attempts becomes 2, no direct dispatch
+                # Second fallback failure: attempts becomes 2.
                 self.controller._handle_coordinator_item(item)
                 ep2 = self.controller.attention_get(key)
                 self.assertEqual(ep2["attempts"], 2)
-                mock_direct.assert_not_called()
+                self.assertEqual(mock_direct.call_count, 2)
 
-                # Third invocation: fallback to direct dispatch triggers
                 self.controller._handle_coordinator_item(item)
-                mock_direct.assert_called_once_with(item)
+                self.assertEqual(mock_direct.call_count, 3)
         finally:
             self.controller.attention_clear(key)
 
-    def test_prompt_exception_accumulates_attempts_and_falls_back(self):
-        """When coordinator agent prompt raises an exception (e.g. process timeout/kill), attempts accumulate and fallback triggers on >= 2 attempts."""
+    def test_prompt_exception_accumulates_after_planner_refusal(self):
+        """Coordinator exceptions stay on the fallback path after planner refusal."""
         workflow_id = "wf-prompt-exc"
         node_id = "node1"
         key = f"{workflow_id}:stage_advance:{node_id}"
@@ -232,7 +233,7 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
 
         try:
             with patch.object(self.controller, "coordinator_intake_enabled", return_value=True), \
-                 patch.object(self.controller, "try_direct_stage_advance", return_value=True) as mock_direct, \
+                 patch.object(self.controller, "try_direct_stage_advance", return_value=False) as mock_direct, \
                  patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"), \
                  patch.object(self.controller, "project_for_workflow", return_value={"project_name": "test", "project_root": "/tmp", "coordinator_pane_id": "w1:p1"}), \
                  patch.object(self.controller, "coordinator_status", return_value="idle"), \
@@ -244,22 +245,21 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
                 ep1 = self.controller.attention_get(key)
                 self.assertIsNotNone(ep1)
                 self.assertEqual(ep1["attempts"], 1)
-                mock_direct.assert_not_called()
+                self.assertEqual(mock_direct.call_count, 1)
 
                 # Second exception: attempts becomes 2
                 self.controller._handle_coordinator_item(item)
                 ep2 = self.controller.attention_get(key)
                 self.assertEqual(ep2["attempts"], 2)
-                mock_direct.assert_not_called()
+                self.assertEqual(mock_direct.call_count, 2)
 
-                # Third invocation: fallback triggers
                 self.controller._handle_coordinator_item(item)
-                mock_direct.assert_called_once_with(item)
+                self.assertEqual(mock_direct.call_count, 3)
         finally:
             self.controller.attention_clear(key)
 
-    def test_intake_stalled_not_triggered_below_attempts_threshold(self):
-        """When attempts < 2, intake must NOT fall back and should proceed with coordinator intake."""
+    def test_direct_dispatch_does_not_wait_for_attention_threshold(self):
+        """Deterministic dispatch is attempted regardless of coordinator retry count."""
         workflow_id = "wf-no-fallback"
         node_id = "first_node"
         item = {
@@ -277,10 +277,10 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
              patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"), \
              patch.object(self.controller, "project_for_workflow", return_value={}):
             self.controller._handle_coordinator_item(item)
-            mock_direct.assert_not_called()
+            mock_direct.assert_called_once_with(item)
 
-    def test_intake_stalled_not_triggered_for_unrelated_reason(self):
-        """When reason is unrelated (e.g. upstream_blocked), intake must NOT fall back."""
+    def test_direct_dispatch_does_not_consume_unrelated_attention(self):
+        """Unrelated attention is left to its own gate and does not select transport."""
         workflow_id = "wf-unrelated-reason"
         node_id = "first_node"
         item = {
@@ -298,7 +298,7 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
              patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"), \
              patch.object(self.controller, "project_for_workflow", return_value={}):
             self.controller._handle_coordinator_item(item)
-            mock_direct.assert_not_called()
+            mock_direct.assert_called_once_with(item)
 
     def test_producer_to_consumer_end_to_end_attention_consistency(self):
         """Verify real attention_note writes match attention_get expectations in controller."""
@@ -347,7 +347,7 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
             }
 
             with patch.object(self.controller, "coordinator_intake_enabled", return_value=True), \
-                 patch.object(self.controller, "try_direct_stage_advance", return_value=True) as mock_direct, \
+                 patch.object(self.controller, "try_direct_stage_advance", return_value=False) as mock_direct, \
                  patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"):
                 self.controller._handle_coordinator_item(item)
                 mock_direct.assert_called_once_with(item)
@@ -380,7 +380,7 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
 
         try:
             with patch.object(self.controller, "coordinator_intake_enabled", return_value=True), \
-                 patch.object(self.controller, "try_direct_stage_advance", return_value=True) as mock_direct, \
+                 patch.object(self.controller, "try_direct_stage_advance", return_value=False) as mock_direct, \
                  patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"), \
                  patch.object(self.controller, "project_for_workflow", return_value={"project_name": "test", "project_root": "/tmp", "coordinator_pane_id": "w1:p1"}), \
                  patch.object(self.controller, "coordinator_status", return_value="idle"), \
@@ -405,8 +405,7 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
                 ep2 = self.controller.attention_get(key)
                 self.assertIsNotNone(ep2)
                 self.assertEqual(ep2["attempts"], 1)
-                # Must NOT have fallen back to direct dispatch!
-                mock_direct.assert_not_called()
+                self.assertEqual(mock_direct.call_count, 3)
         finally:
             self.controller.attention_clear(key)
 
@@ -440,19 +439,19 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
             self.controller._attention_store.upsert(key, ep)
 
             with patch.object(self.controller, "coordinator_intake_enabled", return_value=True), \
-                 patch.object(self.controller, "try_direct_stage_advance", return_value=True) as mock_direct, \
+                 patch.object(self.controller, "try_direct_stage_advance", return_value=False) as mock_direct, \
                  patch.object(self.controller, "coordinator_pane_for_workflow", return_value=None):
 
                 # Missing pane failure occurs now; because previous was > 1800s ago, attempts resets to 1
                 self.controller._handle_coordinator_item(item)
                 new_ep = self.controller.attention_get(key)
                 self.assertEqual(new_ep["attempts"], 1)
-                mock_direct.assert_not_called()
+                mock_direct.assert_called_once_with(item)
         finally:
             self.controller.attention_clear(key)
 
-    def test_stale_attention_episode_does_not_trigger_intake_fallback(self):
-        """Even if an old episode had attempts=2, if it is stale (> task_stall_after), intake must NOT fall back."""
+    def test_stale_attention_episode_does_not_block_direct_dispatch(self):
+        """A stale coordinator episode cannot gate a deterministic launch."""
         import time
         workflow_id = "wf-stale-no-fallback"
         node_id = "node1"
@@ -475,7 +474,7 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
              patch.object(self.controller, "coordinator_pane_for_workflow", return_value="w1:p1"), \
              patch.object(self.controller, "project_for_workflow", return_value={}):
             self.controller._handle_coordinator_item(item)
-            mock_direct.assert_not_called()
+            mock_direct.assert_called_once_with(item)
 
     def test_mark_stage_advance_notified_clears_exact_target_node_id_key(self):
         """Verify mark_stage_advance_notified clears the exact target_node_id episode key used by _handle_coordinator_item."""
@@ -497,6 +496,62 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
             self.assertIsNone(self.controller.attention_get(key))
         finally:
             self.controller.attention_clear(key)
+
+    def test_mark_stage_advance_notified_can_preserve_unknown_delivery_attention(self):
+        workflow_id = "wf-unknown-delivery"
+        target_node = "node1"
+        key = f"{workflow_id}:stage_advance:{target_node}"
+        self.controller.attention_note(
+            key,
+            {"task_id": f"stage_advance:{target_node}", "workflow_id": workflow_id},
+            "stage_advance",
+            reason="direct_dispatch_delivery_unknown",
+        )
+        try:
+            self.controller.mark_stage_advance_notified(
+                workflow_id, target_node, clear_attention=False
+            )
+            self.assertEqual(
+                self.controller.attention_get(key)["reason"],
+                "direct_dispatch_delivery_unknown",
+            )
+        finally:
+            self.controller.attention_clear(key)
+
+    def test_clearing_unknown_delivery_attention_releases_stage_latch(self):
+        import tempfile
+
+        workflow_id = "wf-unknown-reconciled"
+        target_node = "node1"
+        key = f"{workflow_id}:stage_advance:{target_node}"
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            self.controller, "STAGE_STATE_FILE", f"{tmp}/stage-state.json"
+        ):
+            self.controller.attention_note(
+                key,
+                {
+                    "task_id": f"stage_advance:{target_node}",
+                    "workflow_id": workflow_id,
+                    "execution_id": "execution-1",
+                },
+                "stage_advance",
+                reason="direct_dispatch_delivery_unknown",
+            )
+            self.controller.mark_stage_advance_notified(
+                workflow_id, target_node, clear_attention=False
+            )
+            self.assertEqual(
+                self.controller.attention_get(key)["execution_id"],
+                "execution-1",
+            )
+
+            self.controller.attention_clear(key)
+
+            self.assertIsNone(self.controller.attention_get(key))
+            self.assertNotIn(
+                f"{workflow_id}:{target_node}",
+                self.controller.load_stage_state(),
+            )
 
     def test_mark_stage_advance_notified_handles_clear_error_gracefully(self):
         """Verify that an exception in attention_clear does not crash mark_stage_advance_notified or leave silent failure."""

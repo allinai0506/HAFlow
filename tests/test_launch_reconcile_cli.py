@@ -30,6 +30,80 @@ def test_launch_reconcile_handler_rejects_missing_intent_without_side_effects(tm
     assert store.list_events(event_type='launch_intent') == []
 
 
+def test_launch_reconcile_derives_execution_identity_and_preserves_it_in_recovery_command(
+    tmp_path, capsys, monkeypatch
+):
+    from types import SimpleNamespace
+    from herdr import task_resources
+    from herdr.task_cli_resources import handle_launch_reconcile
+
+    store = get_state_store(tmp_path / 'execution-state.db')
+    store.save_workflow({
+        'workflow_id': 'wf',
+        'status': 'running',
+        'execution_id': 'execution-current',
+    })
+    with workflow_launch_lock(store.db_path, 'wf'):
+        begin_launch_intent(
+            store,
+            workflow_id='wf',
+            node_id='n',
+            candidate_sha='abc',
+            task_id='current-task',
+            execution_id='execution-current',
+            now=100,
+        )
+    monkeypatch.setattr(
+        task_resources,
+        'inventory_launch_resources',
+        lambda _intent: {'resource_status': 'unknown'},
+    )
+    args = SimpleNamespace(
+        workflow_id='wf', node='n', dispatch_role='worker', candidate_sha='abc',
+        dispatch_round=1, execution_id=None, authorize_terminal_id=None,
+        apply=False, confirm_agent_never_started=False, reason=None,
+    )
+
+    handle_launch_reconcile(
+        args,
+        get_store=lambda: store,
+        release_agent_reservation=lambda _task_id: pytest.fail('unexpected release'),
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report['task_id'] == 'current-task'
+    assert '--execution-id execution-current' in report['recovery_command']
+
+
+def test_launch_reconcile_without_explicit_execution_falls_back_to_legacy_intent(
+    tmp_path, capsys, monkeypatch
+):
+    from types import SimpleNamespace
+    from herdr import task_resources
+    from herdr.task_cli_resources import handle_launch_reconcile
+
+    store = get_state_store(tmp_path / 'legacy-intent.db')
+    store.save_workflow({'workflow_id': 'wf', 'status': 'running',
+                         'execution_id': 'execution-current'})
+    with workflow_launch_lock(store.db_path, 'wf'):
+        begin_launch_intent(store, workflow_id='wf', node_id='n',
+                            candidate_sha='abc', task_id='legacy-task', now=100)
+    monkeypatch.setattr(task_resources, 'inventory_launch_resources',
+                        lambda _intent: {'resource_status': 'unknown'})
+    args = SimpleNamespace(
+        workflow_id='wf', node='n', dispatch_role='worker', candidate_sha='abc',
+        dispatch_round=1, execution_id=None, authorize_terminal_id=None,
+        apply=False, confirm_agent_never_started=False, reason=None,
+    )
+
+    handle_launch_reconcile(args, get_store=lambda: store,
+                            release_agent_reservation=lambda _task_id: None)
+
+    report = json.loads(capsys.readouterr().out)
+    assert report['task_id'] == 'legacy-task'
+    assert '--execution-id' not in report['recovery_command']
+
+
 @pytest.mark.parametrize('resource_status', ['absent', 'owned', 'foreign', 'unknown'])
 def test_real_reconcile_cli_only_proven_absence_releases(tmp_path, resource_status):
     store = get_state_store(tmp_path / 'state.db')

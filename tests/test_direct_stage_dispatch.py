@@ -429,7 +429,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
             patch.object(
                 self.ctrl,
                 "mark_stage_advance_notified",
-                side_effect=lambda wf, node: self.notified.append(node),
+                side_effect=lambda wf, node, **kwargs: self.notified.append(node),
             ),
             # 阶段边界的总指挥 /compact 注入有独立契约测试;
             # 这里打桩,保证本组测试只观察派发行为。
@@ -462,6 +462,111 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("test", cmd)
         self.assertIn("--agent", cmd)
         self.assertIn("auto", cmd)
+
+    def test_previous_execution_task_does_not_block_current_launch(self):
+        old = _task("wf-1-test-auto", "working")
+        old["execution_id"] = "previous-execution"
+        with patch.object(
+            self.ctrl,
+            "project_for_workflow",
+            return_value={
+                "startup_ready": True,
+                "project_root": "/tmp/proj",
+                "requirement": "优化摘要展示",
+                "execution_id": "current-execution",
+            },
+        ), patch.object(self.ctrl, "load_tasks", return_value=[old]):
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
+        self.assertEqual(len(self.commands), 1)
+        task_id = self.commands[0][self.commands[0].index("--task-id") + 1]
+        self.assertNotEqual(task_id, "wf-1-test-auto")
+
+    def test_outstanding_launch_intent_reserves_its_task_id(self):
+        from herdr.state_store import get_state_store
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = get_state_store(Path(tempdir.name) / "state.db")
+        store.record_event("launch_intent", {
+                "key": "launch:old",
+                "phase": "allocating",
+                "task_id": "wf-1-test-auto",
+            }, workflow_id="wf-1", source="launch")
+        with patch.object(self.ctrl, "_get_store", return_value=store):
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        task_id = self.commands[0][self.commands[0].index("--task-id") + 1]
+        self.assertNotEqual(task_id, "wf-1-test-auto")
+
+    def test_direct_dispatch_does_not_require_coordinator_pane(self):
+        """A fully specified Worker launch must not depend on coordinator liveness."""
+        with patch.object(
+            self.ctrl,
+            "project_for_workflow",
+            return_value={
+                "startup_ready": True,
+                "project_root": "/tmp/proj",
+                "requirement": "优化摘要展示",
+            },
+        ):
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
+        self.assertEqual(len(self.commands), 1)
+        self.assertIn("launch", self.commands[0])
+
+    def test_direct_dispatch_records_configuration_failure_reason(self):
+        item = self._item()
+        with patch.object(
+            self.ctrl,
+            "project_for_workflow",
+            return_value={"startup_ready": True},
+        ):
+            result = self.ctrl.try_direct_stage_advance(item)
+
+        self.assertFalse(result)
+        self.assertEqual(
+            item["direct_dispatch_fallback_reason"],
+            "workflow_configuration_missing",
+        )
+
+    def test_invalid_dispatch_contract_falls_back_without_escaping(self):
+        item = self._item()
+        with patch.object(
+            self.ctrl.direct_dispatch_planner,
+            "plan_stage_dispatch",
+            side_effect=ValueError("docs git node requires artifact_mode"),
+        ):
+            result = self.ctrl.try_direct_stage_advance(item)
+
+        self.assertFalse(result)
+        self.assertEqual(
+            item["direct_dispatch_fallback_reason"],
+            "dispatch_contract_invalid",
+        )
+        self.assertEqual(self.commands, [])
+
+    def test_untracked_launch_timeout_never_falls_through_to_coordinator(self):
+        """Once transport starts, an unknown outcome belongs to recovery."""
+        self.commands.clear()
+        with patch.object(
+            self.ctrl.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["herdr-task", "launch"], 45),
+        ), patch.object(self.ctrl, "attention_get", return_value={}), \
+             patch.object(self.ctrl, "attention_note") as note:
+            result = self.ctrl.try_direct_stage_advance(self._item())
+
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
+        self.assertEqual(note.call_args.kwargs["reason"], "direct_dispatch_delivery_unknown")
+        self.ctrl.mark_stage_advance_notified.assert_called_once_with(
+            "wf-1", "test", clear_attention=False
+        )
 
     def test_direct_advance_triggers_coordinator_compaction(self):
         # 2026-09-17 效率优化:阶段推进成功即触发总指挥 /compact 注入
@@ -497,7 +602,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertIn("共享文档区", prompt)
         self.assertIn("共享规格 MARKER", prompt)
 
-    def test_launch_timeout_is_bounded_and_falls_back(self):
+    def test_launch_timeout_is_bounded_and_blocks_second_transport(self):
         seen_timeouts = []
 
         def hung(cmd, **kwargs):
@@ -506,13 +611,13 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
 
         with patch.object(self.ctrl.subprocess, "run", side_effect=hung):
             result = self.ctrl.try_direct_stage_advance(self._item())
-        self.assertFalse(result)
-        self.assertEqual(self.notified, [])
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
         self.assertEqual(self.commands, [])
         self.assertTrue(seen_timeouts)
         self.assertTrue(all(t is not None and t > 0 for t in seen_timeouts))
 
-    def test_partial_launch_timeout_reports_partial(self):
+    def test_partial_launch_timeout_requires_reconciliation_without_fallback(self):
         node = _node(
             id="requirements",
             agent_policy={
@@ -535,11 +640,11 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         with patch.object(self.ctrl.subprocess, "run", side_effect=flaky), \
              patch("builtins.print") as output:
             result = self.ctrl.try_direct_stage_advance(self._item(node=node))
-        self.assertFalse(result)
-        self.assertEqual(self.notified, [])
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
         printed = " ".join(str(c) for c in output.call_args_list)
-        self.assertIn("PARTIAL", printed)
-        self.assertIn("wf-1-requirements-executor", printed)
+        self.assertIn("DIRECT DISPATCH UNKNOWN", printed)
+        self.assertIn("wf-1-requirements-challenger", printed)
 
     def test_dynamic_direct_dispatch_does_not_launch(self):
         result = self.ctrl.try_direct_stage_advance(self._item(node=_node(
@@ -555,6 +660,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
                 with self.subTest(node_type=node_type, enabled=enabled), \
                      patch.dict(os.environ, {"HERDR_DIRECT_STAGE_DISPATCH": enabled}), \
                      patch.object(self.ctrl, "coordinator_pane_for_workflow", return_value=None) as coordinator, \
+                     patch.object(self.ctrl, "notify_attention", return_value=True) as notify, \
                      patch("builtins.print") as output:
                     self.ctrl._handle_coordinator_item(
                         self._item(node=_node(node_type=node_type))
@@ -566,27 +672,33 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
                         "STAGE ADVANCE BLOCKED" in str(call)
                         for call in output.call_args_list
                     ))
+                    episode = self.ctrl.attention_get("wf-1:stage_advance:test")
+                    self.assertEqual(episode["reason"], "human_decision_required")
+                    self.assertIn(f"node_type={node_type}", episode["detail"])
+                    notify.assert_called_once()
+                    self.ctrl.attention_clear("wf-1:stage_advance:test")
 
     def test_missing_item_node_resolves_native_workflow_node(self):
         item = self._item()
         item.pop("node")
         with patch.object(self.ctrl, "workflow_config_for", return_value={
             "nodes": [_node(node_type="human")],
-        }), patch.object(self.ctrl, "coordinator_pane_for_workflow", return_value=None) as coordinator:
+        }), patch.object(self.ctrl, "coordinator_pane_for_workflow", return_value=None) as coordinator, \
+             patch.object(self.ctrl, "notify_attention", return_value=True):
             self.ctrl._handle_coordinator_item(item)
         coordinator.assert_not_called()
         self.assertEqual(self.commands, [])
         self.assertEqual(self.notified, [])
 
-    def test_launch_failure_falls_back_to_coordinator(self):
+    def test_launch_failure_blocks_second_transport(self):
         with patch.object(
             self.ctrl.subprocess,
             "run",
             return_value=subprocess.CompletedProcess([], 1, "", "boom"),
         ):
             result = self.ctrl.try_direct_stage_advance(self._item())
-        self.assertFalse(result)
-        self.assertEqual(self.notified, [])
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
 
     def test_wait_mode_marks_notified_without_launch(self):
         with patch.object(
@@ -793,9 +905,14 @@ class CoordinatorIntakeTest(unittest.TestCase):
             self.ctrl._handle_coordinator_item(self._item(stage))
         return direct_mock
 
-    def test_first_stage_routes_to_coordinator_intake(self):
+    def test_first_stage_prefers_deterministic_direct_dispatch(self):
         direct_mock = self._run_item("start")
-        direct_mock.assert_not_called()
+        direct_mock.assert_called_once()
+        self.assertEqual(self.prompts, [])
+
+    def test_first_stage_falls_back_to_coordinator_for_incomplete_contract(self):
+        direct_mock = self._run_item("start", direct_result=False)
+        direct_mock.assert_called_once()
         self.assertEqual(len(self.prompts), 1)
         self.assertIn("HERDR_WORKFLOW_INTAKE_EVENT", self.prompts[0])
         self.assertIn("总指挥接单机制", self.prompts[0])
@@ -813,7 +930,7 @@ class CoordinatorIntakeTest(unittest.TestCase):
                 title="全局决策 MARKER",
                 node="requirements",
             )
-            self._run_item("start")
+            self._run_item("start", direct_result=False)
 
         self.assertEqual(len(self.prompts), 1)
         self.assertIn("共享文档区", self.prompts[0])

@@ -48,6 +48,49 @@ def test_roles_and_explicit_rework_are_distinct(tmp_path):
         assert claim(store, task_id='t-r2', round=2, supersedes='t')['status'] == 'claimed'
 
 
+def test_new_execution_does_not_deduplicate_against_historical_task_or_intent(tmp_path):
+    store = get_state_store(tmp_path / 'state.db')
+    with resources.workflow_launch_lock(store.db_path, 'wf'):
+        previous = api()(
+            store,
+            workflow_id='wf',
+            node_id='n',
+            role='worker',
+            candidate_sha='abc',
+            dispatch_round=1,
+            task_id='old-task',
+            execution_id='execution-old',
+            now=100,
+        )
+        assert previous['status'] == 'claimed'
+        store.save_task({
+            'task_id': 'old-task',
+            'workflow_id': 'wf',
+            'node': 'n',
+            'dispatch_role': 'worker',
+            'candidate_sha': 'abc',
+            'dispatch_round': 1,
+            'execution_id': 'execution-old',
+            'status': 'pending',
+        })
+
+        current = api()(
+            store,
+            workflow_id='wf',
+            node_id='n',
+            role='worker',
+            candidate_sha='abc',
+            dispatch_round=1,
+            task_id='new-task',
+            execution_id='execution-new',
+            now=101,
+        )
+
+    assert current['status'] == 'claimed'
+    assert current['intent']['task_id'] == 'new-task'
+    assert current['intent']['key'] != previous['intent']['key']
+
+
 def _racer(db, barrier, queue, task_id):
     store = get_state_store(db)
     barrier.wait(timeout=10)
@@ -191,7 +234,13 @@ def test_launch_entry_registers_identity_and_receipt_before_duplicate(tmp_path, 
     monkeypatch.setenv('HERDR_STATE_DB', str(store.db_path))
     monkeypatch.setenv('TASKS_FILE', str(tmp_path / 'tasks.json'))
     monkeypatch.setenv('WORKFLOWS_FILE', str(tmp_path / 'workflows.json'))
-    store.save_workflow({'workflow_id': 'wf', 'project_id': 'p', 'status': 'running', 'project_root': str(tmp_path), 'config': {'nodes': [{'id': 'n', 'artifact_mode': 'shared_artifacts', 'default_integration_mode': 'none'}]}})
+    store.save_workflow({'workflow_id': 'wf', 'project_id': 'p', 'status': 'running',
+                         'execution_id': 'execution-current', 'project_root': str(tmp_path),
+                         'config': {'nodes': [{'id': 'n', 'max_tasks_per_node': 1,
+                                              'artifact_mode': 'shared_artifacts',
+                                              'default_integration_mode': 'none'}]}})
+    store.save_task({'task_id': 'historical', 'workflow_id': 'wf', 'node': 'n',
+                     'execution_id': 'execution-old', 'status': 'cleaned'})
     cli = _load_module('dispatch_registration_cli', Path(__file__).resolve().parents[1] / 'bin/herdr-task')
     calls = []
     monkeypatch.setattr(cli, 'choose_agent', lambda *a, **k: calls.append('route') or 'codex')
@@ -210,11 +259,12 @@ def test_launch_entry_registers_identity_and_receipt_before_duplicate(tmp_path, 
     assert task['artifact_mode'] == 'shared_artifacts'
     latest = store.list_events(event_type='launch_intent', limit=1, desc=True)[0]['payload']
     assert latest['phase'] == 'registered' and latest['resources']['pane_id'] == 'owned'
+    assert task['execution_id'] == 'execution-current'
     cli.launch_task(args)
     args.task_id = 'manual'
     cli.launch_task(args)
     assert calls == ['route', 'worker', 'dispatch']
-    assert len(store.list_tasks()) == 1
+    assert {item['task_id'] for item in store.list_tasks()} == {'historical', 'auto'}
 
 
 @pytest.fixture

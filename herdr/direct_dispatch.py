@@ -537,6 +537,7 @@ def plan_stage_dispatch(
     candidate_sha=None,
     gate_inventory_block=None,
     redispatch_blocker_notes=None,
+    reserved_task_ids=None,
 ):
     """决定 ready 节点该派发什么。
 
@@ -587,6 +588,7 @@ def plan_stage_dispatch(
             for task in (tasks or [])
             if task.get("task_id")
         }
+        existing_ids.update(str(task_id) for task_id in (reserved_task_ids or ()) if task_id)
         specs = []
         for task in sorted(
             awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or "")
@@ -653,6 +655,7 @@ def plan_stage_dispatch(
         for task in (tasks or [])
         if task.get("task_id")
     }
+    existing_ids.update(str(task_id) for task_id in (reserved_task_ids or ()) if task_id)
 
     roles = normalized.get("roles") or []
     if roles:

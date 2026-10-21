@@ -193,7 +193,8 @@ def _reap_task_pane(store, task_id, *, apply=False, probe=None, close=None,
         return result
 
 
-def dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round):
+def dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round,
+                      execution_id=None):
     """Stable across caller source and generated task IDs."""
     fields = [workflow_id, node_id, role, candidate_sha or '', dispatch_round]
     if any(not isinstance(value, str) or not value or len(value) > 256
@@ -203,6 +204,10 @@ def dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round)
         raise ValueError('candidate_sha must be a bounded string')
     if type(dispatch_round) is not int or dispatch_round < 1:
         raise ValueError('dispatch_round must be a positive integer')
+    if execution_id is not None:
+        if not isinstance(execution_id, str) or not execution_id or len(execution_id) > 256:
+            raise ValueError('execution_id must be a bounded nonempty string')
+        fields.append(execution_id)
     return 'launch:' + hashlib.sha256(json.dumps(fields).encode()).hexdigest()
 
 
@@ -230,14 +235,34 @@ def _latest_intent(store, key, *, conn=None):
     return events[0]['payload'] if events else None
 
 
-def find_dispatch_task(store, workflow_id, node_id, role, candidate_sha, dispatch_round):
-    dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round)
+def outstanding_launch_task_ids(store, workflow_id, limit=1000):
+    """Reserve task/resource names owned by the latest non-absent intents."""
+    events = store.list_events(workflow_id=workflow_id, event_type='launch_intent',
+                               source='launch', desc=True, limit=limit)
+    seen = set()
+    reserved = set()
+    for event in events:
+        payload = event.get('payload') or {}
+        identity = payload.get('key') or payload.get('intent_id')
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        if payload.get('phase') != 'resources_absent' and payload.get('task_id'):
+            reserved.add(payload['task_id'])
+    return reserved
+
+
+def find_dispatch_task(store, workflow_id, node_id, role, candidate_sha, dispatch_round,
+                       execution_id=None):
+    dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round,
+                      execution_id)
     for task in store.list_tasks(workflow_id=workflow_id):
         # Historical records have no declared role/round. Do not invent a
         # matching identity from terminal failed/superseded task history.
         if 'dispatch_role' not in task or 'dispatch_round' not in task:
             continue
-        if ((task.get('node') or task.get('stage')) == node_id
+        if ((execution_id is None or task.get('execution_id') == execution_id)
+                and (task.get('node') or task.get('stage')) == node_id
                 and (task.get('dispatch_role') or 'worker') == role
                 and (task.get('candidate_sha') or '') == (candidate_sha or '')
                 and int(task.get('dispatch_round') or 1) == dispatch_round):
@@ -267,7 +292,8 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
     now = time.time() if now is None else now
     if not 1 <= lease_seconds <= 600:
         raise ValueError('launch lease must be between 1 and 600 seconds')
-    key = dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round)
+    key = dispatch_identity(workflow_id, node_id, role, candidate_sha, dispatch_round,
+                            execution_id)
     if dispatch_round > 1 and not supersedes:
         raise ValueError('new dispatch round requires supersedes')
     if supersedes:
@@ -277,7 +303,8 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
                 or (old.get('dispatch_role') or 'worker') != role
                 or dispatch_round != int(old.get('dispatch_round') or 1) + 1):
             raise ValueError('supersedes must bind previous round of same workflow/node/role')
-    task = find_dispatch_task(store, workflow_id, node_id, role, candidate_sha, dispatch_round)
+    task = find_dispatch_task(store, workflow_id, node_id, role, candidate_sha,
+                              dispatch_round, execution_id)
     if task:
         if dispatch_operation_id is not None and task.get('dispatch_operation_id') != dispatch_operation_id:
             raise ValueError('existing task belongs to another dispatch operation')
@@ -299,8 +326,10 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
               'candidate_sha': candidate_sha or '', 'dispatch_round': dispatch_round,
               'task_id': task_id, 'supersedes': supersedes, 'phase': 'allocating',
               'lease_until': now + lease_seconds, 'resources': {}}
+    if execution_id is not None:
+        intent['execution_id'] = execution_id
     if dispatch_operation_id is not None:
-        intent.update(dispatch_operation_id=dispatch_operation_id, dispatch_attempt=dispatch_attempt, execution_id=execution_id)
+        intent.update(dispatch_operation_id=dispatch_operation_id, dispatch_attempt=dispatch_attempt)
         intent['resources']['run_id'] = run_id
     _launch_event(store, intent, now)
     return {'status': 'claimed', 'intent': intent}
@@ -400,7 +429,8 @@ def registered_launch_task(store, intent, *, conn=None):
         return None
     if dispatch_identity(task.get('workflow_id'), task.get('node') or task.get('stage'),
                          task.get('dispatch_role') or 'worker', task.get('candidate_sha') or '',
-                         int(task.get('dispatch_round') or 1)) != intent['key']:
+                         int(task.get('dispatch_round') or 1),
+                         intent.get('execution_id')) != intent['key']:
         return None
     run_id = (intent.get('resources') or {}).get('run_id')
     return task if not run_id or task.get('run_id') == run_id else None

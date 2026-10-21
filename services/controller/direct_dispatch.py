@@ -8,25 +8,39 @@ def try_direct_stage_advance(ports, item):
 
     返回 True 表示事件已被处理(含 wait),False 表示必须走总指挥原路径。
     """
-    if ports.direct_dispatch_planner is None or not ports.direct_stage_dispatch_enabled():
+    def fallback(reason):
+        item["direct_dispatch_fallback_reason"] = str(reason or "direct_dispatch_unavailable")
         return False
+
+    if ports.direct_dispatch_planner is None or not ports.direct_stage_dispatch_enabled():
+        return fallback("direct_dispatch_disabled")
 
     node = item.get("node")
     workflow_id = item.get("workflow_id")
     ready_id = item.get("node_id") or item.get("next_stage")
 
     if not workflow_id or not ready_id:
-        return False
+        return fallback("dispatch_identity_missing")
 
     project_ctx = ports.project_for_workflow(workflow_id) or {}
     if project_ctx.get("startup_ready") is False:
-        return False
+        return fallback("workflow_startup_not_ready")
 
     project_root = project_ctx.get("project_root") or ""
-    if not project_root or not project_ctx.get("coordinator_pane_id"):
-        return False
+    if not project_root:
+        return fallback("workflow_configuration_missing")
 
     requirement = (project_ctx.get("requirement") or "").strip()
+    all_tasks = ports.load_tasks() or []
+    tasks = all_tasks
+    execution_id = project_ctx.get("execution_id")
+    if execution_id:
+        tasks = [
+            task for task in tasks
+            if task.get("workflow_id") != workflow_id
+            or not task.get("execution_id")
+            or task.get("execution_id") == execution_id
+        ]
 
     # 历史 workflow.json 的节点字段可能为空(旧模板快照),
     # 与总指挥路径一致回退 stage-policies 后再做规则化决策。
@@ -56,7 +70,7 @@ def try_direct_stage_advance(ports, item):
             f"blocked_dep={verdict_dep} "
             "-> fallback to coordinator for adjudication"
         )
-        return False
+        return fallback("blocked_verdict_requires_decision")
 
     # Scheduler v1 汇聚门禁:join 判定先于一切闩与派发。
     # - 非 join 形状:直接放行,走原语义(零行为变化);
@@ -64,14 +78,14 @@ def try_direct_stage_advance(ports, item):
     # - 判定异常:Fail-Closed,回落总指挥(原 fallback 语义)。
     try:
         join_node = node if isinstance(node, dict) else {"id": ready_id}
-        if not ports._scheduler_join_gate_allows(workflow_id, join_node, ports.load_tasks()):
+        if not ports._scheduler_join_gate_allows(workflow_id, join_node, tasks):
             return True
     except Exception as exc:
         print(
             f"[JOIN GATE ERROR] workflow={workflow_id} "
             f"node={ready_id}: {exc}"
         )
-        return False
+        return fallback("join_gate_evaluation_failed")
 
     gate_task = ports.node_is_gate(workflow_id, ready_id)
 
@@ -92,7 +106,7 @@ def try_direct_stage_advance(ports, item):
     # agent/opencode/feat-impl-t7-integration-gates-r2",任务在 pending 阶段
     # 即被判 router_isolation_rejected,从未真正执行。详见 lessons §110。
     candidate_branch = ports.direct_dispatch_planner.candidate_branch_for_node(
-        ports.load_tasks(), workflow_id, ready_id, dep_ids, delivered_in_base=True
+        tasks, workflow_id, ready_id, dep_ids, delivered_in_base=True
     )
     candidate_sha = ports._scheduler_expected_candidate_sha(
         workflow_id, project_root, dep_ids, candidate_branch
@@ -113,11 +127,11 @@ def try_direct_stage_advance(ports, item):
                 f"[SELECTIVE REPLAN BASELINE REFUSED] workflow={workflow_id} "
                 f"node={ready_id} reason=frozen_unproven -> fallback to coordinator"
             )
-            return False
+            return fallback("frozen_candidate_unproven")
         try:
             from herdr import direct_dispatch as _dd
             _node_tasks = [
-                t for t in (ports.load_tasks() or [])
+                t for t in tasks
                 if isinstance(t, dict)
                 and str(t.get("workflow_id") or "") == workflow_id
                 and str(t.get("node") or t.get("stage") or "") == ready_id
@@ -142,7 +156,7 @@ def try_direct_stage_advance(ports, item):
                     f"node={ready_id} reason=baseline_unproven "
                     f"fact={str(_fact.get('replan_id') or '')[:16]} -> fallback to coordinator"
                 )
-                return False
+                return fallback("selective_replacement_baseline_unproven")
         if _need_baseline:
             candidate_branch = _frozen_branch
             candidate_sha = _frozen_sha
@@ -164,20 +178,31 @@ def try_direct_stage_advance(ports, item):
                 f"[SELECTIVE REPLAN WARN] workflow={workflow_id} "
                 f"inventory injection skipped: {exc}"
             )
-    plan = ports.direct_dispatch_planner.plan_stage_dispatch(
-        workflow_id,
-        node,
-        ports.load_tasks(),
-        requirement,
-        context_branch=candidate_branch,
-        gate_contract=gate_task,
-        docs_block=docs_block,
-        candidate_sha=candidate_sha,
-        gate_inventory_block=gate_inventory_block,
-        redispatch_blocker_notes=ports._selective_redispatch_blocker_notes(
-            workflow_id, ready_id
-        ),
-    )
+    try:
+        from herdr.task_resources import outstanding_launch_task_ids
+        reserved_task_ids = {task.get("task_id") for task in all_tasks if task.get("task_id")}
+        reserved_task_ids.update(outstanding_launch_task_ids(ports._get_store(), workflow_id))
+        plan = ports.direct_dispatch_planner.plan_stage_dispatch(
+            workflow_id,
+            node,
+            tasks,
+            requirement,
+            context_branch=candidate_branch,
+            gate_contract=gate_task,
+            docs_block=docs_block,
+            candidate_sha=candidate_sha,
+            gate_inventory_block=gate_inventory_block,
+            redispatch_blocker_notes=ports._selective_redispatch_blocker_notes(
+                workflow_id, ready_id
+            ),
+            reserved_task_ids=reserved_task_ids,
+        )
+    except ValueError as exc:
+        print(
+            f"[DIRECT DISPATCH CONTRACT INVALID] workflow={workflow_id} "
+            f"node={ready_id}: {exc}"
+        )
+        return fallback("dispatch_contract_invalid")
 
     if gate_task and plan.get("mode") == "dispatch":
         # 状态目录必须先于 Agent 写入存在(结论文件落 clone 外,交付零污染)。
@@ -216,7 +241,7 @@ def try_direct_stage_advance(ports, item):
             f"node={ready_id} "
             f"reason={plan.get('reason')}"
         )
-        return False
+        return fallback(plan.get("reason") or "planner_refused")
 
     if mode == "wait":
         # 节点已有活跃任务:推进会自然由状态机完成,不再唤醒总指挥。
@@ -231,12 +256,12 @@ def try_direct_stage_advance(ports, item):
 
     specs = plan.get("specs") or []
     if not specs:
-        return False
+        return fallback("dispatch_specs_missing")
 
     if not ports._dispatch_candidate_ready(
         project_root, project_ctx.get("base_branch"), specs, workflow_id=workflow_id
     ):
-        return False
+        return fallback("worker_candidate_unavailable")
 
     dispatch_operation_id = item.get('dispatch_operation_id')
     dispatch_owner = item.get('dispatch_owner')
@@ -377,13 +402,41 @@ def try_direct_stage_advance(ports, item):
                 )
                 ports.mark_stage_advance_notified(workflow_id, ready_id)
                 return True
+            # Legacy events may not carry a durable node-dispatch operation.
+            # Once the launch subprocess has run, timeout/non-zero cannot prove
+            # absence of side effects. Persist an explicit intervention and
+            # consume the event; falling through to coordinator intake could
+            # send the same node through a second transport.
+            if dispatch_operation_id is None:
+                key = f"{workflow_id}:stage_advance:{ready_id}"
+                episode = ports.attention_get(key) or {}
+                ports.attention_note(
+                    key,
+                    {
+                        "task_id": f"stage_advance:{ready_id}",
+                        "workflow_id": workflow_id,
+                        "execution_id": project_ctx.get("execution_id"),
+                    },
+                    "stage_advance",
+                    reason="direct_dispatch_delivery_unknown",
+                    attempts=int(episode.get("attempts") or 0) + 1,
+                    detail=(output or "launch transport timed out")[:500],
+                )
+                ports.mark_stage_advance_notified(
+                    workflow_id, ready_id, clear_attention=False
+                )
+                print(
+                    f"[DIRECT DISPATCH UNKNOWN] workflow={workflow_id} "
+                    f"node={ready_id}: manual reconciliation required"
+                )
+                return True
             if launched:
                 print(
                     f"[DIRECT DISPATCH PARTIAL] "
                     f"launched={','.join(launched)} "
                     "-> fallback to coordinator for reconciliation"
                 )
-            return False
+            return fallback("partial_launch_requires_reconciliation" if launched else "worker_launch_failed")
 
         launched.append(spec["task_id"])
 

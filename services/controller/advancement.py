@@ -98,14 +98,6 @@ def check_workflow_stage_advance(ports, workflow_id):
         if not assessment['can_advance']:
             return
 
-    pane = ports.coordinator_pane_for_workflow(workflow_id)
-    if not pane:
-        from herdr.node_dispatch_store import defer
-        for op in recovery_store.list_operations(ports._get_store().db_path, workflow_id):
-            if op['payload'].get('kind') == 'node_dispatch':
-                defer(ports._get_store().db_path, op['id'], 'coordinator_missing')
-        return
-
     workflow_cfg = ports.workflow_config_for(workflow_id)
     if not workflow_cfg:
         return
@@ -301,7 +293,21 @@ def check_workflow_stage_advance(ports, workflow_id):
                         "-> awaiting adjudication"
                     )
                 continue
-            if ports.attention_blocks_retry(f"{workflow_id}:stage_advance:{ready_id}"):
+            attention_key = f"{workflow_id}:stage_advance:{ready_id}"
+            attention = ports.attention_get(attention_key) or {}
+            if attention.get("reason") in (
+                "human_decision_required",
+                "direct_dispatch_delivery_unknown",
+            ):
+                attention_execution = attention.get("execution_id")
+                current_execution = workflow_record.get("execution_id")
+                if (attention_execution and current_execution
+                        and attention_execution != current_execution):
+                    ports.attention_clear(attention_key)
+                    attention = {}
+                else:
+                    continue
+            if ports.attention_blocks_retry(attention_key):
                 continue
 
             deps = ready_node.get("depends_on", [])
@@ -347,8 +353,16 @@ def check_workflow_stage_advance(ports, workflow_id):
             dispatch_claim = None
             if not deps or ports._get_store().get_workflow(workflow_id):
                 from herdr.node_dispatch_store import operation_for_node, claim
-                op = operation_for_node(ports._get_store().db_path, workflow_id, ready_id)
-                if (deps or ports.coordinator_intake_enabled()) and not op and ports._get_store().get_workflow(workflow_id):
+                agent_node = ready_node.get("node_type", "agent") == "agent"
+                op = (
+                    operation_for_node(
+                        ports._get_store().db_path, workflow_id, ready_id
+                    )
+                    if agent_node
+                    else None
+                )
+                if (agent_node and (deps or ports.coordinator_intake_enabled())
+                        and not op and ports._get_store().get_workflow(workflow_id)):
                     continue
                 if op and not deps and not ports.coordinator_intake_enabled() and op['status'] not in ('resolved', 'superseded'):
                     continue
@@ -399,7 +413,21 @@ def check_workflow_stage_advance(ports, workflow_id):
             ports.handle_fix_loop(workflow_id, stage_key, gate_cfg, workflow_cfg)
             continue
 
-        if ports.attention_blocks_retry(f"{workflow_id}:stage_advance:{next_stage}"):
+        attention_key = f"{workflow_id}:stage_advance:{next_stage}"
+        attention = ports.attention_get(attention_key) or {}
+        if attention.get("reason") in (
+            "human_decision_required",
+            "direct_dispatch_delivery_unknown",
+        ):
+            attention_execution = attention.get("execution_id")
+            current_execution = workflow_record.get("execution_id")
+            if (attention_execution and current_execution
+                    and attention_execution != current_execution):
+                ports.attention_clear(attention_key)
+                attention = {}
+            else:
+                continue
+        if ports.attention_blocks_retry(attention_key):
             continue
 
         if ports._fix_loop_latch_blocks(workflow_id, stage_key):
@@ -445,10 +473,10 @@ DEPENDENCIES = {'enqueue_stage_advance': ('check_workflow_stage_advance',),
                                   '_scheduler_resolve_candidate_and_plan',
                                   '_selective_replan_awaiting_redispatch',
                                   '_workflow_complete_logged', '_workflow_entry',
-                                  'attention_blocks_retry', 'attention_get', 'attention_note',
+                                  'attention_blocks_retry', 'attention_clear', 'attention_get', 'attention_note',
                                   'blocked_gate_dependency', 'blocked_verdict_dep',
                                   'clear_stage_advance', 'coordinator_intake_enabled',
-                                  'coordinator_pane_for_workflow', 'coordinator_queue',
+                                  'coordinator_queue',
                                   'gate_verdict', 'get_ready_nodes', 'handle_fix_loop',
                                   'is_node_complete', 'is_workflow_completed', 'liveness',
                                   'load_tasks', 'mark_stage_advance_queued',

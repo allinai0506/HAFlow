@@ -115,6 +115,69 @@ def test_stage_admission_claims_real_dispatch_lease(scene):
     assert admitted_node["id"] == "implementation"
 
 
+def test_stage_admission_join_ignores_previous_execution_tasks(scene):
+    from herdr.coordinator_stage_admission import admit_stage_dispatch
+
+    scene.store.save_task({
+        "task_id": "old-dependency",
+        "workflow_id": "wf",
+        "node": "dependency",
+        "execution_id": "previous-execution",
+        "run_id": "old-run",
+        "status": "working",
+    })
+    observed = []
+
+    result = admit_stage_dispatch(
+        scene.item,
+        scene.item["node"],
+        "implementation",
+        get_store=lambda: scene.store,
+        coordinator_intake_enabled=lambda: True,
+        reconcile_node_dispatches=scene.ctrl.reconcile_node_dispatches,
+        find_node=scene.ctrl.find_node,
+        scheduler_join_gate_allows=lambda _wid, _node, tasks: observed.extend(tasks) or True,
+        load_tasks=scene.store.list_tasks,
+        clear_stage_advance=scene.ctrl.clear_stage_advance,
+    )
+
+    assert result is not None
+    assert all(task["task_id"] != "old-dependency" for task in observed)
+
+
+def test_stage_admission_rereads_workflow_after_reconciliation_generation_change(scene):
+    from herdr.coordinator_stage_admission import admit_stage_dispatch
+
+    def reopen_then_reconcile(workflow_id, discover=True):
+        workflow = scene.store.get_workflow(workflow_id)
+        workflow["execution_id"] = "execution-2"
+        workflow["config"] = {"nodes": [{
+            "id": "implementation",
+            "depends_on": [],
+            "purpose": "current-generation-purpose",
+        }]}
+        scene.store.save_workflow(workflow)
+        return scene.ctrl.reconcile_node_dispatches(workflow_id, discover=discover)
+
+    result = admit_stage_dispatch(
+        scene.item,
+        {"id": "implementation", "depends_on": [], "purpose": "stale-purpose"},
+        "implementation",
+        get_store=lambda: scene.store,
+        coordinator_intake_enabled=lambda: True,
+        reconcile_node_dispatches=reopen_then_reconcile,
+        find_node=scene.ctrl.find_node,
+        scheduler_join_gate_allows=lambda *_: True,
+        load_tasks=scene.store.list_tasks,
+        clear_stage_advance=scene.ctrl.clear_stage_advance,
+    )
+
+    assert result is not None
+    _item, admitted_node, dispatch_op, _owner = result
+    assert admitted_node["purpose"] == "current-generation-purpose"
+    assert dispatch_op["payload"]["generation"][0] == "execution-2"
+
+
 def test_stage_admission_defers_and_clears_when_join_gate_blocks(scene):
     from herdr.coordinator_stage_admission import admit_stage_dispatch
 
@@ -141,14 +204,14 @@ def test_stage_admission_defers_and_clears_when_join_gate_blocks(scene):
     assert cleared == [("wf", "implementation", "pending", "join_gate_blocked")]
 
 
-def test_zero_task_workflow_without_coordinator_is_not_an_unowned_running_state(scene, monkeypatch):
+def test_zero_task_workflow_without_coordinator_claims_one_dispatch(scene, monkeypatch):
     monkeypatch.setattr(scene.ctrl, 'coordinator_pane_for_workflow', lambda _: None)
     scene.ctrl.check_workflow_stage_advance('wf')
     operations = dispatch_operations(scene)
     assert len(operations) == 1
-    assert operations[0]['status'] == 'pending'
-    assert operations[0]['detail']['reason'] == 'coordinator_missing'
-    assert operations[0]['next_due_at'] == 1030
+    assert operations[0]['status'] == 'running'
+    assert operations[0]['payload']['node_id'] == 'implementation'
+    assert scene.ctrl.coordinator_queue.qsize() == 1
 
 
 def started_operation(scene):
@@ -315,18 +378,16 @@ def test_legacy_notified_migrates_to_bounded_unknown_wait(scene):
     assert scene.sent == []
 
 
-def test_missing_coordinator_exhausts_bounded_preflight_then_human_can_retry(scene, monkeypatch):
+def test_missing_coordinator_lease_recovery_reuses_dispatch_operation(scene, monkeypatch):
     monkeypatch.setattr(scene.ctrl, 'coordinator_pane_for_workflow', lambda _: None)
     for tick in (1000, 1030, 1060, 2000):
         scene.clock[0] = tick
         scene.ctrl.check_workflow_stage_advance('wf')
     op = dispatch_operations(scene)[0]
-    assert op['status'] == 'waiting_human'
-    assert op['attempts'] == 3
-    retried = recovery_store.decide_operation(scene.store.db_path, op['id'], op['version'],
-        'operator', 'retry', 'coordinator repaired', 2000)
-    assert retried['status'] == 'pending'
-    assert retried['attempts'] == 0
+    assert op['status'] == 'running'
+    assert op['attempts'] == 2
+    assert len(dispatch_operations(scene)) == 1
+    assert scene.store.list_tasks(workflow_id='wf') == []
 
 
 def test_zero_task_projection_exposes_wait_and_expired_human_decision(scene):

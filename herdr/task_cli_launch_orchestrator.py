@@ -222,6 +222,7 @@ def launch_task_orchestrated(args, *, deps):
             args.dispatch_role,
             candidate,
             args.dispatch_round,
+            getattr(args, "execution_id", None),
         )
         if duplicate:
             if (
@@ -260,7 +261,17 @@ def launch_task_orchestrated(args, *, deps):
     else:
         _prefetched_experience_suffix = None
         _prefetched_experience_refs = None
-    _check_launch_capacity(args, project, data.get("tasks", []), node_id)
+    capacity_tasks = data.get("tasks", [])
+    execution_id = getattr(args, "execution_id", None)
+    if execution_id:
+        capacity_tasks = [
+            task
+            for task in capacity_tasks
+            if task.get("workflow_id") != args.workflow_id
+            or not task.get("execution_id")
+            or task.get("execution_id") == execution_id
+        ]
+    _check_launch_capacity(args, project, capacity_tasks, node_id)
     try:
         claim = begin_launch_intent(
             store,
