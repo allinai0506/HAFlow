@@ -63,7 +63,7 @@ Desktop and narrow-screen screenshots were visually inspected. Temporary artifac
 - Confirmation checks the current Workflow, read state, automation mode, and server identity again. High-risk and bypass actions require an explicit reason.
 - Action submission sends no caller-derived command, action type, endpoint override, or substituted Task identity.
 - An immediate `accepted_waiting` receipt remains visible across refreshes. Another operation's receipt cannot resolve it. A matching operation's resolved or superseded state can clear it.
-- A rejected card remains visible and disabled even when the new projection omits the obsolete action.
+- A rejected action snapshot remains visible and disabled even when the new projection omits it. A current action with a different expected identity or intent remains usable.
 - Unknown reads render an alert and do not claim there are no todos. A wrong-Workflow response becomes unknown, and stale request sequences cannot overwrite a new selection.
 - The existing recovery form retains its operator, reason, candidate, lineage, absent-resource, and startup-transcript confirmation fields.
 - Inline handlers use HTML-escaped JavaScript arguments. Runtime tests decode attributes as the browser does before checking their syntax.
@@ -80,3 +80,31 @@ Desktop and narrow-screen screenshots were visually inspected. Temporary artifac
 6. The pre-existing untracked `.superpowers` handoff files were preserved. Only this report is added from that directory.
 
 The implementation followed the approved design and TDD plan. `verification-before-completion` supplies the fresh-check discipline, and `technical-writing` supplies the evidence-report structure.
+
+## Review fix round 1 of 5
+
+Review reported four defects at `11283e4e9af85e25ec11d1bb6a86aa2468fb5712`. Their confirmed reproductions supersede the earlier self-review's no-known-blocker statement. This round fixes them in `877d0f6f42d8a70f32d056b75cd6103d1ff3b35d`.
+
+The reviewer did not provide a saved probe script or command. The parent confirmed this. The probes below reproduce the described conditions through the real composed-JS harness; they are equivalent regressions, not an unchanged rerun of an unavailable original script.
+
+| Finding | Confirmed RED | Fix and GREEN evidence |
+| --- | --- | --- |
+| P1: failed Workflow B read reuses A's facts | `workflow_id=wf-2` contained A's `impl-x`, `run-1`, judgment, actions, and receipt | The error path keeps cache only when its Workflow matches. Otherwise it creates an unknown projection with empty collections. The regression also proves that legacy recovery fallback cannot leak A's operation. |
+| P2: rejection disables a later same-name action | `SAME_FORM=true`, `NEW_ENABLED=false`, `INTENT_ENABLED=false` | Capture a detached action snapshot. Compare canonical Workflow/target, expected identity, intent payload, and safety policy. Key ordering does not change identity. The rejected snapshot stays disabled; a changed version or intent stays enabled. Confirmation rejects changed snapshots, and identical rejected requests cannot reopen their form. Server-side deduplication is unchanged. |
+| Late legacy completion hides Cockpit | `HIDDEN=true` while `SELECTED=__ctl__` | Legacy success and failure callbacks do not render the flow view while Cockpit is selected. The callback guard includes the request sequence and current Workflow target. |
+| Late decisions do not update Cockpit | `DECISION=false` after the matching response | Matching decision success and failure repaint the current Cockpit. A foreign response or old Workflow callback cannot replace its data. |
+
+The initial four regression tests returned **4 failed, 20 deselected** before the fixes and **4 passed, 20 deselected** after them. Additional probes cover legacy/decision request failure, explicit Workflow changes with late callbacks, and hidden Task-view ownership. The Task-view probes first returned `TASKS_UNTOUCHED=false` for both response types; they now pass because only the active view is repainted.
+
+The full focused command listed above returned **80 passed, 73 subtests passed**. `git diff --check` exited 0. This round changes only:
+
+- `console/static/console/scripts/controller-cockpit.js`
+- `console/static/console/scripts/workflow-reader.js`
+- `tests/test_console_cockpit_runtime.py`
+- This report.
+
+The real offline Chrome checks were repeated at 1440 × 1100 and 500 × 1000 using the final code. Both processes exited 0. Each reported `cacheIsolated=true`, `sameRejectedDisabled=true`, `newIdentityEnabled=true`, `legacyPreserved=true`, and `decisionRepainted=true`. Both retained the approved page, surface, and primary colors, with no horizontal overflow. The screenshots were visually inspected.
+
+Round 1 artifacts are `/tmp/haflow-cockpit-r1-browser.JSqRex/round-1-final.html`, `final-0.png`, and `final-1.png`.
+
+The browser probes use controlled responses, fresh temporary browser profiles, and no external requests. They validate browser behavior without a production-state mutation; they do not establish production UAT. The existing limits above still apply. No backend action registry, receipt persistence, runtime, deployment, or Task-board code changed.
