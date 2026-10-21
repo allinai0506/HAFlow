@@ -7732,3 +7732,33 @@ pytest -q tests/test_zombie_obligation_regression.py
 ```
 
 证据：新增 `tests/test_slice2_scheduling_stability.py`（9 项全绿），覆盖 P4 decide/mark_started 事务解耦、P5 可达性拒绝与 main 前进候选失效、P11 替代者双向识别与终态工作流过滤。53 项相关专项测试 100% 通过。
+
+---
+
+## 185. 控制台告警生命周期失真、历史终态僵尸告警与零操作死闭环（2026-10-21）
+
+### 问题背景
+
+用户在 Web 控制台访问 `?view=alerts` 告警中心时，发现左侧导航轨红点持续常驻且永远无法消除。排查发现存在三个层次的缺陷：
+1. **告警生命周期未与工作流终态/重试链路对齐（僵尸告警）**：`console/runtime.py:overview()` 粗暴地扫描全局历史所有任务 `t.get('status') in {'blocked', 'failed'}`，只要历史库中存在失败任务就无条件当作活跃告警；未过滤已交付完成（`completed`）、归档（`archived`）或取消（`cancelled`）的工作流，也未过滤已被后续重试版本（`-rN` 或 `supersedes`）替代的中间失败记录。导致几天前已成功解决交付的任务（如 `impl-trace-core-1016-r3`）永久触发红点，产生“狼来了”假告警疲劳。
+2. **告警缺乏消警/已读机制（不可消除）**：前端直接以未读数量 `visibleAlerts().length > 0` 强行控制红点显隐，缺乏消警（Dismiss）与已读（Ack）状态持久化，用户即使已进入告警中心确认，红点也无法消除。
+3. **告警中心为纯文本半成品（零操作性）**：告警列表仅渲染极其简陋的三行静态 `<div>`，后端提取的失败原因（`reason`）被直接丢弃，整行无点击跳转，缺少“查看详情抽屉”、“前往工作流”、“查看终端现场”以及“忽略告警”的可操作闭环。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 告警判定脱离宿主生命周期，历史失败污染活跃态势 | 告警必须具备时效性（Timeliness）与未决性（Unresolved）；历史归档工作流的失败属于历史审计记录，不是当下需干预的告警 | 后端 `overview()` 必须校验宿主工作流状态（终态排除）及替代关系（`supersedes`/`superseded_by` 排除），只向活跃工作流的未决异常报警 |
+| 告警红点仅绑定数组长度，无消警状态机制 | 无法消除的红点会导致人类用户对提醒彻底脱敏，产生严重的操作疲劳与信任损耗 | 引入告警唯一键签名（`task_id:status:updated_at`）与本地消警持久化，支持单条与批量“已知晓/忽略”，消警后及时熄灭红点 |
+| 告警呈现缺少关键因果与可操作处置动作 | 告警三要素必须齐备：[发生了什么原因] + [影响了哪个工作流] + [可执行的动作]；无动作的告警等于噪音 | 必须完整呈现错误原因（`reason`）、元数据，并提供打开详情抽屉（`openTaskDrawer`）、工作流直达（`loadWorkflow`）、终端接入（`showPane`）及消除闭环 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_console_overview_alerts.py tests/test_console_frontend_syntax.py
+python3 -m compileall -q herdr services bin tests console
+git diff --check
+```
+
+证据：`console/runtime.py:overview` 增加终态工作流与替代者过滤；`presentation.js` 与 `shell.js` 增加消警机制与可操作卡片；新增 `tests/test_console_overview_alerts.py` 与 `tests/test_console_frontend_syntax.py::test_shell_alerts_render_and_actionability`。
+

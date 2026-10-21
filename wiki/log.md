@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-21] fix | 控制台告警生命周期感知、已完成工作流与替代任务过滤、可操作交互与前端消警闭环
+
+- 背景：
+  1. 用户访问控制台 `?view=alerts` 告警中心时，发现红点常驻不可消除；
+  2. `console/runtime.py:overview()` 粗暴将全局所有历史 `failed`/`blocked` 任务纳入告警，未过滤已终态归档的工作流，也未过滤已被后续重试版本（`-rN` 或 `supersedes`）替代的中间失败，导致已成功交付的历史任务（如 `impl-trace-core-1016-r3`）永久误报（P1）；
+  3. 告警中心呈现为无交互的纯文本 HTML 片段，关键失败原因（`reason`）被丢弃，整行无点击跳转，且无“查看任务”、“前往工作流”、“查看终端”与消警闭环（P2）。
+- 变更：
+  1. **告警生命周期与终态过滤**：在 `console/runtime.py:overview()` 中补充工作流状态与任务替代关系校验；排除终态工作流（`completed`、`archived`、`cancelled`）任务，排除已被 `superseded_by` 或后继任务 `supersedes` 声明替代的中间失败，补齐 `stage`、`stage_label`、时间戳与 `reason` 字段；
+  2. **消警机制与红点解耦**：在 `presentation.js` 与 `shell.js` 中新增告警签名与消警状态管理（`dismissAlert`、`dismissAllAlerts`、`clearDismissedAlerts`、`activeAlerts`），红点仅由未消警的活跃异常驱动；
+  3. **告警可操作性重构**：重构 `renderShellAlerts()`，展示显式失败/阻塞原因与执行者工位元数据，提供整行点击查看、详情抽屉（`openTaskDrawer`）、工作流直达（`loadWorkflow`）、终端接入（`showPane`）及单条/批量忽略动作。
+- 证据：
+  1. 新增 `tests/test_console_overview_alerts.py`（2 项全绿）；
+  2. 新增 `tests/test_console_frontend_syntax.py::test_shell_alerts_render_and_actionability` 前端 Node.js 沙盒测试（共 17 项全绿）；
+  3. 静态编译 `python3 -m compileall -q herdr services bin tests console` 与 `git diff --check` 零告警通过；
+  4. 验证真实项目数据 `runtime.overview()['alerts']` 成功由 6 条历史僵尸告警收敛至 0 条活跃告警，红点正确熄灭。
+
 ## [2026-10-21] fix | 调度稳定性、假死锁预防、候选新鲜度主动失效与僵尸义务收敛 (切片 2: P4, P5, P11)
 
 - 背景：
