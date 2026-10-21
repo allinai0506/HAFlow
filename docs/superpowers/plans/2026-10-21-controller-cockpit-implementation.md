@@ -543,6 +543,7 @@ git commit -m "feat(console): unify workflow controller cockpit"
 ### Task 5: 将分散入口收敛为驾驶舱快捷定位
 
 **Files:**
+- Modify: `console/static/console/scripts/controller-cockpit.js`（2026-10-21 用户授权：补齐目标定位、返回上下文与历史/缺失目标说明）
 - Modify: `console/static/console/scripts/flow-canvas.js`
 - Modify: `console/static/console/scripts/task-board.js`
 - Modify: `console/static/console/scripts/task-detail.js`
@@ -552,6 +553,8 @@ git commit -m "feat(console): unify workflow controller cockpit"
 - Test: `tests/test_console_cockpit_runtime.py`
 - Test: `tests/test_console_task_detail.py`
 - Test: `tests/test_workflow_graph_projection.py`
+- Test: `tests/test_console_standard_layout_tabs.py`（更新本任务明确验证的入口契约）
+- Test: `tests/test_console_workflow_latency.py`（更新 Task 4 新增 Cockpit sidecar 后的请求计数断言）
 
 **Interfaces:**
 - Consumes: `openControllerCockpit(target)` from Task 4
@@ -617,7 +620,7 @@ Expected: all commands exit 0.
 - [ ] **Step 7: Commit Task 5**
 
 ```bash
-git add console/static/console/scripts/flow-canvas.js console/static/console/scripts/task-board.js console/static/console/scripts/task-detail.js console/static/console/scripts/dashboard.js console/static/console/scripts/workspace.js console/static/console/scripts/sidebar-tabs.js tests/test_console_cockpit_runtime.py tests/test_console_task_detail.py tests/test_workflow_graph_projection.py
+git add console/static/console/scripts/controller-cockpit.js console/static/console/scripts/flow-canvas.js console/static/console/scripts/task-board.js console/static/console/scripts/task-detail.js console/static/console/scripts/dashboard.js console/static/console/scripts/workspace.js console/static/console/scripts/sidebar-tabs.js tests/test_console_cockpit_runtime.py tests/test_console_task_detail.py tests/test_workflow_graph_projection.py tests/test_console_standard_layout_tabs.py tests/test_console_workflow_latency.py
 git commit -m "refactor(console): centralize controller entrypoints"
 ```
 
