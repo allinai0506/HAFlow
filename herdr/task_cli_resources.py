@@ -117,12 +117,18 @@ def handle_launch_reconcile(args, *, get_store, release_agent_reservation):
 
     try:
         store = get_store()
+        execution_id = getattr(args, "execution_id", None)
+        if not execution_id:
+            execution_id = (store.get_workflow(args.workflow_id) or {}).get(
+                "execution_id"
+            )
         key = dispatch_identity(
             args.workflow_id,
             args.node,
             args.dispatch_role,
             args.candidate_sha or "",
             args.dispatch_round,
+            execution_id,
         )
         with workflow_launch_lock(store.db_path, args.workflow_id):
             intent = _latest_intent(store, key)
@@ -202,6 +208,11 @@ def handle_launch_reconcile(args, *, get_store, release_agent_reservation):
                     + shlex.quote(args.candidate_sha or "")
                     + " --dispatch-round "
                     + str(args.dispatch_round)
+                    + (
+                        " --execution-id " + shlex.quote(execution_id)
+                        if execution_id
+                        else ""
+                    )
                     + " --apply"
                 )
                 if report.get("resource_status") != "absent":
