@@ -172,6 +172,41 @@ Evidence:
 
 ---
 
+## 2b. 第二业务切片扩展实体（OEP-0003，v0.3.0）
+
+> 已合入 main（PR #308，2026-10-21）
+
+### 旁路诊断层
+
+| 实体 | 主键 | 说明 |
+|------|------|------|
+| `Finding`（TrajectoryFinding） | `finding_id`，去重键 `finding_key` | Observer 对 Agent 运行轨迹的分析结论；**是分析不是事实**，事实在 trajectory events |
+| `Observation` | `observation_id`（sha256 内容寻址） | 不可变证据快照（日志/事件/转录），由 ObservationStore 落盘 |
+
+关键约束：`finding_key` UNIQUE 保证同一问题集多次观测不重复插入；Finding 写入不得触发 Task 状态机转换。
+
+### 控制台交互层
+
+| 实体 | 主键 | 说明 |
+|------|------|------|
+| `ConsoleView` | `view_id = console:{session}:{workflow_id}` | 操作舱视图身份锚点；`allowed_actions` 由 `workflow_policy._validate_force_pass_params` 运行时计算 |
+
+### 经验枢纽层
+
+| 实体 | 主键 | 说明 |
+|------|------|------|
+| `ExperienceRule` | `experience_id` | Agent 执行教训经人工审核后的可版本化业务规则；status: `pending_review → approved/published/rejected/revoked` |
+
+### 新增动作契约
+
+| 动作 | 绑定 | 授权策略 |
+|------|------|----------|
+| `publish_finding` | `herdr.state_db.upsert_trajectory_finding` | `observer_service_policy` |
+| `promote_experience_rule` | `console_http_api:api_experience_review` | `experience_hub_policy` |
+| `revoke_experience_rule` | `console_http_api:api_experience_revoke` | `experience_hub_policy` |
+
+---
+
 ## 3. 核心领域不变量 (Invariants)
 
 1. `FACT` **Anchor Pane 永不执行业务**: 每个 Node Tab 内命名为 `"Anchor"` 的窗格专供 `herdr pane split` 分裂新工位使用，绝对不能被分配给 Task 作为工作窗格。

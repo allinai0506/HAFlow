@@ -7573,3 +7573,43 @@ pytest -q tests/test_execution_trace.py tests/test_execution_trace_api.py
 - `tests/test_execution_trace_api.py` — 真实 Console API 回归（含翻页）
 - `wiki/execution-trace.md` — 窗口补读与冻结归属事实
 - Issue #261 / #262（PR #260 评审 P2）；PR #291 评审 P2（按类型限流、运行身份精确匹配）
+
+
+---
+
+## [2026-10-21] 企业本体 Brownfield 探索与两切片扩展
+
+### 问题背景
+
+HAFlow 系统在两年演化中积累了大量隐式领域概念和 19 处命名/语义冲突（SC-001～SC-019），导致：前后端对"active"集合含义理解不一致（SC-008）、门禁状态与任务状态混淆（SC-012）、Console force-review 无版本保护（SC-019）等系统性风险。目标是通过 enterprise-ontology-as-code 技能建立可机械验证的企业本体资产层。
+
+### 经验教训
+
+| 教训 | 描述 | 适用场景 |
+|------|------|---------|
+| **先审计再建模** | audit_ontology.py 的 E/R/B/A 四项检查比 schema 验证更有价值——它强迫每个实体绑定真实代码符号，杜绝"纸上建模" | 任何 brownfield 本体探索 |
+| **finding_key 去重合约先于 finding_id** | Observer 的 `finding_key` 是业务去重键，`finding_id` 是存储主键；混淆会导致同一问题被多次写入。建模时必须把去重键作为"身份"而非主键 | 分析/诊断实体建模 |
+| **connector 类型决定 B 检查范围** | `herdr_core_lib`/`herdr_task_cli`/`herdr_factory_cli`/`herdr_controller_service` 四种 connector 会被 audit 机械校验；自定义 http_api 类型 connector 不在校验范围，适合外部服务（console_http_api） | 新增 binding 设计 |
+| **双向授权一次性闭环** | 新增 Action 时，必须同步在目标 Policy 的 `allowed_actions` 中添加，否则 A-not-listed/A-grant-not-cited 报 MAJOR 阻塞。单向登记是最常见的 YAML 错误 | 任何新增 action |
+| **INFO=2 是基线不是 0** | audit_ontology.py 的 C-coverage INFO 提示（CLI 子命令未绑定 action）是设计预留的 baseline noise，不需要归零，只需确保每次变更后 INFO 数量不上涨即可 | 持续集成验收 |
+| **Projection 只读无 actions** | 投影（projection）代表"可见什么"而非"能做什么"，actions 字段必须为空列表，否则触发 A-readonly-projection MAJOR | 任何新增 projection |
+
+### 操作规范
+
+```bash
+# 每次变更本体后必跑两条命令（顺序不变）
+python3 /path/to/ontology_validate.py ontology   # schema 验证
+python3 ontology/tests/audit_ontology.py .       # 机械审计（目标: MAJOR=0, MINOR=0）
+
+# 新增 action 的三步检查
+# 1. action 文件：authorization.policies 包含目标 policy id
+# 2. policy 文件：allowed_actions 包含该 action id
+# 3. binding connector 存在且 operation 可解析（herdr_core_lib 类型必须 python_op_resolves=True）
+```
+
+### 验证证据
+
+- `ontology/tests/audit_ontology.py`：机械审计脚本（E/R/B/A/T/C 六类检查）
+- PR #306（SC-010，commit 188ee05）：第一切片 19 项语义冲突 100% 收敛
+- PR #308（OEP-0003，commit 88c7fe1）：第二切片三子域扩展，MAJOR=0 持续绿灯
+- 本体版本：0.1.0（发现）→ 0.3.0（两切片完整扩展）
