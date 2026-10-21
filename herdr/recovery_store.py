@@ -49,9 +49,13 @@ def _workflow_snapshot(conn, workflow_id):
         raise ValueError('pinned configuration exceeds snapshot budget')
     config = json.loads(row['config_json'] or '{}')
     epoch = max(float(workflow.get('created_at') or 0), float(workflow.get('reopened_at') or 0))
-    frozen = conn.execute("SELECT id,payload_json FROM events WHERE workflow_id=? AND event_type='candidate_frozen' AND source='critical-path-scheduler' AND timestamp>=? ORDER BY id DESC LIMIT 1", (workflow_id, epoch)).fetchone()
-    workflow['candidate_sha'] = json.loads(frozen['payload_json']).get('candidate_sha') if frozen else None
-    workflow['candidate_episode_id'] = frozen['id'] if frozen else 0
+    latest = conn.execute("SELECT id,event_type,payload_json FROM events WHERE workflow_id=? AND event_type IN ('candidate_frozen','candidate_invalidated') AND source='critical-path-scheduler' AND timestamp>=? ORDER BY id DESC LIMIT 1", (workflow_id, epoch)).fetchone()
+    if latest and latest['event_type'] == 'candidate_frozen':
+        workflow['candidate_sha'] = json.loads(latest['payload_json']).get('candidate_sha')
+        workflow['candidate_episode_id'] = latest['id']
+    else:
+        workflow['candidate_sha'] = None
+        workflow['candidate_episode_id'] = 0
     workflow['config'] = config
     return workflow, config
 
@@ -237,6 +241,7 @@ def mark_started(db_path, operation_id, owner, step, now):
     with _transaction(db_path) as conn:
         current = _get(conn, operation_id)
         ensure_for_workflow(conn, current['workflow_id'], now)
+    with _transaction(db_path) as conn:
         _owned(conn, operation_id, owner, now)
         conn.execute('UPDATE workflow_recovery_operations SET started=1,detail_json=?,version=version+1,updated_at=? WHERE id=?', (json.dumps({'step': step}), now, operation_id))
         op = _get(conn, operation_id)
@@ -387,14 +392,15 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
         raise ValueError('future hold deadline required')
     with _transaction(db_path) as conn:
         original = _get(conn, operation_id)
-        if original['payload'].get('kind') == 'business_gate_wait':
-            raise ValueError('business gate waits resolve only after fresh acceptance evidence; relaunch the gate')
-        if original['version'] != expected_version:
-            raise ValueError('stale recovery version')
         ensure_for_workflow(conn, original['workflow_id'], now)
+    with _transaction(db_path) as conn:
         op = _get(conn, operation_id)
+        if op['payload'].get('kind') == 'business_gate_wait':
+            raise ValueError('business gate waits resolve only after fresh acceptance evidence; relaunch the gate')
+        if op['version'] != expected_version:
+            raise ValueError('stale recovery version')
         workflow, _, _ = _snapshot(conn, op['workflow_id'])
-        if op['version'] != expected_version or op['status'] in ('superseded', 'resolved', 'running') or workflow['status'] in ('closed', 'paused'):
+        if op['status'] in ('superseded', 'resolved', 'running') or workflow['status'] in ('closed', 'paused'):
             raise ValueError('stale recovery facts or inactive workflow')
         if action == 'retry' and ((op['payload'].get('status') == 'waiting_human' and op['payload'].get('reason') != 'finalize_escalated') or op['started']):
             raise ValueError('retry prerequisites unknown; delivery must be verified')

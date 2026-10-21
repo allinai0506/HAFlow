@@ -7669,3 +7669,31 @@ pytest -q -k finalize tests/
 ```
 
 证据：新增 `tests/test_slice1_gate_robustness.py`（4 项通过），覆盖 `gate: {}` 对称判定、业务验收同步落盘 verdict 文件、软件适配器识别重放特征以及 `git_finalize` 自动传参 `--allow-rebase`。既有 95 项门禁专项与 100 项 finalize 场景测试全量通过。
+
+## 183. 调度稳定性、假死锁预防、候选新鲜度主动失效与僵尸义务收敛（2026-10-21）
+
+### 问题背景
+
+在多 Agent 长周期自动化运行场景中，暴露出三项调度与恢复状态机深度缺陷：
+1. **P4 恢复事务假死锁**：`herdr/recovery_store.py` 中将 `ensure_for_workflow` 与前置条件校验（`op['version'] != expected_version` 或工作流状态校验）放在同一个事务中。当前置条件校验未通过抛出 `ValueError` 时，整个事务发生回滚，将 `ensure_for_workflow` 在数据库中推导和收敛的最新 obligation 事实和版本变更也一并回滚。这使得数据库恢复操作版本残留为旧值，外部调用方基于最新状态重试时再次触发旧校验回滚，系统陷入假死锁死循环。
+2. **P5 候选冻结缺少 reachability/freshness 检查**：`herdr/scheduler_facts.py` 的 `record_candidate_frozen` 仅进行简单的 SHA 格式和单工作流幂等（`prior == sha`）检查，未校验候选 commit 在项目 Git 仓库中的真实可达性（reachability）以及相对于目标基础分支 `base_branch`（如 `main`）的新鲜度（freshness）。当 main 分支前进时，候选实际上已过时，但系统仍盲目返回 `exists`，导致后续调度在过时提交上重复空转；应在检测到 main 前进时主动记录失效（`candidate_invalidated` 事件）并将候选置为过期失效状态。
+3. **P11 check-obligations 误报假阳性僵尸义务**：`herdr/task_cli_tasks.py` 的 `check_zombie_obligations` 仅检查单个任务自身的 `status == 'superseded' and replacement_pending and not superseded_by`，未能识别后继任务通过 `supersedes == t['task_id']` 声明的替代关系，也未能过滤已处于终态（`completed`, `failed`, `halted`, `closed`, `abandoned`）的工作流，导致收尾检查误报僵尸 obligation。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 事实推导与操作校验在同一事务中导致回滚副作用 | 事实收敛（ensure）代表只读推导出的权威客观事实，不得因单次操作决断失败而回滚抹除 | 将 `ensure_for_workflow` 独立事务提交，确保 obligation 状态持久化落盘，再执行操作的前置条件校验与状态变更 |
+| 候选冻结仅做单工作流幂等而脱离底层 Git 真实演进 | 状态机内的候选版本若与底层代码库 base 分支脱节，会导致调度在过时代码上空转 | 在 `record_candidate_frozen` 中增加 Git reachability 与 freshness 检查，检测到 base 前进时主动记录 `candidate_invalidated` 事实并失效过期候选 |
+| 义务检查仅看单向显式指针而忽略反向链接与工作流终态 | 任务替代关系往往由后继者在 launch 时通过 `--supersedes` 确立，终态工作流义务已被整体决断收尾 | `check_zombie_obligations` 与 `required_task_issues` 必须支持双向链路识别（`superseded_by` 或 `supersedes`），并忽略终态工作流内的遗留任务 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_slice2_scheduling_stability.py
+pytest -q tests/test_recovery_store.py
+pytest -q tests/test_scheduler_facts.py
+pytest -q tests/test_zombie_obligation_regression.py
+```
+
+证据：新增 `tests/test_slice2_scheduling_stability.py`（9 项全绿），覆盖 P4 decide/mark_started 事务解耦、P5 可达性拒绝与 main 前进候选失效、P11 替代者双向识别与终态工作流过滤。53 项相关专项测试 100% 通过。

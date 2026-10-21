@@ -90,7 +90,7 @@ def build_task_registry_handlers(dependencies):
         "list_tasks": partial(task_cli_tasks.list_tasks, deps={"load_tasks": common["load_tasks"]}),
         "check_zombie_obligations": partial(
             task_cli_tasks.check_zombie_obligations,
-            deps={"load_tasks": common["load_tasks"]},
+            deps={"load_tasks": common["load_tasks"], "get_store": dependencies.get("_get_store")},
         ),
     }
 

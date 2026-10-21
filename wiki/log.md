@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-21] fix | 调度稳定性、假死锁预防、候选新鲜度主动失效与僵尸义务收敛 (切片 2: P4, P5, P11)
+
+- 背景：
+  1. `herdr/recovery_store.py` 中将 `ensure_for_workflow` 与前置条件校验耦合在同一事务中，当前置条件检查失败触发回滚时，导致最新推导的 obligation 与版本变更被一同回滚，数据库残留旧版本导致假死锁循环（P4）；
+  2. `herdr/scheduler_facts.py` 的 `record_candidate_frozen` 仅进行内存/快照层比对，未校验候选 commit 在 Git 仓库的可达性与相对于目标 base 分支（`main`/`dev`）的新鲜度。当 base 前进时，已过时候选仍被判定为 `exists`，导致后续调度在脱节提交上空转（P5）；
+  3. `check_zombie_obligations` 与 `required_task_issues` 仅单向校验 `superseded_by`，未能识别后继任务通过 `supersedes` 显式确立的替代关系，且未过滤终态工作流（`completed`、`failed` 等），造成假阳性僵尸义务误报（P11）。
+- 变更：
+  1. **恢复事务与前置校验分离**：在 `herdr/recovery_store.py` 的 `decide_operation` 和 `mark_started` 中，将 `ensure_for_workflow` 剥离至独立的前置事务中提交，保证 obligation 事实收敛落盘，避免后续操作校验回滚造成事实抹除；
+  2. **候选可达性与基础分支新鲜度检查**：在 `herdr/scheduler_facts.py:record_candidate_frozen` 中增加 Git reachability 与相对于 `base_branch` 的 freshness 检查；检测到 base 分支前进时主动记录 `candidate_invalidated` 事实并返回 `invalidated`；`_workflow_snapshot` 同步识别失效事件并清除 `candidate_sha`；控制器检测到 base 前进主动触发候选失效，打断过时调度死循环；
+  3. **替代链路双向收敛与终态工作流过滤**：在 `herdr/task_cli_tasks.py:check_zombie_obligations` 与 `herdr/scheduler.py:required_task_issues` 中，补充对 `supersedes == task_id` 后继关系的识别；并在 `check_zombie_obligations` 中排除终态工作流（`completed`、`failed`、`halted`、`closed`、`abandoned`）的遗留任务。
+- 证据：
+  1. 新增 `tests/test_slice2_scheduling_stability.py`（9 项全绿）；
+  2. 调度与恢复相关专项测试 `tests/test_recovery_store.py`（25 项）、`tests/test_scheduler_facts.py`（9 项）、`tests/test_zombie_obligation_regression.py`（5 项）、`tests/test_slice1_gate_robustness.py`（5 项）共 53 项全绿通过；
+  3. 调度长集成测试 `tests/test_workflow_repair_contracts.py` 与 `test_control_convergence.py`（108 项）全绿通过；
+  4. 静态编译 `python3 -m compileall -q herdr services bin tests` 与 `git diff --check` 零告警通过。
+
 ## [2026-10-21] fix | 门禁判定口径对齐、业务验收同步 verdict 凭据与合法重放 finalize 收编 (切片 1: P1, P8, P3)
 
 - 背景：

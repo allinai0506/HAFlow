@@ -216,13 +216,41 @@ def check_zombie_obligations(data=None, *, deps):
     if data is None:
         data = load_tasks()
     tasks = data.get("tasks", []) if isinstance(data, dict) else data or []
+
+    terminal_statuses = {"completed", "failed", "halted", "closed", "abandoned"}
+    workflows_data = data.get("workflows", []) if isinstance(data, dict) else []
+    workflow_status_map = {
+        w.get("workflow_id"): w.get("status")
+        for w in workflows_data
+        if isinstance(w, dict) and w.get("workflow_id")
+    }
+    get_store = deps.get("get_store")
+    if get_store:
+        try:
+            store = get_store()
+            if store:
+                for w in store.list_workflows():
+                    if isinstance(w, dict) and w.get("workflow_id"):
+                        workflow_status_map[w["workflow_id"]] = w.get("status")
+        except Exception:
+            pass
+
+    superseded_targets = {
+        t.get("supersedes")
+        for t in tasks
+        if isinstance(t, dict) and t.get("supersedes")
+    }
+
     zombies = []
     for t in tasks:
         if isinstance(t, dict):
-            if (
-                t.get("status") == "superseded"
-                and t.get("replacement_pending")
-                and (not t.get("superseded_by"))
-            ):
-                zombies.append(t)
+            task_id = t.get("task_id")
+            if t.get("superseded_by") or (task_id and task_id in superseded_targets):
+                continue
+            if t.get("status") != "superseded" or not t.get("replacement_pending"):
+                continue
+            wf_id = t.get("workflow_id")
+            if wf_id and workflow_status_map.get(wf_id) in terminal_statuses:
+                continue
+            zombies.append(t)
     return zombies
