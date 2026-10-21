@@ -3279,3 +3279,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-017 状态从“未验证”更新为“已解决”。
 - Added `tests/test_task_add_overwrite_verification.py`：新增对老任务状态防护、版本号保护及重复注册拦截的端到端 CLI 回归测试（2/2 PASSED）。
 - Evidence：`herdr/task_cli_tasks.py:140-174`、`tests/test_task_add_overwrite_verification.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Refactor & Tests | 控制台 force-review 特权契约与 CAS 守卫闭环 (SC-019)
+
+- Updated `console/task_api.py:api_task_force_review`：
+  - 将控制台人工强制转入复审态（`agent_done`）显式收敛为受控特权流转契约 `console-force-review`（严格拒绝从 `completed`、`superseded` 等终态非法跃迁）；
+  - 增强并发安全与乐观锁守卫：支持可选的 `expected_version` 与 `expected_status` 校验，未传递时默认从当前任务事实提取，并在底层 `compare_and_set_task_transition` 独占事务内完成原子核验与流转，版本或状态不匹配时 fail-closed 拦截并发踩踏；
+  - 强化审计轨迹：透传操作人标识 `operator`（默认 `human_console`）与审核说明 `reason` 至同事务落库的权威 `task_transition` 审计事件载荷；
+  - 统一异常模型：捕获底层 `InvalidTransitionError` 与 `ValueError` 并转化为标准的 `RuntimeError`，由 Console HTTP 服务器统一返回可读错误。
+- Updated `wiki/task-lifecycle.md`：在任务生命周期章节增补 SC-019“控制台强制复审（force-review）特权契约与 CAS 守卫保证”条款。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-019 状态从“确认”更新为“已解决（已收敛至特权状态流转与 CAS 守卫闭环）”。
+- Added `tests/test_console_force_review_guard.py`：新增对入参空值校验、非法版本号校验、任务不存在处理、全部非终态合法流转、全部终态非法流转拦截、版本号 CAS 不匹配拦截、状态 CAS 不匹配拦截、操作员/原因审计落库及协调员通知异常隔离等 9 项专项回归测试（9/9 PASSED）。
+- Evidence：`console/task_api.py:266-350`、`herdr/transitions.py:84-87`、`tests/test_console_force_review_guard.py`、`tests/test_d1_privileged_transitions.py`、`ontology/tests/audit_ontology.py`。

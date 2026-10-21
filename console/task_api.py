@@ -2,6 +2,7 @@ import time
 from herdr import kernel as herdr_kernel
 from herdr import steering as herdr_steering
 from herdr import interaction_loop as herdr_interaction_loop
+from herdr.transitions import InvalidTransitionError
 from console import common, inventory, read_api, runtime, workflow_policy
 
 def api_task_steer(b):
@@ -264,8 +265,23 @@ def api_task_interaction_respond(b):
         }
 
 def api_task_force_review(b):
-    tid=str(b.get('task_id') or '').strip()
-    if not tid:raise RuntimeError('task_id 不能为空')
+    b = b or {}
+    tid = str(b.get('task_id') or '').strip()
+    if not tid:
+        raise RuntimeError('task_id 不能为空')
+    op = str(b.get('operator') or 'human_console').strip()
+    reason = str(b.get('reason') or 'console_force_review').strip()
+    exp_ver_raw = b.get('expected_version')
+    exp_ver = None
+    if exp_ver_raw is not None:
+        try:
+            exp_ver = int(exp_ver_raw)
+        except (ValueError, TypeError):
+            raise RuntimeError(f"无效的 expected_version: {exp_ver_raw}")
+    exp_status = b.get('expected_status')
+    if exp_status is not None:
+        exp_status = str(exp_status).strip()
+
     task = None
     store = None
     if hasattr(herdr_kernel, "get_state_store"):
@@ -280,21 +296,28 @@ def api_task_force_review(b):
             if t.get('task_id') == tid:
                 task = t
                 break
-        if not task: raise RuntimeError(f'未找到任务 {tid}')
+        if not task:
+            raise RuntimeError(f'未找到任务 {tid}')
         task['status'] = 'agent_done'
         task['updated_at'] = time.time()
         herdr_kernel.save_tasks_data(tdata)
     else:
         if hasattr(store, "compare_and_set_task_transition"):
-            res = store.compare_and_set_task_transition(
-                task_id=tid,
-                to_status="agent_done",
-                reason="console_force_review",
-                source="console-force-review",
-                intent="console-force-review",
-                expected_status=task.get("status"),
-                expected_version=task.get("version"),
-            )
+            target_expected_version = exp_ver if exp_ver is not None else task.get('version')
+            target_expected_status = exp_status if exp_status is not None else task.get('status')
+            try:
+                res = store.compare_and_set_task_transition(
+                    task_id=tid,
+                    to_status="agent_done",
+                    reason=reason,
+                    source="console-force-review",
+                    intent="console-force-review",
+                    metadata={"operator": op},
+                    expected_status=target_expected_status,
+                    expected_version=target_expected_version,
+                )
+            except (InvalidTransitionError, ValueError) as exc:
+                raise RuntimeError(f"任务状态流转失败: {exc}")
             if not res.get("ok", True):
                 raise RuntimeError(f"任务状态流转失败: {res.get('reason')}")
             task = store.get_task(tid) or task
@@ -305,8 +328,8 @@ def api_task_force_review(b):
             task['updated_at'] = time.time()
             store.save_task(task)
 
-    wid=task.get('workflow_id')
-    notified=False
+    wid = task.get('workflow_id')
+    notified = False
     if wid:
         wf = None
         if store:
@@ -315,14 +338,14 @@ def api_task_force_review(b):
             wdata = herdr_kernel.load_workflows_data()
             wf = wdata.get('workflows', {}).get(wid)
         if wf and wf.get('coordinator_pane_id'):
-            c=wf['coordinator_pane_id']
-            msg=f'''HERDR_TASK_FORCE_REVIEW\n\ntask_id: {tid}\nworkflow_id: {wid}\n\n总指挥已人工唤醒评审，请立即对工位产物进行复审验收。'''
+            c = wf['coordinator_pane_id']
+            msg = f'''HERDR_TASK_FORCE_REVIEW\n\ntask_id: {tid}\nworkflow_id: {wid}\n\n总指挥已人工唤醒评审，请立即对工位产物进行复审验收。'''
             try:
-                r=common.run(['herdr','agent','prompt',c,msg,'--wait','--timeout','10000'],15)
-                notified=(r.returncode==0)
+                r = common.run(['herdr', 'agent', 'prompt', c, msg, '--wait', '--timeout', '10000'], 15)
+                notified = (r.returncode == 0)
             except Exception:
                 pass
-    return {'task_id':tid,'status':'agent_done','notified':notified}
+    return {'task_id': tid, 'status': 'agent_done', 'notified': notified}
 
 def api_task_signoff(b):
     b = b or {}
