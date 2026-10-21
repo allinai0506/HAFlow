@@ -7791,3 +7791,51 @@ git diff --check
 ```
 
 证据：新增 `tests/test_node_gate_receipt_convergence.py`（12 项测试覆盖 P1-P12 全场景：空 dict 门禁、显式 gate:false、自定义 gate 正则对齐、working/failed 任务回执自愈、文件同步异常透出、权威 DB 事件投影恢复、陈旧 epoch/candidate 拒绝、幂等防重推推进）。全部 153 项核心与回归测试 100% 通过。
+
+---
+
+## 188. 沙箱护栏沿继承配置逃逸，反把开发者主仓锁死（2026-10-22）
+
+### 问题背景
+
+推送两个已完成的修复分支时，`git push` 被无条件拒绝：
+
+```text
+[GIT GUARD REJECT] Worker Agent is restricted to local sandbox testing only.
+Direct git push/PR from worker clone is disabled.
+```
+
+但该护栏按设计只应装进 worker 沙箱克隆（`services/herdr-worker.py#install_worker_sandbox_push_guard` 写入 `<clone>/.git/hooks`），且有 `tests/test_worker_push_guard.py` 断言其存在。实际它出现在**主仓库** `~/HAFlow/.git/hooks/pre-push`，于是主仓及其所有 linked worktree 一律无法推送——包括开发者本人，以及 wrapup 阶段「建立交付 PR」那一步。
+
+根因是一条**跨边界继承信道**：
+
+1. 主仓本地设了 `core.hooksPath = /Users/user/HAFlow/.git/hooks`（绝对路径，且与 git 默认位置相同，本身冗余）；
+2. worker 克隆是主仓的 CoW 副本，`herdr-worker.py:197-205` 还会显式把源仓的 `core.hooksPath` 传播给 clone，于是克隆**原样继承了这个绝对路径**；
+3. `install_worker_sandbox_push_guard` 只对**相对**路径做重定位（`if not custom_hooks.is_absolute(): custom_hooks = Path(clone) / custom_hooks`），绝对路径被当作「已经指向正确位置」直接写入——而这个「正确位置」是主仓库。
+
+证据链：主仓 `pre-push` 的 mtime 为 Oct 21 **23:24**，与 `wf-haflow-1021-01-cleanroom_review-auto-r2` 克隆的创建时间**同分钟**；两者 inode 不同（1213918188 / 1213966688），证明克隆自己有一份、主仓**也**被写了一份。
+
+**二阶后果更容易被忽略**：`core.hooksPath` 一旦设置，git 就**不再读** `.git/hooks`。所以在修复前，克隆自己那份护栏是**惰性的**——沙箱真正生效的 hook 是它与主仓共享的那一个。也就是说这个缺陷同时造成两个反向错误：主仓被锁死，而沙箱的有效防护并非它自己那份。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 沙箱边界按值的字面形式判定 | 「相对路径需要重定位、绝对路径无需处理」是把**语法形式**当成了**位置语义**。绝对路径恰恰是最容易逃逸的一种 | 沙箱写入必须对**解析后的真实路径**做包含性校验（`resolve()` + `is_relative_to(clone_root)`），而不是按相对/绝对分支 |
+| 继承配置是跨边界信道 | CoW 克隆继承源仓的全部 git config；任何「读配置再据此写文件」的逻辑都可能被继承值带到沙箱外 | 消费继承配置前必须判定它是否仍指向沙箱内；指向外部时要么重定位、要么显式失效，不能原样使用 |
+| 护栏有效性未被验证 | 既有测试写了护栏文件、也断言了文件存在，但 `core.hooksPath` 生效时那份文件根本不被 git 读取 | 沙箱护栏测试必须断言**行为**（真实 `git push` 被拒），不能只断言文件落盘；本次两条新用例都以 push 结果为准 |
+| 测试只覆盖了安全的那条分支 | 既有夹具把 `core.hooksPath` 设为相对值 `.task-hooks`，只走到重定位分支，继承绝对路径这一形态从未被覆盖 | 对「按输入形态分支」的逻辑，每种形态都要有反例；缺的那种往往正是生产里出现的那种 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_worker_push_guard.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：`install_worker_sandbox_push_guard` 改为对解析后的路径做沙箱包含性校验；逃逸时 `git config --unset core.hooksPath`，让 git 回落到已被护栏覆盖的 `<clone>/.git/hooks`，因此护栏既**不外泄**也**不失效**。新增 `test_push_guard_never_escapes_the_sandbox`（RED 精确复现生产缺陷：护栏被写进源仓）与 `test_push_guard_keeps_an_absolute_path_inside_the_sandbox`（沙箱内绝对路径仍按原样尊重），两者均断言真实 `git push` 被拒。受影响 23 个测试文件回归 **380 passed**。
+
+**遗留（已记录未修）**：`herdr-worker.py:197-205` 仍会把源仓 `core.hooksPath` 原样传播给独立克隆。该传播对相对路径仍有意义（保留项目自定义 hook），对绝对路径则由本次修复在护栏安装阶段失效化；是否应改为「传播时就重定位」属于克隆装配语义的单独决策，未在本轮夹带。
+
+**现场处置**：仅删除主仓泄漏的那一份 `~/HAFlow/.git/hooks/pre-push`（155 字节，内容已记录可原样恢复）；逐个确认 7 个 worker 克隆的护栏均保留（`GUARDED`），沙箱策略未受影响。未使用 `--no-verify` 绕过。
