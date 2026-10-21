@@ -20,7 +20,7 @@
 | SC-013 | 任务类型词表 | schema L53 历史版本称 explore/plan/code/test/review/docs | launch --task-type 取值 fix/feat/refactor/docs/test/chore/perf/ci；schema 与文档已同步校准，兼容别名自动映射为 docs/test，业务类型走 business_task_type | — | **已解决**（D4 落地） |
 | SC-014 | fix-loop 可作废集合 | controller 注释要求与矩阵“→ superseded”一致 | FIX_LOOP_SUPERSEDEABLE 已补齐 paused 与 interrupted，与 TASK_TRANSITIONS 完全对齐 | — | **已解决**（D5 落地） |
 | SC-015 | 门禁豁免守卫 | 控制台 force-pass 带 expected_version（console/control_api.py L409） | CLI 与 factory 的 force-pass 不带 expected_version（bin/herdr-factory L652-656）；bypass 亦不带 | — | 确认（控制台确认提示未核对） |
-| SC-016 | resume 目标 | 矩阵：paused 不可达 dispatched、blocked | bin/herdr-task L8000-8010 按 status_history 回退到 dispatched 或 blocked；set 对非法边的实际行为未验证 | — | 未验证 |
+| SC-016 | resume 目标 | 矩阵：paused 不可达 dispatched、blocked | `herdr/task_cli_workflow.py:resume_task` 显式守卫仅在最新来源为 `rework` 时恢复为 `rework`，其余来源（含 `dispatched`、`blocked`、`working`）均安全收敛恢复至 `working`；`TASK_TRANSITIONS["paused"]` 允许流转至 `working`/`rework`，经 `tests/test_resume_transition.py` 验证无非法边风险 | — | **已解决**（已验证安全收敛至 working/rework 合法子集） |
 | SC-017 | `herdr-task add` 覆盖写 | — | bin/herdr-task L1199-1203 与 state_db.py L1714-1731 的覆盖写可能回退并发状态（子代理取证） | — | 未验证 |
 | SC-018 | 越权状态变更拦截 | wiki/task-lifecycle.md L15：“任何越权状态变更将被 CLI 直接拦截” | 8 类状态机外写入路径，见 states/task_lifecycle.yaml 的 out_of_matrix_writers | — | **已裁决**（ADR-0005 / OEP-0002） |
 | SC-019 | 控制台 force-review | 控制台写路由用于人工复审 | console/task_api.py L266-290 直接设置 status=agent_done，无守卫、无事件 | — | 确认 |
@@ -36,4 +36,5 @@
 7. SC-010、SC-015、SC-019：把豁免与人工覆盖纳入权限模型，统一守卫，并为控制台写路由增加鉴权（代码变更）。
 8. SC-011、SC-012 已由 ADR-0006、ADR-0007 与 OEP-0002 裁决：工作流初始状态定案为 running（pending 为未装配/草稿态）；门禁解耦为 gate_spec 与 gate_verdict，DB 为调度第一事实源，文件为不可变快照。
 9. SC-013、SC-014 已解决：任务类型词表统一对齐为 CLI choices；补齐 fix-loop 可作废集合（D4、D5）。
-9. SC-018 已由 ADR-0005 与 OEP-0002 裁决：状态机外写入显式收敛为 privileged_transitions 特权流转契约，严禁直写 SQL/save_task 绕过网关。
+10. SC-016 已解决（已验证）：核查并验证 `resume_task` 防御性恢复逻辑，任务暂停恢复时仅在来源为 rework 时返回 rework，其余情况统一安全收敛为 working，完全遵循状态转移矩阵，专项测试 `tests/test_resume_transition.py`（6/6）全绿通过。
+11. SC-018 已由 ADR-0005 与 OEP-0002 裁决：状态机外写入显式收敛为 privileged_transitions 特权流转契约，严禁直写 SQL/save_task 绕过网关。

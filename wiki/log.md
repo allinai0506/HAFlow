@@ -3260,3 +3260,12 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-008 状态标记为“已解决”。
 - Added `tests/test_router_active_statuses_decoupling.py`：新增对两类集合定义、兼容别名、差集/交集正交关系及 `_active_agent_loads` 负载计算行为的专项回归测试。
 - Evidence：`herdr/agent_router.py`、`herdr/transitions.py`、`wiki/agent-routing-and-pools.md`、`wiki/task-lifecycle.md`、`tests/test_router_active_statuses_decoupling.py`、`ontology/tests/audit_ontology.py`。
+
+## [2026-10-21] Verify & Docs | 任务恢复目标状态收敛核查与闭环 (SC-016)
+
+- Verified & Documented `herdr/task_cli_workflow.py:resume_task`：核查任务从 `paused` 状态恢复执行时的确定性收敛规则。
+  - 针对历史关于“是否会回退到非法边 `dispatched` 或 `blocked`”的存疑，源码证实 `resume_task` 具备显式守卫——仅在最近一次来源为 `rework` 时恢复为 `rework`，其余历史来源（包括 `working`、`dispatched`、`blocked` 或无历史）均统一安全收敛恢复至 `working`；
+  - 该行为完全在 `TASK_TRANSITIONS["paused"]`（`{"working", "rework", "agent_done", "failed", "superseded", "interrupted"}`）合法转移子集内，消除了因非法边导致的暂停态卡死风险。
+- Updated `wiki/task-lifecycle.md`：在任务状态机章节补充 SC-016 恢复目标收敛规则与防卡死说明。
+- Updated `ontology/decisions/0003-semantic-conflicts.md`：将 SC-016 状态从“未验证”更新为“已解决（已验证）”。
+- Evidence：`herdr/task_cli_workflow.py:382-405`、`tests/test_resume_transition.py`（6/6 PASSED）、`ontology/tests/audit_ontology.py`。

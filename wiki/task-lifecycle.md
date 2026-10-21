@@ -93,6 +93,13 @@ Evidence:
    - 业务语义：表示 Agent 工位与任务排队容量的占用情况（用于路由负载均衡与 Least Loaded 选人）。它包含 `pending`（已指派给 Agent 的待处理任务占用了该 Agent 的排队并发配额），不包含 `paused` 与 `interrupted`（任务已休眠停止执行，不消耗 Agent 活跃执行算力）。
 3. **架构解耦原则**：“同名不等于同义”。生命周期管理关注管线进展（Pipeline Active），路由调度关注工位容量（Capacity Occupied），二者正交，禁止混用。
 
+`FACT` **任务恢复（resume）目标收敛规则（SC-016）**：
+任务处于 `paused` 状态时，执行 `herdr-task resume <task_id>` 的目标状态严格收敛至状态机合法边：
+- `TASK_TRANSITIONS["paused"]` 允许流转的目标包括 `working` 与 `rework`，但**严格禁止**直接流转到 `dispatched` 或 `blocked`；
+- `herdr/task_cli_workflow.py:resume_task` 仅在任务最新暂停来源为 `rework` 时将其恢复为 `rework`；若最新来源为 `working`、`dispatched`、`blocked` 或无历史，均统一安全收敛恢复至 `working`（进入工位继续执行）；
+- 该防御性收敛杜绝了从 `dispatched` 或 `blocked` 暂停的任务在恢复时产生非法状态转移（`Illegal transition: paused -> dispatched/blocked`），确保任务不会被卡死在暂停态。
+- 证据链：`herdr/task_cli_workflow.py:395-405`、`tests/test_resume_transition.py`。
+
 `FACT` 当前内循环耗尽的blocked是等待仲裁的持久事实，Agent working/idle/done不能代替明确恢复决策。实时事件保留该状态；重启在已知运行信号下恢复仲裁队列。最新blocked转换reason优先于可遗留的sentinel_reason；历史缺失时保留legacy行为。证据：`tests/test_inner_loop_arbitration_recovery.py`。旧屏幕跨恢复epoch（C03c）仍单独待修。仲裁卡及人工升级提示使用现有合法blocked→working命令，不增状态边或force；真实CLI参数执行回归见`tests/test_blocked_recovery_command_contract.py`（C30）。
 
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop
