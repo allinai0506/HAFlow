@@ -3436,4 +3436,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 逃逸时 `--unset` 克隆的 `core.hooksPath`，让 git 回落到已被护栏覆盖的 `<clone>/.git/hooks`：护栏既不外泄也不失效。修复前 `core.hooksPath` 生效会让克隆自己那份护栏成为惰性文件，沙箱真正生效的是与主仓共享的那一个——同一缺陷造成两个反向错误。
 - 测试从「断言文件落盘」升级为「断言真实 push 被拒」；既有夹具只覆盖相对路径 `.task-hooks`，继承绝对路径这一形态首次被覆盖（RED 精确复现生产缺陷）。
 - 遗留已记录：`herdr-worker.py:197-205` 仍原样传播源仓 `core.hooksPath`，绝对路径情形由本次修复在护栏安装阶段失效化；是否改为传播时重定位属克隆装配语义的单独决策。
-- Evidence：`tests/test_worker_push_guard.py`（新增 2 例）、`services/herdr-worker.py`；受影响 23 个测试文件回归 `380 passed`；`docs/lessons/lessons-learned.md` §188。
+- Evidence：`tests/test_worker_push_guard.py`（新增 2 例）、`services/herdr-worker.py`；受影响 23 个测试文件回归 `380 passed`；`docs/lessons/lessons-learned.md` §189。
