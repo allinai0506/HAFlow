@@ -88,6 +88,8 @@ def add_workflow_parsers(sub):
     bypass_gate_cmd.add_argument("task_id", help="目标任务 ID")
     bypass_gate_cmd.add_argument("--reason", required=True, help="门禁豁免原因（必填审计凭据）")
     bypass_gate_cmd.add_argument("--operator", default="human", help="操作人标识（默认 human）")
+    bypass_gate_cmd.add_argument("--token", "--operator-token", dest="token", default=None, help="操作人凭据令牌 (HMAC / Bearer Token)")
+    bypass_gate_cmd.add_argument("--credentials", "--operator-credentials", dest="credentials_path", default=None, help="操作人凭据文件路径")
     bypass_gate_cmd.add_argument("--note", default=None, help="附加说明")
     bypass_gate_cmd.add_argument("--expected-version", type=int, default=None, help="目标任务期望版本号 (CAS 乐观锁)")
     bypass_gate_cmd.add_argument("--json", action="store_true", help="以 JSON 格式输出")

@@ -31,7 +31,7 @@ def _resolve_target_node(payload):
     return next(iter(unique_vals)) if unique_vals else ""
 
 
-def _validate_force_pass_params(payload, wid, wf=None, task=None):
+def _validate_force_pass_params(payload, wid, wf=None, task=None, db_path=None):
     """Unified validation for manual gate force-pass requests.
 
     Shared across /api/controller/execute-action, /api/kernel/force-pass, and /api/task/signoff.
@@ -99,9 +99,25 @@ def _validate_force_pass_params(payload, wid, wf=None, task=None):
     raw_op = payload.get('operator')
     if raw_op is None and 'operator' not in payload:
         raw_op = 'human'
-    from herdr.transitions import validate_operator, InvalidOperatorError
+    token = payload.get('auth_token') or payload.get('token') or payload.get('operator_token')
+    credentials_path = payload.get('credentials_path') or payload.get('operator_credentials')
+    from herdr.operator_auth import OperatorAuthError, authenticate_and_authorize_operator
+    from herdr.transitions import InvalidOperatorError, validate_operator
     try:
         op = validate_operator(raw_op)
-    except (InvalidOperatorError, ValueError) as exc:
+        principal = authenticate_and_authorize_operator(
+            operator_id=op,
+            action="force_pass_gate",
+            token=token,
+            credentials_path=credentials_path,
+            task=task,
+            db_path=db_path,
+        )
+        op = principal.operator_id
+    except InvalidOperatorError as exc:
+        raise RuntimeError(f"无效的操作人标识: {exc}")
+    except OperatorAuthError as exc:
+        raise RuntimeError(f"操作人凭据或能力鉴权失败: {exc}")
+    except (ValueError, RuntimeError) as exc:
         raise RuntimeError(f"无效的操作人标识: {exc}")
     return gate, reason, op

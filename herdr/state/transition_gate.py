@@ -365,10 +365,25 @@ def force_pass_gate(
     task_id: Optional[str] = None,
     expected_pane_id: Optional[str] = None,
     expected_task_versions: Optional[Dict[str, int]] = None,
+    token: Optional[str] = None,
+    credentials_path: Optional[str] = None,
+    strict_auth: Optional[bool] = None,
+    secret: Optional[str] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Atomically check and force-pass a gate node within a single immediate transaction."""
-    from herdr.transitions import validate_operator
-    operator = validate_operator(operator)
+    from herdr.operator_auth import authenticate_and_authorize_operator
+    principal = authenticate_and_authorize_operator(
+        operator_id=operator,
+        action="force_pass_gate",
+        token=token,
+        credentials_path=credentials_path,
+        task=None,
+        db_path=db_path,
+        strict_auth=strict_auth,
+        secret=secret,
+    )
+    operator = principal.operator_id
     should_close = False
     if conn is None:
         conn = _facade().get_db_connection(db_path)
@@ -505,6 +520,9 @@ def force_pass_gate(
             "verdict": "pass",
             "note": note,
             "operator": operator,
+            "role": principal.role,
+            "authenticated": principal.authenticated,
+            "auth_method": principal.auth_method,
             "timestamp": now,
         }
         if task_id:

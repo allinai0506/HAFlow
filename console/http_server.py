@@ -294,7 +294,10 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/agent':return self.send_json(200,workflow_api.set_agent_override(str(b['workflow_id']),str(b.get('agent') or 'auto')))
             if p=='/api/workflow/candidate':return self.send_json(200,workflow_api.create_candidate(str(b['workflow_id'])))
             if p=='/api/workflow/advance':return self.send_json(200,workflow_api.manual_advance(str(b['workflow_id'])))
-            if p=='/api/task/force-review':return self.send_json(200,task_api.api_task_force_review(b))
+            if p=='/api/task/force-review':
+                b = b or {}
+                b.setdefault('auth_token', self.get_auth_token())
+                return self.send_json(200,task_api.api_task_force_review(b))
             if p=='/api/workflow/retry-advance':return self.send_json(200,control_api.api_workflow_retry_advance(b))
             if p=='/api/task/coordinator':return self.send_json(200,workflow_api.ask_coordinator(str(b['task_id'])))
             if p=='/api/task/steer':return self.send_json(200,task_api.api_task_steer(b))
@@ -305,7 +308,10 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/kernel/resume':return self.send_json(200,control_api.api_kernel_resume(b))
             if p=='/api/kernel/step':return self.send_json(200,control_api.api_kernel_step(b))
             if p=='/api/kernel/rollback':return self.send_json(200,control_api.api_kernel_rollback(b))
-            if p=='/api/kernel/force-pass':return self.send_json(200,control_api.api_kernel_force_pass(b))
+            if p=='/api/kernel/force-pass':
+                b = b or {}
+                b.setdefault('auth_token', self.get_auth_token())
+                return self.send_json(200,control_api.api_kernel_force_pass(b))
             if p=='/api/kernel/checkpoint':return self.send_json(200,control_api.api_kernel_checkpoint_create(b))
             if p=='/api/kernel/checkpoint/restore':return self.send_json(200,control_api.api_kernel_checkpoint_restore(b))
             if p=='/api/controller/execute-action':return self.send_json(200,control_api.api_controller_execute_action(b))

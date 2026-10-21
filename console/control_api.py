@@ -62,6 +62,8 @@ def api_kernel_force_pass(b):
     exp_ver = b.get('expected_version')
     exp_task_vers = b.get('expected_task_versions')
     exp_pane = str(b.get('expected_pane_id') or b.get('pane_id') or '').strip()
+    token = b.get('auth_token') or b.get('token') or b.get('operator_token')
+    credentials_path = b.get('credentials_path') or b.get('operator_credentials')
 
     return herdr_kernel.force_pass_gate(
         wid,
@@ -72,6 +74,8 @@ def api_kernel_force_pass(b):
         task_id=task_id or None,
         expected_pane_id=exp_pane or None,
         expected_task_versions=exp_task_vers,
+        token=token,
+        credentials_path=credentials_path,
     )
 
 def api_kernel_checkpoint_create(b):

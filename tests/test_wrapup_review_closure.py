@@ -1490,7 +1490,7 @@ def test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_ad
 
     # Negative: bypass must fail closed when receipt was bound to earlier head
     with pytest.raises(ValueError, match=r"\[REVIEW CLOSURE REQUIRED\]"):
-        kernel.bypass_task_gate(task_id, reason="Emergency bypass", operator="lead-op", store=scene.store)
+        kernel.bypass_task_gate(task_id, reason="Emergency bypass", operator="lead-op", token="token-lead-secret", store=scene.store)
 
     # Status must still be blocked, not marked completed!
     assert scene.store.get_task(task_id)["status"] == "blocked"
@@ -1506,7 +1506,7 @@ def test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_ad
     )
 
     # Now bypass_task_gate must succeed, update under the clone lock, and consume the atomic head guard
-    res = kernel.bypass_task_gate(task_id, reason="Legitimate bypass on matching head", operator="lead-op", store=scene.store)
+    res = kernel.bypass_task_gate(task_id, reason="Legitimate bypass on matching head", operator="lead-op", token="token-lead-secret", store=scene.store)
     assert res["status"] == "completed"
     assert scene.store.get_task(task_id)["status"] == "completed"
 

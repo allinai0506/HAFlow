@@ -361,11 +361,33 @@ def force_pass_gate(
     task_id: Optional[str] = None,
     expected_pane_id: Optional[str] = None,
     expected_task_versions: Optional[Dict[str, int]] = None,
+    token: Optional[str] = None,
+    credentials_path: Optional[str] = None,
+    strict_auth: Optional[bool] = None,
+    secret: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Forcibly mark a gate node verdict as passed/approved with an audit note."""
-    from .transitions import validate_operator
-    operator = validate_operator(operator)
     s = _get_store(store)
+    from .operator_auth import authenticate_and_authorize_operator
+    target_task = None
+    if task_id:
+        try:
+            target_task = s.get_task(task_id) if hasattr(s, "get_task") else None
+        except Exception:
+            target_task = None
+
+    principal = authenticate_and_authorize_operator(
+        operator_id=operator,
+        action="force_pass_gate",
+        token=token,
+        credentials_path=credentials_path,
+        task=target_task,
+        store=s,
+        strict_auth=strict_auth,
+        secret=secret,
+    )
+    operator = principal.operator_id
+
     if hasattr(s, "force_pass_gate"):
         res = s.force_pass_gate(
             workflow_id=workflow_id,
@@ -376,6 +398,10 @@ def force_pass_gate(
             task_id=task_id,
             expected_pane_id=expected_pane_id,
             expected_task_versions=expected_task_versions,
+            token=token,
+            credentials_path=credentials_path,
+            strict_auth=strict_auth,
+            secret=secret,
         )
     else:
         tasks = s.list_tasks(workflow_id=workflow_id)
@@ -443,6 +469,9 @@ def force_pass_gate(
                 "verdict": "pass",
                 "note": note,
                 "operator": operator,
+                "role": principal.role,
+                "authenticated": principal.authenticated,
+                "auth_method": principal.auth_method,
                 "timestamp": now,
             }
             if task_id:
@@ -724,6 +753,10 @@ def bypass_task_gate(
     note: Optional[str] = None,
     store: Optional[StateStore] = None,
     expected_version: Optional[int] = None,
+    token: Optional[str] = None,
+    credentials_path: Optional[str] = None,
+    strict_auth: Optional[bool] = None,
+    secret: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Universal human-in-the-loop gate bypass.
 
@@ -741,13 +774,23 @@ def bypass_task_gate(
     if not cleaned_reason:
         raise ValueError("Gate bypass reason must be provided")
 
-    from .transitions import validate_operator
-    operator = validate_operator(operator)
-
     s = _get_store(store)
     task = s.get_task(task_id)
     if not task:
         raise ValueError(f"Task '{task_id}' not found")
+
+    from .operator_auth import authenticate_and_authorize_operator
+    principal = authenticate_and_authorize_operator(
+        operator_id=operator,
+        action="bypass_gate",
+        token=token,
+        credentials_path=credentials_path,
+        task=task,
+        store=s,
+        strict_auth=strict_auth,
+        secret=secret,
+    )
+    operator = principal.operator_id
 
     if expected_version is not None and task.get("version") != expected_version:
         raise ValueError(
@@ -775,6 +818,9 @@ def bypass_task_gate(
         "previous_note": previous_note,
         "reason": cleaned_reason,
         "operator": operator,
+        "role": principal.role,
+        "authenticated": principal.authenticated,
+        "auth_method": principal.auth_method,
         "note": note,
         "timestamp": now,
         "bypassed_at": datetime.now(timezone.utc).isoformat(),

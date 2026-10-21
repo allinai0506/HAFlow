@@ -304,6 +304,7 @@ class StateStore(ABC):
         task_id: Optional[str] = None,
         expected_pane_id: Optional[str] = None,
         expected_task_versions: Optional[Dict[str, int]] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """Atomically force-pass a gate node within a single database transaction."""
         pass
@@ -909,6 +910,11 @@ class SQLiteStateStore(StateStore):
         task_id: Optional[str] = None,
         expected_pane_id: Optional[str] = None,
         expected_task_versions: Optional[Dict[str, int]] = None,
+        token: Optional[str] = None,
+        credentials_path: Optional[str] = None,
+        strict_auth: Optional[bool] = None,
+        secret: Optional[str] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         return state_db.force_pass_gate(
             workflow_id=workflow_id,
@@ -920,6 +926,11 @@ class SQLiteStateStore(StateStore):
             task_id=task_id,
             expected_pane_id=expected_pane_id,
             expected_task_versions=expected_task_versions,
+            token=token,
+            credentials_path=credentials_path,
+            strict_auth=strict_auth,
+            secret=secret,
+            **kwargs,
         )
 
     # Steering

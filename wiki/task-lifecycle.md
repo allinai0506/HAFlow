@@ -143,6 +143,21 @@ Evidence:
      - **CLI 门禁命令**：`bin/herdr-task bypass-gate` 与 `bin/herdr-factory force-pass` 透传 `--operator`，并在非法输入时以非零状态码 fail-closed 终止。
 - 证据链：`herdr/transitions.py:validate_operator`、`herdr/kernel.py:force_pass_gate`、`herdr/kernel.py:bypass_task_gate`、`herdr/state_db.py:force_pass_gate`、`console/workflow_policy.py:_validate_force_pass_params`、`console/task_api.py:api_task_force_review`、`tests/test_gate_exemption_operator_audit.py`。
 
+`FACT` **门禁豁免企业级凭据鉴权与主体能力绑定（Issue #307，2026-10-21）**：
+- 解决 PR #306 Codex 审查指出之纯逻辑语法校验无法防止无凭据伪装特权身份的缺陷，建立端到端主体认证与能力授权：
+  1. **身份认证 (Authentication)**：
+     - 支持经签名的 HMAC Token（`haflow_v1.<payload>.<signature>`）与服务端持久化凭据（`state_db.get_user_token(operator, "operator"|"gate_bypass")`）；
+     - 显式呈现原则：凭据只能来自显式调用参数（`token` / `--token` / `--operator-token`）、凭据文件（`credentials_path` / `--credentials` / `--operator-credentials`）、环境变量（`HERDR_OPERATOR_TOKEN` / `HERDR_OPERATOR_CREDENTIALS`）或 HTTP 标头（`Authorization: Bearer <token>` / `X-HAFlow-Token`）；
+     - 凭据文件严禁位于 worker 克隆目录或项目工作区内，阻断本地伪造；
+  2. **能力授权 (Authorization)**：
+     - 在 `ontology/policies/gate_bypass_policy.yaml` 推进策略生命周期至 `active`，设置 `roles_implemented: true`；
+     - 严格校验操作人具备 `human_operator`（或特权管理员）角色及目标操作 Capability（`bypass_gate`、`force_pass_gate`、`force_review`）；
+  3. **防伪装阻断 (Anti-impersonation)**：
+     - 严禁工位 Agent 自放行（`task.agent == operator` 立即以 `OperatorImpersonationError` 阻断）；
+     - 服务端已注册操作人未提供匹配凭证时坚决拒绝（阻断借用合法操作员名称伪装）；
+     - 严格模式或策略生效下，未携带有效凭据的特权操作一律 fail-closed。
+- 证据链：`herdr/operator_auth.py:authenticate_and_authorize_operator`、`herdr/kernel.py:bypass_task_gate`、`herdr/kernel.py:force_pass_gate`、`herdr/state_db.py:force_pass_gate`、`console/workflow_policy.py:_validate_force_pass_params`、`console/task_api.py:api_task_force_review`、`bin/herdr-task bypass-gate`、`bin/herdr-factory force-pass`、`ontology/policies/gate_bypass_policy.yaml`、`tests/test_gate_auth_and_capability.py`。
+
 `FACT` 当前内循环耗尽的blocked是等待仲裁的持久事实，Agent working/idle/done不能代替明确恢复决策。实时事件保留该状态；重启在已知运行信号下恢复仲裁队列。最新blocked转换reason优先于可遗留的sentinel_reason；历史缺失时保留legacy行为。证据：`tests/test_inner_loop_arbitration_recovery.py`。旧屏幕跨恢复epoch（C03c）仍单独待修。仲裁卡及人工升级提示使用现有合法blocked→working命令，不增状态边或force；真实CLI参数执行回归见`tests/test_blocked_recovery_command_contract.py`（C30）。
 
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop

@@ -272,10 +272,24 @@ def api_task_force_review(b):
     raw_op = b.get('operator')
     if raw_op is None and 'operator' not in b:
         raw_op = 'human_console'
+    token = b.get('auth_token') or b.get('token') or b.get('operator_token')
+    credentials_path = b.get('credentials_path') or b.get('operator_credentials')
     from herdr.transitions import validate_operator, InvalidOperatorError
+    from herdr.operator_auth import authenticate_and_authorize_operator, OperatorAuthError
     try:
         op = validate_operator(raw_op)
-    except (InvalidOperatorError, ValueError) as exc:
+        principal = authenticate_and_authorize_operator(
+            operator_id=op,
+            action="force_review",
+            token=token,
+            credentials_path=credentials_path,
+        )
+        op = principal.operator_id
+    except InvalidOperatorError as exc:
+        raise RuntimeError(f"无效的操作人标识: {exc}")
+    except OperatorAuthError as exc:
+        raise RuntimeError(f"操作人凭据或能力鉴权失败: {exc}")
+    except (ValueError, Exception) as exc:
         raise RuntimeError(f"无效的操作人标识: {exc}")
     reason = str(b.get('reason') or 'console_force_review').strip()
     exp_ver_raw = b.get('expected_version')

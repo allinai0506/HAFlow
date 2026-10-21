@@ -24,6 +24,30 @@
   3. 静态编译 `python3 -m compileall -q herdr services bin tests console` 与 `git diff --check` 零告警通过；
   4. 验证真实项目数据 `runtime.overview()['alerts']` 成功由 6 条历史僵尸告警收敛至 0 条活跃告警，红点正确熄灭。
 
+## [2026-10-21] feat | 门禁豁免与特权操作接入企业级凭据鉴权与主体能力绑定 (Issue #307)
+
+- 背景：
+  1. 在 PR #306 (SC-010) 中，已确立门禁人工放行与强制复审中 operator 的基础格式规范、非空校验、注入/遍历字符拦截以及匿名占位符阻断（`herdr/transitions.py:validate_operator`），消除了自由无审计字符串的盲区；
+  2. GitHub Codex 自动化评审在 PR #306 中指出关键 P1 缺陷：`validate_operator` 仅做语法格式校验，未对主体身份进行签名凭据核验；非可信本地进程或 Agent 可伪造 `lead_admin` 等合法格式操作人标识并获得带假名的豁免回执；CLI、内核与 Web 控制台特权路由均未接入凭据鉴权；策略 `gate_bypass_policy.yaml` 仍声明未实现角色且未阻断 Agent，未能达成归属性审计。
+- 变更：
+  1. **统一操作人鉴权与授权引擎 (`herdr/operator_auth.py`)**：
+     - 实现 `issue_operator_hmac_token` 与 `verify_operator_hmac_token`：支持分布式与企业级防篡改防伪装签名凭据（`haflow_v1.<payload>.<signature>`），支持有效期与签发主体校验；
+     - 整合 `state_db.get_user_token(operator, "operator"|"gate_bypass")`：单源权威支持持久化企业操作人令牌，使用 `hmac.compare_digest` 恒定时间防时序攻击；
+     - 遵循显式呈现与环境隔离原则：严格拦截工位克隆及工作区目录内的凭据文件遍历伪造（Lesson §175）；
+     - 实现主体能力校验与防伪装阻断：严禁工位 Agent 伪造主体自放行（`task.agent == operator` 立即阻断）；要求特权操作人必须具备 `human_operator`（或特权管理员）角色及对应 Capability 授权；
+  2. **核心门禁特权写入与 Web 控制台全链路接入**：
+     - `herdr/kernel.py`：`bypass_task_gate` 与 `force_pass_gate` 接入 `authenticate_and_authorize_operator`，将认证状态（`authenticated`）、角色（`role`）与凭据类型（`auth_method`）透传至放行回执、工作流覆盖与审计轨迹；
+     - `herdr/state/transition_gate.py`：在底层原子放行事务中接入操作人鉴权并绑定审计事实；
+     - `console/workflow_policy.py` & `console/task_api.py`：Web 控制台在 `_validate_force_pass_params` 与 `api_task_force_review` 中接入鉴权，支持透传 HTTP Bearer Token / Header Token / Payload Token；
+     - `bin/herdr-task bypass-gate` & `bin/herdr-factory force-pass`：CLI 子命令新增 `--token` (`--operator-token`) 与 `--credentials` (`--operator-credentials`) 显式凭据参数；
+  3. **本体资产推进至 Active**：
+     - `ontology/policies/gate_bypass_policy.yaml`：推进策略生命周期至 `lifecycle: active`，标记 `roles_implemented: true`，明确主体为具备有效凭据与对应 Capability 授权的 `human_operator`，并明确 `agent_execution.mode: forbidden` 严禁 Agent 冒用；
+     - `ontology/actions/bypass_gate.yaml` 与 `ontology/actions/force_pass_gate.yaml`：补充 `token` 与 `credentials_path` 入参。
+- 证据：
+  1. 新增 `tests/test_gate_auth_and_capability.py` 涵盖 HMAC 签名校验、State DB 鉴权、能力授权、防伪装阻断、内核流转、控制台守卫与 CLI 命令行等 20 项专项测试（100% 通过）；
+  2. 既有门禁操作人规范专项 `tests/test_gate_exemption_operator_audit.py`（18 项 / 85 subtest）、版本乐观锁 `tests/test_gate_exemption_version_guard.py`（6 项）与 wrapup review-closure 全套 58 项测试全量通过；
+  3. 编译检查 `python3 -m compileall -q herdr services bin tests` 零告警通过；`git diff --check` 格式合规。
+
 ## [2026-10-21] fix | 调度稳定性、假死锁预防、候选新鲜度主动失效与僵尸义务收敛 (切片 2: P4, P5, P11)
 
 - 背景：

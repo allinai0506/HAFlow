@@ -657,6 +657,8 @@ def force_pass_command(
     expected_version=None,
     task_id=None,
     expected_task_versions=None,
+    token=None,
+    credentials_path=None,
 ):
     try:
         exp_task_vers = None
@@ -680,6 +682,8 @@ def force_pass_command(
             expected_version=expected_version,
             task_id=task_id,
             expected_task_versions=exp_task_vers,
+            token=token,
+            credentials_path=credentials_path,
         )
         print(f"Gate {gate_node_id} for workflow {workflow_id} marked as passed.")
         print(f"Updated tasks: {', '.join(res.get('updated_tasks', [])) or 'none'}")
@@ -897,6 +901,8 @@ def main():
     fp_cmd.add_argument("gate_node_id")
     fp_cmd.add_argument("--note", default="human forced pass", help="审计说明")
     fp_cmd.add_argument("--operator", default="human", help="操作人标识")
+    fp_cmd.add_argument("--token", "--operator-token", dest="token", default=None, help="操作人凭据令牌")
+    fp_cmd.add_argument("--credentials", "--operator-credentials", dest="credentials_path", default=None, help="操作人凭据文件路径")
     fp_cmd.add_argument("--task-id", default=None, help="目标门禁任务标识 (可选，指定具体放行单任务)")
     fp_cmd.add_argument("--expected-version", type=int, default=None, help="目标门禁任务期望版本号 (CAS 乐观锁)")
     fp_cmd.add_argument("--expected-task-versions", default=None, help="多任务节点期望版本映射 JSON (例如 '{\"task-1\": 1}')")
@@ -990,6 +996,8 @@ def main():
             expected_version=getattr(args, "expected_version", None),
             task_id=getattr(args, "task_id", None),
             expected_task_versions=getattr(args, "expected_task_versions", None),
+            token=getattr(args, "token", None),
+            credentials_path=getattr(args, "credentials_path", None),
         ))
 
     if args.command == "checkpoint":

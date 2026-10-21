@@ -330,6 +330,8 @@ def main(argv=None, *, handlers):
             note=getattr(args, "note", None),
             as_json=getattr(args, "json", False),
             expected_version=getattr(args, "expected_version", None),
+            token=getattr(args, "token", None),
+            credentials_path=getattr(args, "credentials_path", None),
         )
     elif args.command == "stage-status":
         stage_status(args.workflow_id, args.stage)
