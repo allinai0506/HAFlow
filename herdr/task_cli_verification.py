@@ -406,6 +406,15 @@ def _gate_verdict_file_candidates(task):
             else (Path.home() / ".herdr-controller" / "gate-verdicts")
         )
         candidates.append(str(vdir / f"{task_id}.json"))
+        try:
+            from herdr.state_store import get_state_store
+            from herdr.task_checkpoint import project_gate_verdict_from_business_acceptance
+            store = get_state_store()
+            restored = project_gate_verdict_from_business_acceptance(store, task)
+            if restored and restored not in candidates:
+                candidates.insert(0, restored)
+        except Exception:
+            pass
 
     clone_path = task.get("clone_path")
     if clone_path:

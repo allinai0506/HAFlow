@@ -7762,3 +7762,32 @@ git diff --check
 
 证据：`console/runtime.py:overview` 增加终态工作流与替代者过滤；`presentation.js` 与 `shell.js` 增加消警机制与可操作卡片；新增 `tests/test_console_overview_alerts.py` 与 `tests/test_console_frontend_syntax.py::test_shell_alerts_render_and_actionability`。
 
+
+---
+
+## 186. 门禁口径判定对齐、业务验收文件异常透出与权威 DB 投影恢复（2026-10-21）
+
+### 问题背景
+
+在多 Agent 协同工作流的自动化闭环（测试任务派发 → Agent 实际执行 → 测试证据产生 → 业务验收记录 → 门禁结论采纳 → Controller 自动推进）中，暴露出两类阻碍自动推进的核心缺陷：
+1. **门禁口径判定多模块割裂（问题 A）**：`services/controller/auto_verdict.py` 的 `process_gate_verdict_reconciliations` 存在局部的 ad-hoc 判定：当节点 `node_type == "agent"` 且未显式指定 `gate: true`（如 `gate: {}` 或省略 gate 键的测试节点）时，局部的 `not node_match.get("gate")` 将其误判为 `is_gate = False`，跳过了权威的 `ports.node_is_gate()` 判定。同时，`services/controller/node_policy.py` 中的 `resolve_gate_config` 缺少 `(^|[_-])(gate|cleanroom)($|[_-])` 命名模式识别，导致 Controller、Sentinel、CLI 和巡检对同一自定义门禁节点的判定结论产生分歧。
+2. **业务验收与裁决文件同步脱节且静默吞异常（问题 B）**：`herdr/task_checkpoint.py` 的 `record_business_acceptance()` 在 SQLite 数据库中已成功提交 `business_acceptance_recorded` 事实事件，但在同步写入磁盘 `gate-verdict` 文件时，使用了 `except Exception: pass` 静默吞掉所有 I/O 异常。当磁盘写入失败或外部导致文件丢失时，Controller 和 CLI 只检查磁盘文件，无法获取门禁裁决，导致已产生合法通过回执的任务卡死在 `working` 或被 Watchdog 超时标记为 `failed`，整个工作流发生假死。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 门禁判定口径碎片化，各模块自创判定规则 | 节点类型判定必须统一权威来源，禁止在局部流程中硬编码 truthy/falsy 或自造白名单 | 统一复用 `node_policy.resolve_gate_config` 与 `ports.node_is_gate`，对齐 `(^|[_-])(gate|cleanroom)($|[_-])` 模式，确保 Controller/Sentinel/CLI 对门禁属性认知严格一致 |
+| 文件同步异常被静默吞掉导致事实与投影割裂 | 副作用同步失败不得静默忽略，否则会导致上层无法感知落盘缺陷 | 明确区分事务核心与外围投影：文件同步失败必须记录明确日志并向外抛出（`OSError`），严禁无声吞没 |
+| 外部文件系统不可靠导致裁决结算永久阻塞 | 数据库事件是唯一的权威事实源（Single Source of Truth），易失文件只是投影 | Controller 和 CLI 必须支持以 DB `business_acceptance_recorded` 事实为源的幂等投影恢复（`project_gate_verdict_from_business_acceptance`），严格校验身份完整性（task/run/epoch/candidate/artifacts/verdict）后自动重建裁决文件 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_node_gate_receipt_convergence.py
+pytest -q tests/test_slice1_gate_robustness.py tests/test_slice2_scheduling_stability.py tests/test_issue_250_codex_p1_p2_fixes.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：新增 `tests/test_node_gate_receipt_convergence.py`（12 项测试覆盖 P1-P12 全场景：空 dict 门禁、显式 gate:false、自定义 gate 正则对齐、working/failed 任务回执自愈、文件同步异常透出、权威 DB 事件投影恢复、陈旧 epoch/candidate 拒绝、幂等防重推推进）。全部 153 项核心与回归测试 100% 通过。

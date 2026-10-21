@@ -3422,3 +3422,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Updated [[architecture]]：intake 关闭的兼容派发仍执行持久确认；工作流控制在 SQLite 写入边界校验指纹，快照去重覆盖持久元数据。
 - Workflow 控制优先进入 100 Action 展示窗口，Operation 定位使用精确 Action 查询并隔离迟到响应；恢复回执先匹配 checkpoint 再限量。
 - Evidence：`herdr/workflow_control_store.py`、`tests/test_controller_cockpit_bounded_fix2.py`、`tests/test_console_controller_cockpit_e2e.py`。
+
+## [2026-10-21] Gate | 测试节点门禁判定对齐与业务验收回执 DB 投影收敛（V1）
+
+- 修复 Controller、Sentinel、CLI 门禁判定口径割裂：`services/controller/node_policy.py:resolve_gate_config` 补全 `(^|[_-])(gate|cleanroom)($|[_-])` 正则命名模式；`services/controller/auto_verdict.py` 废除局部 ad-hoc 门禁检查，统一复用 `ports.node_is_gate()`，确保未显式声明 gate 的测试节点与 `gate: {}` 节点均被正确作为门禁结算。
+- 业务验收异常透出与权威 DB 投影恢复：`herdr/task_checkpoint.py:record_business_acceptance` 在落库后透出文件同步异常（`OSError`）；新增 `project_gate_verdict_from_business_acceptance`，以数据库 `business_acceptance_recorded` 为唯一事实源，严格校验任务身份、epoch、候选 SHA、产物与裁决合法性，在裁决文件缺失或损坏时支持 Controller/CLI 自动自愈投影。
+- 自动化执行与推进闭环：在门禁回执就绪时，处于 `working` 或 Watchdog 误标 `failed` 的门禁任务均可正确由 Controller 采纳裁决（`auto_verdict`）、更新任务为终态并自动驱动后继节点派发，严格防范陈旧凭证并保持幂等。
+- Evidence：`tests/test_node_gate_receipt_convergence.py`（12 项测试全部通过，含真实测试执行、业务验收回执与 Controller 推进闭环）、Lesson 186。
