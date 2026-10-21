@@ -361,6 +361,23 @@ class TestControllerCockpitRuntime(unittest.TestCase):
         self.assertEqual(body['workflow_id'], 'wf-1')
         self.assertIn('FOREIGN=false', out)
 
+    def test_runtime_targets_match_all_supplied_task_run_and_pane_fields(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run_in(tmp, """
+                state.workflowId='wf-1';state.workflow={workflow:{workflow_id:'wf-1'}};
+                state.controllerCockpit=__cockpitFixture;
+                openControllerCockpit({workflowId:'wf-1',runId:'run-1'});
+                console.log('RUN='+document.getElementById('controllerTabView').innerHTML.includes('controller-cockpit-task is-target'));
+                openControllerCockpit({workflowId:'wf-1',taskId:'impl-x',runId:'old-run'});
+                console.log('WRONG='+document.getElementById('controllerTabView').innerHTML.includes('controller-cockpit-task is-target'));
+                openControllerCockpit({workflowId:'wf-1',taskId:null,runId:null,paneId:'pane-1'});
+                console.log('PANE='+document.getElementById('controllerTabView').innerHTML.includes('controller-cockpit-task is-target'));
+            """)
+        self.assertIn('RUN=true', out)
+        self.assertIn('WRONG=false', out)
+        self.assertIn('PANE=true', out)
+
     def test_cockpit_opens_and_renders_pipeline_section_without_blockers(self):
         """The reported bug: healthy-but-unintegrated, zero blockers.
 
