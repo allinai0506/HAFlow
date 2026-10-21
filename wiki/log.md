@@ -3331,3 +3331,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 节点合同不足、业务歧义、人工门禁及不确定启动仍沿用 coordinator/human fallback、持久 operation、成果门禁和有界恢复，不新增调度器或 LLM 判定路径。
 - 自动化专项为 `329 passed, 44 subtests passed`；真实三节点 Agent E2E 因可用 Agent 深度预检超时/认证与端口阻塞未完成，未宣称生产级验证通过。
 - Evidence：`services/controller/advancement.py`、`services/controller/direct_dispatch.py`、`services/controller/stage_delivery.py`、`tests/test_direct_stage_dispatch.py`、`tests/test_scheduler_dispatch_e2e.py`、`docs/walkthroughs/thin-orchestrator-v1.md`。
+
+## [2026-10-21] Ontology | 第二切片扩展——Console UI / Observer Findings / Experience Hub（OEP-0003，v0.3.0）
+
+- 在企业本体 `ontology/` 完成第二业务切片扩展（PR #308），本体版本升至 0.3.0。
+- 新增 4 对象：`finding`（TrajectoryFinding 分析结论）、`observation`（不可变证据快照）、`console_view`（操作舱视图身份锚点）、`experience_rule`（可版本化业务规则）。
+- 新增 4 关系：finding↔task, finding↔observation, experience_rule↔task, console_view↔workflow_instance。
+- 新增 3 规则：`finding_severity_actionable`、`experience_rule_promotable`、`console_action_permitted`。
+- 新增 3 动作 + 双向授权闭环：`publish_finding`（observer_service_policy）、`promote/revoke_experience_rule`（experience_hub_policy）。
+- 新增 2 投影：`console_cockpit_view`（操作舱上下文）、`experience_hub_context`（经验枢纽审核）。
+- 新增 1 connector：`console_http_api`（http_api 类型，api_experience_review/revoke）。
+- 全量机械审计：`MAJOR=0, MINOR=0, INFO=2`（与基线一致）；第一切片状态机不变量未被触碰。
+- Evidence：`ontology/proposals/OEP-0003-second-business-slice-expansion.md`、`ontology/tests/audit_ontology.py`。
