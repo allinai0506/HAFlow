@@ -8008,3 +8008,62 @@ pytest -q tests/test_console_controller_actions_api.py
 ---
 
 ---
+
+---
+
+## 191. 共享浏览器 E2E 的三类间歇失败，与一次被自己实验证伪的归因（2026-10-22）
+
+### 问题背景
+
+`#322`/`#323` 的必需门禁（`Codex P1 Gate`）与规则审核全绿，`pytest` 却连红，失败点固定在 `tests/test_console_controller_cockpit_e2e.py`，**每轮都是不同用例、不同错误**：
+
+```text
+PR run（main 的 -n auto）    test_resume_control_...      CDP request timed out: Input.dispatchMouseEvent
+PR run（main 的 -n auto）    test_steer_...              page.click timed out after 3000ms: <article> intercepts pointer events
+                             test_controller_automatic_..  / test_stale_identity_...
+dispatch run（loadgroup）    test_header_pause_checkpoint.. page.fill: Selector #cockpitReason matched 0 elements
+dispatch run（loadgroup+等待）test_steer_...              page.click timed out after 3000ms: <article> intercepts pointer events
+                             test_operation_deep_link_...  page.evaluate timed out after 15000ms（页面可响应，求值仍挂起）
+```
+
+同基线的 `#324` 全量 SUCCESS，本地隔离运行约 3 秒即通过。
+
+### 我的第一次归因错了三分之二
+
+第一版修复打包了两个假设：① 多 worker 争抢单个 ego-browser 守护进程（本机确实只有 `127.0.0.1:54321` 一个监听）导致 CDP 排队；② ego-browser 动作默认预算 3000ms（`help('page.click')` 明文）扛不住驾驶舱异步重渲染造成的浮层拦截。于是加了 `xdist_group` + 把 CI 调度器改成 `--dist loadgroup`，并把动作超时提到 15000ms。
+
+受控实验（`workflow_dispatch`，确认日志打出 `-n auto --dist loadgroup`）**证伪了它们作为主因的地位**：
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| 争抢是主因 → 串行化可修 | `--dist loadgroup` 生效后重跑 | **同一文件仍失败**；且此前本地串行（无 xdist）也复现过 → 争抢不是本文件的成因 |
+| 拦截是暂态 → 提预算可等过去 | 动作传 `{timeout:15000}` 后重跑 | 错误仍是 **`timed out after 3000ms`** → 命中检查这一段**不跟随** `timeout` 选项，提预算对它是惰性的 |
+
+唯一被证实有效的是第三件事，而它是被前两件掩盖后才显形的：`confirm_action` 按 Enter 后**立刻**填模态里的原因框，而模态是异步打开的。`Selector #cockpitReason matched 0 elements` 说的就是元素当时不存在——与资源、与预算都无关。补上显式的「等模态打开」后，该用例在下一轮受控 run 中不再失败；护栏还顺带抓出**第二处**同样漏掉这个等待的调用点（`test_stale_identity_...`，它的 Enter 在上一个 browser 子进程里，等待必须写在同一进程内）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 改 workflow 的 PR 无法自证 | `HAFlow Test Suite` 只由 `pull_request_target` 触发且**无 push 触发**，而 `pull_request_target` 的 **job 定义取自 base 分支**，只有 checkout 是 merge 结果——日志实证 PR run 里 echo 的仍是 main 的 `-n auto` | 修改 workflow 文件的 PR 必须以自身分支的 `gh workflow run --ref <branch>`（`workflow_dispatch` 按分支文件执行、`mode=full`）作为验收证据；PR 的必需检查绿灯不构成生效证据 |
+| 把「默认值与错误文案吻合」当成因果 | 3000ms 确实等于文档默认值，看着像铁证；但那是**命中检查**的内部预算，不受 `timeout` 管辖。数字巧合 ≠ 机制相同 | 归因必须能被单独证伪：先构造「只改一个变量」的受控 run，再宣称机制；做不到就写成假设 |
+| 多个未证假设打包进一个 PR | ①②一起提交后，一半被证伪时难以判断另一半是否有效，也污染了 lesson 与 CI 配置 | 相互独立的机制假设拆成独立可回退的改动；每个都带自己的证伪判据 |
+| 串行化与提超时都没修好，不代表没有缺陷 | `matched 0 elements` 是**缺失显式等待**，属可确定性修复的一类；它一直被前两类噪声盖住 | 抖动排查按错误签名分桶统计（「元素不存在 / 命中被拦截 / 请求往返超时」是三类不同故障），逐桶处理，不要用一个均值掩盖 |
+| 破坏性验证误用 git 还原 | 我用 `git checkout --` 复原临时破坏，两次把**自己未提交**的修复一起抹掉 | 做破坏性反证前先提交，或用 `/tmp` 副本恢复；`git checkout` 的还原点是 HEAD，不是「我刚才的想法」 |
+| 修复要留反向验证 | 3 条护栏（两处 fill 前必有打开等待、打开/关闭等待成对、被证伪的 `xdist_group`/`ACTION_TIMEOUT` 不得复活）均通过，且逐条实测「删掉等待 → 立即 FAIL」 | 稳定性修复的护栏必须做反向验证，否则只会写出自言为真的空断言 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_console_cockpit_e2e_harness.py
+pytest -q tests/test_console_controller_cockpit_e2e.py
+```
+
+证据：护栏 3 passed，反向删除任一处打开等待即 FAIL；journey 文件本地 14 passed（本地数只作回归参考，本机与生产 Agent 共用同一浏览器守护，不是干净测量面）。
+
+### 仍未修的两类（转 issue 跟踪，不在本 PR 假装解决）
+
+1. `page.click timed out after 3000ms: <article> intercepts pointer events` —— 回执/动作 `<article>` 在指针下重排吃掉点击；真实用户同样会被咬，需先判定属前端层级/布局稳定性缺陷还是测试竞态。
+2. `PageEvaluationTimeoutError: page.evaluate timed out after 15000ms` —— 页面有挂起超过 15 秒的求值，疑似未落定的在途请求。
+
+诊断入口应在失败路径抓 `document.elementFromPoint(目标中心)` 与该 `<article>` 的几何/层级，以及挂起 evaluate 的请求来源。**不要**用提高超时值或加 `--reruns` 掩盖，也不要在没有新证据时重新引入 `loadgroup`/`xdist_group`。

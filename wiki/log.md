@@ -3483,3 +3483,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 修正原方案：不再「通知总指挥」。薄编排改造（`7d3ab69`）已把总指挥移出 durable operation 失败路径，再投递等于给同一节点开第二条 transport；本次真正缺口是 attention 一条都没写（现场 0 次 attention、0 次 COORDINATOR INTAKE）。
 - 实现过程中 `tests/test_controller_modularity.py` 的 500 行上限真实拦下一次越界（514 行），据此把拒绝分类与升级构造下沉到 `herdr/direct_dispatch.py`。遗留：该模块现为 500 行、正好压上限（改动前 495，`cockpit_automation.py` 亦为 500），下次 +1 行即失败，需单独抽取重构恢复余量。
 - Evidence：`tests/test_predecessor_lineage_consistency.py`（RED 用例照抄 op 211810 的 `predecessors` 与两个 task 的真实指针状态）、`tests/test_stage_advance_and_supersede.py`、`tests/test_direct_stage_dispatch.py`（夹具绑定 durable operation，复现日志行与事故现场逐字一致）、`tests/test_controller_modularity.py`；受影响 73 个测试文件回归 `2083 passed, 3 skipped, 203 subtests passed`，收尾修正后直接受影响 6 个文件重跑 `215 passed, 45 subtests`；`docs/lessons/lessons-learned.md` §188。
+
+## [2026-10-22] Tests / Console | 驾驶舱 E2E：修掉缺失的模态打开等待，并撤回两项被证伪的猜测
+
+- 已验证修复：`confirm_action` 按 Enter 后立刻填模态内的原因框，而模态是异步打开的，`page.fill('#cockpitReason')` 因此间歇报 `Selector ... matched 0 elements`。现补显式「等模态打开」，与既有的「等模态关闭」成对；护栏还抓出 `test_stale_identity_...` 里第二处同样漏掉该等待的调用点（其 Enter 在上一个 browser 子进程，等待必须写在同一进程内）。
+- 撤回两项被自身受控实验证伪的假设：① `--dist loadgroup` + `xdist_group`（争抢非本文件主因，串行化后仍失败，本地串行也复现）；② 把动作超时从 3000ms 提到 15000ms（命中检查不跟随 `timeout` 选项，错误里仍是 3000ms）。护栏中加锁禁止二者复活。
+- 新记两条可复用事实：`HAFlow Test Suite` 只有 `pull_request_target`（无 push 触发）且 job 定义取自 base 分支，故**改 workflow 的 PR 无法在自己的 PR run 里自证**，必须用 `gh workflow run --ref <branch>` 的 `workflow_dispatch`（按分支文件、`mode=full`）验收；`PageEvaluationTimeoutError` 显示存在挂起 >15s 的 evaluate，属第三类独立故障。
+- 仍未修（转 issue，不在本 PR 假装解决）：`<article> intercepts pointer events`（可能是驾驶舱层级/布局被真实用户同样咬到的产品缺陷）与挂起的 `page.evaluate`。禁止用提高超时或 `--reruns` 掩盖。
+- Evidence：`tests/test_console_cockpit_e2e_harness.py`（3 项护栏，逐条反向验证：删除打开等待即 FAIL）、`tests/test_console_controller_cockpit_e2e.py`（本地 14 passed）；`docs/lessons/lessons-learned.md` §191 已按实测重写。

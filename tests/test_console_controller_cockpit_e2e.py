@@ -4,6 +4,15 @@ Requires the local ego-browser service. Only terminal transport and service
 probes are controlled; projection, actions, identity, receipts and storage run
 unchanged. Each test owns and closes its Page so xdist workers cannot navigate
 another test's temporary service. No Agent is launched and no model is called.
+
+The cockpit opens its action modal asynchronously after Enter, so a journey
+must wait for it before touching a field inside: without that wait
+`page.fill('#cockpitReason', ...)` intermittently reports
+`Selector #cockpitReason matched 0 elements`. `confirm_action` therefore waits
+for the modal to open, symmetric with the existing wait for it to close.
+Tests in this file still fail intermittently from two other causes that are
+not addressed here; see the tracking issue before assuming a new red is
+yours.
 """
 import json
 import os
@@ -137,6 +146,7 @@ def open_cockpit(fixture, wid="wf-e2e"):
 def confirm_action(fixture, aid, *, instruction=None, reason="人工核查当前身份和证据"):
     fixture.browser(f"""
         await page.press('loc=css:[data-action-id="{aid}"] button','Enter');
+        await page.waitForFunction(()=>document.getElementById('modal').classList.contains('open'));
         {f'await page.fill("#cockpitInstruction",{json.dumps(instruction)});' if instruction is not None else ''}
         await page.fill('#cockpitReason',{json.dumps(reason)});
         await page.click('#cockpitActionConfirm');
@@ -189,6 +199,7 @@ def test_stale_identity_rejected_then_halt_uses_current_pane(cockpit):
     cockpit.browser("await page.press('loc=css:[data-action-id=\"working:halt\"] button','Enter');")
     cockpit.store.update_task_metadata("working", {"pane_id": "replacement-pane"})
     cockpit.browser("""
+        await page.waitForFunction(()=>document.getElementById('modal').classList.contains('open'));
         await page.fill('#cockpitReason','核查旧快照'); await page.click('#cockpitActionConfirm');
         await page.waitForFunction(()=>state.controllerReceipt?.status==='rejected');
         await page.waitForFunction(()=>state.controllerCockpit.tasks.some(t=>t.task_id==='working'&&t.pane_id==='replacement-pane'));
