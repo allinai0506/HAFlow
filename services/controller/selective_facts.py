@@ -191,7 +191,7 @@ def _retry_node_for_gate(ports, workflow_cfg, gate_cfg, gate_node_id):
 DEPENDENCIES = {'_latest_selective_fact': ('scheduler_facts_store', 'selective_replan_core'),
  '_all_selective_facts': ('scheduler_facts_store', 'selective_replan_core'),
  '_selective_replan_awaiting_redispatch': ('_all_selective_facts', 'load_tasks'),
- '_selective_gate_inventory_block': ('load_tasks', 'selective_replan_core'),
+ '_selective_gate_inventory_block': ('_get_store', '_scheduler_current_frozen_candidate_sha', 'load_tasks', 'selective_replan_core'),
  '_selective_redispatch_blocker_notes': ('_all_selective_facts', 'selective_replan_core'),
  '_blocked_gate_tasks_for': ('load_tasks',),
  '_retry_node_for_gate': ()}

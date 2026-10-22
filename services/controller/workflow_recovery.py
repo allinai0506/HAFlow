@@ -149,10 +149,10 @@ def execute_workflow_recovery(ports, operation, owner):
             request_id = 'recovery:' + ports.uuid.uuid4().hex
             details['rework_requests'][tid] = request_id
             step('rework_started')
-            ok, _ = ports._rework_retry_task(task, '+'.join(payload['gate_nodes']), request_id=request_id, failure_facts=payload.get('facts') or [])
+            ok, err = ports._rework_retry_task(task, '+'.join(payload['gate_nodes']), request_id=request_id, failure_facts=payload.get('facts') or [])
             fresh = store.get_task(tid) or {}
             if not ok or not has_confirmed_rework(store, fresh, request_id):
-                return 'waiting_human', {'reason': 'rework_delivery_unconfirmed', **details}
+                return 'waiting_human', {'reason': 'rework_delivery_unconfirmed', 'rework_error': err, **details}
             details['repair_map'][tid] = {'kind':'rework', 'task_id':tid,
                 'run_id':task.get('run_id'), 'source_run_id':task.get('run_id'),
                 'request_id':request_id, 'completion_epoch':fresh.get('completion_epoch'),

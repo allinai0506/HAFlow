@@ -8130,8 +8130,13 @@ python3 -m compileall -q herdr services bin tests
 git diff --check
 ```
 
+### 深度复核与二阶缺陷治理（PR #332 复核闭环）
 
-证据：`tests/test_service_release.py` 新增 13 项（词表校验通过/拒绝、宿主状态逐字保留、三字段同代际、`WorkingDirectory` 不凭空创建、`--labels` 单一权威、未纳管漂移检出与 workspace 不误报、installer 先拒绝后豁免、带参数服务端到端纳管）；`tests/test_installer_bash_compat.py` 的清单副本删除并改为从 `SCRIPTS` 派生，因此 bash 3.2 兼容矩阵现在真实遍历 5 个服务（含 hub）；同文件另 2 项注入 `launchctl list` 故障，分别锁住「瞬时失败不得静默中断自检」与「持续失败必须 fail-closed 且逐服务归因」。用**真机 plist** 在临时 `HOME` 预演 `--no-restart`：hub 的 9 项 argv 全保留、`--db-path` 仍指向 `~/.herdr-controller/experience_hub.db`、三字段同代际、exit 0。同一份未改动的真机 plist 在「改动前清单」下被 `unmanaged_release_plists` 报出 `ad17b85e9a6a`，在「当前清单」下为空——历史案例成为可机检的事实。
+在 PR #332 首次实现后，复核发现 5 个进阶边界问题，已在后续提交中全面补齐：
 
-**未做（需单独授权）**：把线上 experience-hub 切到新 release（改 plist + `bootout`/`bootstrap`）。代码变更后的首次正常部署会自动完成这件事。
+1. **依赖注入装配隐式熔断（P1）**：`services/controller/selective_facts.py` 的 `_selective_gate_inventory_block` 引入了 `_scheduler_current_frozen_candidate_sha` 与 `_get_store`，但模块底部的 `DEPENDENCIES` 字典未声明这两项依赖。控制器的代理装配机制禁止未声明访问，导致 `hasattr` 均静默返回 `False`，门禁提示词退化为 implementation 任务。修复：补齐依赖字典声明，并在直接派发入口验证提示词包含 wrapup。
+2. **多轮连续失败谱系断裂（P1）**：若修复候选 Z 再次被门禁阻断，第 2 轮恢复中父提交变为已失败的 Y，原代码检查 `note['candidate_sha'] == prior['parent_sha']` 失败。修复：在 `wrapup_delivery` 元数据中持久化记录最初通过的 `certified_sha`，通过 `merge-base --is-ancestor certified_sha parent` 验证完整祖先关系，支持在预算（<= 3）内连续失败多轮返工。
+3. **未确认送达提前接纳提交漏洞（P2）**：`_find_active_candidate_recovery` 曾放行处于 `pending` 状态的返工提交。修复：严格调用 `has_confirmed_rework(store, active_task, expected_request)` 验证，未确认为 `delivered` 且缺事件凭据时一律拒绝修复提交。
+4. **返工提示词阻断事实丢失**：`_rework_retry_task` 仅按 `t['candidate_sha'] == task['candidate_sha']` 过滤，而 wrapup 任务的 `candidate_sha` 指向原认证 X，导致审阅 Y 产生的 blocked 事实被全部剔除。修复：将当前集成的候选 SHA（`integrated_commit` / `integrated_sha`）及 `failure_facts` 中的候选 SHA 纳入匹配集合，完整保留门禁阻断原因与审核意见。
+5. **真实返工生命周期与收尾收据验收**：测试套件由单纯的元数据更新升级为调用 `kernel.transition_task`（`rework -> working`）与 `issue_completion_contract` 凭证轮转；并在收尾阶段真正调用 `cli(scene, "close-workflow", "wf")`，对 SQLite `workflow_close_operations` 表中的 `completed` 收据和 options 做出确证。
 

@@ -3545,3 +3545,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `python3 -m compileall -q herdr services bin tests` clean；
   - `git diff --check` clean；
   - `docs/lessons/lessons-learned.md` §193。
+
+## 2026-10-22 PR #332 复核问题闭环与多轮返工谱系巩固
+- 触发：用户对 PR #332 进行独立复核，指出 2 个 P1、1 个 P2、返工提示词阻断事实丢失及测试未验收收尾等 5 项问题。
+- 变更：
+  1. **补齐控制器装配依赖声明 (P1)**：在 `services/controller/selective_facts.py:DEPENDENCIES['_selective_gate_inventory_block']` 中补齐 `_get_store` 与 `_scheduler_current_frozen_candidate_sha`，使受保护代理允许装配访问，消除静默退化回 implementation 的装配缺陷。
+  2. **多轮连续失败祖先溯源 (P1)**：在 `herdr/wrapup_delivery.py:begin` 持久化记录 `certified_sha`，并在 `_find_active_candidate_recovery` 中用 `git merge-base --is-ancestor certified_sha parent` 核验任意轮次（<= 3）失败后父提交到最初通过认证的基准 commit 的祖先关系，支持连续失败后持续修复。
+  3. **严格返工送达确认门禁 (P2)**：在 `herdr/wrapup_delivery.py:_find_active_candidate_recovery` 中收紧修复准入条件，严格调用 `has_confirmed_rework(store, active_task, expected_request)` 验证，彻底杜绝返工指令未送达或处于 pending 状态下提前放行修复提交。
+  4. **返工提示词保留完整阻断原因**：在 `services/controller/fix_invalidation.py:_rework_retry_task` 中将当前集成候选 SHA（`integrated_commit` / `integrated_sha`）及 `failure_facts` 中的候选 SHA 纳入匹配池，保留失败门禁的真实 note，防止阻断事实丢失。
+  5. **忠实返工生命周期与收尾收据验收**：在 `tests/test_wrapup_failure_recovery_closed_loop.py` 中接入真实状态机流转（`rework -> working`）与凭据轮转；端到端调用 `cli(scene, "close-workflow", "wf")` 并严格断言 SQLite `workflow_close_operations` 的 `completed` 收据；新增多轮连续返工、未确认返工阻断与审核清单 wrapup 提示词专项测试（22/22 全绿）。
+- 证据：
+  - `pytest -q tests/test_wrapup_failure_recovery_closed_loop.py` → 22 passed；
+  - `pytest -q tests/test_workflow_recovery.py tests/test_selective_replan_*.py tests/test_workflow_progress.py` → 170 passed；
+  - `python3 -m compileall -q herdr services bin tests` clean；
+  - `git diff --check` clean；
+  - `docs/lessons/lessons-learned.md` §193 补充更新。

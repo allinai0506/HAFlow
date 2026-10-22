@@ -53,10 +53,19 @@ def _fix_loop_keepable(ports, task):
 
 def _rework_retry_task(ports, task, gate_node_id, request_id=None, failure_facts=None):
     """Use the CLI ownership/CAS/transport contract; failure retains the Task."""
+    target_candidate_shas = {
+        task.get("candidate_sha"),
+        task.get("integrated_commit"),
+        (task.get("wrapup_delivery") or {}).get("integrated_sha"),
+    } - {None, ""}
+    if failure_facts:
+        target_candidate_shas.update(
+            f.get("candidate_sha") for f in failure_facts if f.get("candidate_sha")
+        )
     gate_tasks = [t for t in (failure_facts if failure_facts is not None else ports.load_tasks())
                   if t.get("workflow_id") == task.get("workflow_id")
                   and t.get("status") != "superseded" and not t.get("superseded_by")
-                  and t.get("candidate_sha") == task.get("candidate_sha")
+                  and (not target_candidate_shas or t.get("candidate_sha") in target_candidate_shas)
                   and (t.get("node") or t.get("stage")) in gate_node_id.split("+")
                   and t.get("stage_verdict") == "blocked"]
     if request_id is None:

@@ -29,48 +29,111 @@ from tests.test_wrapup_candidate_delivery import (
 )
 
 
+def _report_wrapup(scene, *, now=None):
+    from herdr.completion_receipt import consume_completion_receipt
+
+    task = scene.store.get_task("wrap")
+    report = scene.root / "final-wrapup.txt"
+    report.write_text(
+        "Final runtime report for " + git(scene.clone, "rev-parse", "HEAD")
+    )
+    pub = cli(
+        scene,
+        "checkpoint-publish",
+        "--task-id",
+        "wrap",
+        "--run-id",
+        task["run_id"],
+        "--epoch",
+        task["completion_epoch"],
+        "--segment-file",
+        str(report),
+        "--step",
+        "1",
+    )
+    receipt = json.loads(pub.stdout)
+    cli(
+        scene,
+        "report-completion",
+        "wrap",
+        "--identity-file",
+        task["completion_identity_path"],
+        "--artifact",
+        receipt["observation_id"] + ":" + receipt["sha256"],
+    )
+    consumed = consume_completion_receipt(
+        "wrap", scene.store, now=now or (time.time() + 120)
+    )
+    assert consumed["accepted"], consumed
+
+
 def _install_transport_mock(controller, scene):
     real_transport = controller.subprocess.run
 
     def mock_run(command, **kwargs):
-        if len(command) >= 3 and command[1] == "rework":
-            tid = command[2]
+        try:
+            if len(command) >= 3 and command[1] == "rework":
+                tid = command[2]
 
-            def arg(key, default=None):
-                return command[command.index(key) + 1] if key in command else default
+                def arg(key, default=None):
+                    return command[command.index(key) + 1] if key in command else default
 
-            req_id = arg("--request-id")
-            reason = arg("--reason")
-            prompt = arg("--prompt")
-            task = scene.store.get_task(tid)
-            scene.store.update_task_metadata(
-                tid,
-                {
-                    "rework_delivery": "delivered",
-                    "rework_request_id": req_id,
-                    "rework_prompt": prompt,
-                    "stage_verdict": None,
-                    "stage_verdict_note": None,
-                },
-            )
-            scene.store.record_event(
-                "rework_dispatched",
-                {
-                    "delivery_phase": "dispatched",
-                    "intervention_id": req_id,
-                    "action": "REWORK",
-                    "completion_epoch": task.get("completion_epoch"),
-                    "identity_path": task.get("completion_identity_path"),
-                },
-                workflow_id=task.get("workflow_id"),
-                task_id=tid,
-                node_id=task.get("node") or task.get("stage"),
-                run_id=task.get("run_id"),
-                source="herdr-task",
-            )
-            import subprocess
-            return subprocess.CompletedProcess(command, 0, f"[REWORK] {tid} delivered", "")
-        return real_transport(command, **kwargs)
+                req_id = arg("--request-id")
+                reason = arg("--reason")
+                prompt = arg("--prompt")
+                task = scene.store.get_task(tid)
+                from herdr.completion_receipt import issue_completion_contract
+                from herdr import kernel
+
+                kernel.transition_task(
+                    tid,
+                    "rework",
+                    reason=reason or "recovery",
+                    source="herdr-task",
+                    store=scene.store,
+                    metadata={"request_id": req_id},
+                )
+                issue_completion_contract(tid, scene.store)
+                task = scene.store.get_task(tid)
+                scene.store.update_task_metadata(
+                    tid,
+                    {
+                        "rework_delivery": "delivered",
+                        "rework_request_id": req_id,
+                        "rework_prompt": prompt,
+                        "stage_verdict": None,
+                        "stage_verdict_note": None,
+                    },
+                )
+                scene.store.record_event(
+                    "rework_dispatched",
+                    {
+                        "delivery_phase": "dispatched",
+                        "intervention_id": req_id,
+                        "action": "REWORK",
+                        "completion_epoch": task.get("completion_epoch"),
+                        "identity_path": task.get("completion_identity_path"),
+                    },
+                    workflow_id=task.get("workflow_id"),
+                    task_id=tid,
+                    node_id=task.get("node") or task.get("stage"),
+                    run_id=task.get("run_id"),
+                    source="herdr-task",
+                )
+                kernel.transition_task(
+                    tid,
+                    "working",
+                    reason="agent_working",
+                    source="agent",
+                    store=scene.store,
+                )
+                import subprocess
+                return subprocess.CompletedProcess(command, 0, f"[REWORK] {tid} delivered", "")
+            return real_transport(command, **kwargs)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            raise
 
     controller.subprocess.run = mock_run
 
@@ -118,6 +181,8 @@ def test_full_wrapup_failure_recovery_closed_loop(scene, controller, agents, for
     wrap = scene.store.get_task("wrap")
     assert wrap["status"] in ("working", "agent_done")
     assert wrap.get("rework_delivery") == "delivered"
+    rework_prompt = wrap.get("rework_prompt") or ""
+    assert "old-review-r2: Independent fixture evidence checked" in rework_prompt
 
     # Verify blocked gate task is superseded
     assert scene.store.get_task("old-review-r2")["status"] == "superseded"
@@ -156,17 +221,24 @@ def test_full_wrapup_failure_recovery_closed_loop(scene, controller, agents, for
     closure(scene, pr, s_z)
 
     # 11. wrapup completes
-    report_wrapup(scene)
+    _report_wrapup(scene)
     cli(scene, "set", "wrap", "completed")
     assert scene.store.get_task("wrap")["status"] == "completed"
 
-    # 12. workflow completes
-    completed = {
-        node["id"]
-        for node in scene.cfg["nodes"]
-        if controller.is_node_complete("wf", node["id"])
-    }
-    assert is_workflow_completed(scene.cfg, completed)
+    # 12. workflow completes and close-workflow records receipt
+    cli(scene, "close-workflow", "wf")
+    assert scene.store.get_workflow("wf")["status"] == "completed"
+
+    import sqlite3
+    conn = sqlite3.connect(scene.store.db_path)
+    close_row = conn.execute(
+        "SELECT state, receipt FROM workflow_close_operations WHERE workflow_id=?",
+        ("wf",),
+    ).fetchone()
+    assert close_row is not None
+    assert close_row[0] == "completed"
+    receipt = json.loads(close_row[1])
+    assert receipt.get("workflow_id") == "wf"
 
     effective = select_effective_delivery(wd.annotate_notes(wd.load_notes("wf")))
     assert _body_value(effective, "candidate_sha") == s_z
@@ -304,7 +376,7 @@ def test_old_candidate_evidence_cannot_pass_new_candidate(scene, controller, age
     assert closure_res.returncode != 0
 
     # Verify that wrapup completion is refused
-    report_wrapup(scene)
+    _report_wrapup(scene)
     set_res = cli(scene, "set", "wrap", "completed", ok=False)
     assert set_res.returncode != 0
 
@@ -359,3 +431,124 @@ def test_idempotent_sweeps_do_not_duplicate_reworks(scene, controller, agents):
     assert req_id1 == req_id2
     events = scene.store.list_events(task_id="wrap", event_type="rework_dispatched")
     assert len(events) == 1
+
+
+def test_gate_dispatch_inventory_lists_wrapup_not_impl(scene, controller, agents):
+    """
+    P1 verification: Selective gate inventory block via real controller port proxy
+    identifies wrapup as retry_node and lists task_id: wrap, not the predecessor implementation.
+    """
+    y, s_y = add_output(scene, "Knowledge Y")
+    # Dispatched verifiers freeze candidate Y and receive this inventory block
+    tasks = dispatch_verifiers(scene, controller, agents)
+    assert len(tasks) == 2
+
+    # Verify controller dependency wiring on ports
+    inventory_block = controller._selective_gate_inventory_block("wf", scene.cfg)
+    assert inventory_block is not None, "Gate inventory block should be generated"
+    assert "task_id: wrap" in inventory_block
+    assert "task_id: impl" not in inventory_block
+
+
+def test_consecutive_failures_round3_recovery(scene, controller, agents, forge):
+    """
+    P1 verification: Multi-round failure recovery where candidate Y fails (round 1),
+    repair Z fails again (round 2), and repair W succeeds (round 3) within the budget <= 3.
+    Verifies ancestral lineage to certified commit X is preserved across rounds.
+    """
+    # Round 1: wrapup produces candidate Y
+    y, s_y = add_output(scene, "Candidate Y (round 1 defect)")
+    tasks1 = dispatch_verifiers(scene, controller, agents)
+    for tid in tasks1:
+        node = scene.store.get_task(tid)["node"]
+        certify(scene, tid, verdict="blocked" if node == "review" else "pass")
+
+    _install_transport_mock(controller, scene)
+
+    # Controller recovery round 1 -> delivers rework to wrap
+    ops1 = controller.check_workflow_recovery("wf")
+    op1 = next(o for o in ops1 if (o.get("payload") or {}).get("kind") == "fix_loop")
+    assert op1["status"] == "awaiting_result"
+    assert op1["payload"]["retry_node"] == "wrapup"
+
+    # Round 2: wrapup produces repair candidate Z (still flawed)
+    z, s_z = add_output(scene, "Candidate Z (round 2 defect)")
+    tasks2 = dispatch_verifiers(scene, controller, agents)
+    assert set(tasks2).isdisjoint(tasks1)
+    for tid in tasks2:
+        node = scene.store.get_task(tid)["node"]
+        certify(scene, tid, verdict="blocked" if node == "review" else "pass")
+
+    # Controller recovery round 2 -> delivers second rework to wrap
+    ops2 = controller.check_workflow_recovery("wf")
+    op2 = next(
+        o
+        for o in ops2
+        if (o.get("payload") or {}).get("candidate_sha") == s_z
+        and (o.get("payload") or {}).get("kind") == "fix_loop"
+    )
+    assert op2["status"] == "awaiting_result"
+    assert op2["payload"]["retry_node"] == "wrapup"
+    assert op2["payload"]["candidate_sha"] == s_z
+
+    # Round 3: wrapup produces repair candidate W (clean fix)
+    w, s_w = add_output(scene, "Candidate W (round 3 clean fix)")
+    tasks3 = dispatch_verifiers(scene, controller, agents)
+    assert set(tasks3).isdisjoint(tasks2)
+    for tid in tasks3:
+        certify(scene, tid, verdict="pass")
+    accept_join(scene)
+
+    # Recovery settles
+    ops3 = controller.check_workflow_recovery("wf", now=time.time() + 60)
+    op3 = next(o for o in ops3 if o["id"] == op2["id"])
+    assert op3["status"] == "resolved"
+    assert op3["detail"].get("reason") == "replacement_reverified"
+
+    # Delivery, PR, review closure and close-workflow on candidate W
+    assert delivery(scene, tasks3) == s_w
+    pr = publish(scene, "wrap")
+    assert pr["candidate_sha"] == s_w
+    (scene.fakebin / "head.txt").write_text(s_w)
+    closure(scene, pr, s_w)
+
+    _report_wrapup(scene)
+    cli(scene, "set", "wrap", "completed")
+    assert scene.store.get_task("wrap")["status"] == "completed"
+
+    cli(scene, "close-workflow", "wf")
+    assert scene.store.get_workflow("wf")["status"] == "completed"
+
+
+def test_unconfirmed_rework_blocks_repair_submission(scene, controller, agents):
+    """
+    P2 verification: An unconfirmed rework (e.g. pending delivery or missing confirmed receipt)
+    blocks candidate submission, preventing premature admission before rework has been delivered.
+    """
+    y, s_y = add_output(scene, "Candidate Y")
+    tasks = dispatch_verifiers(scene, controller, agents)
+    for tid in tasks:
+        node = scene.store.get_task(tid)["node"]
+        certify(scene, tid, verdict="blocked" if node == "review" else "pass")
+
+    _install_transport_mock(controller, scene)
+    ops = controller.check_workflow_recovery("wf")
+    op = next(o for o in ops if (o.get("payload") or {}).get("kind") == "fix_loop")
+    assert op["status"] == "awaiting_result"
+
+    # Temporarily set rework_delivery to pending (unconfirmed)
+    scene.store.update_task_metadata("wrap", {"rework_delivery": "pending"})
+
+    # Attempt to commit repair candidate before delivery is confirmed
+    (scene.clone / "knowledge.md").write_text("Premature repair attempt\n")
+    res = cli(scene, "commit", "wrap", ok=False)
+    assert res.returncode != 0
+    err = (res.stderr + res.stdout).lower()
+    assert "certified" in err or "recovery" in err or "effective" in err
+
+    # Now restore confirmed delivery
+    scene.store.update_task_metadata("wrap", {"rework_delivery": "delivered"})
+
+    # Now commit repair candidate succeeds
+    res_ok = cli(scene, "commit", "wrap")
+    assert res_ok.returncode == 0
