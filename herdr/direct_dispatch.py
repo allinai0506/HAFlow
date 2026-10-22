@@ -654,7 +654,9 @@ def plan_stage_dispatch(
                     new_id,
                     redispatch_of=old_id,
                     last_failure_note=str(
-                        task.get("stage_verdict_note") or ""
+                        task.get("same_node_redo_note")
+                        or task.get("stage_verdict_note")
+                        or ""
                     ).strip()
                     or None,
                     context_branch=context_branch,

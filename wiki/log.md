@@ -8,6 +8,13 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-23] feat | 非门禁节点 blocked 自动重做一次，第二次带已知限制放行
+
+- 背景：需求、计划返回 blocked 后，调度因为没有候选 SHA、节点也不是代码门禁，停在 waiting_human，只能把裁决交给总指挥。
+- 变更：非门禁节点的落定 blocked 结果自动打回本节点一次；再用完这一次仍 blocked，则保持原结论并标 `accepted_with_limits`，下一节点可以启动。代码门禁仍走 fix-loop。见 [[dag-workflow-engine]] §4.4。
+- 证据：`tests/test_node_acceptance.py`、`tests/test_gate_verdict_symmetry.py`。运行中的控制器要装上这份代码并重启后才会按新规则走。
+- 口径：`normalize_workflow` 给每个节点写的空 `gate: {}` 不是门禁声明。需求、计划因此仍走一次重做；test / review / wrapup 和名字像 gate 的节点仍是代码门禁。
+
 ## [2026-10-21] fix | 控制台告警生命周期感知、已完成工作流与替代任务过滤、可操作交互与前端消警闭环
 
 - 背景：

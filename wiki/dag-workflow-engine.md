@@ -145,17 +145,23 @@ Evidence:
 
 ### 4.4 任务级门禁结论对称性
 
-`FACT` 任务级 `blocked` 验收结论对自动推进一律有效，不问节点有无 gate 配置：
-sweep 发现就绪节点的任一依赖存在未作废 blocked 结论时，不 queue、不作废下游，
-只记 attention（`upstream_blocked`，可退避）并通知总指挥裁决，作废过期结论后自动恢复；
-`try_direct_stage_advance` 在规划前复查同一条件，命中则 `DIRECT DISPATCH BLOCKED`
-回退总指挥。未知依赖时保持原行为（fail-open）。fix-loop 的销毁式回流仍仅对有
-gate 配置的节点（test/review/wrapup）触发。
+`FACT` 代码门禁（test / review / wrapup，以及节点或阶段策略上的 gate）的
+`blocked` 仍停住自动推进，并走原有 fix-loop。不销毁下游。
+
+`FACT` 非代码门禁（需求、计划）返回 `blocked` 时，不交给总指挥裁决。
+模板规范化写在每个节点上的空 `gate: {}` 不是门禁声明。
+当前任务都已落定，就自动打回本节点重做一次：两侧任务一起作废，沿用现有补派，
+说明里写上阻断和「已知限制」。已经有过一次作废的 blocked 结果、这一轮仍 blocked，
+节点即完成：`stage_verdict` 保持 blocked，任务带 `accepted_with_limits`，
+下一节点可以启动。还有任务在跑则等待，不打回。不无限重做。
 
 Evidence:
-- `services/herdr-controller.py#blocked_verdict_dep`
-- `services/herdr-controller.py#check_workflow_stage_advance`
-- `services/herdr-controller.py#try_direct_stage_advance`
+- `herdr/node_acceptance.py#acceptance_actions`
+- `services/controller/node_acceptance.py#apply_node_acceptance`
+- `services/controller/node_policy.py#blocked_verdict_dep`
+- `services/controller/advancement.py#check_workflow_stage_advance`
+- `herdr/direct_dispatch.py#plan_stage_dispatch`
+- `tests/test_node_acceptance.py`
 - `tests/test_gate_verdict_symmetry.py`
 
 ## 5. 选择性重新验证：候选轮换后哪些 verifier 必须重跑

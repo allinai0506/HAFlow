@@ -1,14 +1,10 @@
 """Gate verdict symmetry tests.
 
-Live regression (2026-09-17): plan-challenger recorded verdict=blocked,
-yet the automatic path still launched the test node (test-auto), while the
-manual advance path refused. Root cause: GATE_DEFAULTS only covers
-test/review/wrapup, so plan/requirements blocked verdicts are invisible to
-the sweep fix-loop, and try_direct never checks verdicts at all.
-
-Contract: a task-level blocked verdict on any dependency must stop
-automatic advance (funnel to coordinator adjudication) without destroying
-downstream work. Voiding the verdict (supersede) must resume advance.
+Code gates (test/review/wrapup) still stop automatic advance and stay on
+the fix loop. A non-gate node that returns blocked is sent back to itself
+once. After that one redo, a remaining blocked verdict is a known limit:
+the verdict stays blocked, and the next node may start. Downstream work
+that already exists is not destroyed.
 """
 
 from tests.support.console_source import console_source
@@ -73,9 +69,11 @@ def _node(node_id="test", depends_on=None, **overrides):
 def _workflow_cfg():
     return {
         "nodes": [
-            {"id": "plan", "label": "plan", "depends_on": []},
-            {"id": "implementation", "label": "impl", "depends_on": ["plan"]},
-            {"id": "test", "label": "test", "depends_on": ["implementation", "plan"]},
+            {"id": "plan", "label": "plan", "depends_on": [], "gate": {}},
+            {"id": "implementation", "label": "impl", "depends_on": ["plan"],
+             "gate": {}},
+            {"id": "test", "label": "test", "depends_on": ["implementation", "plan"],
+             "gate": {}},
         ]
     }
 
@@ -120,7 +118,8 @@ class SweepBlockedVerdictTest(unittest.TestCase):
             patch.object(_ctrl, "load_stage_state", return_value={}),
             patch.object(_ctrl, "save_stage_state",
                          side_effect=lambda s: None),
-            patch.object(_ctrl, "load_tasks", return_value=registry),
+            patch.object(_ctrl, "load_tasks",
+                         side_effect=lambda: self.store.list_tasks()),
             patch.object(_ctrl, "_attention_store", store),
             patch.object(_ctrl, "notify_attention",
                          side_effect=lambda *a, **k: self.notifies.append(a)),
@@ -138,14 +137,6 @@ class SweepBlockedVerdictTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def _blocked_operation(self):
-        from herdr.recovery_store import list_operations
-        operations = list_operations(self.store.db_path, "wf-1")
-        self.assertEqual(len(operations), 1)
-        self.assertEqual(operations[0]["status"], "waiting_human")
-        self.assertEqual(operations[0]["payload"]["reason"], "candidate_unknown")
-        return operations[0]
-
     def _plan_blocked_registry(self):
         return [
             _task("plan-e", "cleaned", "plan", stage_verdict="pass"),
@@ -155,32 +146,68 @@ class SweepBlockedVerdictTest(unittest.TestCase):
             _task("impl-b", "cleaned", "implementation", stage_verdict="pass"),
         ]
 
-    def test_blocked_dep_stops_auto_advance_without_destruction(self):
-        registry = self._plan_blocked_registry()
+    def _open_human_ops(self):
+        from herdr.recovery_store import list_operations
+        return [
+            op for op in list_operations(self.store.db_path, "wf-1")
+            if op["status"] == "waiting_human"
+            and op["payload"].get("reason") == "candidate_unknown"
+        ]
+
+    def test_blocked_non_gate_is_redone_once_without_starting_the_next_node(self):
+        self._patch_env(self._plan_blocked_registry())
+
+        _ctrl.check_workflow_stage_advance("wf-1")
+
+        self.assertNotIn("test", self.advance_marks)
+        self.assertEqual(self.fixloop_calls, [])
+        self.assertEqual(self._open_human_ops(), [])
+        for task_id in ("plan-e", "plan-c"):
+            persisted = self.store.get_task(task_id)
+            self.assertEqual(persisted["status"], "superseded")
+            self.assertEqual(
+                persisted["stage_verdict"],
+                "pass" if task_id == "plan-e" else "blocked",
+            )
+            self.assertIn("已知限制", persisted.get("same_node_redo_note") or "")
+        self.assertIn("P0 未修", self.store.get_task("plan-c").get("same_node_redo_note") or "")
+        impl = self.store.get_task("impl-a")
+        self.assertEqual(impl["status"], "cleaned")
+
+    def test_second_sweep_does_not_redo_again(self):
+        self._patch_env(self._plan_blocked_registry())
+
+        _ctrl.check_workflow_stage_advance("wf-1")
+        _ctrl.check_workflow_stage_advance("wf-1")
+
+        self.assertEqual(self.store.get_task("plan-c")["status"], "superseded")
+        self.assertEqual(self.store.get_task("plan-c")["stage_verdict"], "blocked")
+        self.assertNotIn("test", self.advance_marks)
+        self.assertEqual(self._open_human_ops(), [])
+
+    def test_second_blocked_result_advances_with_the_verdict_unchanged(self):
+        registry = [
+            _task("plan-e", "superseded", "plan", stage_verdict="pass"),
+            _task("plan-c", "superseded", "plan", stage_verdict="blocked",
+                  stage_verdict_note="P0 未修"),
+            _task("plan-e2", "cleaned", "plan", stage_verdict="pass",
+                  supersedes="plan-e"),
+            _task("plan-c2", "cleaned", "plan", stage_verdict="blocked",
+                  stage_verdict_note="P0 仍在", supersedes="plan-c"),
+            _task("impl-a", "cleaned", "implementation", stage_verdict="pass"),
+            _task("impl-b", "cleaned", "implementation", stage_verdict="pass"),
+        ]
         self._patch_env(registry)
 
         _ctrl.check_workflow_stage_advance("wf-1")
 
-        self.assertEqual(self.advance_marks, [])
+        fresh = self.store.get_task("plan-c2")
+        self.assertEqual(fresh["status"], "cleaned")
+        self.assertEqual(fresh["stage_verdict"], "blocked")
+        self.assertTrue(fresh.get("accepted_with_limits"))
+        self.assertIn("test", self.advance_marks)
         self.assertEqual(self.fixloop_calls, [])
-        operation = self._blocked_operation()
-        self.assertEqual(operation["payload"]["task_ids"], ["plan-c"])
-        for task in registry:
-            persisted = self.store.get_task(task["task_id"])
-            self.assertEqual(persisted["status"], task["status"])
-            self.assertEqual(persisted["stage_verdict"], task["stage_verdict"])
-
-    def test_second_sweep_does_not_renotify(self):
-        self._patch_env(self._plan_blocked_registry())
-
-        _ctrl.check_workflow_stage_advance("wf-1")
-        first = self._blocked_operation()
-        _ctrl.check_workflow_stage_advance("wf-1")
-        second = self._blocked_operation()
-        self.assertEqual(second["id"], first["id"])
-        self.assertEqual(second["version"], first["version"])
-        self.assertEqual(self.advance_marks, [])
-        self.assertEqual(self.store.get_task("plan-c")["stage_verdict"], "blocked")
+        self.assertEqual(self._open_human_ops(), [])
 
     def test_voided_verdict_resumes_advance(self):
         registry = [
@@ -267,6 +294,17 @@ class DirectBlockedDepTest(unittest.TestCase):
         self.assertEqual(self.notified, [])
         self.assertTrue(any(
             "BLOCKED" in str(call) for call in output.call_args_list))
+
+    def test_known_limit_allows_the_next_node_to_launch(self):
+        tasks = self._tasks_with_plan("blocked")
+        for task in tasks:
+            if task["stage_verdict"] == "blocked":
+                task["accepted_with_limits"] = True
+        with patch.object(self.ctrl, "load_tasks", return_value=tasks):
+            result = self.ctrl.try_direct_stage_advance(
+                self._item(_node(depends_on=["plan"])))
+        self.assertTrue(result)
+        self.assertEqual(len(self.commands), 1)
 
     def test_passed_upstream_dep_proceeds(self):
         with patch.object(

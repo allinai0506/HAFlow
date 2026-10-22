@@ -95,6 +95,21 @@ def check_workflow_stage_advance(ports, workflow_id):
         ports.reconcile_stage_advance_states(workflow_id, snapshot_config)
         ports.reconcile_node_dispatches(workflow_id)
         assessment = assess_workflow(record, snapshot_config, snapshot_tasks)
+        try:
+            wrote = ports.apply_node_acceptance(
+                workflow_id, snapshot_config, snapshot_tasks)
+        except Exception as exc:
+            print(f"[NODE ACCEPTANCE] workflow={workflow_id}: {exc}")
+            wrote = 0
+        if wrote:
+            # The unstarted human obligation was opened from the blocked
+            # tasks. They are no longer the current result, so reconcile
+            # drops it, and the existing redispatch sees the superseded rows.
+            recovery_store.reconcile(ports._get_store().db_path, workflow_id)
+            ports.reconcile_node_dispatches(workflow_id)
+            record, snapshot_config, snapshot_tasks = recovery_store.read_snapshot(
+                ports._get_store().db_path, workflow_id)
+            assessment = assess_workflow(record, snapshot_config, snapshot_tasks)
         if not assessment['can_advance']:
             return
 
@@ -483,7 +498,8 @@ DEPENDENCIES = {'enqueue_stage_advance': ('check_workflow_stage_advance',),
                                   'is_node_complete', 'is_workflow_completed', 'liveness',
                                   'load_tasks', 'mark_stage_advance_queued',
                                   'maybe_close_completed_workflow', 'notify_attention',
-                                  'project_for_workflow', 'reconcile_node_dispatches',
+                                  'apply_node_acceptance', 'project_for_workflow',
+                                  'reconcile_node_dispatches',
                                   'reconcile_stage_advance_states', 'resolve_gate_config',
                                   'selective_replan_core', 'time', 'workflow_closed',
                                   'workflow_config_for')}

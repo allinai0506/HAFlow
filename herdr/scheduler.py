@@ -231,10 +231,16 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
 
 
 def node_verdict(tasks_for_node):
-    """Node acceptance verdict: any blocked wins, else any pass."""
+    """Node acceptance verdict: any blocked wins, else any pass.
+
+    ``accepted_with_limits`` keeps the blocked verdict on the task and does
+    not count as a halt. A finalize escalation still does.
+    """
     verdict = None
     for task in tasks_for_node or []:
         if not isinstance(task, dict):
+            continue
+        if task.get("accepted_with_limits") and not task.get("finalize_escalated"):
             continue
         task_verdict = str(task.get("stage_verdict") or "").strip()
         if task_verdict == "blocked":
