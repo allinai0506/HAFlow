@@ -3560,3 +3560,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `python3 -m compileall -q herdr services bin tests` clean；
   - `git diff --check` clean；
   - `docs/lessons/lessons-learned.md` §193 补充更新。
+
+## [2026-10-22] Tests / Console | 驾驶舱 E2E 间歇失败诊断第一现场闭环与时序加固（Issue #326）
+- 触发：GitHub Issue #326 跟踪驾驶舱 E2E 中两类间歇性失败（`<article>` 指针拦截与 `page.evaluate` 挂起），要求在失败路径补充第一现场诊断采集并加固时序。
+- 变更：
+  1. **失败路径诊断遥测**：在 `tests/test_console_controller_cockpit_e2e.py` 的 `browser()` 中实现 `collect_cockpit_failure_diagnostics`，在任何失败退出时自动采集目标与遮挡元素的 `document.elementFromPoint(cx, cy)`、包围盒坐标、z-index、position、`window.state?.controllerReceipt` 与在途请求列表。
+  2. **消除二次异步重绘**：在 `open_cockpit` 中显式等待 `state.decisionData!==undefined`，阻断后台 `/api/workflow/decisions` 到达时触发的 `openControllerCockpitModal` 全量重刷与布局位移。
+  3. **模态与求值时序加固**：在 `closeModal` 后补充显式等待 `!modal.classList.contains('open')`；在深链接求值中消除对内部网络 Promise 的直接 `await`。
+  4. **护栏硬锁**：在 `tests/test_console_cockpit_e2e_harness.py` 增加 3 项断言锁定诊断采集能力与等待时序，且维持被证伪的 `xdist_group`/`ACTION_TIMEOUT` 禁止复活规则。
+- 证据：
+  - `pytest -v tests/test_console_cockpit_e2e_harness.py` → 6 passed；
+  - `pytest tests/test_console_cockpit_e2e_harness.py tests/test_console_controller_cockpit_e2e.py` → 20 passed；
+  - `pytest -q tests/test_console_frontend_syntax.py tests/test_console_ui_modules.py` → 24 passed；
+  - `python3 -m compileall -q herdr services bin tests console` clean；
+  - `git diff --check` clean；
+  - `docs/lessons/lessons-learned.md` §194。

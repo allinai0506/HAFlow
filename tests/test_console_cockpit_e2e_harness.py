@@ -56,3 +56,24 @@ def test_no_contention_fixes_reappear_without_evidence():
     text = source()
     for gone in ("xdist_group", "ACTION_TIMEOUT"):
         assert gone not in text, f"{gone} returned: it was disproved, not merely unused"
+
+
+def test_failure_diagnostics_collected_on_browser_error():
+    """Issue #326 requires diagnostic telemetry on browser() failure path."""
+    text = source()
+    assert "collect_cockpit_failure_diagnostics" in text, "failure path must collect diagnostics"
+    assert "elementFromPoint" in text, "diagnostics must sample elementFromPoint"
+    assert "controllerReceipt" in text, "diagnostics must record controllerReceipt state"
+    assert "inFlightFetches" in text, "diagnostics must capture inFlightFetches"
+
+
+def test_open_cockpit_waits_for_decision_data():
+    """open_cockpit must wait for decision data to avoid asynchronous cockpit repaints."""
+    text = source()
+    assert "state.decisionData!==undefined" in text, "open_cockpit must await decisionData settlement"
+
+
+def test_collect_cockpit_failure_diagnostics_handles_missing_page_or_binary():
+    from tests.test_console_controller_cockpit_e2e import collect_cockpit_failure_diagnostics
+    assert collect_cockpit_failure_diagnostics(None, "p1", "await page.click('x')", None) == ""
+    assert collect_cockpit_failure_diagnostics("ego-browser", None, "await page.click('x')", None) == ""

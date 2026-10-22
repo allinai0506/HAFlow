@@ -8140,3 +8140,42 @@ git diff --check
 4. **返工提示词阻断事实丢失**：`_rework_retry_task` 仅按 `t['candidate_sha'] == task['candidate_sha']` 过滤，而 wrapup 任务的 `candidate_sha` 指向原认证 X，导致审阅 Y 产生的 blocked 事实被全部剔除。修复：将当前集成的候选 SHA（`integrated_commit` / `integrated_sha`）及 `failure_facts` 中的候选 SHA 纳入匹配集合，完整保留门禁阻断原因与审核意见。
 5. **真实返工生命周期与收尾收据验收**：测试套件由单纯的元数据更新升级为调用 `kernel.transition_task`（`rework -> working`）与 `issue_completion_contract` 凭证轮转；并在收尾阶段真正调用 `cli(scene, "close-workflow", "wf")`，对 SQLite `workflow_close_operations` 表中的 `completed` 收据和 options 做出确证。
 
+---
+
+## 194. 控制台驾驶舱 E2E 失败第一现场诊断与异步二次重绘防护（2026-10-22）
+
+### 问题背景
+
+Issue #326 跟踪了 `tests/test_console_controller_cockpit_e2e.py` 在宿主高负载或 CI 并发时暴露的两类间歇性失败：
+1. **A 类（指针拦截）**：`page.click timed out after 3000ms: <article> intercepts pointer events`。
+2. **B 类（求值挂起）**：`PageEvaluationTimeoutError: page.evaluate timed out after 15000ms`。
+
+虽然正反对照实验已证实自托管宿主在承载生产任务时的超高负载是放大抖动的主因，但在相同硬件条件下，测试时序与异步数据流存在确定性缺陷：
+- `open_cockpit` 仅等待了 `state.controllerActionsData`，未等待异步拉取的 `state.decisionData`。当裁决接口晚于驾驶舱初次渲染到达时，触发 `openControllerCockpitModal()` 全量替换 `controllerTabView.innerHTML`，导致刚定位的动作卡片在被点击瞬间发生位置偏移，被重排后的 `<article>` 拦截。
+- `test_operation_deep_link...` 在 `page.evaluate` 中直接返回了 `openControllerCockpit` 的内部 fetch Promise，强制让求值操作等待网络 I/O，耗尽 15000ms 预算。
+- 失败路径缺乏第一现场物理几何与网络遥测，使开发者只能盲猜根因。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 复合异步加载未完全对齐 | 页面存在多路并行请求时，仅等待其中一路会导致另一路到达时产生破坏性二次重绘（Layout Shift） | E2E 页面打开阶段必须显式等待所有参与初次布局渲染的关键状态（如 `state.decisionData`）落定，禁止在重绘未稳定前向 DOM 发起真实指针交互 |
+| `page.evaluate` 中不当返回 Promise | `evaluate` 会自动 `await` 返回的 Promise，易把简单的指令触发变成网络 I/O 阻塞并触发 15s 超时 | `page.evaluate` 触发界面动作时使用函数体语句（`() => { action(); }`）而不直接 `return Promise`；等待该动作产生的效果交由后续专职的 `waitForFunction` 或选择器监听 |
+| 间歇性故障缺乏第一现场遥测 | 仅凭 Playwright/ego-browser 的截断错误信息无法区分产品层级 BUG 还是测试竞态 | 在 `browser()` 失败路径增加确定性自动采样：对目标取中心点采样 `document.elementFromPoint`，记录命中标签、类名、z-index、position、目标与遮挡者包围盒、`state.controllerReceipt` 以及在途 fetch |
+
+### 修复与防护
+
+1. **失败路径诊断补齐**：在 `tests/test_console_controller_cockpit_e2e.py` 增加 `collect_cockpit_failure_diagnostics`，在任何命令非零退出时主动查询当前页面，捕获被拦截元素几何及网络/回执状态并追加至错误输出。
+2. **时序与状态稳定**：在 `open_cockpit` 挂载 `window.__inFlightFetches` 拦截器并增加 `state.decisionData!==undefined` 检查；在 `closeModal` 后补充显式等待 `!modal.classList.contains('open')`；解除 deep link 求值中的 Promise 阻塞。
+3. **护栏硬锁**：在 `tests/test_console_cockpit_e2e_harness.py` 增加 3 项守护断言，锁死诊断采集字段、时序等待与空参防护，同时保留原有反向护栏。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_console_cockpit_e2e_harness.py
+pytest -q tests/test_console_controller_cockpit_e2e.py
+pytest -q tests/test_console_frontend_syntax.py tests/test_console_ui_modules.py
+python3 -m compileall -q herdr services bin tests console
+git diff --check
+```
+

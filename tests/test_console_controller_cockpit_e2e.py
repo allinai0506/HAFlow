@@ -16,6 +16,7 @@ yours.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -32,6 +33,91 @@ from herdr.state_store import SQLiteStateStore
 SPACE = f"HAFlow Controller Cockpit Task 6 20261021 process {os.getpid()}"
 
 
+def collect_cockpit_failure_diagnostics(binary, page_label, script, result):
+    if page_label is None or not binary:
+        return ""
+    selectors = re.findall(r"(?:click|press|fill|waitForFunction|querySelector)\(['\"]([^'\"]+)['\"]", script)
+    selectors_json = json.dumps(selectors)
+    diag_script = f"""
+    const task=await taskSpace({json.dumps(SPACE)});
+    const page=task.page({json.dumps(page_label)});
+    try {{
+        const report = await page.evaluate((selectors) => {{
+            const res = {{
+                url: location.href,
+                workflowId: window.state?.workflowId,
+                readState: window.state?.controllerCockpit?.read_state,
+                receipt: window.state?.controllerReceipt,
+                inFlightFetches: Array.from(window.__inFlightFetches?.values?.() || []).map(f => ({{
+                    url: f.url,
+                    elapsedMs: Math.round(performance.now() - f.started)
+                }})),
+                inspections: []
+            }};
+            for (let raw of selectors) {{
+                let sel = raw;
+                if (sel.startsWith('loc=css:')) sel = sel.slice(8);
+                try {{
+                    const el = document.querySelector(sel);
+                    if (!el) {{
+                        res.inspections.push({{ selector: raw, found: false }});
+                        continue;
+                    }}
+                    const r = el.getBoundingClientRect();
+                    const cx = r.left + r.width / 2;
+                    const cy = r.top + r.height / 2;
+                    const hit = document.elementFromPoint(cx, cy);
+                    const hitCs = hit ? window.getComputedStyle(hit) : null;
+                    const elCs = window.getComputedStyle(el);
+                    res.inspections.push({{
+                        selector: raw,
+                        found: true,
+                        target: {{
+                            tag: el.tagName,
+                            className: el.className,
+                            zIndex: elCs.zIndex,
+                            position: elCs.position,
+                            rect: {{ x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }}
+                        }},
+                        centerPoint: {{ x: Math.round(cx), y: Math.round(cy) }},
+                        hitElement: hit ? {{
+                            tag: hit.tagName,
+                            className: hit.className,
+                            actionId: hit.getAttribute('data-action-id') || hit.closest('[data-action-id]')?.getAttribute('data-action-id'),
+                            zIndex: hitCs.zIndex,
+                            position: hitCs.position,
+                            rect: (function(){{
+                                const hr = hit.getBoundingClientRect();
+                                return {{ x: Math.round(hr.x), y: Math.round(hr.y), width: Math.round(hr.width), height: Math.round(hr.height) }};
+                            }})(),
+                            isTargetOrDescendant: el === hit || el.contains(hit)
+                        }} : null
+                    }});
+                }} catch(e) {{
+                    res.inspections.push({{ selector: raw, error: e.message }});
+                }}
+            }}
+            return res;
+        }}, {selectors_json});
+        console.log("DIAGNOSTICS_JSON=" + JSON.stringify(report));
+    }} catch(e) {{
+        console.log("DIAGNOSTICS_ERROR=" + e.message);
+    }}
+    """
+    try:
+        proc = subprocess.run([binary, "nodejs", "-e", diag_script],
+                              capture_output=True, text=True, timeout=8)
+        output = proc.stdout + proc.stderr
+        if "DIAGNOSTICS_JSON=" in output:
+            data = json.loads(output.split("DIAGNOSTICS_JSON=", 1)[1].splitlines()[0])
+            return "\n--- Cockpit E2E Failure Diagnostics ---\n" + json.dumps(data, indent=2, ensure_ascii=False) + "\n----------------------------------------\n"
+        if "DIAGNOSTICS_ERROR=" in output:
+            return f"\n--- Cockpit E2E Failure Diagnostics Error: {output.strip()} ---\n"
+    except Exception as exc:
+        return f"\n--- Cockpit E2E Failure Diagnostics Collection Failed: {exc} ---\n"
+    return ""
+
+
 def browser(script, *, page_label):
     binary = shutil.which("ego-browser")
     if not binary:
@@ -41,7 +127,9 @@ def browser(script, *, page_label):
         prelude += f"const page=task.page({json.dumps(page_label)});"
     result = subprocess.run([binary, "nodejs", "-e", prelude + script],
                             capture_output=True, text=True, timeout=45)
-    assert result.returncode == 0, result.stdout + result.stderr
+    if result.returncode != 0:
+        diagnostics = collect_cockpit_failure_diagnostics(binary, page_label, script, result)
+        assert result.returncode == 0, (result.stdout + result.stderr + diagnostics)
     return result.stdout + result.stderr
 
 
@@ -137,7 +225,19 @@ def open_cockpit(fixture, wid="wf-e2e"):
     fixture.browser(f"""
         await page.cdp('Emulation.setDeviceMetricsOverride',{{width:1440,height:1800,deviceScaleFactor:1,mobile:false}});
         await page.goto({json.dumps(fixture.url + '/?workflow_id=' + wid)});
-        await page.waitForFunction(()=>typeof openControllerCockpit==='function'&&state.overview&&state.workflow?.workflow?.workflow_id==={json.dumps(wid)}&&!state.controllerActionsData?.pending,undefined,{{timeout:15000}});
+        await page.evaluate(()=>{{
+            if(!window.__inFlightFetches){{
+                window.__inFlightFetches=new Map();
+                const orig=window.fetch;
+                window.fetch=function(...args){{
+                    const url=typeof args[0]==='string'?args[0]:(args[0]?.url||'unknown');
+                    const key=Symbol();
+                    window.__inFlightFetches.set(key,{{url,started:performance.now()}});
+                    return orig.apply(this,args).finally(()=>window.__inFlightFetches.delete(key));
+                }};
+            }}
+        }});
+        await page.waitForFunction(()=>typeof openControllerCockpit==='function'&&state.overview&&state.workflow?.workflow?.workflow_id==={json.dumps(wid)}&&!state.controllerActionsData?.pending&&state.decisionData!==undefined,undefined,{{timeout:15000}});
         await page.evaluate(()=>openControllerCockpit({{workflowId:{json.dumps(wid)}}}));
         await page.waitForFunction(()=>state.controllerCockpit?.workflow?.workflow_id==={json.dumps(wid)}&&state.controllerCockpit.read_state==='confirmed');
     """)
@@ -164,7 +264,10 @@ def test_steer_custom_instruction_roundtrips_to_current_run(cockpit):
         console.log('INSTRUCTION_FIELD='+await page.evaluate(()=>!!document.getElementById('cockpitInstruction')));
     """)
     assert "INSTRUCTION_FIELD=true" in out, "steer confirmation must accept the human instruction"
-    cockpit.browser("await page.evaluate(()=>closeModal());")
+    cockpit.browser("""
+        await page.evaluate(()=>closeModal());
+        await page.waitForFunction(()=>!document.getElementById('modal').classList.contains('open'));
+    """)
     confirm_action(cockpit, "working:steer", instruction="请先核查 SQLite 回执再继续")
     queued = cockpit.store.list_steers(task_id="working")
     assert len(queued) == 1
@@ -434,7 +537,7 @@ def test_operation_deep_link_fetches_confirmation_outside_display_window(cockpit
     assert not any(a['action_id'] == aid for a in cockpit.read(wid)['actions'])
     open_cockpit(cockpit, wid)
     cockpit.browser(f"""
-        await page.evaluate(()=>openControllerCockpit({{workflowId:'{wid}',operationId:{target['id']}}}));
+        await page.evaluate(()=>{{ openControllerCockpit({{workflowId:'{wid}',operationId:{target['id']}}}); }});
         await page.waitForFunction(()=>!!document.querySelector('[data-action-id="{aid}"]'),undefined,{{timeout:5000}});
         console.log('CARDS='+await page.evaluate(()=>document.querySelectorAll('[data-action-id]').length));
     """)
