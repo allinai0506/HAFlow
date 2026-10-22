@@ -1,9 +1,11 @@
 import time
+
+from console import common, inventory, read_api, runtime, workflow_policy
+from herdr import interaction_loop as herdr_interaction_loop
 from herdr import kernel as herdr_kernel
 from herdr import steering as herdr_steering
-from herdr import interaction_loop as herdr_interaction_loop
 from herdr.transitions import InvalidTransitionError
-from console import common, inventory, read_api, runtime, workflow_policy
+
 
 def api_task_steer(b):
     tid=str(b.get('task_id') or '').strip()
@@ -272,10 +274,27 @@ def api_task_force_review(b):
     raw_op = b.get('operator')
     if raw_op is None and 'operator' not in b:
         raw_op = 'human_console'
-    from herdr.transitions import validate_operator, InvalidOperatorError
+    token = b.get('operator_token') or b.get('token')
+    credentials_path = b.get('operator_credentials') or b.get('credentials_path')
+    from herdr.operator_auth import (
+        OperatorAuthError,
+        authenticate_and_authorize_operator,
+    )
+    from herdr.transitions import InvalidOperatorError, validate_operator
     try:
         op = validate_operator(raw_op)
-    except (InvalidOperatorError, ValueError) as exc:
+        principal = authenticate_and_authorize_operator(
+            operator_id=op,
+            action="force_review",
+            token=token,
+            credentials_path=credentials_path,
+        )
+        op = principal.operator_id
+    except InvalidOperatorError as exc:
+        raise RuntimeError(f"无效的操作人标识: {exc}")
+    except OperatorAuthError as exc:
+        raise RuntimeError(f"操作人凭据或能力鉴权失败: {exc}")
+    except ValueError as exc:
         raise RuntimeError(f"无效的操作人标识: {exc}")
     reason = str(b.get('reason') or 'console_force_review').strip()
     exp_ver_raw = b.get('expected_version')
@@ -410,6 +429,8 @@ def api_task_signoff(b):
         exp_ver = b.get('expected_version')
         exp_task_vers = b.get('expected_task_versions')
         exp_pane = str(b.get('expected_pane_id') or b.get('pane_id') or '').strip()
+        token = b.get('operator_token') or b.get('token')
+        credentials_path = b.get('operator_credentials') or b.get('credentials_path')
 
         res = herdr_kernel.force_pass_gate(
             wid,
@@ -420,6 +441,8 @@ def api_task_signoff(b):
             task_id=tid or None,
             expected_pane_id=exp_pane or None,
             expected_task_versions=exp_task_vers,
+            token=token,
+            credentials_path=credentials_path,
         )
         return {'ok': True, 'action': 'approve', 'result': res}
     elif act=='reject':

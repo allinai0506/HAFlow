@@ -1,6 +1,5 @@
 """Argument definitions for the workflow command family."""
 
-import argparse
 
 
 def add_workflow_parsers(sub):
@@ -88,9 +87,22 @@ def add_workflow_parsers(sub):
     bypass_gate_cmd.add_argument("task_id", help="目标任务 ID")
     bypass_gate_cmd.add_argument("--reason", required=True, help="门禁豁免原因（必填审计凭据）")
     bypass_gate_cmd.add_argument("--operator", default="human", help="操作人标识（默认 human）")
+    bypass_gate_cmd.add_argument("--token", "--operator-token", dest="token", default=None, help="操作人凭据令牌 (HMAC / Bearer Token)")
+    bypass_gate_cmd.add_argument("--credentials", "--operator-credentials", dest="credentials_path", default=None, help="操作人凭据文件路径")
     bypass_gate_cmd.add_argument("--note", default=None, help="附加说明")
     bypass_gate_cmd.add_argument("--expected-version", type=int, default=None, help="目标任务期望版本号 (CAS 乐观锁)")
     bypass_gate_cmd.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
+    issue_token_cmd = sub.add_parser("issue-operator-token", help="受控签发操作人企业级 HMAC 签名凭据 (Issue #307)")
+    issue_token_cmd.add_argument("operator", help="操作人标识 (例如 lead_alice)")
+    issue_token_cmd.add_argument("--role", default="human_operator", help="操作人角色 (默认 human_operator)")
+    issue_token_cmd.add_argument("--capabilities", default=None, help="能力列表 (逗号分隔，默认 bypass_gate,force_pass_gate,force_review)")
+    issue_token_cmd.add_argument("--expires-in", type=float, default=3600.0, help="凭据有效期秒数 (默认 3600)")
+    issue_token_cmd.add_argument("--secret", default=None, help="显式指定签名密钥 (默认使用控制台安全私钥)")
+    issue_token_cmd.add_argument("--out", default=None, help="凭据写入目标文件路径 (以 0o600 权限原子落盘)")
+    issue_token_cmd.add_argument("--register-db", action="store_true", help="同时将凭据持久化登记到 state_db")
+    issue_token_cmd.add_argument("--db-path", default=None, help="指定 state_db 路径")
+    issue_token_cmd.add_argument("--json", action="store_true", help="以 JSON 格式输出")
 
     stage_cmd = sub.add_parser("stage-status")
     stage_cmd.add_argument("workflow_id")

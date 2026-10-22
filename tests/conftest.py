@@ -62,6 +62,9 @@ os.environ["HERDR_ATTENTION_FILE"] = os.path.join(
 # Enabling deterministic observer tests must not implicitly enable model spend.
 os.environ["HERDR_OBSERVER_JEV_ENABLED"] = "0"
 
+# Allow legacy SC-010 operator regex tests to run without credentials unless strictly tested.
+os.environ.setdefault("HERDR_ALLOW_UNAUTHENTICATED_OPERATOR", "1")
+
 
 @pytest.fixture(autouse=True)
 def isolate_model_credentials(monkeypatch):

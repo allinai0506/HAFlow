@@ -1,9 +1,11 @@
 import time
+
+from console import common, inventory, task_api, workflow_api, workflow_policy
+from herdr import controller_actions as herdr_controller_actions
 from herdr import human_decisions as herdr_human_decisions
 from herdr import kernel as herdr_kernel
-from herdr import controller_actions as herdr_controller_actions
 from herdr import workflow_docs as herdr_workflow_docs
-from console import common, inventory, task_api, workflow_api, workflow_policy
+
 
 def api_kernel_pause(b):
     wid=str(b.get('workflow_id') or '').strip()
@@ -62,6 +64,8 @@ def api_kernel_force_pass(b):
     exp_ver = b.get('expected_version')
     exp_task_vers = b.get('expected_task_versions')
     exp_pane = str(b.get('expected_pane_id') or b.get('pane_id') or '').strip()
+    token = b.get('operator_token') or b.get('token') or b.get('auth_token')
+    credentials_path = b.get('operator_credentials') or b.get('credentials_path')
 
     return herdr_kernel.force_pass_gate(
         wid,
@@ -72,6 +76,8 @@ def api_kernel_force_pass(b):
         task_id=task_id or None,
         expected_pane_id=exp_pane or None,
         expected_task_versions=exp_task_vers,
+        token=token,
+        credentials_path=credentials_path,
     )
 
 def api_kernel_checkpoint_create(b):
@@ -306,8 +312,14 @@ def api_controller_execute_action(payload):
     # Historical callers retain their result/exception contract; receipts add
     # authoritative outcome facts without changing transport success semantics.
     from herdr.controller_receipts import classify_receipt
-    from services.controller.cockpit_automation import (read_cockpit, persist_receipt,
-        read_action_state, pending_action_receipt, checkpoint_result, _unknown_cockpit)
+    from services.controller.cockpit_automation import (
+        _unknown_cockpit,
+        checkpoint_result,
+        pending_action_receipt,
+        persist_receipt,
+        read_action_state,
+        read_cockpit,
+    )
     store = herdr_kernel._get_store()
     wid = str((payload or {}).get('workflow_id') or '').strip()
     try:
@@ -417,7 +429,7 @@ def _execute_legacy_controller_action(payload, *, validate_only=False):
             cur_pane = str(task.get('pane_id') or '').strip()
             exp_pane = str(payload.get('expected_pane_id') or '').strip()
             if cur_pane != exp_pane:
-                raise RuntimeError(f'任务运行实例已变化，请刷新页面')
+                raise RuntimeError('任务运行实例已变化，请刷新页面')
         elif payload.get('pane_id') is not None and act_type not in ('redrive',):
             req_pane = str(payload.get('pane_id') or '').strip()
             cur_pane = str(task.get('pane_id') or '').strip()
@@ -469,6 +481,8 @@ def _execute_legacy_controller_action(payload, *, validate_only=False):
         exp_ver = payload.get('expected_version')
         exp_task_vers = payload.get('expected_task_versions')
         exp_pane = str(payload.get('expected_pane_id') or payload.get('pane_id') or '').strip()
+        token = payload.get('operator_token') or payload.get('token') or payload.get('auth_token')
+        credentials_path = payload.get('operator_credentials') or payload.get('credentials_path')
 
         # Execution/write boundary check: pass expected_version, task_id, expected_pane_id, expected_task_versions to force_pass_gate
         gate_res = herdr_kernel.force_pass_gate(
@@ -480,6 +494,8 @@ def _execute_legacy_controller_action(payload, *, validate_only=False):
             task_id=task_id or None,
             expected_pane_id=exp_pane or None,
             expected_task_versions=exp_task_vers,
+            token=token,
+            credentials_path=credentials_path,
         )
 
         adv_res = None

@@ -24,6 +24,30 @@
   3. 静态编译 `python3 -m compileall -q herdr services bin tests console` 与 `git diff --check` 零告警通过；
   4. 验证真实项目数据 `runtime.overview()['alerts']` 成功由 6 条历史僵尸告警收敛至 0 条活跃告警，红点正确熄灭。
 
+## [2026-10-21] feat | 门禁豁免与特权操作接入企业级凭据鉴权与主体能力绑定 (Issue #307)
+
+- 背景：
+  1. 在 PR #306 (SC-010) 中，已确立门禁人工放行与强制复审中 operator 的基础格式规范、非空校验、注入/遍历字符拦截以及匿名占位符阻断（`herdr/transitions.py:validate_operator`），消除了自由无审计字符串的盲区；
+  2. GitHub Codex 自动化评审在 PR #306 中指出关键 P1 缺陷：`validate_operator` 仅做语法格式校验，未对主体身份进行签名凭据核验；非可信本地进程或 Agent 可伪造 `lead_admin` 等合法格式操作人标识并获得带假名的豁免回执；CLI、内核与 Web 控制台特权路由均未接入凭据鉴权；策略 `gate_bypass_policy.yaml` 仍声明未实现角色且未阻断 Agent，未能达成归属性审计。
+- 变更：
+  1. **统一操作人鉴权与授权引擎 (`herdr/operator_auth.py`)**：
+     - 实现 `issue_operator_hmac_token` 与 `verify_operator_hmac_token`：支持分布式与企业级防篡改防伪装签名凭据（`haflow_v1.<payload>.<signature>`），支持有效期与签发主体校验；
+     - 整合 `state_db.get_user_token(operator, "operator"|"gate_bypass")`：单源权威支持持久化企业操作人令牌，使用 `hmac.compare_digest` 恒定时间防时序攻击；
+     - 遵循显式呈现与环境隔离原则：严格拦截工位克隆及工作区目录内的凭据文件遍历伪造（Lesson §175）；
+     - 实现主体能力校验与防伪装阻断：严禁工位 Agent 伪造主体自放行（`task.agent == operator` 立即阻断）；要求特权操作人必须具备 `human_operator`（或特权管理员）角色及对应 Capability 授权；
+  2. **核心门禁特权写入与 Web 控制台全链路接入**：
+     - `herdr/kernel.py`：`bypass_task_gate` 与 `force_pass_gate` 接入 `authenticate_and_authorize_operator`，将认证状态（`authenticated`）、角色（`role`）与凭据类型（`auth_method`）透传至放行回执、工作流覆盖与审计轨迹；
+     - `herdr/state/transition_gate.py`：在底层原子放行事务中接入操作人鉴权并绑定审计事实；
+     - `console/workflow_policy.py` & `console/task_api.py`：Web 控制台在 `_validate_force_pass_params` 与 `api_task_force_review` 中接入鉴权，支持透传 HTTP Bearer Token / Header Token / Payload Token；
+     - `bin/herdr-task bypass-gate` & `bin/herdr-factory force-pass`：CLI 子命令新增 `--token` (`--operator-token`) 与 `--credentials` (`--operator-credentials`) 显式凭据参数；
+  3. **本体资产推进至 Active**：
+     - `ontology/policies/gate_bypass_policy.yaml`：推进策略生命周期至 `lifecycle: active`，标记 `roles_implemented: true`，明确主体为具备有效凭据与对应 Capability 授权的 `human_operator`，设定 `agent_execution.mode: inherit_user` 并通过防伪装守卫严禁 Agent 持有特权；
+     - `ontology/actions/bypass_gate.yaml` 与 `ontology/actions/force_pass_gate.yaml`：补充 `token` 与 `credentials_path` 入参。
+- 证据：
+  1. 新增 `tests/test_gate_auth_and_capability.py` 涵盖 HMAC 签名校验、State DB 鉴权、能力授权、防伪装阻断、内核流转、控制台守卫与 CLI 命令行等 20 项专项测试（100% 通过）；
+  2. 既有门禁操作人规范专项 `tests/test_gate_exemption_operator_audit.py`（18 项 / 85 subtest）、版本乐观锁 `tests/test_gate_exemption_version_guard.py`（6 项）与 wrapup review-closure 全套 58 项测试全量通过；
+  3. 编译检查 `python3 -m compileall -q herdr services bin tests` 零告警通过；`git diff --check` 格式合规。
+
 ## [2026-10-21] fix | 调度稳定性、假死锁预防、候选新鲜度主动失效与僵尸义务收敛 (切片 2: P4, P5, P11)
 
 - 背景：
@@ -3466,4 +3490,4 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 撤回两项被自身受控实验证伪的假设：① `--dist loadgroup` + `xdist_group`（争抢非本文件主因，串行化后仍失败，本地串行也复现）；② 把动作超时从 3000ms 提到 15000ms（命中检查不跟随 `timeout` 选项，错误里仍是 3000ms）。护栏中加锁禁止二者复活。
 - 新记两条可复用事实：`HAFlow Test Suite` 只有 `pull_request_target`（无 push 触发）且 job 定义取自 base 分支，故**改 workflow 的 PR 无法在自己的 PR run 里自证**，必须用 `gh workflow run --ref <branch>` 的 `workflow_dispatch`（按分支文件、`mode=full`）验收；`PageEvaluationTimeoutError` 显示存在挂起 >15s 的 evaluate，属第三类独立故障。
 - 仍未修（转 issue，不在本 PR 假装解决）：`<article> intercepts pointer events`（可能是驾驶舱层级/布局被真实用户同样咬到的产品缺陷）与挂起的 `page.evaluate`。禁止用提高超时或 `--reruns` 掩盖。
-- Evidence：`tests/test_console_cockpit_e2e_harness.py`（3 项护栏，逐条反向验证：删除打开等待即 FAIL）、`tests/test_console_controller_cockpit_e2e.py`（本地 14 passed）；`docs/lessons/lessons-learned.md` §190 已按实测重写。
+- Evidence：`tests/test_console_cockpit_e2e_harness.py`（3 项护栏，逐条反向验证：删除打开等待即 FAIL）、`tests/test_console_controller_cockpit_e2e.py`（本地 14 passed）；`docs/lessons/lessons-learned.md` §191 已按实测重写。

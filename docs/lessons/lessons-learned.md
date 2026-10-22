@@ -7955,7 +7955,63 @@ git diff --check
 
 ---
 
-## 190. 共享浏览器 E2E 的三类间歇失败，与一次被自己实验证伪的归因（2026-10-22）
+## 190. 门禁豁免与特权操作企业级凭据鉴权、主体能力绑定与工作区越权防护（2026-10-21）
+
+### 问题背景
+
+在 PR #306 的代码评审（Codex finding / Issue #307）与 cleanroom review 中指出：流水线门禁豁免（`bypass-gate`、`force-pass`）以及控制台强制复核等高危特权操作，此前仅校验操作者名字（`operator` 纯字符串），缺乏企业级真实凭据验证。这导致执行上下文中的 Worker Agent 可以通过伪造 `operator` 字符串自我豁免门禁，且任何未注册的外部调用者都可以冒用管理员身份绕过流水线质量门禁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 门禁豁免仅依赖 operator 字符串参数 | 无法防御身份冒用，无法阻断执行 Agent 的自我豁免 | 必须引入多策略真实身份凭据验证：支持标准 HMAC-SHA256 签名 Token (`haflow_v1.<payload>.<sig>`) 与数据库预注册 Token，并进行主体存在性与能力范围校验 |
+| Agent 工位克隆目录存在凭据文件投毒与路径穿越风险 | 恶意或受损的 Task Worker 可能在克隆工作目录伪造凭据文件，诱骗流水线加载 | 强制凭据路径防护：凭据文件必须存在且在工作区/克隆目录之外（如 `~/.herdr-controller/`）；严格拒绝从当前或历史 task/run 工作区内加载特权凭据（防越权与目录穿越） |
+| Worker Agent 自我豁免（task.agent == operator） | 研发工位的 Agent 若拥有豁免权，会导致门禁形同虚设 | 核心门禁决断必须比对当前 Task 的 `agent` 身份；当 `operator == task.agent` 时一票否决，禁止任何人以自我代理身份豁免门禁 |
+| 遵守 ADR M-12 避免角色模型伪实现 | 代码尚未完整落地角色 RBAC 时，本体策略若强设 `roles_implemented: true` 会制造安全虚假证明 | 遵守 ADR-0004 决策 M-12：在完整角色强校验真正落地前保持 `roles_implemented: false`，实际授权基于认证主体与 Capability 能力模型 |
+
+### 操作规范（已固化到 `herdr/operator_auth.py` 与 `herdr/kernel.py`）
+
+1. **凭据验证统一入口**：所有涉及 `bypass_task_gate`、`force_pass_gate`、`force_review` 的调用链统一调用 `authenticate_and_authorize_operator`，支持 `--token` / `--operator-token` 及 `--credentials` / `--operator-credentials`。
+2. **工作区隔离防护**：`resolve_presented_token` 自动检查候选凭据文件绝对路径，若位于任何已知 task workspace / clone 内部立即抛出 `OperatorAuthenticationError` 阻断执行。
+3. **不可伪造凭据签发与回放防护**：HMAC Token 具备租户、主体、过期时间戳（`exp`）及 capabilities 数组签名保护，非法篡改或过期自动失效。
+4. **默认 Fail-Closed 与工位环境硬限制**：出厂默认对未提供凭据者一票否决（Fail-Closed）；Worker 工位环境内强行拒绝自签发凭据与未认证豁免。
+5. **控制台凭据隔离与端到端传递**：操作者特权 Token 与 Experience Hub 认证 Token 严格解耦（`X-HAFlow-Operator-Token`），并在所有审批与执行动作中完整传递至 `herdr_kernel`。
+
+### Cleanroom Review 阻断项修复（B1–B6 闭环）
+
+| 阻断项 | 漏洞根因 | 修复策略与安全不变量 |
+|--------|----------|----------------------|
+| **B1** | 环境变量缺失时回退到宽松放行，导致无 Token 即可绕过门禁 | 出厂默认强制 Fail-Closed；未认证兜底移除；缺少有效凭据一律拒绝 |
+| **B2** | Worker Agent 可在任务内调用签发逻辑生成合法 Token | 阻断 Worker 自签发/自伪装，在凭据签发、凭据目录、克隆身份多处进行不可绕过判定，签发仅限非 Worker 操作人环境 |
+| **B3** | 本地无 secret 时存在静态弱密钥 fallback | 彻底移除静态弱密钥，必须显式配置或通过 `secrets.token_hex(32)` 生成原子 0o600 凭据文件，目录不可用直接报错 |
+| **B4** | Console `force_pass_gate` 与 Task Signoff 未向底层传递 token | 在 Controller 与 Task API 审批调用链中完整透传已认证主体或 token，消除重复认证与 token 丢弃 |
+| **B5** | Console HTTP 错误地将体验中心普通用户 token 注入操作者鉴权 | 增加专用的 `get_operator_token()` 提取 `X-HAFlow-Operator-Token`，杜绝凭据混用与特权提升 |
+| **B6** | 策略文档中 roles_implemented 与 ADR M-12 冲突 | 对齐 ADR M-12 保持 `roles_implemented: false`，文档与本体策略同步一致 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_gate_auth_and_capability.py
+pytest -q tests/test_gate_exemption_operator_audit.py
+pytest -q tests/test_wrapup_review_closure.py
+pytest -q tests/test_console_controller_actions_api.py
+```
+
+### 相关文档 / 关联证据
+
+- Issue #307
+- `herdr/operator_auth.py`
+- `tests/test_gate_auth_and_capability.py`
+- `ontology/policies/gate_bypass_policy.yaml`
+
+---
+
+---
+
+---
+
+## 191. 共享浏览器 E2E 的三类间歇失败，与一次被自己实验证伪的归因（2026-10-22）
 
 ### 问题背景
 

@@ -1,12 +1,23 @@
-import json, urllib.parse
+import json
+import urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+
+from console import (
+    common,
+    control_api,
+    inventory,
+    read_api,
+    runtime,
+    task_api,
+    workflow_api,
+)
+from console.page import HTML, HTML_TEMPLATE
+from herdr import deliverables as herdr_deliverables
 from herdr import projects as herdr_projects
 from herdr.kernel import state_db_path
-from herdr import deliverables as herdr_deliverables
-from console import common, control_api, inventory, read_api, runtime, task_api, workflow_api
-from console.page import HTML, HTML_TEMPLATE
+
 
 def _get_console_hub_client(token=None):
     from herdr.experience.client import ExperienceClient
@@ -82,6 +93,11 @@ class Handler(BaseHTTPRequestHandler):
             return header_tok.strip()
         from herdr.state_db import get_user_token
         return get_user_token('local-console-reviewer', 'experience_hub')
+    def get_operator_token(self):
+        header_tok = self.headers.get('X-HAFlow-Operator-Token') or self.headers.get('X-Operator-Token')
+        if header_tok:
+            return header_tok.strip()
+        return None
     def send_json(self,status,data=None,error=None):
         p={'ok':error is None};
         if data is not None:p['data']=data
@@ -294,21 +310,41 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/agent':return self.send_json(200,workflow_api.set_agent_override(str(b['workflow_id']),str(b.get('agent') or 'auto')))
             if p=='/api/workflow/candidate':return self.send_json(200,workflow_api.create_candidate(str(b['workflow_id'])))
             if p=='/api/workflow/advance':return self.send_json(200,workflow_api.manual_advance(str(b['workflow_id'])))
-            if p=='/api/task/force-review':return self.send_json(200,task_api.api_task_force_review(b))
+            if p=='/api/task/force-review':
+                b = b or {}
+                op_tok = self.get_operator_token()
+                if op_tok and 'operator_token' not in b and 'token' not in b:
+                    b['operator_token'] = op_tok
+                return self.send_json(200,task_api.api_task_force_review(b))
             if p=='/api/workflow/retry-advance':return self.send_json(200,control_api.api_workflow_retry_advance(b))
             if p=='/api/task/coordinator':return self.send_json(200,workflow_api.ask_coordinator(str(b['task_id'])))
             if p=='/api/task/steer':return self.send_json(200,task_api.api_task_steer(b))
             if p=='/api/task/halt':return self.send_json(200,task_api.api_task_halt(b))
-            if p=='/api/task/signoff':return self.send_json(200,task_api.api_task_signoff(b))
+            if p=='/api/task/signoff':
+                b = b or {}
+                op_tok = self.get_operator_token()
+                if op_tok and 'operator_token' not in b and 'token' not in b:
+                    b['operator_token'] = op_tok
+                return self.send_json(200,task_api.api_task_signoff(b))
             if p=='/api/slot/bind':return self.send_json(200,workflow_api.bind_slot(str(b['pane_id']),str(b.get('agent') or 'auto')))
             if p=='/api/kernel/pause':return self.send_json(200,control_api.api_kernel_pause(b))
             if p=='/api/kernel/resume':return self.send_json(200,control_api.api_kernel_resume(b))
             if p=='/api/kernel/step':return self.send_json(200,control_api.api_kernel_step(b))
             if p=='/api/kernel/rollback':return self.send_json(200,control_api.api_kernel_rollback(b))
-            if p=='/api/kernel/force-pass':return self.send_json(200,control_api.api_kernel_force_pass(b))
+            if p=='/api/kernel/force-pass':
+                b = b or {}
+                op_tok = self.get_operator_token()
+                if op_tok and 'operator_token' not in b and 'token' not in b:
+                    b['operator_token'] = op_tok
+                return self.send_json(200,control_api.api_kernel_force_pass(b))
             if p=='/api/kernel/checkpoint':return self.send_json(200,control_api.api_kernel_checkpoint_create(b))
             if p=='/api/kernel/checkpoint/restore':return self.send_json(200,control_api.api_kernel_checkpoint_restore(b))
-            if p=='/api/controller/execute-action':return self.send_json(200,control_api.api_controller_execute_action(b))
+            if p=='/api/controller/execute-action':
+                b = b or {}
+                op_tok = self.get_operator_token()
+                if op_tok and 'operator_token' not in b and 'token' not in b:
+                    b['operator_token'] = op_tok
+                return self.send_json(200,control_api.api_controller_execute_action(b))
             if p=='/api/workflow/decision/raise':return self.send_json(200,control_api.api_workflow_decide_raise(b))
             if p=='/api/workflow/decision':return self.send_json(200,control_api.api_workflow_decide_resolve(b))
             if p=='/api/workflow/recovery/decision':return self.send_json(200,workflow_api.api_workflow_recovery_decide(b))

@@ -40,6 +40,7 @@ ENTRY_HANDLERS = (
     "force_advance",
     "get_task",
     "integrate_task",
+    "issue_operator_token_cli",
     "launch_task",
     "list_tasks",
     "merge_pull_request",
@@ -68,6 +69,7 @@ TASK_REGISTRY_HANDLERS = frozenset({
 
 def build_task_registry_handlers(dependencies):
     from functools import partial
+
     from herdr import task_cli_tasks
 
     common = {

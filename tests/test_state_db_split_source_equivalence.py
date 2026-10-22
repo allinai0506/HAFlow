@@ -40,10 +40,10 @@ def test_moved_function_bodies_preserve_authorized_ast():
     for original in BASELINE.body:
         if not isinstance(original, (ast.FunctionDef, ast.ClassDef)):
             continue
-        if original.name in {'_ensure_schema', 'save_task', 'create_checkpoint', 'restore_checkpoint'}:
-            # _ensure_schema has the runtime DDL contract. The other three are
-            # intentionally changed by Controller Cockpit identity/admission
-            # fencing and have dedicated real-SQLite regression tests.
+        if original.name in {'_ensure_schema', 'save_task', 'create_checkpoint', 'restore_checkpoint', 'force_pass_gate'}:
+            # _ensure_schema has the runtime DDL contract. save_task, create_checkpoint,
+            # restore_checkpoint are changed by Controller Cockpit fencing.
+            # force_pass_gate is changed by Issue #307 enterprise credential auth.
             continue
         function = getattr(state_db, original.name)
         actual = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
@@ -58,7 +58,7 @@ def test_moved_function_bodies_preserve_authorized_ast():
             expected = RemoveInlineTransitionImport().visit(expected)
         assert ast.dump(actual) == ast.dump(expected), original.name
         compared.append(original.name)
-    assert len(compared) == 150
+    assert len(compared) == 149
 
 
 def test_time_calls_remain_35_unchanged_expressions():

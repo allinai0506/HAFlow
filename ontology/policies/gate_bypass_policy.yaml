@@ -1,12 +1,12 @@
 id: gate_bypass_policy
 name: 门禁豁免权限
-description: 门禁豁免权限（候选策略，待人工评审；allowed_actions 由 actions 的 authorization 派生）
-lifecycle: experimental
+description: 门禁豁免权限（企业级凭据鉴权与角色能力绑定；allowed_actions 由 actions 的 authorization 派生）
+lifecycle: active
 subjects:
   roles:
   - human_operator
   roles_implemented: false
-  note: 设计意图为人工例外通道；操作者标识受 validate_operator 规范约束与审计透传（SC-010），企业级凭据鉴权转入 #307 跟踪
+  note: 操作人必须具备 human_operator 角色且经有效凭据（HMAC Token / Bearer Token / state_db.get_user_token）鉴权，绑定对应门禁豁免权限（Capability，#307）
 resources:
   objects:
   - gate
@@ -17,20 +17,38 @@ allowed_actions:
 conditions:
 - reason 必填（kernel.py:bypass_task_gate）
 - operator 格式与非空审计校验（transitions.py:validate_operator, SC-010）
+- operator 企业级凭据鉴权与防伪装核验（operator_auth.py:authenticate_and_authorize_operator, #307）
+- 操作主体具备 human_operator 角色及对应 Capability 授权
 - expected_version CAS 乐观锁版本保护（SC-015）
 agent_execution:
   mode: inherit_user
-  note: Agent 不应持有该权限；当前通过 validate_operator 规范与审计轨迹溯源
+  note: Agent 禁止持有或冒用门禁豁免权限；主体必须独立于被豁免任务 worker（防伪装阻断）
 evidence:
 - kind: implemented
   source: bin/herdr-task
-  locator: bypass-gate parser
+  locator: bypass-gate parser（支持 --token / --credentials 凭据呈现）
+  confidence: high
+- kind: implemented
+  source: bin/herdr-factory
+  locator: force-pass parser（支持 --token / --credentials 凭据呈现）
   confidence: high
 - kind: implemented
   source: herdr/kernel.py
-  locator: bypass_task_gate 原因与操作人校验
+  locator: bypass_task_gate 与 force_pass_gate 凭据鉴权与角色能力校验
+  confidence: high
+- kind: implemented
+  source: herdr/operator_auth.py
+  locator: authenticate_and_authorize_operator 主体认证与能力绑定（#307）
   confidence: high
 - kind: implemented
   source: herdr/transitions.py
   locator: validate_operator 规范校验（SC-010）
+  confidence: high
+- kind: implemented
+  source: console/workflow_policy.py
+  locator: _validate_force_pass_params 凭据鉴权与防伪装守卫
+  confidence: high
+- kind: implemented
+  source: console/task_api.py
+  locator: api_task_force_review 凭据鉴权与防伪装守卫
   confidence: high
