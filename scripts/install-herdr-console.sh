@@ -196,20 +196,22 @@ for service in ${SNAPSHOT_SERVICES[@]+"${SNAPSHOT_SERVICES[@]}"}; do
     if ! attempt_out="$(launchctl list 2>&1)"; then
       query_failed=1
       last_error="${attempt_out}"
-      [[ "${attempt}" == "3" ]] || sleep 2
-      continue
-    fi
-    query_failed=0
-    attempt_pid="$(printf '%s\n' "${attempt_out}" \
-      | awk -v s="${service}" '$3==s {print $1; exit}')"
-    if [[ -n "${attempt_pid}" && "${attempt_pid}" != "-" ]]; then
-      pid="${attempt_pid}"
-      break
+    elif ! attempt_pid="$(printf '%s\n' "${attempt_out}" \
+      | awk -v s="${service}" '$1 ~ /^[0-9]+$/ && $3 == s {print $1; exit}')"; then
+      # 解析同样是命令替换赋值：不加守卫就与本段的原始缺陷只差一行
+      query_failed=1
+      last_error="状态解析失败"
+    else
+      query_failed=0
+      if [[ -n "${attempt_pid}" ]]; then
+        pid="${attempt_pid}"
+        break
+      fi
     fi
     [[ "${attempt}" == "3" ]] || sleep 2
   done
   if [[ "${query_failed}" == "1" ]]; then
-    echo "  ✗ ${service}: launchctl 状态查询连续失败，无法证明其加载代际" >&2
+    echo "  ✗ ${service}: launchctl 状态查询未能确证其加载代际" >&2
     if [[ -n "${last_error}" ]]; then echo "      launchctl: ${last_error}" >&2; fi
     status=1
     continue
