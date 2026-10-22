@@ -3471,3 +3471,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 与 Lesson 186 的关系：该条给 `resolve_gate_config` 补的是**名字正则**，本条改为**声明语义**。两者互补（前者判「有无门禁契约」，后者判「是否独立验证候选」，`wrapup` 有 `gate:` 但不是 verifier），但按名字打补丁覆盖不到 `audit`/`qa_gate` 这类命名，剩余两处名字正则仍应收敛到声明语义。
 - 遗留已记录未修：`coordinator_messages.py:261` 仍是字面量，只影响兜底路径给总指挥的建议命令文本，正确修需改纯函数签名；其残余风险已被本次修好的分配后基线门兜住。
 - Evidence：`herdr/node_roles.py`、`tests/test_node_roles.py`、`tests/test_verifier_identity_parity.py`、`tests/test_task_cli_launch_preflight.py`、`tests/test_fix_bug1002_parallel_candidate.py`；受影响 66 个测试文件回归 `1542 passed, 2 skipped, 237 subtests passed`；`docs/lessons/lessons-learned.md` §187。
+
+## [2026-10-22] Controller / Herdr Core | 补派活锁四处修复（wf-haflow-1021-01）
+
+- Updated [[architecture]]：补派谱系的两条判定（`lineage_redispatch_candidates` 取叶子 / `predecessors_current` 校验 operation 前驱）必须共用同一份事实；新增 `_declared_successor` 同时接受正反指针并按 workflow / node / execution 三重作用域隔离。
+- 四处独立缺陷叠加导致 craft 节点活锁 17.5 分钟（日志四行一组循环，无退避无上限无终态），最终靠一次无关的候选轮转才逃出：
+  1. `predecessors_current` 只读反向指针 `superseded_by`，而该指针只在成功 launch 末尾回填；`-r2` 被 `baseline_stale` fail-fast 拒绝后前驱断链，判定误认为「前驱仍当前」，自愈（`dispatch_predecessor_changed`）无法触发；
+  2. `reconcile_workflow` 的 `_absence_result` 分支先 `continue`，遮蔽 `core.result()` 里的 staleness 判定 → 改为身份/时效优先于资源缺失；
+  3. `reconcile_stage_advance_states` 仅凭谱系撤 `notified` 锁，不看 operation 是否已 `waiting_human` → 新增 `dispatch_awaiting_human`，人工裁决未决时保留锁，裁决后自动恢复撤销能力（不复活 wf-nexusarchive-1005-01 的僵尸义务死锁）；
+  4. 操作绑定路径 launch 失败即 `return True`，永久拒绝也不升级 → 新增纯函数 `permanent_refusal_escalation`，外壳只做两次副作用调用，写 attention 且**不**开第二条 transport。
+- 修正原方案：不再「通知总指挥」。薄编排改造（`7d3ab69`）已把总指挥移出 durable operation 失败路径，再投递等于给同一节点开第二条 transport；本次真正缺口是 attention 一条都没写（现场 0 次 attention、0 次 COORDINATOR INTAKE）。
+- 实现过程中 `tests/test_controller_modularity.py` 的 500 行上限真实拦下一次越界（514 行），据此把拒绝分类与升级构造下沉到 `herdr/direct_dispatch.py`。遗留：该模块现为 500 行、正好压上限（改动前 495，`cockpit_automation.py` 亦为 500），下次 +1 行即失败，需单独抽取重构恢复余量。
+- Evidence：`tests/test_predecessor_lineage_consistency.py`（RED 用例照抄 op 211810 的 `predecessors` 与两个 task 的真实指针状态）、`tests/test_stage_advance_and_supersede.py`、`tests/test_direct_stage_dispatch.py`（夹具绑定 durable operation，复现日志行与事故现场逐字一致）、`tests/test_controller_modularity.py`；受影响 73 个测试文件回归 `2083 passed, 3 skipped, 203 subtests passed`，收尾修正后直接受影响 6 个文件重跑 `215 passed, 45 subtests`；`docs/lessons/lessons-learned.md` §188。

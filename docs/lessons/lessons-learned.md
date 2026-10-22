@@ -7852,7 +7852,110 @@ git diff --check
 
 ---
 
-## 188. 门禁豁免与特权操作企业级凭据鉴权、主体能力绑定与工作区越权防护（2026-10-21）
+## 188. 补派活锁：两条前驱规则口径不一致 + 撤销闩不看人工裁决状态（2026-10-22）
+
+### 问题背景
+
+`wf-haflow-1021-01` 的 craft 节点在 22:16:45 → 22:34:09 之间活锁 **17.5 分钟**，`controller.out.log` 末尾整段是同一组四行循环，无退避、无上限、无终态：
+
+```text
+[STAGE ADVANCE QUEUED]  workflow=wf-haflow-1021-01 start -> craft
+[DIRECT DISPATCH ERROR] task=...-craft-auto-r3: [DISPATCH REJECTED] replacement dispatch requires its predecessor
+[STAGE DISPATCH AWAITING_TASK] workflow=... node=craft operation=211810 status=waiting_human
+[STAGE REVOKE] workflow=... node=craft: own lineage fully superseded with no live task, revoking 'notified' lock
+```
+
+用生产库数据复现后确认是**四个独立缺陷叠加**，任修其一都不够：
+
+1. **两条前驱规则口径不一致（核心）**。op 211810 的 `predecessors` 冻结为 `[craft-auto]`（在 `-r2` 存在之前算出）；而 `lineage_redispatch_candidates` 按设计只取谱系**叶子**，选中 `-r2`，于是 launch 带 `supersedes=craft-auto-r2`，被 `node_dispatch_store.py:437` 的 `supersedes ∈ op.predecessors` 永久拒绝。自愈路径本来存在（`predecessors_current` 判 False → `dispatch_predecessor_changed` → op 作废 → 下轮按当前叶子重注册），但 `predecessors_current` **只读反向指针** `superseded_by`；而 `superseded_by` 的回填位于成功 launch 的末尾（`task_cli_launch_orchestrator.py:555`），`-r2` 因 `baseline_stale` 在 `:399` 就被 fail-fast 拒绝，回填永远到不了，`craft-auto.superseded_by` 保持 `None`，判定于是认为「前驱仍然当前」。反观 `lineage_redispatch_candidates`（`task_lineage.py:31-35`）是**双向建链**的，看得见 `-r2`。同一事实，两条规则给出相反答案。
+2. **absence 分支遮蔽 staleness 判定**。`reconcile_workflow` 先算 `_absence_result` 并 `continue`，`core.result()` 里的 `predecessors_current` 分支长期不可达。
+3. **撤销闩不看人工裁决状态**。`reconcile_stage_advance_states` 仅凭谱系就撤 `notified` 锁，op 已是 `waiting_human` 也照撤，撤完立刻重新排队。`waiting_human` 名义上是恢复契约的终态停车位，实际不是刹车。
+4. **永久失败不出声**。操作绑定路径 launch 一失败就 `return True`（契约："A started launch must never fall through to a second transport"），不升级。全程 **0 次 attention、0 次 COORDINATOR INTAKE**，总指挥只收到 3 次 `/compact`。
+
+活锁最终在 22:34:09 以 `dispatch_predecessor_changed` 自行逃出——靠的是 22:26:43 一次**无关的候选轮转**改变了 absence 判定条件，不是设计使然。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 同一事实存在两条判定规则 | 「前驱是否仍然有效」和「该补派谁」必须共用同一份谱系事实。一条双向建链、一条只信反向指针，就会在指针不完整时给出相反结论 | 判定谱系关系时，正反指针任一存在即为证据；只在成功路径末尾写反向指针，等于让所有 fail-fast 分支都留下断链 |
+| fail-fast 拒绝跳过收尾 | 拒绝得越早，越容易跳过位于成功路径末尾的状态收尾，留下半连接的谱系 | 任何会写入「替代关系」的路径，必须检查 fail-fast 分支是否也需要同一份连接；回填不能只挂在成功尾部 |
+| 恢复状态机分支互相遮蔽 | `reconcile` 里先命中的分支会 `continue` 掉后面的判定；把「资源缺失」排在「身份过期」之前，会让过期 op 永远等不到作废重注册 | 身份/时效类判定优先于资源缺失类判定：身份都不对了，「资源没到」没有意义 |
+| 终态停车位不是刹车 | `waiting_human` 只是 op 的状态，其他机制（阶段闩）若不读它，就会继续在它底下重新排队 | 任何「等人工」状态必须被所有会重新触发同一动作的机制读取；否则升级等于没升级 |
+| 有意的「不二次投递」契约吞掉了升级 | `return True` 保证不走第二条 transport 是对的，但它同时是唯一出口，于是永久失败也静默返回 | 「不二次投递」与「必须出声」是两件事：拒绝可以既不走第二条 transport，又写 attention |
+
+### 关于「通知总指挥」的修正
+
+原计划是永久失败时「升级 attention **并通知总指挥**」。读码后只做前者：薄编排改造（`7d3ab69`）明确把总指挥移出 durable operation 的失败路径，`return True` 的注释就是这条契约。再往总指挥投递等于给同一个节点开第二条 transport，与契约冲突。`attention` 本就是既有的、Console 待裁决项可见的升级通道——本次事故的真正缺口是它**一条都没写**，不是没通知总指挥。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_predecessor_lineage_consistency.py \
+  tests/test_stage_advance_and_supersede.py \
+  tests/test_direct_stage_dispatch.py \
+  tests/test_controller_modularity.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：`herdr/node_dispatch.py#_declared_successor` 让前驱判定同时接受正反指针（按 workflow / node / execution 三重作用域隔离，跨作用域的声明不算证据）；`herdr/node_dispatch_store.py#reconcile_workflow` 让 staleness 优先于 absence；`services/controller/stage_state.py#dispatch_awaiting_human` 在 op 已 `waiting_human` 时保留 `notified` 锁，且人工裁决后自动恢复撤销能力；`herdr/direct_dispatch.py#permanent_refusal_escalation` 作为纯函数产出可直接施加的 attention 参数，外壳只做两次副作用调用。
+
+RED 用例均以生产数据形态构造：前驱测试直接照抄 op 211810 的 `predecessors` 与两个 task 的指针状态；派发测试的夹具绑定 durable operation，复现出的日志行与事故现场逐字一致。`tests/test_controller_modularity.py` 的行数上限（`services/controller/*.py` ≤ 500）在实现过程中真实拦下一次越界（514 行），据此把分类与升级构造下沉到 `herdr/`。
+
+**遗留（已记录未修）**：`services/controller/direct_dispatch.py` 改动后为 **500 行，正好压在强制上限**（改动前 495）。该模块在本次之前已接近饱和，下一次任何 +1 行都会触发 `test_controller_modularity.py` 失败，需要单独一次抽取重构恢复余量。
+
+---
+
+## 189. 沙箱护栏沿继承配置逃逸，反把开发者主仓锁死（2026-10-22）
+
+### 问题背景
+
+推送两个已完成的修复分支时，`git push` 被无条件拒绝：
+
+```text
+[GIT GUARD REJECT] Worker Agent is restricted to local sandbox testing only.
+Direct git push/PR from worker clone is disabled.
+```
+
+但该护栏按设计只应装进 worker 沙箱克隆（`services/herdr-worker.py#install_worker_sandbox_push_guard` 写入 `<clone>/.git/hooks`），且有 `tests/test_worker_push_guard.py` 断言其存在。实际它出现在**主仓库** `~/HAFlow/.git/hooks/pre-push`，于是主仓及其所有 linked worktree 一律无法推送——包括开发者本人，以及 wrapup 阶段「建立交付 PR」那一步。
+
+根因是一条**跨边界继承信道**：
+
+1. 主仓本地设了 `core.hooksPath = /Users/user/HAFlow/.git/hooks`（绝对路径，且与 git 默认位置相同，本身冗余）；
+2. worker 克隆是主仓的 CoW 副本，`herdr-worker.py:197-205` 还会显式把源仓的 `core.hooksPath` 传播给 clone，于是克隆**原样继承了这个绝对路径**；
+3. `install_worker_sandbox_push_guard` 只对**相对**路径做重定位（`if not custom_hooks.is_absolute(): custom_hooks = Path(clone) / custom_hooks`），绝对路径被当作「已经指向正确位置」直接写入——而这个「正确位置」是主仓库。
+
+证据链：主仓 `pre-push` 的 mtime 为 Oct 21 **23:24**，与 `wf-haflow-1021-01-cleanroom_review-auto-r2` 克隆的创建时间**同分钟**；两者 inode 不同（1213918188 / 1213966688），证明克隆自己有一份、主仓**也**被写了一份。
+
+**二阶后果更容易被忽略**：`core.hooksPath` 一旦设置，git 就**不再读** `.git/hooks`。所以在修复前，克隆自己那份护栏是**惰性的**——沙箱真正生效的 hook 是它与主仓共享的那一个。也就是说这个缺陷同时造成两个反向错误：主仓被锁死，而沙箱的有效防护并非它自己那份。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 沙箱边界按值的字面形式判定 | 「相对路径需要重定位、绝对路径无需处理」是把**语法形式**当成了**位置语义**。绝对路径恰恰是最容易逃逸的一种 | 沙箱写入必须对**解析后的真实路径**做包含性校验（`resolve()` + `is_relative_to(clone_root)`），而不是按相对/绝对分支 |
+| 继承配置是跨边界信道 | CoW 克隆继承源仓的全部 git config；任何「读配置再据此写文件」的逻辑都可能被继承值带到沙箱外 | 消费继承配置前必须判定它是否仍指向沙箱内；指向外部时要么重定位、要么显式失效，不能原样使用 |
+| 护栏有效性未被验证 | 既有测试写了护栏文件、也断言了文件存在，但 `core.hooksPath` 生效时那份文件根本不被 git 读取 | 沙箱护栏测试必须断言**行为**（真实 `git push` 被拒），不能只断言文件落盘；本次两条新用例都以 push 结果为准 |
+| 测试只覆盖了安全的那条分支 | 既有夹具把 `core.hooksPath` 设为相对值 `.task-hooks`，只走到重定位分支，继承绝对路径这一形态从未被覆盖 | 对「按输入形态分支」的逻辑，每种形态都要有反例；缺的那种往往正是生产里出现的那种 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_worker_push_guard.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：`install_worker_sandbox_push_guard` 改为对解析后的路径做沙箱包含性校验；逃逸时 `git config --unset core.hooksPath`，让 git 回落到已被护栏覆盖的 `<clone>/.git/hooks`，因此护栏既**不外泄**也**不失效**。新增 `test_push_guard_never_escapes_the_sandbox`（RED 精确复现生产缺陷：护栏被写进源仓）与 `test_push_guard_keeps_an_absolute_path_inside_the_sandbox`（沙箱内绝对路径仍按原样尊重），两者均断言真实 `git push` 被拒。受影响 23 个测试文件回归 **380 passed**。
+
+**遗留（已记录未修）**：`herdr-worker.py:197-205` 仍会把源仓 `core.hooksPath` 原样传播给独立克隆。该传播对相对路径仍有意义（保留项目自定义 hook），对绝对路径则由本次修复在护栏安装阶段失效化；是否应改为「传播时就重定位」属于克隆装配语义的单独决策，未在本轮夹带。
+
+**现场处置**：仅删除主仓泄漏的那一份 `~/HAFlow/.git/hooks/pre-push`（155 字节，内容已记录可原样恢复）；逐个确认 7 个 worker 克隆的护栏均保留（`GUARDED`），沙箱策略未受影响。未使用 `--no-verify` 绕过。
+
+---
+
+## 190. 门禁豁免与特权操作企业级凭据鉴权、主体能力绑定与工作区越权防护（2026-10-21）
 
 ### 问题背景
 
@@ -7905,49 +8008,3 @@ pytest -q tests/test_console_controller_actions_api.py
 ---
 
 ---
-
-## 189. 沙箱护栏沿继承配置逃逸，反把开发者主仓锁死（2026-10-22）
-
-### 问题背景
-
-推送两个已完成的修复分支时，`git push` 被无条件拒绝：
-
-```text
-[GIT GUARD REJECT] Worker Agent is restricted to local sandbox testing only.
-Direct git push/PR from worker clone is disabled.
-```
-
-但该护栏按设计只应装进 worker 沙箱克隆（`services/herdr-worker.py#install_worker_sandbox_push_guard` 写入 `<clone>/.git/hooks`），且有 `tests/test_worker_push_guard.py` 断言其存在。实际它出现在**主仓库** `~/HAFlow/.git/hooks/pre-push`，于是主仓及其所有 linked worktree 一律无法推送——包括开发者本人，以及 wrapup 阶段「建立交付 PR」那一步。
-
-根因是一条**跨边界继承信道**：
-
-1. 主仓本地设了 `core.hooksPath = /Users/user/HAFlow/.git/hooks`（绝对路径，且与 git 默认位置相同，本身冗余）；
-2. worker 克隆是主仓的 CoW 副本，`herdr-worker.py:197-205` 还会显式把源仓的 `core.hooksPath` 传播给 clone，于是克隆**原样继承了这个绝对路径**；
-3. `install_worker_sandbox_push_guard` 只对**相对**路径做重定位（`if not custom_hooks.is_absolute(): custom_hooks = Path(clone) / custom_hooks`），绝对路径被当作「已经指向正确位置」直接写入——而这个「正确位置」是主仓库。
-
-证据链：主仓 `pre-push` 的 mtime 为 Oct 21 **23:24**，与 `wf-haflow-1021-01-cleanroom_review-auto-r2` 克隆的创建时间**同分钟**；两者 inode 不同（1213918188 / 1213966688），证明克隆自己有一份、主仓**也**被写了一份。
-
-**二阶后果更容易被忽略**：`core.hooksPath` 一旦设置，git 就**不再读** `.git/hooks`。所以在修复前，克隆自己那份护栏是**惰性的**——沙箱真正生效的 hook 是它与主仓共享的那一个。也就是说这个缺陷同时造成两个反向错误：主仓被锁死，而沙箱的有效防护并非它自己那份。
-
-### 经验教训
-
-| 问题 | 教训 | 规范 |
-|------|------|------|
-| 沙箱边界按值的字面形式判定 | 「相对路径需要重定位、绝对路径无需处理」是把**语法形式**当成了**位置语义**。绝对路径恰恰是最容易逃逸的一种 | 沙箱写入必须对**解析后的真实路径**做包含性校验（`resolve()` + `is_relative_to(clone_root)`），而不是按相对/绝对分支 |
-| 继承配置是跨边界信道 | CoW 克隆继承源仓的全部 git config；任何「读配置再据此写文件」的逻辑都可能被继承值带到沙箱外 | 消费继承配置前必须判定它是否仍指向沙箱内；指向外部时要么重定位、要么显式失效，不能原样使用 |
-| 护栏有效性未被验证 | 既有测试写了护栏文件、也断言了文件存在，但 `core.hooksPath` 生效时那份文件根本不被 git 读取 | 沙箱护栏测试必须断言**行为**（真实 `git push` 被拒），不能只断言文件落盘；本次两条新用例都以 push 结果为准 |
-| 测试只覆盖了安全的那条分支 | 既有夹具把 `core.hooksPath` 设为相对值 `.task-hooks`，只走到重定位分支，继承绝对路径这一形态从未被覆盖 | 对「按输入形态分支」的逻辑，每种形态都要有反例；缺的那种往往正是生产里出现的那种 |
-
-### 验证命令 / 守护测试
-
-```bash
-pytest -q tests/test_worker_push_guard.py
-python3 -m compileall -q herdr services bin tests
-git diff --check
-```
-
-证据：`install_worker_sandbox_push_guard` 改为对解析后的路径做沙箱包含性校验；逃逸时 `git config --unset core.hooksPath`，让 git 回落到已被护栏覆盖的 `<clone>/.git/hooks`，因此护栏既**不外泄**也**不失效**。新增 `test_push_guard_never_escapes_the_sandbox`（RED 精确复现生产缺陷：护栏被写进源仓）与 `test_push_guard_keeps_an_absolute_path_inside_the_sandbox`（沙箱内绝对路径仍按原样尊重），两者均断言真实 `git push` 被拒。受影响 23 个测试文件回归 **380 passed**。
-
-**遗留（已记录未修）**：`herdr-worker.py:197-205` 仍会把源仓 `core.hooksPath` 原样传播给独立克隆。该传播对相对路径仍有意义（保留项目自定义 hook），对绝对路径则由本次修复在护栏安装阶段失效化；是否应改为「传播时就重定位」属于克隆装配语义的单独决策，未在本轮夹带。
-
-**现场处置**：仅删除主仓泄漏的那一份 `~/HAFlow/.git/hooks/pre-push`（155 字节，内容已记录可原样恢复）；逐个确认 7 个 worker 克隆的护栏均保留（`GUARDED`），沙箱策略未受影响。未使用 `--no-verify` 绕过。
