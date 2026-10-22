@@ -233,3 +233,77 @@ def test_adopt_head_does_not_align_when_head_not_descendant(tmp_path: Path, monk
         ["git", "-C", str(clone), "rev-parse", task_branch], text=True
     ).strip()
     assert branch_sha == baseline_commit
+
+
+def _init_clone(tmp_path: Path, name: str, hooks_path: str | None = None):
+    clone = tmp_path / name
+    clone.mkdir()
+    subprocess.run(["git", "init", str(clone)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.email", "t@t.com"], check=True)
+    if hooks_path is not None:
+        subprocess.run(["git", "-C", str(clone), "config", "core.hooksPath", hooks_path],
+                       check=True, capture_output=True)
+    remote = tmp_path / f"{name}_remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(clone), "remote", "add", "origin", str(remote)],
+                   check=True, capture_output=True)
+    (clone / "file.txt").write_text("hello", encoding="utf-8")
+    subprocess.run(["git", "-C", str(clone), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(clone), "commit", "-m", "initial"], check=True)
+    return clone, remote
+
+
+def test_push_guard_never_escapes_the_sandbox(tmp_path: Path):
+    """A CoW clone inherits the source repo's core.hooksPath verbatim.
+
+    Production leak (wf-haflow-1021-01): the main checkout carried
+    core.hooksPath=/Users/user/HAFlow/.git/hooks, every worker clone inherited
+    that absolute path, and install_worker_sandbox_push_guard wrote the guard
+    into it -- disabling `git push` from the developer's own repository and every
+    linked worktree. The leaked hook's mtime matched clone creation to the
+    minute. The relative-path case was already covered; the inherited absolute
+    path was not.
+    """
+    source = tmp_path / "source_repo"
+    source.mkdir()
+    subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+    source_hooks = source / ".git" / "hooks"
+
+    clone, remote = _init_clone(tmp_path, "sandbox_clone", str(source_hooks))
+
+    herdr_worker.install_worker_sandbox_push_guard(clone)
+
+    # The repository the clone was copied from must not be written to.
+    assert not (source_hooks / "pre-push").exists()
+
+    # And the sandbox must still be guarded: git resolves hooks through
+    # core.hooksPath, so a guard only in .git/hooks is inert unless the inherited
+    # value is repinned into the clone.
+    push = subprocess.run(["git", "-C", str(clone), "push", str(remote), "HEAD:main"],
+                          capture_output=True, text=True)
+    assert push.returncode != 0
+    assert "[GIT GUARD REJECT]" in push.stderr
+
+    configured = subprocess.run(
+        ["git", "-C", str(clone), "config", "--get", "core.hooksPath"],
+        capture_output=True, text=True).stdout.strip()
+    if configured and Path(configured).is_absolute():
+        assert Path(configured).resolve().is_relative_to(clone.resolve())
+
+
+def test_push_guard_keeps_an_absolute_path_inside_the_sandbox(tmp_path: Path):
+    """An absolute hooksPath that already lives in the clone is honoured as-is."""
+    clone, remote = _init_clone(tmp_path, "inner_clone", None)
+    inner = clone / ".sandbox-hooks"
+    subprocess.run(["git", "-C", str(clone), "config", "core.hooksPath", str(inner)],
+                   check=True, capture_output=True)
+
+    herdr_worker.install_worker_sandbox_push_guard(clone)
+
+    assert (inner / "pre-push").exists()
+    assert "[GIT GUARD REJECT]" in (inner / "pre-push").read_text(encoding="utf-8")
+    push = subprocess.run(["git", "-C", str(clone), "push", str(remote), "HEAD:main"],
+                          capture_output=True, text=True)
+    assert push.returncode != 0
+    assert "[GIT GUARD REJECT]" in push.stderr

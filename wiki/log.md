@@ -3429,3 +3429,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 业务验收异常透出与权威 DB 投影恢复：`herdr/task_checkpoint.py:record_business_acceptance` 在落库后透出文件同步异常（`OSError`）；新增 `project_gate_verdict_from_business_acceptance`，以数据库 `business_acceptance_recorded` 为唯一事实源，严格校验任务身份、epoch、候选 SHA、产物与裁决合法性，在裁决文件缺失或损坏时支持 Controller/CLI 自动自愈投影。
 - 自动化执行与推进闭环：在门禁回执就绪时，处于 `working` 或 Watchdog 误标 `failed` 的门禁任务均可正确由 Controller 采纳裁决（`auto_verdict`）、更新任务为终态并自动驱动后继节点派发，严格防范陈旧凭证并保持幂等。
 - Evidence：`tests/test_node_gate_receipt_convergence.py`（12 项测试全部通过，含真实测试执行、业务验收回执与 Controller 推进闭环）、Lesson 186。
+
+## [2026-10-22] Worker | 沙箱推送护栏不再沿继承的 core.hooksPath 逃逸
+
+- `install_worker_sandbox_push_guard` 改为对**解析后的真实路径**做沙箱包含性校验；此前只重定位相对路径，继承来的绝对 `core.hooksPath` 被原样使用，把护栏写进了开发者主仓库，导致主仓及所有 linked worktree 无法 `git push`（含 wrapup 的建 PR 步骤）。
+- 逃逸时 `--unset` 克隆的 `core.hooksPath`，让 git 回落到已被护栏覆盖的 `<clone>/.git/hooks`：护栏既不外泄也不失效。修复前 `core.hooksPath` 生效会让克隆自己那份护栏成为惰性文件，沙箱真正生效的是与主仓共享的那一个——同一缺陷造成两个反向错误。
+- 测试从「断言文件落盘」升级为「断言真实 push 被拒」；既有夹具只覆盖相对路径 `.task-hooks`，继承绝对路径这一形态首次被覆盖（RED 精确复现生产缺陷）。
+- 遗留已记录：`herdr-worker.py:197-205` 仍原样传播源仓 `core.hooksPath`，绝对路径情形由本次修复在护栏安装阶段失效化；是否改为传播时重定位属克隆装配语义的单独决策。
+- Evidence：`tests/test_worker_push_guard.py`（新增 2 例）、`services/herdr-worker.py`；受影响 23 个测试文件回归 `380 passed`；`docs/lessons/lessons-learned.md` §189。
