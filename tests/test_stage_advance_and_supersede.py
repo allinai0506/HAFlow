@@ -244,6 +244,62 @@ class TestReconcile(unittest.TestCase):
         finally:
             os.unlink(tmp)
 
+    def test_notified_preserved_while_dispatch_awaits_a_human_decision(self):
+        """The latch must not re-arm a dispatch that can only be refused again.
+
+        Production livelock (wf-haflow-1021-01): the durable operation had
+        already escalated to waiting_human after three attempts, but the revoke
+        only looked at the lineage, so every sweep queued the stage again, the
+        launch was rejected again, and the cycle repeated with no backoff and no
+        terminal state -- 17.5 minutes of it, and the controller log grew four
+        lines per turn.
+        """
+        wf = "wf-reconcile-brake"
+        workflow_cfg = {"nodes": [{"id": "craft", "depends_on": []}]}
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump({f"{wf}:craft": "notified"}, f)
+            tmp = f.name
+        try:
+            self.ctrl.STAGE_STATE_FILE = tmp
+            self.ctrl.load_tasks = lambda: [
+                {"task_id": "craft-auto", "workflow_id": wf, "node": "craft",
+                 "stage": "craft", "status": "superseded",
+                 "replacement_pending": True, "superseded_by": None},
+            ]
+            self.ctrl.dispatch_awaiting_human = lambda workflow_id, node_id: True
+            self.ctrl.reconcile_stage_advance_states(wf, workflow_cfg)
+            with open(tmp) as f:
+                state = json.load(f)
+            self.assertEqual(state.get(f"{wf}:craft"), "notified")
+        finally:
+            os.unlink(tmp)
+
+    def test_notified_still_revoked_when_no_human_decision_is_pending(self):
+        """The brake must not resurrect the zombie-obligation deadlock."""
+        wf = "wf-reconcile-brake-off"
+        workflow_cfg = {"nodes": [{"id": "craft", "depends_on": []}]}
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump({f"{wf}:craft": "notified"}, f)
+            tmp = f.name
+        try:
+            self.ctrl.STAGE_STATE_FILE = tmp
+            self.ctrl.load_tasks = lambda: [
+                {"task_id": "craft-auto", "workflow_id": wf, "node": "craft",
+                 "stage": "craft", "status": "superseded",
+                 "replacement_pending": True, "superseded_by": None},
+            ]
+            self.ctrl.dispatch_awaiting_human = lambda workflow_id, node_id: False
+            self.ctrl.reconcile_stage_advance_states(wf, workflow_cfg)
+            with open(tmp) as f:
+                state = json.load(f)
+            self.assertNotIn(f"{wf}:craft", state)
+        finally:
+            os.unlink(tmp)
+
     def test_notified_revoked_when_own_lineage_fully_superseded_no_pending(self):
         """Same regression via the fully-superseded shape (no replacement_pending)."""
         wf = "wf-reconcile-zombie2"

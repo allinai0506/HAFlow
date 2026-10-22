@@ -45,6 +45,50 @@ GIT_DELIVERED_STATUSES = frozenset(
 )
 
 
+# Launch refusals that a bare retry cannot clear: each needs a state change
+# (rebase onto dev, a human decision, or an agent/credential fix). Re-queueing
+# them silently just burns the log and hides the escalation — wf-haflow-1021-01
+# spun 17.5 minutes and produced zero attention entries this way.
+PERMANENT_DISPATCH_REFUSALS = (
+    ("[BASELINE STALE]", "baseline_stale"),
+    ("[BASELINE REJECTED]", "baseline_rejected"),
+    ("[DISPATCH REJECTED]", "dispatch_rejected"),
+    ("[ROUTER REJECTED]", "router_isolation_rejected"),
+    ("ROUTER OPT-OUT AUDIT FAILED", "router_isolation_rejected"),
+)
+
+
+def permanent_dispatch_refusal(output):
+    """The stable refusal code when retrying cannot help, otherwise None."""
+    text = str(output or "")
+    for marker, code in PERMANENT_DISPATCH_REFUSALS:
+        if marker in text:
+            return code
+    return None
+
+
+def permanent_refusal_escalation(output, task_id, workflow_id, node_id):
+    """The attention episode a permanent launch refusal warrants, or None.
+
+    Returned as ready-to-apply arguments so the Controller shell stays a thin
+    imperative layer: it decides nothing here, it only performs the two effects.
+    """
+    code = permanent_dispatch_refusal(output)
+    if not code:
+        return None
+    detail = str(output or "")[:500]
+    return {
+        "key": f"{task_id}:dispatch_refused",
+        "reason": code,
+        "note": {"key": f"{task_id}:dispatch_refused",
+                 "task": {"task_id": task_id, "workflow_id": workflow_id},
+                 "event_type": "dispatch_refused", "reason": code,
+                 "attempts": 1, "detail": detail},
+        "log": (f"[DIRECT DISPATCH REFUSED] workflow={workflow_id} node={node_id} "
+                f"task={task_id} reason={code} -> attention; retry cannot clear this"),
+    }
+
+
 def candidate_branch_for_node(
     tasks, workflow_id, node_id, dep_ids, delivered_in_base=False
 ):

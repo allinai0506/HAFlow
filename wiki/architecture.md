@@ -168,6 +168,21 @@ Evidence:
   `herdr/direct_dispatch.py#lineage_redispatch_candidates` 保证同一替换谱系
   （`x` / `x-r2` / …）最多只补派一发；旧逻辑会把历史作废任务反复补派，
   fix-loop 每轮 2→4→8 放大并发重复任务（[[dag-workflow-engine]] §4.3）。
+- `FACT` **补派谱系的两条判定必须共用同一份事实（2026-10-22 引入，lessons §188）**:
+  `lineage_redispatch_candidates` 双向建链、只补派谱系**叶子**；
+  `herdr/node_dispatch.py#predecessors_current` 判定 operation 记录的前驱是否仍然有效。
+  两者必须对「这条谱系是否已被替代」给出同一答案，否则 operation 冻结的
+  `predecessors` 与 planner 实际选择的 `supersedes` 会永久对不上，
+  `node_dispatch_store.py` 的 `replacement dispatch requires its predecessor`
+  变成不可满足的校验。`_declared_successor` 因此同时接受正反指针
+  （`superseded_by` 或他任务的 `supersedes`），并按 workflow / node / execution
+  三重作用域隔离，跨作用域的声明不算证据。反向指针只在成功 launch 末尾回填，
+  fail-fast 拒绝（如 `baseline_stale`）不会写，所以前向指针常常是唯一证据。
+  配套两条边界：`reconcile_workflow` 中身份/时效判定优先于「资源缺失」判定
+  （过期 operation 应先作废重注册，而不是继续报 absence）；
+  `services/controller/stage_state.py#dispatch_awaiting_human` 让 `notified` 撤销闩
+  读取 operation 的 `waiting_human`，人工裁决未决时不再重新排队——否则
+  「等人工」只是状态标记，不是刹车。
 - `FACT` **门禁规则化裁决 auto-verdict（2026-09-17 引入，lessons §62）**:
   门禁节点（test/review/wrapup）派发时注入结论契约
   （`herdr/direct_dispatch.py#gate_verdict_contract`：写 clone 外状态目录
