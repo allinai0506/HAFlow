@@ -7952,3 +7952,50 @@ git diff --check
 **遗留（已记录未修）**：`herdr-worker.py:197-205` 仍会把源仓 `core.hooksPath` 原样传播给独立克隆。该传播对相对路径仍有意义（保留项目自定义 hook），对绝对路径则由本次修复在护栏安装阶段失效化；是否应改为「传播时就重定位」属于克隆装配语义的单独决策，未在本轮夹带。
 
 **现场处置**：仅删除主仓泄漏的那一份 `~/HAFlow/.git/hooks/pre-push`（155 字节，内容已记录可原样恢复）；逐个确认 7 个 worker 克隆的护栏均保留（`GUARDED`），沙箱策略未受影响。未使用 `--no-verify` 绕过。
+
+---
+
+## 190. 共享守护进程的浏览器 E2E：默认 3 秒预算与 load 调度器忽略 xdist_group（2026-10-22）
+
+### 问题背景
+
+`#322`/`#323` 两个 PR 的代码审核全绿（`Codex P1 Gate`、`Automated Rule & Shadow Review` 均 SUCCESS），但 `pytest` 连续两轮失败，失败点全在 `tests/test_console_controller_cockpit_e2e.py`，**且每轮是不同的用例**：
+
+```text
+第 1 轮  test_resume_control_visible_and_executable_with_101_tasks
+         CDP request timed out: Input.dispatchMouseEvent / dispatchKeyEvent
+第 2 轮  test_steer_custom_instruction_roundtrips_to_current_run
+         page.click timed out after 3000ms: <article> intercepts pointer events
+         test_controller_automatic_default_and_template_confirmation
+         test_stale_identity_rejected_then_halt_uses_current_pane
+```
+
+同一基线、同一套件的 `#324` 却全量 SUCCESS——纯随机性。把上述用例在本地单独跑，全部约 3 秒通过；连跑整文件也偶发 1 失败（本机同时在跑生产 workflow，Agent 也在用同一个 ego-browser，不是干净测量面）。
+
+两条独立机制：
+
+1. **共享单守护 + `load` 调度器**：本机实测 `127.0.0.1:54321` 只有一个 ego-browser 守护进程。CI 用 `pytest -n auto`，默认 `--dist load`——此时 **`xdist_group` 标记被完全忽略**，多个 worker 的 CDP 输入请求排进同一个队列，3000ms 预算直接超时。
+2. **默认动作预算太紧**：`help('page.click')` 明确写 `timeout ... defaults to 3000`。驾驶舱的身份/回执投影是异步重渲染的，动作卡片（`controller-cockpit-action` / `-receipt` / role=alert 的 `<article>`）会在按下瞬间移位或短暂覆盖目标。3 秒不足以等它落定，15 秒可以。
+
+一次误判要记录：曾把根因猜成「CI 在 pytest 前 `rm -rf "$HOME"` 删掉了浏览器 socket」。核对 `haflow-tests.yml` 后**不成立**——那句 `rm -rf` 属于 checkout 阶段，pytest 前只有 `export HOME=... && mkdir -p`。凭目录形态猜因果、不看调用顺序，就会开出无效药方。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 依赖共享守护进程的测试在并行下不稳定 | 「每个测试自己开 Page」不等于隔离：进程隔离只挡住导航串扰，挡不住单守护进程的请求排队 | 共享不可并行资源的测试用 `xdist_group` 归组，并**把 CI 调度器设为 `--dist loadgroup`**——`load` 下该标记是空操作，这是最容易漏的一半 |
+| 用工具默认超时承载真实竞态 | 第三方动作 API 的默认值是按人工交互选的，不保证覆盖 CI 争抢 + 应用重渲染双重延迟 | 自动化 E2E 显式声明动作预算（与文件内 `waitForFunction` 预算对齐），不依赖默认值；不要用 `force:true` 绕过拦截检查——native CDP 按坐标投递，覆盖层存在时会点到错的元素 |
+| 红灯归因于最近一次改动 | 每轮失败用例都不同、且同基线另一 PR 全绿时，先看失败签名是否指向公共依赖，再决定回滚/重跑 | 间歇性红灯先取「失败集合是否稳定」作判据；不稳定即共享资源/时序问题，与被改代码无关，不得据此回滚或谎报归因 |
+| 靠猜排除环境因素 | 「HOME 被删」听起来自洽，但必须核对步骤顺序与真实报错 | 声称因果前，先用日志原文 + 配置逐条对照；本例中 `timed out after 3000ms` 与 API 文档默认值完全吻合，才是可复用的证据 |
+| 修复无回归护栏 | 超时值和调度器模式都是会被顺手改回的常数 | 加源码级护栏测试（本文件 5 条：marker 存在、workflow 用 loadgroup、每个动作调用带显式超时、常量为单一定义且 ≥15000、prelude 单点注入），并已实测反向改回 `load` 时护栏立刻失败 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_console_cockpit_e2e_harness.py
+pytest -q tests/test_console_controller_cockpit_e2e.py
+```
+
+证据：`tests/test_console_cockpit_e2e_harness.py` 5 项护栏（不启动浏览器）；已反向验证把 `--dist loadgroup` 改回 `load` 时 `test_ci_uses_the_scheduler_that_honours_xdist_group` 立即 FAIL。真实验收以本 PR 的 CI 全量（`-n auto --dist loadgroup`，干净 runner）为准；本地因与生产 Agent 共用浏览器守护，不作为判据。
+
+**遗留**：若 CI 仍出现同文件抖动，下一步是把浏览器 E2E 拆成独立 serial job（与主套件分离），而不是继续加高超时值。

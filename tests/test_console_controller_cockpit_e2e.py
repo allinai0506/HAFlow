@@ -4,6 +4,20 @@ Requires the local ego-browser service. Only terminal transport and service
 probes are controlled; projection, actions, identity, receipts and storage run
 unchanged. Each test owns and closes its Page so xdist workers cannot navigate
 another test's temporary service. No Agent is launched and no model is called.
+
+All journeys here drive one shared ego-browser daemon, so two hazards apply:
+CDP input requests queue behind other workers' sessions, and the cockpit
+re-renders action cards while identity or receipts change. ego-browser's
+default 3000ms action budget is too tight for both — it surfaces as
+`CDP request timed out: Input.dispatchKeyEvent` or
+`<article> intercepts pointer events`. Two guards, both required:
+
+  * `pytestmark = xdist_group(...)` pins every test in this module to a single
+    xdist worker; the CI job runs `--dist loadgroup` so the group is honoured
+    (the default `load` scheduler ignores it), removing cross-worker contention
+    on the one shared daemon;
+  * `ACTION_TIMEOUT` raises per-action waits to 15000ms, so a transient overlay
+    resolves instead of failing the journey. Do not restore the 3000ms default.
 """
 import json
 import os
@@ -22,12 +36,20 @@ from herdr.state_store import SQLiteStateStore
 
 SPACE = f"HAFlow Controller Cockpit Task 6 20261021 process {os.getpid()}"
 
+# Bounded per-action wait for press/click/fill. 15s matches the readiness
+# budgets the journeys already use and only covers the shared-daemon re-render
+# window; a real regression still fails, just later.
+ACTION_TIMEOUT = 15000
+
+pytestmark = pytest.mark.xdist_group("ego-browser")
+
 
 def browser(script, *, page_label):
     binary = shutil.which("ego-browser")
     if not binary:
         pytest.skip("real browser E2E requires ego-browser and its local browser service")
-    prelude = f"const task=await taskSpace({json.dumps(SPACE)});"
+    prelude = (f"const task=await taskSpace({json.dumps(SPACE)});"
+               f"const ACTION_TIMEOUT={ACTION_TIMEOUT};")
     if page_label is not None:
         prelude += f"const page=task.page({json.dumps(page_label)});"
     result = subprocess.run([binary, "nodejs", "-e", prelude + script],
@@ -136,10 +158,10 @@ def open_cockpit(fixture, wid="wf-e2e"):
 
 def confirm_action(fixture, aid, *, instruction=None, reason="人工核查当前身份和证据"):
     fixture.browser(f"""
-        await page.press('loc=css:[data-action-id="{aid}"] button','Enter');
-        {f'await page.fill("#cockpitInstruction",{json.dumps(instruction)});' if instruction is not None else ''}
-        await page.fill('#cockpitReason',{json.dumps(reason)});
-        await page.click('#cockpitActionConfirm');
+        await page.press('loc=css:[data-action-id="{aid}"] button','Enter',{{timeout:ACTION_TIMEOUT}});
+        {f'await page.fill("#cockpitInstruction",{json.dumps(instruction)},{{timeout:ACTION_TIMEOUT}});' if instruction is not None else ''}
+        await page.fill('#cockpitReason',{json.dumps(reason)},{{timeout:ACTION_TIMEOUT}});
+        await page.click('#cockpitActionConfirm',{{timeout:ACTION_TIMEOUT}});
         await page.waitForFunction(()=>!document.getElementById('modal').classList.contains('open'));
         await page.waitForFunction(()=>state.controllerReceipt?.action_id==={json.dumps(aid)});
         console.log(JSON.stringify(await page.evaluate(()=>state.controllerReceipt)));
@@ -150,7 +172,7 @@ def test_steer_custom_instruction_roundtrips_to_current_run(cockpit):
     """Catches an Action modal that silently sends the core's generic default."""
     open_cockpit(cockpit)
     out = cockpit.browser("""
-        await page.click('loc=css:[data-action-id="working:steer"] button');
+        await page.click('loc=css:[data-action-id="working:steer"] button',{timeout:ACTION_TIMEOUT});
         console.log('INSTRUCTION_FIELD='+await page.evaluate(()=>!!document.getElementById('cockpitInstruction')));
     """)
     assert "INSTRUCTION_FIELD=true" in out, "steer confirmation must accept the human instruction"
@@ -186,10 +208,10 @@ def test_controller_automatic_default_and_template_confirmation(cockpit):
 
 def test_stale_identity_rejected_then_halt_uses_current_pane(cockpit):
     open_cockpit(cockpit)
-    cockpit.browser("await page.press('loc=css:[data-action-id=\"working:halt\"] button','Enter');")
+    cockpit.browser("await page.press('loc=css:[data-action-id=\"working:halt\"] button','Enter',{timeout:ACTION_TIMEOUT});")
     cockpit.store.update_task_metadata("working", {"pane_id": "replacement-pane"})
     cockpit.browser("""
-        await page.fill('#cockpitReason','核查旧快照'); await page.click('#cockpitActionConfirm');
+        await page.fill('#cockpitReason','核查旧快照',{timeout:ACTION_TIMEOUT}); await page.click('#cockpitActionConfirm',{timeout:ACTION_TIMEOUT});
         await page.waitForFunction(()=>state.controllerReceipt?.status==='rejected');
         await page.waitForFunction(()=>state.controllerCockpit.tasks.some(t=>t.task_id==='working'&&t.pane_id==='replacement-pane'));
     """)
@@ -216,14 +238,14 @@ def test_canvas_deeplink_and_responsive_cockpit(cockpit):
     open_cockpit(cockpit)
     out = cockpit.browser("""
         await page.evaluate(()=>returnFromControllerCockpit());
-        await page.click('loc=css:.x6-node[data-cell-id="gate"]');
+        await page.click('loc=css:.x6-node[data-cell-id="gate"]',{timeout:ACTION_TIMEOUT});
         await page.waitForFunction(()=>state.flowSelectedNodeId==='gate'&&state.selectedTaskId==='blocked');
         await page.keyboard.press('Escape');
         console.log(await page.snapshot());
     """)
     assert "Controller" in out
     cockpit.browser("""
-        await page.press('loc=css:#flowInspectorBody .flow-act-group > button','Enter');
+        await page.press('loc=css:#flowInspectorBody .flow-act-group > button','Enter',{timeout:ACTION_TIMEOUT});
         await page.waitForFunction(()=>state.workflowId==='__ctl__'&&state.controllerTarget.nodeId==='gate');
         console.log(await page.snapshot());
     """)
