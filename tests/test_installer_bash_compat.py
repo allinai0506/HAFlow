@@ -9,12 +9,22 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVICES = {
-    "com.user.herdr-factory-console": "console/herdr_factory_console.py",
-    "com.user.herdr-controller": "services/herdr-controller.py",
-    "com.user.herdr-sentinel": "services/herdr-sentinel.py",
-    "com.user.herdr-notifier": "services/herdr-notifier.py",
-}
+
+
+def managed_scripts():
+    """纳管清单只有一个权威：herdr.service_release.SCRIPTS。
+
+    本测试曾自备一份副本，于是「加了服务但清单没同步」在这里根本测不出来。
+    """
+    from herdr.service_release import SCRIPTS
+    return {label: spec[0] for label, spec in SCRIPTS.items()}
+
+
+def test_service_authority_is_not_copied_into_this_test():
+    from herdr.service_release import SCRIPTS
+    assert set(managed_scripts()) == set(SCRIPTS)
+    assert "com.user.herdr-experience-hub" in SCRIPTS, \
+        "带参数的服务被排除出纳管清单：它会被永久钉在旧 release 上"
 
 
 @pytest.mark.parametrize("layout", ["release", "workspace", "mixed", "none"])
@@ -27,8 +37,9 @@ def test_installer_handles_empty_service_groups(tmp_path, layout, restart):
     ).strip()
     agents = tmp_path / "Library/LaunchAgents"
     agents.mkdir(parents=True)
+    services = managed_scripts()
     expected = {}
-    for index, (label, relative) in enumerate(SERVICES.items()):
+    for index, (label, relative) in enumerate(services.items()):
         if layout == "none":
             continue
         release = layout == "release" or (layout == "mixed" and index % 2 == 0)
@@ -88,5 +99,5 @@ if sys.argv[1:] == ['list']:
         assert not calls
     for label, root in expected.items():
         data = plistlib.loads((agents / (label + ".plist")).read_bytes())
-        assert data["ProgramArguments"] == ["/usr/bin/python3", str(root / SERVICES[label])]
+        assert data["ProgramArguments"] == ["/usr/bin/python3", str(root / services[label])]
         assert data["EnvironmentVariables"]["HERDR_ROOT"] == str(root)

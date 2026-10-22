@@ -11,7 +11,7 @@
 
 ## 1. 服务清单
 
-系统由 4 个独立的后台服务共同协作组成：
+后台服务分两代运行方式，**纳管清单的唯一权威是 `herdr/service_release.py` 里的 `SCRIPTS`**：
 
 | 服务标识 (Label) | 脚本路径 | 核心职责 |
 | :--- | :--- | :--- |
@@ -19,6 +19,11 @@
 | `com.user.herdr-notifier` | `/Users/user/HAFlow/services/herdr-notifier.py` | 任务与工作流完成时的 macOS 原生系统通知推送。 |
 | `com.user.herdr-sentinel` | `/Users/user/HAFlow/services/herdr-sentinel.py` | 工位生命周期监控与空闲/僵死任务守护巡检。 |
 | `com.user.herdr-factory-console` | 仓库源：`console/herdr_factory_console.py`；部署副本：`/Users/user/.herdr-console/herdr_factory_console.py` | 可视化 Web 控制台服务（默认端口 `8765`）。 |
+| `com.user.herdr-experience-hub` | `bin/herdr-experience-hub`（`start --host 127.0.0.1 --port 8780 --db-path ~/.herdr-controller/experience_hub.db`） | 企业经验中心：内网审核发布业务规则，独立 SQLite + `http.server`，契约见 [`wiki/enterprise-experience-hub.md`](../../wiki/enterprise-experience-hub.md)。 |
+
+新增服务只在 `SCRIPTS` 登记一次：部署脚本用 `python3 -m herdr.service_release --labels` 取清单，不再自备第二份。带启动参数的服务在登记时声明**参数词表**（如 `('start', '--host', '--port', '--db-path')`）——词表校验 flag，参数值属宿主状态，逐字保留。
+
+未登记而 plist 又钉在 `releases/<sha>` 上的服务会被部署脚本拒绝部署（见 §2.2.1），因为它会永久停在旧代际且不报错。
 
 Console 使用 Python 标准库 `http.server` 提供 HTTP 服务，页面是内嵌 HTML/CSS/原生 JavaScript，没有独立 Node/npm 构建产物。Dashboard API 由 `/api/ops-center` 暴露；Workflow 启动通过异步 `POST /api/run` + `GET /api/run/status` 完成，具体契约见 [`console/README.md`](../../console/README.md) 与 [`wiki/ops-center.md`](../../wiki/ops-center.md)。
 
@@ -48,17 +53,22 @@ launchctl list | grep herdr
 > - 改了 **console / controller** 或 `herdr/` 包 → **工作区改动不会生效**，
 >   必须先提交，再重建快照并让服务重载。
 
-#### 2.2.1 推荐：一条命令部署（console + controller + sentinel + notifier）
+#### 2.2.1 推荐：一条命令部署（`SCRIPTS` 里的全部服务）
 
-`./scripts/install-herdr-console.sh` 会：提交后按 `HEAD` 重建 release 快照 →
-改 plist（console 还改 `HERDR_ROOT`）→ `bootout` + `bootstrap` 重载 → 自检
-运行中进程是否真的加载了新 commit。改完直接跑它即可。
+`./scripts/install-herdr-console.sh` 会：按 `HEAD` 重建 release 快照 →
+改 plist（`ProgramArguments`、`HERDR_ROOT`、`WorkingDirectory` 一起迁移，不留分裂代际）→
+`bootout` + `bootstrap` 重载 → 自检运行中进程是否真的加载了新 commit。改完直接跑它即可。
 
 ```bash
 ./scripts/install-herdr-console.sh              # 部署当前 HEAD
 ./scripts/install-herdr-console.sh --sha <commit>  # 部署指定 commit
-./scripts/install-herdr-console.sh --no-restart   # 只同步资源，不重载
+./scripts/install-herdr-console.sh --no-restart   # 写 plist 配置，但不重载（运行进程仍是旧代码）
+./scripts/install-herdr-console.sh --allow-unmanaged <label>  # 显式豁免未纳管服务，让它继续钉在旧 release 上
 ```
+
+部署前先做**未纳管检查**：脚本枚举 `~/Library/LaunchAgents/com.user.herdr-*.plist`，
+凡是钉在 `releases/<sha>` 却不在 `SCRIPTS` 里的服务，会连同「落后 HEAD 多少个提交」一起报错并**拒绝部署**
+（不写任何 plist）。这类漂移过去不报错，只会在某天该服务代码真的变了才被发现。
 
 **改 console / controller 前必须先提交**，否则快照还是旧 commit。
 

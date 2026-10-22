@@ -8067,3 +8067,44 @@ pytest -q tests/test_console_controller_cockpit_e2e.py
 2. `PageEvaluationTimeoutError: page.evaluate timed out after 15000ms` —— 页面有挂起超过 15 秒的求值，疑似未落定的在途请求。
 
 诊断入口应在失败路径抓 `document.elementFromPoint(目标中心)` 与该 `<article>` 的几何/层级，以及挂起 evaluate 的请求来源。**不要**用提高超时值或加 `--reruns` 掩盖，也不要在没有新证据时重新引入 `loadgroup`/`xdist_group`。
+
+---
+
+## 192. 部署纳管清单分散四处，带参数的服务被静默挡在外面并永久钉在旧代际（2026-10-22）
+
+### 问题背景
+
+排查 CI 宿主负载时顺手核对 defunct 进程归属，发现 `com.user.herdr-experience-hub` 的 plist 把 `ProgramArguments`、`EnvironmentVariables.HERDR_ROOT`、`WorkingDirectory` 三处全部钉在 `releases/ad17b85e9a6a`，而当时已部署的 release 是 `3777ff7fc7ae` —— 落后 301 个提交。部署脚本对它**零引用**，所以任何一次「部署到最新」都不会碰它，也不会报告它没被部署。
+
+根因不是一行清单漏写，而是**四个结构性事实叠加**：
+
+1. **纳管清单存在三份互不知情的副本**：`install-herdr-console.sh` 的 bash `SERVICES` 数组、`herdr/service_release.py` 的 `SCRIPTS` 字典、`tests/test_installer_bash_compat.py` 的 `SERVICES` 常量。加服务要改三处，而**测试那份永远绿**——它按自己的常量遍历，压根不知道生产清单少了一个服务。
+2. **参数合同把带参数的服务挡在纳管之外**：`publish_service_plists` 要求 `len(args) == 2`，否则抛 `migrate custom arguments explicitly`。experience-hub 的 argv 有 9 项（`start --host --port --db-path`）。所以它是被设计**故意排除**的（注释里写了要显式迁移），而那次迁移从未发生。这不是 bug，是**没人认领的 TODO 变成了生产状态**。
+3. **钉死路径不会自己过期**：plist 里的绝对 `releases/<sha>` 是持久配置，与「代码是否在跑新代际」没有任何反馈回路。失效方式是静默放行，不是报错。
+4. **旧测试断言的是错误前提**：`test_points_plist_at_the_new_snapshot` 与 `test_kickstart_only_services_are_still_covered` 断言「标签字符串字面量出现在脚本文本里」。清单收口到单一权威后这两个前提同时失效——它们保护的恰恰是该被消除的重复。
+
+严重性必须如实校正：`git diff ad17b85..3777ff7 -- bin/herdr-experience-hub herdr/experience/` 为**空**，即当时运行的旧代际 hub 与 main 上的 hub 代码逐字节等价。所以「落后 301 提交」是潜在债，**不是现役故障**。真正的缺陷是这种等价一旦破裂无人知晓。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 同一份清单存三处，其中一处在测试里 | 副本数量不产生冗余，只产生漂移：生产少一个服务时，按自己常量遍历的测试仍全绿 | 纳管清单只有 `herdr/service_release.SCRIPTS` 一个权威；部署脚本用 `python3 -m herdr.service_release --labels` 索取，测试同样从 `SCRIPTS` 派生。门禁断言改为「标签**不得**硬编码回脚本」 |
+| 参数合同用「禁止参数」实现安全 | 用一个太窄的合同换取简单性，代价是合法的服务被静默排除在部署之外，且排除方式是放行不是报错 | 合同从「禁止」改为「校验词表」：声明每个服务允许的 flag，**flag 名校验、参数值逐字保留**（`--port`/`--db-path` 是宿主状态，被改写反而错）。未知 flag 仍 fail-closed |
+| 只迁移 `ProgramArguments` 与 `HERDR_ROOT` | 纳管带 `WorkingDirectory` 的服务时会产生分裂代际：代码从新 release 起、cwd 仍在旧 release——比继续钉死更糟 | 所有 release 作用域字段必须**同批**迁移；断言「脚本路径、`HERDR_ROOT`、`WorkingDirectory` 指向同一 root」。缺失的字段不凭空创建 |
+| 未纳管的钉死服务不可见 | 「没被部署」必须是一条能被机器检出的事实，而不是靠人事后 `ls` 出来 | 部署前枚举 `~/Library/LaunchAgents/com.user.herdr-*.plist`，凡钉在 `releases/<sha>` 且不在 `SCRIPTS` 者，连同落后提交数报错并**拒绝部署**（不写任何 plist）；`--allow-unmanaged <label>` 作为显式豁免 |
+| 把宿主现象直接归因到自己的链路上 | 我曾在 issue 里写「22 个 defunct 疑似 worker 派发未回收子进程」，未按父子归属验证；实测 24 个 defunct 的父进程是 `verge-mihomo`(20)/`agy`(2)/`project_launcher.py`(1)/`aitrust-server`(1)，HAFlow 全部服务 PID 的僵尸子进程数为 0 | 归因前先看 `ps -eo ppid,stat` 的父进程分布并反向核对自身；错误归因要在原地公开更正，并把「本 issue 不是什么」写进新 issue 防止他人去不存在的缺陷里排查 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_service_release.py tests/test_installer_bash_compat.py \
+  tests/test_install_herdr_console_deploy.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：`tests/test_service_release.py` 新增 13 项（词表校验通过/拒绝、宿主状态逐字保留、三字段同代际、`WorkingDirectory` 不凭空创建、`--labels` 单一权威、未纳管漂移检出与 workspace 不误报、installer 先拒绝后豁免、带参数服务端到端纳管）；`tests/test_installer_bash_compat.py` 的清单副本删除并改为从 `SCRIPTS` 派生，因此 bash 3.2 兼容矩阵现在真实遍历 5 个服务（含 hub）。用**真机 plist** 在临时 `HOME` 预演 `--no-restart`：hub 的 9 项 argv 全保留、`--db-path` 仍指向 `~/.herdr-controller/experience_hub.db`、三字段同代际、exit 0。同一份未改动的真机 plist 在「改动前清单」下被 `unmanaged_release_plists` 报出 `ad17b85e9a6a`，在「当前清单」下为空——历史案例成为可机检的事实。
+
+**未做（需单独授权）**：把线上 experience-hub 切到新 release（改 plist + `bootout`/`bootstrap`）。代码变更后的首次正常部署会自动完成这件事。
+

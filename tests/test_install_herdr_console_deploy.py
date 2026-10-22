@@ -58,15 +58,13 @@ class TestInstallScriptRebuildsReleaseSnapshot(unittest.TestCase):
         )
 
     def test_points_plist_at_the_new_snapshot(self):
-        text = _script_text()
+        from herdr.service_release import SCRIPTS, publish_service_plists
         for service in SNAPSHOT_SERVICES:
             with self.subTest(service=service):
                 self.assertIn(
-                    service, text,
-                    f"脚本未处理 {service} 的 plist；该服务跑冻结快照，"
-                    f"不改 plist 就不生效",
+                    service, SCRIPTS,
+                    f"{service} 不在纳管清单里：跑冻结快照的服务不改 plist 就不生效",
                 )
-        from herdr.service_release import publish_service_plists
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             release = root.resolve() / "releases" / "new"
@@ -113,13 +111,41 @@ class TestInstallScriptReloadsJobsCorrectly(unittest.TestCase):
         )
 
     def test_kickstart_only_services_are_still_covered(self):
-        text = _script_text()
+        """重载路径按 plist 实际布局判定，不按标签硬编码。"""
+        from herdr.service_release import SCRIPTS
         for service in KICKSTART_ONLY:
             with self.subTest(service=service):
                 self.assertIn(
-                    service, text,
-                    f"{service} 直跑工作区源码，改 plist 后仍需被重载",
+                    service, SCRIPTS,
+                    f"{service} 直跑工作区源码，必须仍在纳管清单里才会被重载",
                 )
+        text = _script_text()
+        self.assertRegex(
+            text, r"ProgramArguments",
+            "release/workspace 布局判定必须读取 plist 真实命令行，不能靠标签名单",
+        )
+
+    def test_managed_labels_are_not_hardcoded_in_the_script(self):
+        """白名单曾分散在 bash 数组、Python 字典与本测试常量三处，补服务必漏一处。"""
+        text = _script_text()
+        self.assertRegex(
+            text, r"herdr\.service_release --labels",
+            "纳管清单必须向 herdr.service_release.SCRIPTS 索取，而不是自带一份",
+        )
+        from herdr.service_release import SCRIPTS, SERVICE_NAMESPACE
+        for label in ("com.user.herdr-factory-console", "com.user.herdr-controller",
+                      "com.user.herdr-sentinel", "com.user.herdr-notifier",
+                      "com.user.herdr-experience-hub"):
+            with self.subTest(label=label):
+                self.assertIn(label, SCRIPTS, f"{label} 未纳管：会被永久钉在旧 release 上")
+                self.assertNotIn(
+                    label, text,
+                    f"{label} 被写回脚本，绕过 SCRIPTS 唯一权威",
+                )
+        self.assertNotIn(
+            SERVICE_NAMESPACE, text,
+            "服务命名空间也只在 Python 侧：脚本再 glob 一份就会与清单漂移",
+        )
 
 
 class TestInstallScriptVerifiesDeployment(unittest.TestCase):

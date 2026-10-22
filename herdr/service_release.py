@@ -70,11 +70,76 @@ def _attested_snapshot_sha(root):
     return 'unknown'
 
 SCRIPTS = {
-    'com.user.herdr-factory-console': 'console/herdr_factory_console.py',
-    'com.user.herdr-controller': 'services/herdr-controller.py',
-    'com.user.herdr-sentinel': 'services/herdr-sentinel.py',
-    'com.user.herdr-notifier': 'services/herdr-notifier.py',
+    'com.user.herdr-factory-console': ('console/herdr_factory_console.py', ()),
+    'com.user.herdr-controller': ('services/herdr-controller.py', ()),
+    'com.user.herdr-sentinel': ('services/herdr-sentinel.py', ()),
+    'com.user.herdr-notifier': ('services/herdr-notifier.py', ()),
+    'com.user.herdr-experience-hub': ('bin/herdr-experience-hub',
+                                      ('start', '--host', '--port', '--db-path')),
 }
+SERVICE_NAMESPACE = 'com.user.herdr-'
+
+
+def _argument_problem(label, tail, declared):
+    """Return why this argv tail is not the service's declared contract, or None.
+
+    Flags are validated by vocabulary, values by nothing: a host may retarget a
+    port or db path without the release migration refusing to run.
+    """
+    index = 0
+    while index < len(tail):
+        token = tail[index]
+        if token.startswith('-'):
+            if token not in declared:
+                return f'unknown argument {token} for {label}; migrate custom arguments explicitly'
+            if index + 1 >= len(tail):
+                return f'unknown argument value for {token} in {label}'
+            index += 2
+            continue
+        if token not in declared:
+            return f'unknown argument {token} for {label}; migrate custom arguments explicitly'
+        index += 1
+    return None
+
+
+def _pinned_sha(data):
+    """Release sha a plist is frozen onto, from any field that names a release."""
+    values = [a for a in (data.get('ProgramArguments') or []) if isinstance(a, str)]
+    values.append((data.get('EnvironmentVariables') or {}).get('HERDR_ROOT'))
+    values.append(data.get('WorkingDirectory'))
+    for value in values:
+        parts = Path(str(value or '')).parts
+        if 'releases' in parts:
+            following = parts[parts.index('releases') + 1:]
+            if following:
+                return following[0]
+    return None
+
+
+def unmanaged_release_plists(paths, managed=None, namespace=SERVICE_NAMESPACE):
+    """Installed services frozen onto a release snapshot that nothing publishes to.
+
+    These keep running an old generation forever, and no deploy reports it.
+    """
+    managed = SCRIPTS if managed is None else managed
+    drift = []
+    for path in map(Path, paths):
+        label = path.stem
+        if not label.startswith(namespace) or label in managed:
+            continue
+        try:
+            sha = _pinned_sha(plistlib.loads(path.read_bytes()))
+        except Exception:
+            sha = None
+        if sha:
+            drift.append({'service': label, 'configured_sha': sha,
+                          'reason': 'release-pinned but not published by the installer'})
+    return drift
+
+
+def unmanaged_plists_in(directory, **kwargs):
+    return unmanaged_release_plists(
+        sorted(Path(directory).glob(SERVICE_NAMESPACE + '*.plist')), **kwargs)
 
 
 def _atomic(path, data):
@@ -91,23 +156,34 @@ def _atomic(path, data):
 def publish_service_plists(paths, release_root):
     """Validate the entire batch before any replacement. Each file is atomic.
 
-    Supported contract: interpreter + one known script, no custom arguments.
-    Existing release services migrate; workspace services keep their root.
+    Supported contract: interpreter + one known script, optionally followed by
+    that service's declared argument vocabulary. Only release-scoped fields
+    migrate, and they migrate together: a split between script path,
+    HERDR_ROOT and working directory would run new code inside an old snapshot.
     """
     prepared = []
     for path in map(Path, paths):
         original = path.read_bytes(); data = plistlib.loads(original)
-        relative = SCRIPTS.get(path.stem)
+        spec = SCRIPTS.get(path.stem)
         args = data.get('ProgramArguments')
-        if not relative or not isinstance(args, list) or len(args) != 2:
+        if not spec or not isinstance(args, list) or len(args) < 2:
             raise ValueError(f'unknown ProgramArguments in {path}; migrate custom arguments explicitly')
-        if not all(isinstance(a, str) and a and '\x00' not in a for a in args) or not args[1].endswith('/' + relative):
+        if not all(isinstance(a, str) and a and '\x00' not in a for a in args):
             raise ValueError(f'unknown service script in {path}')
+        relative, declared = spec
+        if not args[1].endswith('/' + relative):
+            raise ValueError(f'unknown service script in {path}')
+        problem = _argument_problem(path.stem, args[2:], declared)
+        if problem:
+            raise ValueError(problem)
         old_root = Path(args[1]).parents[len(Path(relative).parts)-1]
         root = Path(release_root).resolve() if 'releases' in old_root.parts else old_root
         script = root / relative
         if not script.is_file(): raise ValueError(f'service script missing: {script}')
-        data['ProgramArguments'] = [args[0], str(script)]
+        data['ProgramArguments'] = [args[0], str(script), *args[2:]]
+        working = data.get('WorkingDirectory')
+        if isinstance(working, str) and 'releases' in Path(working).parts:
+            data['WorkingDirectory'] = str(root)
         env = data.setdefault('EnvironmentVariables', {})
         if not isinstance(env, dict): raise ValueError(f'invalid environment in {path}')
         env['HERDR_ROOT'] = str(root)
@@ -154,5 +230,10 @@ if __name__ == '__main__':
     import sys
     if sys.argv[1] == '--verify-snapshot':
         verify_snapshot(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif sys.argv[1] == '--labels':
+        print(' '.join(SCRIPTS))
+    elif sys.argv[1] == '--drift':
+        for entry in unmanaged_plists_in(sys.argv[2]):
+            print(entry['service'], entry['configured_sha'])
     else:
         print(json.dumps(publish_service_plists(sys.argv[2:], sys.argv[1]), ensure_ascii=False))
