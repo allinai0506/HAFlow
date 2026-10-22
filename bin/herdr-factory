@@ -907,6 +907,17 @@ def main():
     fp_cmd.add_argument("--expected-version", type=int, default=None, help="目标门禁任务期望版本号 (CAS 乐观锁)")
     fp_cmd.add_argument("--expected-task-versions", default=None, help="多任务节点期望版本映射 JSON (例如 '{\"task-1\": 1}')")
 
+    issue_cmd = sub.add_parser("issue-operator-token", help="受控签发操作人企业级 HMAC 签名凭据 (Issue #307)")
+    issue_cmd.add_argument("operator", help="操作人标识 (例如 lead_alice)")
+    issue_cmd.add_argument("--role", default="human_operator", help="操作人角色 (默认 human_operator)")
+    issue_cmd.add_argument("--capabilities", default=None, help="能力列表 (逗号分隔，默认 bypass_gate,force_pass_gate,force_review)")
+    issue_cmd.add_argument("--expires-in", type=float, default=3600.0, help="凭据有效期秒数 (默认 3600)")
+    issue_cmd.add_argument("--secret", default=None, help="显式指定签名密钥 (默认使用控制台安全私钥)")
+    issue_cmd.add_argument("--out", default=None, help="凭据写入目标文件路径 (以 0o600 权限原子落盘)")
+    issue_cmd.add_argument("--register-db", action="store_true", help="同时将凭据持久化登记到 state_db")
+    issue_cmd.add_argument("--db-path", default=None, help="指定 state_db 路径")
+    issue_cmd.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
     cp_cmd = sub.add_parser("checkpoint", help="工作流运行态快照管理")
     cp_sub = cp_cmd.add_subparsers(dest="cp_action", required=True)
     cp_save = cp_sub.add_parser("save", help="创建运行态快照")
@@ -999,6 +1010,71 @@ def main():
             token=getattr(args, "token", None),
             credentials_path=getattr(args, "credentials_path", None),
         ))
+
+    if args.command == "issue-operator-token":
+        import hashlib
+        from herdr.operator_auth import issue_operator_hmac_token, is_worker_environment, OperatorImpersonationError
+
+        if is_worker_environment():
+            print("Error: operator token issuance is prohibited within worker clone environments.", file=sys.stderr)
+            sys.exit(1)
+
+        caps = None
+        if getattr(args, "capabilities", None):
+            caps = [c.strip() for c in str(args.capabilities).split(",") if c.strip()]
+
+        try:
+            tok = issue_operator_hmac_token(
+                operator_id=args.operator,
+                role=getattr(args, "role", "human_operator"),
+                capabilities=caps,
+                secret=getattr(args, "secret", None),
+                expires_in=getattr(args, "expires_in", 3600.0),
+            )
+            fp = hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16]
+            out = getattr(args, "out", None)
+            if out:
+                from pathlib import Path
+                p = Path(out).expanduser().resolve()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                temp_out = p.parent / f".tmp_{p.name}_{os.getpid()}"
+                fd = os.open(temp_out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with open(fd, "w", encoding="utf-8") as f:
+                    f.write(tok)
+                os.replace(temp_out, p)
+                try:
+                    p.chmod(0o600)
+                except OSError:
+                    pass
+
+            if getattr(args, "register_db", False):
+                from herdr import state_db
+                from pathlib import Path
+                db_p = Path(args.db_path).resolve() if getattr(args, "db_path", None) else None
+                state_db.save_user_token(args.operator, "operator", tok, db_path=db_p)
+
+            result = {
+                "operator": args.operator,
+                "role": getattr(args, "role", "human_operator"),
+                "capabilities": caps or ["bypass_gate", "force_pass_gate", "force_review"],
+                "expires_in": getattr(args, "expires_in", 3600.0),
+                "fingerprint": fp,
+                "token": tok,
+                "saved_to": str(out) if out else None,
+                "registered_db": bool(getattr(args, "register_db", False)),
+            }
+            if getattr(args, "json", False):
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+            else:
+                msg = f"[OPERATOR TOKEN ISSUED] operator={args.operator} role={getattr(args, 'role', 'human_operator')} fingerprint={fp} registered_db={bool(getattr(args, 'register_db', False))}"
+                if out:
+                    msg += f" saved_to={out}"
+                print(msg)
+                print(f"TOKEN={tok}")
+            sys.exit(0)
+        except Exception as exc:
+            print(f"Error issuing operator token for {args.operator}: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     if args.command == "checkpoint":
         sys.exit(checkpoint_command(args.cp_action, args.workflow_id, tag=getattr(args, "tag", None), checkpoint_id=getattr(args, "checkpoint_id", None)))

@@ -1,9 +1,11 @@
 import time
+
+from console import common, inventory, read_api, runtime, workflow_policy
+from herdr import interaction_loop as herdr_interaction_loop
 from herdr import kernel as herdr_kernel
 from herdr import steering as herdr_steering
-from herdr import interaction_loop as herdr_interaction_loop
 from herdr.transitions import InvalidTransitionError
-from console import common, inventory, read_api, runtime, workflow_policy
+
 
 def api_task_steer(b):
     tid=str(b.get('task_id') or '').strip()
@@ -272,10 +274,13 @@ def api_task_force_review(b):
     raw_op = b.get('operator')
     if raw_op is None and 'operator' not in b:
         raw_op = 'human_console'
-    token = b.get('auth_token') or b.get('token') or b.get('operator_token')
-    credentials_path = b.get('credentials_path') or b.get('operator_credentials')
-    from herdr.transitions import validate_operator, InvalidOperatorError
-    from herdr.operator_auth import authenticate_and_authorize_operator, OperatorAuthError
+    token = b.get('operator_token') or b.get('token')
+    credentials_path = b.get('operator_credentials') or b.get('credentials_path')
+    from herdr.operator_auth import (
+        OperatorAuthError,
+        authenticate_and_authorize_operator,
+    )
+    from herdr.transitions import InvalidOperatorError, validate_operator
     try:
         op = validate_operator(raw_op)
         principal = authenticate_and_authorize_operator(
@@ -424,8 +429,8 @@ def api_task_signoff(b):
         exp_ver = b.get('expected_version')
         exp_task_vers = b.get('expected_task_versions')
         exp_pane = str(b.get('expected_pane_id') or b.get('pane_id') or '').strip()
-        token = b.get('auth_token') or b.get('token') or b.get('operator_token')
-        credentials_path = b.get('credentials_path') or b.get('operator_credentials')
+        token = b.get('operator_token') or b.get('token')
+        credentials_path = b.get('operator_credentials') or b.get('credentials_path')
 
         res = herdr_kernel.force_pass_gate(
             wid,

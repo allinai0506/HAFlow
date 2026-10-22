@@ -359,17 +359,19 @@ def force_pass_gate(
     gate_node_id: str,
     note: str = "human forced pass",
     operator: str = "human",
-    db_path: Optional[Path] = None,
-    conn: Optional[sqlite3.Connection] = None,
-    expected_version: Optional[int] = None,
-    task_id: Optional[str] = None,
-    expected_pane_id: Optional[str] = None,
-    expected_task_versions: Optional[Dict[str, int]] = None,
-    token: Optional[str] = None,
-    credentials_path: Optional[str] = None,
-    strict_auth: Optional[bool] = None,
-    secret: Optional[str] = None,
-) -> Dict[str, Any]:
+    db_path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+    expected_version: int | None = None,
+    task_id: str | None = None,
+    expected_pane_id: str | None = None,
+    expected_task_versions: dict[str, int] | None = None,
+    token: str | None = None,
+    credentials_path: str | None = None,
+    strict_auth: bool | None = None,
+    secret: str | None = None,
+    principal: Any | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     """Atomically check and force-pass a gate node within a single immediate transaction."""
     should_close = False
     if conn is None:
@@ -410,24 +412,41 @@ def force_pass_gate(
         elif matching_tasks:
             for mt in matching_tasks:
                 m_agent = str(mt.get("agent") or "").strip().lower()
-                if m_agent and str(operator or "").strip().lower() == m_agent:
+                op_name = operator.operator_id if hasattr(operator, "operator_id") else str(operator or "")
+                if m_agent and op_name.strip().lower() == m_agent:
                     from herdr.operator_auth import OperatorImpersonationError
                     raise OperatorImpersonationError(
                         "the operator must be independent of the task worker; agent cannot bypass its own gate"
                     )
 
-        from herdr.operator_auth import authenticate_and_authorize_operator
-        principal = authenticate_and_authorize_operator(
-            operator_id=operator,
-            action="force_pass_gate",
-            token=token,
-            credentials_path=credentials_path,
-            task=target_task,
-            db_path=db_path,
-            strict_auth=strict_auth,
-            secret=secret,
+        from herdr.operator_auth import (
+            OperatorPrincipal,
+            authenticate_and_authorize_operator,
         )
-        operator = principal.operator_id
+        if principal is None and isinstance(operator, OperatorPrincipal):
+            principal = operator
+
+        if principal is None:
+            principal = authenticate_and_authorize_operator(
+                operator_id=operator,
+                action="force_pass_gate",
+                token=token,
+                credentials_path=credentials_path,
+                task=target_task,
+                db_path=db_path,
+                strict_auth=strict_auth,
+                secret=secret,
+            )
+            operator = principal.operator_id
+        else:
+            operator = principal.operator_id
+            if target_task:
+                t_agent = str(target_task.get("agent") or "").strip().lower()
+                if t_agent and operator.strip().lower() == t_agent:
+                    from herdr.operator_auth import OperatorImpersonationError
+                    raise OperatorImpersonationError(
+                        "the operator must be independent of the task worker; agent cannot bypass its own gate"
+                    )
 
         tasks_to_update = []
         if task_id:

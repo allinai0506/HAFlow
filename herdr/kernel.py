@@ -13,29 +13,27 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
-from . import workflow
-from . import runtime_state
-from .trajectory import TrajectoryLedger, record_trajectory_event_best_effort
+from . import runtime_state, workflow
 from .state_store import (
-    get_state_store,
     StateStore,
+    get_state_store,
     sync_tasks_projection,
     sync_workflows_projection,
 )
-
+from .trajectory import TrajectoryLedger, record_trajectory_event_best_effort
 
 HOME = Path.home()
 CONTROLLER_DIR = HOME / ".herdr-controller"
 
 
-def get_workflows_file(store: Optional[StateStore] = None) -> Path:
+def get_workflows_file(store: StateStore | None = None) -> Path:
     from .state_store import resolve_workflows_projection_file
     return resolve_workflows_projection_file(store=store)
 
 
-def get_tasks_file(store: Optional[StateStore] = None) -> Path:
+def get_tasks_file(store: StateStore | None = None) -> Path:
     from .state_store import resolve_tasks_projection_file
     return resolve_tasks_projection_file(store=store)
 
@@ -71,19 +69,19 @@ def state_db_path() -> Path:
     return get_default_db_path()
 
 
-def _get_store(store: Optional[StateStore] = None) -> StateStore:
+def _get_store(store: StateStore | None = None) -> StateStore:
     if store is not None:
         return store
     return get_state_store(db_path=state_db_path())
 
 
-def load_workflows_data(store: Optional[StateStore] = None) -> Dict[str, Any]:
+def load_workflows_data(store: StateStore | None = None) -> dict[str, Any]:
     """Load workflows via StateStore (single source of truth)."""
     s = _get_store(store)
     return s.export_workflows_json()
 
 
-def save_workflows_data(data: Dict[str, Any], store: Optional[StateStore] = None) -> None:
+def save_workflows_data(data: dict[str, Any], store: StateStore | None = None) -> None:
     """Save workflows into StateStore and sync compatibility JSON."""
     s = _get_store(store)
     for wid, wf in (data.get("workflows") or {}).items():
@@ -92,13 +90,13 @@ def save_workflows_data(data: Dict[str, Any], store: Optional[StateStore] = None
     sync_workflows_projection(store=s)
 
 
-def load_tasks_data(store: Optional[StateStore] = None) -> Dict[str, Any]:
+def load_tasks_data(store: StateStore | None = None) -> dict[str, Any]:
     """Load tasks via StateStore (single source of truth)."""
     s = _get_store(store)
     return s.export_tasks_json()
 
 
-def save_tasks_data(data: Dict[str, Any], store: Optional[StateStore] = None) -> None:
+def save_tasks_data(data: dict[str, Any], store: StateStore | None = None) -> None:
     """Save tasks into StateStore and sync compatibility JSON."""
     s = _get_store(store)
     for t in data.get("tasks", []):
@@ -108,9 +106,9 @@ def save_tasks_data(data: Dict[str, Any], store: Optional[StateStore] = None) ->
 
 
 
-def collect_downstream_nodes(nodes_by_id: Dict[str, Dict[str, Any]], root_id: str) -> Set[str]:
+def collect_downstream_nodes(nodes_by_id: dict[str, dict[str, Any]], root_id: str) -> set[str]:
     """Calculate the downstream closure containing root_id and all its reachable successors."""
-    dependents: Dict[str, Set[str]] = {}
+    dependents: dict[str, set[str]] = {}
     for node in nodes_by_id.values():
         for dep in node.get("depends_on", []):
             dependents.setdefault(dep, set()).add(node["id"])
@@ -135,14 +133,14 @@ def transition_task(
     to_status: str,
     reason: str,
     source: str = "system",
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
     force: bool = False,
-    store: Optional[StateStore] = None,
+    store: StateStore | None = None,
     expected_status: str | None = None,
     expected_version: int | None = None,
     expected_updated_at: float | None = None,
-    intent: Optional[str] = None,
-) -> Dict[str, Any]:
+    intent: str | None = None,
+) -> dict[str, Any]:
     """State Transition Gateway: Atomically transition task status and append WorkflowEvent."""
     s = _get_store(store)
     meta = dict(metadata or {})
@@ -261,11 +259,11 @@ def transition_workflow(
     to_status: str,
     reason: str,
     source: str = "system",
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
     force: bool = False,
-    store: Optional[StateStore] = None,
-    expected_status: Optional[str] = None,
-) -> Dict[str, Any]:
+    store: StateStore | None = None,
+    expected_status: str | None = None,
+) -> dict[str, Any]:
     """State Transition Gateway: Atomically transition workflow status and append WorkflowEvent."""
     s = _get_store(store)
     res = s.transition_workflow(
@@ -283,10 +281,10 @@ def transition_workflow(
 
 def update_task_metadata(
     task_id: str,
-    updates: Dict[str, Any],
-    store: Optional[StateStore] = None,
-    expected_version: Optional[int] = None,
-) -> Dict[str, Any]:
+    updates: dict[str, Any],
+    store: StateStore | None = None,
+    expected_version: int | None = None,
+) -> dict[str, Any]:
     """Atomically update non-protected metadata fields of a task without touching status."""
     s = _get_store(store)
     res = s.update_task_metadata(task_id, updates, expected_version=expected_version)
@@ -297,9 +295,9 @@ def update_task_metadata(
 
 def update_workflow_metadata(
     workflow_id: str,
-    updates: Dict[str, Any],
-    store: Optional[StateStore] = None,
-) -> Dict[str, Any]:
+    updates: dict[str, Any],
+    store: StateStore | None = None,
+) -> dict[str, Any]:
     """Atomically update non-protected metadata fields of a workflow without touching status."""
     s = _get_store(store)
     res = s.update_workflow_metadata(workflow_id, updates)
@@ -334,14 +332,14 @@ def _set_workflow_pause(workflow_id, node_id, store, expected_identity, paused):
     return result
 
 
-def pause_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optional[StateStore] = None,
-                   expected_identity=None) -> Dict[str, Any]:
+def pause_workflow(workflow_id: str, node_id: str | None = None, store: StateStore | None = None,
+                   expected_identity=None) -> dict[str, Any]:
     """Pause progression globally or hold a node under the same identity fence."""
     return _set_workflow_pause(workflow_id, node_id, store, expected_identity, True)
 
 
-def resume_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optional[StateStore] = None,
-                    expected_identity=None) -> Dict[str, Any]:
+def resume_workflow(workflow_id: str, node_id: str | None = None, store: StateStore | None = None,
+                    expected_identity=None) -> dict[str, Any]:
     """Resume progression globally or release a node under the same identity fence."""
     return _set_workflow_pause(workflow_id, node_id, store, expected_identity, False)
 
@@ -356,34 +354,38 @@ def force_pass_gate(
     gate_node_id: str,
     note: str = "human forced pass",
     operator: str = "human",
-    store: Optional[StateStore] = None,
-    expected_version: Optional[int] = None,
-    task_id: Optional[str] = None,
-    expected_pane_id: Optional[str] = None,
-    expected_task_versions: Optional[Dict[str, int]] = None,
-    token: Optional[str] = None,
-    credentials_path: Optional[str] = None,
-    strict_auth: Optional[bool] = None,
-    secret: Optional[str] = None,
-) -> Dict[str, Any]:
+    store: StateStore | None = None,
+    expected_version: int | None = None,
+    task_id: str | None = None,
+    expected_pane_id: str | None = None,
+    expected_task_versions: dict[str, int] | None = None,
+    token: str | None = None,
+    credentials_path: str | None = None,
+    strict_auth: bool | None = None,
+    secret: str | None = None,
+) -> dict[str, Any]:
     """Forcibly mark a gate node verdict as passed/approved with an audit note."""
     s = _get_store(store)
-    from .operator_auth import authenticate_and_authorize_operator
+    from .operator_auth import OperatorPrincipal, authenticate_and_authorize_operator
     target_task = None
     if task_id and hasattr(s, "get_task"):
         target_task = s.get_task(task_id)
 
-    principal = authenticate_and_authorize_operator(
-        operator_id=operator,
-        action="force_pass_gate",
-        token=token,
-        credentials_path=credentials_path,
-        task=target_task,
-        store=s,
-        strict_auth=strict_auth,
-        secret=secret,
-    )
-    operator = principal.operator_id
+    if isinstance(operator, OperatorPrincipal):
+        principal = operator
+        operator = principal.operator_id
+    else:
+        principal = authenticate_and_authorize_operator(
+            operator_id=operator,
+            action="force_pass_gate",
+            token=token,
+            credentials_path=credentials_path,
+            task=target_task,
+            store=s,
+            strict_auth=strict_auth,
+            secret=secret,
+        )
+        operator = principal.operator_id
 
     if hasattr(s, "force_pass_gate"):
         res = s.force_pass_gate(
@@ -399,6 +401,7 @@ def force_pass_gate(
             credentials_path=credentials_path,
             strict_auth=strict_auth,
             secret=secret,
+            principal=principal,
         )
     else:
         tasks = s.list_tasks(workflow_id=workflow_id)
@@ -520,9 +523,9 @@ def rollback_workflow(
     workflow_id: str,
     target_node_id: str,
     reason: str = "manual_rollback",
-    store: Optional[StateStore] = None,
+    store: StateStore | None = None,
     expected_identity=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Atomically invalidate current execution tasks, overrides, and advance locks."""
     from .workflow_control_store import rollback
     s = _get_store(store)
@@ -553,7 +556,7 @@ def rollback_workflow(
 # 4. Step Primitive
 # ============================================================
 
-def _is_task_completed(task: Dict[str, Any]) -> bool:
+def _is_task_completed(task: dict[str, Any]) -> bool:
     status = task.get("status")
     if status in ("completed", "cleaned", "cleanup_ready"):
         verdict = task.get("stage_verdict")
@@ -561,11 +564,15 @@ def _is_task_completed(task: Dict[str, Any]) -> bool:
     return False
 
 
-def step_workflow(workflow_id: str, expected_identity=None) -> Dict[str, Any]:
+def step_workflow(workflow_id: str, expected_identity=None) -> dict[str, Any]:
     """Execute a single step: compute ready nodes and dispatch or advance exactly one ready node."""
     store = _get_store()
     from . import state_db
-    from .workflow_control_store import control_transaction, fingerprint, validate_identity
+    from .workflow_control_store import (
+        control_transaction,
+        fingerprint,
+        validate_identity,
+    )
     reader = state_db.get_readonly_db_connection(store.db_path)
     try:
         reader.execute('BEGIN')
@@ -596,7 +603,7 @@ def _prepare_step(store, wf_entry, norm_cfg, wf_tasks):
         return {'ok': False, 'workflow_id': workflow_id, 'reason': 'workflow_blocked',
                 'blocker_task_ids': [t['task_id'] for t in assessment['blockers']]}
 
-    completed_nodes: Set[str] = set()
+    completed_nodes: set[str] = set()
     for n in nodes:
         n_id = n["id"]
         n_tasks = [
@@ -641,10 +648,10 @@ def _prepare_step(store, wf_entry, norm_cfg, wf_tasks):
 
 def create_checkpoint(
     workflow_id: str,
-    tag: Optional[str] = None,
-    parent_checkpoint_id: Optional[str] = None,
+    tag: str | None = None,
+    parent_checkpoint_id: str | None = None,
     expected_identity=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Capture a durable point-in-time snapshot of the workflow and its tasks via StateStore."""
     store = _get_store()
 
@@ -674,19 +681,19 @@ def create_checkpoint(
     return res
 
 
-def list_checkpoints(workflow_id: str) -> List[Dict[str, Any]]:
+def list_checkpoints(workflow_id: str) -> list[dict[str, Any]]:
     """List all available checkpoints for workflow_id via StateStore."""
     store = get_state_store()
     return store.list_checkpoints(workflow_id)
 
 
-def get_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
+def get_checkpoint(workflow_id: str, checkpoint_id: str) -> dict[str, Any]:
     """Retrieve full snapshot payload for a checkpoint via StateStore."""
     store = get_state_store()
     return store.get_checkpoint(workflow_id, checkpoint_id)
 
 
-def restore_checkpoint(workflow_id: str, checkpoint_id: str, expected_identity=None) -> Dict[str, Any]:
+def restore_checkpoint(workflow_id: str, checkpoint_id: str, expected_identity=None) -> dict[str, Any]:
     """Restore workflow state and tasks from a checkpoint snapshot via StateStore."""
     store = _get_store()
     res = store.restore_checkpoint(workflow_id, checkpoint_id, expected_identity=expected_identity)
@@ -716,8 +723,8 @@ def restore_checkpoint(workflow_id: str, checkpoint_id: str, expected_identity=N
 def fork_workflow_from_checkpoint(
     checkpoint_id: str,
     new_workflow_id: str,
-    new_title: Optional[str] = None,
-) -> Dict[str, Any]:
+    new_title: str | None = None,
+) -> dict[str, Any]:
     """Time-travel branching: Fork a new workflow instance via StateStore."""
     store = get_state_store()
     res = store.fork_workflow_from_checkpoint(
@@ -732,8 +739,8 @@ def fork_workflow_from_checkpoint(
 
 def reconcile_workflow(
     workflow_id: str,
-    store: Optional[StateStore] = None,
-) -> Dict[str, Any]:
+    store: StateStore | None = None,
+) -> dict[str, Any]:
     """Platform-level self-healing: Reconcile DAG nodes and delivery ledger state."""
     from .reconciliation import reconcile_workflow_state
     s = _get_store(store)
@@ -747,25 +754,26 @@ def bypass_task_gate(
     task_id: str,
     reason: str,
     operator: str = "human",
-    note: Optional[str] = None,
-    store: Optional[StateStore] = None,
-    expected_version: Optional[int] = None,
-    token: Optional[str] = None,
-    credentials_path: Optional[str] = None,
-    strict_auth: Optional[bool] = None,
-    secret: Optional[str] = None,
-) -> Dict[str, Any]:
+    note: str | None = None,
+    store: StateStore | None = None,
+    expected_version: int | None = None,
+    token: str | None = None,
+    credentials_path: str | None = None,
+    strict_auth: bool | None = None,
+    secret: str | None = None,
+) -> dict[str, Any]:
     """Universal human-in-the-loop gate bypass.
 
     Creates a structured bypass receipt, marks stage_verdict as 'pass',
     clears blockers, unblocks suspended/blocked tasks, writes gate verdict file,
     records trajectory audit event, and appends a shared workflow note.
     """
-    import uuid
     import hashlib
+    import uuid
     from datetime import datetime, timezone
-    from .direct_dispatch import gate_verdict_path
+
     from . import workflow_docs
+    from .direct_dispatch import gate_verdict_path
 
     cleaned_reason = str(reason or "").strip()
     if not cleaned_reason:
@@ -776,18 +784,22 @@ def bypass_task_gate(
     if not task:
         raise ValueError(f"Task '{task_id}' not found")
 
-    from .operator_auth import authenticate_and_authorize_operator
-    principal = authenticate_and_authorize_operator(
-        operator_id=operator,
-        action="bypass_gate",
-        token=token,
-        credentials_path=credentials_path,
-        task=task,
-        store=s,
-        strict_auth=strict_auth,
-        secret=secret,
-    )
-    operator = principal.operator_id
+    from .operator_auth import OperatorPrincipal, authenticate_and_authorize_operator
+    if isinstance(operator, OperatorPrincipal):
+        principal = operator
+        operator = principal.operator_id
+    else:
+        principal = authenticate_and_authorize_operator(
+            operator_id=operator,
+            action="bypass_gate",
+            token=token,
+            credentials_path=credentials_path,
+            task=task,
+            store=s,
+            strict_auth=strict_auth,
+            secret=secret,
+        )
+        operator = principal.operator_id
 
     if expected_version is not None and task.get("version") != expected_version:
         raise ValueError(

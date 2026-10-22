@@ -5,7 +5,7 @@ lifecycle: active
 subjects:
   roles:
   - human_operator
-  roles_implemented: true
+  roles_implemented: false
   note: 操作人必须具备 human_operator 角色且经有效凭据（HMAC Token / Bearer Token / state_db.get_user_token）鉴权，绑定对应门禁豁免权限（Capability，#307）
 resources:
   objects:

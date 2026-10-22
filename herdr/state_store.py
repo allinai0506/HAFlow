@@ -12,16 +12,15 @@ Design Principles:
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+import fcntl
 import json
 import os
 import tempfile
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-import fcntl
-from . import state_db
-from . import eval_store
+from . import eval_store, state_db
 
 
 def _atomic_write_json(file_path: Path, data: Any) -> None:
@@ -123,32 +122,28 @@ class StateStore(ABC):
     # Workflows
     def register_workflow(
         self,
-        workflow: Dict[str, Any],
-        event_payload: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        workflow: dict[str, Any],
+        event_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Atomically upsert a workflow record and persist its authoritative workflow_created event."""
         self.save_workflow(workflow)
         return {"ok": True, "workflow_id": workflow.get("workflow_id")}
 
     @abstractmethod
-    def save_workflow(self, workflow: Dict[str, Any]) -> None:
+    def save_workflow(self, workflow: dict[str, Any]) -> None:
         """Upsert a workflow record."""
-        pass
 
     @abstractmethod
-    def get_workflow(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+    def get_workflow(self, workflow_id: str) -> dict[str, Any] | None:
         """Fetch a workflow by its workflow_id."""
-        pass
 
     @abstractmethod
-    def list_workflows(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_workflows(self, status: str | None = None) -> list[dict[str, Any]]:
         """List workflows optionally filtered by status."""
-        pass
 
     @abstractmethod
     def delete_workflow(self, workflow_id: str) -> bool:
         """Delete a workflow and cascade its associated tasks."""
-        pass
 
     @abstractmethod
     def transition_workflow(
@@ -157,46 +152,40 @@ class StateStore(ABC):
         to_status: str,
         reason: str,
         source: str = "system",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         force: bool = False,
-        expected_status: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        expected_status: str | None = None,
+    ) -> dict[str, Any]:
         """Atomically validate and transition a workflow status, appending a WorkflowEvent."""
-        pass
 
     @abstractmethod
     def update_workflow_metadata(
         self,
         workflow_id: str,
-        updates: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
         """Atomically update non-protected metadata fields of a workflow without touching status."""
-        pass
 
     # Tasks
     @abstractmethod
-    def save_task(self, task: Dict[str, Any], fail_if_exists: bool = False) -> None:
+    def save_task(self, task: dict[str, Any], fail_if_exists: bool = False) -> None:
         """Upsert a task record, or fail closed if task already exists."""
-        pass
 
     @abstractmethod
-    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
         """Fetch a task by its task_id."""
-        pass
 
     @abstractmethod
     def list_tasks(
         self,
-        workflow_id: Optional[str] = None,
-        status: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        workflow_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List tasks optionally filtered by workflow_id and/or status."""
-        pass
 
     @abstractmethod
     def delete_task(self, task_id: str) -> bool:
         """Delete a task by its task_id."""
-        pass
 
     @abstractmethod
     def transition_task(
@@ -205,12 +194,11 @@ class StateStore(ABC):
         to_status: str,
         reason: str,
         source: str = "system",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         force: bool = False,
-        intent: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        intent: str | None = None,
+    ) -> dict[str, Any]:
         """Atomically validate and transition a task status, appending a WorkflowEvent."""
-        pass
 
     @abstractmethod
     def compare_and_set_task_transition(
@@ -224,7 +212,7 @@ class StateStore(ABC):
         expected_status: str | None = None,
         expected_version: int | None = None,
         expected_updated_at: float | None = None,
-        intent: Optional[str] = None,
+        intent: str | None = None,
     ) -> dict[str, Any]:
         """Atomically transition a task only when its observed epoch matches."""
 
@@ -287,11 +275,10 @@ class StateStore(ABC):
     def update_task_metadata(
         self,
         task_id: str,
-        updates: Dict[str, Any],
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        updates: dict[str, Any],
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """Atomically update non-protected metadata fields of a task without touching status."""
-        pass
 
     @abstractmethod
     def force_pass_gate(
@@ -300,180 +287,166 @@ class StateStore(ABC):
         gate_node_id: str,
         note: str = "human forced pass",
         operator: str = "human",
-        expected_version: Optional[int] = None,
-        task_id: Optional[str] = None,
-        expected_pane_id: Optional[str] = None,
-        expected_task_versions: Optional[Dict[str, int]] = None,
+        expected_version: int | None = None,
+        task_id: str | None = None,
+        expected_pane_id: str | None = None,
+        expected_task_versions: dict[str, int] | None = None,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Atomically force-pass a gate node within a single database transaction."""
-        pass
 
     # Steering
     @abstractmethod
-    def save_steer(self, steer_item: Dict[str, Any]) -> None:
+    def save_steer(self, steer_item: dict[str, Any]) -> None:
         """Upsert a steering queue item."""
-        pass
 
     @abstractmethod
-    def get_steer(self, steer_id: str) -> Optional[Dict[str, Any]]:
+    def get_steer(self, steer_id: str) -> dict[str, Any] | None:
         """Fetch a steering item by its steer_id."""
-        pass
 
     @abstractmethod
     def list_steers(
         self,
-        task_id: Optional[str] = None,
-        status: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        task_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List steering items optionally filtered by task_id and/or status."""
-        pass
 
     @abstractmethod
     def update_steer_status(
         self,
         steer_id: str,
         status: str,
-        dispatched_at: Optional[float] = None,
+        dispatched_at: float | None = None,
     ) -> bool:
         """Update status and dispatched_at for a steering item."""
-        pass
 
     @abstractmethod
-    def record_steering_history(self, record: Dict[str, Any]) -> None:
+    def record_steering_history(self, record: dict[str, Any]) -> None:
         """Record an intervention/steering audit entry."""
-        pass
 
     @abstractmethod
-    def list_steering_history(self, task_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_steering_history(self, task_id: str | None = None) -> list[dict[str, Any]]:
         """List steering audit entries."""
-        pass
 
     # Events
     @abstractmethod
     def record_event(
         self,
         event_type: str,
-        payload: Dict[str, Any],
-        workflow_id: Optional[str] = None,
-        node_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
+        payload: dict[str, Any],
+        workflow_id: str | None = None,
+        node_id: str | None = None,
+        task_id: str | None = None,
+        agent_id: str | None = None,
         source: str = "system",
-        timestamp: Optional[float] = None,
-        run_id: Optional[str] = None,
+        timestamp: float | None = None,
+        run_id: str | None = None,
     ) -> Any:
         """Record a generic lifecycle event and return its receipt, if any."""
-        pass
 
     @abstractmethod
     def list_events(
         self,
-        workflow_id: Optional[str] = None,
-        node_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        event_type: Optional[str] = None,
-        source: Optional[str] = None,
-        limit: Optional[int] = None,
+        workflow_id: str | None = None,
+        node_id: str | None = None,
+        task_id: str | None = None,
+        agent_id: str | None = None,
+        event_type: str | None = None,
+        source: str | None = None,
+        limit: int | None = None,
         desc: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """List canonical WorkflowEvent records (desc=newest first)."""
-        pass
 
     # Durable Supervisor actions
     @abstractmethod
-    def create_intervention(self, intervention: Dict[str, Any]) -> Dict[str, Any]:
+    def create_intervention(self, intervention: dict[str, Any]) -> dict[str, Any]:
         pass
 
     @abstractmethod
     def create_intervention_with_limit(
-        self, intervention: Dict[str, Any], verification_limit: int,
-    ) -> Dict[str, Any]:
+        self, intervention: dict[str, Any], verification_limit: int,
+    ) -> dict[str, Any]:
         """Atomically enforce the VERIFY budget while creating the row."""
-        pass
 
     @abstractmethod
-    def get_intervention(self, intervention_id: str) -> Optional[Dict[str, Any]]:
+    def get_intervention(self, intervention_id: str) -> dict[str, Any] | None:
         pass
 
     @abstractmethod
     def list_interventions(
         self,
-        run_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        statuses: Optional[List[str]] = None,
-        limit: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+        run_id: str | None = None,
+        task_id: str | None = None,
+        statuses: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         pass
 
     @abstractmethod
     def claim_intervention(
         self,
         intervention_id: str,
-        execution_owner: Optional[str] = None,
+        execution_owner: str | None = None,
         lease_seconds: float = 300.0,
         recover_running: bool = False,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         pass
 
     @abstractmethod
     def complete_intervention(
-        self, intervention_id: str, result: Dict[str, Any],
-        execution_owner: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        self, intervention_id: str, result: dict[str, Any],
+        execution_owner: str | None = None,
+    ) -> dict[str, Any]:
         pass
 
     @abstractmethod
     def fail_intervention(
-        self, intervention_id: str, error: Dict[str, Any],
-        execution_owner: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        self, intervention_id: str, error: dict[str, Any],
+        execution_owner: str | None = None,
+    ) -> dict[str, Any]:
         pass
 
     # Semantic ContextPack working memory
     @abstractmethod
-    def save_context_pack(self, context_pack: Dict[str, Any]) -> Dict[str, Any]:
+    def save_context_pack(self, context_pack: dict[str, Any]) -> dict[str, Any]:
         """Append a ContextPack snapshot, applying source-sequence deduplication."""
-        pass
 
     @abstractmethod
-    def get_context_pack(self, context_id: str) -> Optional[Dict[str, Any]]:
+    def get_context_pack(self, context_id: str) -> dict[str, Any] | None:
         """Fetch one ContextPack by id."""
-        pass
 
     @abstractmethod
-    def get_latest_context_pack(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_latest_context_pack(self, run_id: str) -> dict[str, Any] | None:
         """Fetch the latest ContextPack for a run."""
-        pass
 
     @abstractmethod
-    def list_context_packs(self, run_id: str) -> List[Dict[str, Any]]:
+    def list_context_packs(self, run_id: str) -> list[dict[str, Any]]:
         """List ContextPack snapshots for a run in creation order."""
-        pass
 
     # Immutable WorkingContext projections.  These are concrete on
     # SQLiteStateStore; the base interface stays compatible with existing
     # lightweight test doubles.
     def save_working_context(
-        self, context: Dict[str, Any], *, fingerprint_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        self, context: dict[str, Any], *, fingerprint_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
-    def get_working_context(self, context_id: str) -> Optional[Dict[str, Any]]:
+    def get_working_context(self, context_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def get_latest_working_context(
-        self, task_id: str, agent_role: Optional[str] = None,
-        run_scope: Optional[str] = None, workflow_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        self, task_id: str, agent_role: str | None = None,
+        run_scope: str | None = None, workflow_id: str | None = None,
+    ) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def list_working_contexts(
-        self, task_id: str, agent_role: Optional[str] = None,
-        run_scope: Optional[str] = None, workflow_id: Optional[str] = None,
+        self, task_id: str, agent_role: str | None = None,
+        run_scope: str | None = None, workflow_id: str | None = None,
         limit: int = 1000, offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     # Checkpoints
@@ -481,52 +454,46 @@ class StateStore(ABC):
     def create_checkpoint(
         self,
         workflow_id: str,
-        tag: Optional[str] = None,
-        parent_checkpoint_id: Optional[str] = None,
-        checkpoint_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        tag: str | None = None,
+        parent_checkpoint_id: str | None = None,
+        checkpoint_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
         expected_identity=None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Capture an atomic point-in-time snapshot of a workflow and its tasks."""
-        pass
 
     @abstractmethod
-    def list_checkpoints(self, workflow_id: str) -> List[Dict[str, Any]]:
+    def list_checkpoints(self, workflow_id: str) -> list[dict[str, Any]]:
         """List checkpoints for a workflow."""
-        pass
 
     @abstractmethod
-    def get_checkpoint(self, workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
+    def get_checkpoint(self, workflow_id: str, checkpoint_id: str) -> dict[str, Any]:
         """Retrieve full snapshot payload from checkpoint."""
-        pass
 
     @abstractmethod
-    def restore_checkpoint(self, workflow_id: str, checkpoint_id: str, expected_identity=None) -> Dict[str, Any]:
+    def restore_checkpoint(self, workflow_id: str, checkpoint_id: str, expected_identity=None) -> dict[str, Any]:
         """Restore workflow state and tasks atomically from checkpoint."""
-        pass
 
     @abstractmethod
     def fork_workflow_from_checkpoint(
         self,
         checkpoint_id: str,
         new_workflow_id: str,
-        new_title: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        new_title: str | None = None,
+    ) -> dict[str, Any]:
         """Fork a new workflow from historical checkpoint snapshot."""
-        pass
 
     @abstractmethod
-    def get_checkpoint_lineage(self, workflow_id: str) -> List[Dict[str, Any]]:
+    def get_checkpoint_lineage(self, workflow_id: str) -> list[dict[str, Any]]:
         """Retrieve checkpoint DAG lineage."""
-        pass
 
     # Eval results (point-in-time facts, distinct from Metrics aggregation)
     @abstractmethod
     def record_eval_result(
         self,
         run_id: str,
-        revision: Optional[int] = None,
-        evidence: Optional[Any] = None,
+        revision: int | None = None,
+        evidence: Any | None = None,
         requirements_satisfied: bool | None = None,
         verification_passed: bool | None = None,
         human_intervention_count: int | None = None,
@@ -534,33 +501,28 @@ class StateStore(ABC):
         warnings: list[Any] | None = None,
         task_id: str | None = None,
         workflow_id: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Record one eval fact; same run and revision returns existing row."""
-        pass
 
     @abstractmethod
     def get_eval_result(
         self, run_id: str, revision: int,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Fetch one eval row; absent rows return None."""
-        pass
 
     @abstractmethod
-    def get_latest_eval_result(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_latest_eval_result(self, run_id: str) -> dict[str, Any] | None:
         """Fetch the max-revision eval row; absent runs return None."""
-        pass
 
     @abstractmethod
     def list_eval_results(
-        self, run_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        self, run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List eval rows ordered by revision."""
-        pass
 
     @abstractmethod
-    def get_max_eval_revision(self, run_id: str) -> Optional[int]:
+    def get_max_eval_revision(self, run_id: str) -> int | None:
         """Return max revision for a run; absent runs return None."""
-        pass
 
     # Replay specs (lineage edges, never write source run state)
     @abstractmethod
@@ -568,81 +530,70 @@ class StateStore(ABC):
         self,
         source_run_id: str,
         replay_run_id: str,
-        workflow_id: Optional[str] = None,
-        definition: Optional[Any] = None,
-        lineage: Optional[Any] = None,
+        workflow_id: str | None = None,
+        definition: Any | None = None,
+        lineage: Any | None = None,
         snapshot: str | None = None,
         policy: dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Record one replay edge; same replay run returns existing row."""
-        pass
 
     @abstractmethod
     def get_replay_spec(
         self, replay_run_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Fetch one replay spec by replay run."""
-        pass
 
     @abstractmethod
     def get_replay_spec_by_id(
         self, spec_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Fetch one replay spec by primary key."""
-        pass
 
     @abstractmethod
     def list_replay_specs(
         self,
-        source_run_id: Optional[str] = None,
-        workflow_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        source_run_id: str | None = None,
+        workflow_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List replay specs with optional filters."""
-        pass
 
     @abstractmethod
-    def get_replay_lineage(self, replay_run_id: str) -> List[str]:
+    def get_replay_lineage(self, replay_run_id: str) -> list[str]:
         """Walk source edges back to the origin run."""
-        pass
 
     @abstractmethod
     def latest_run_verification_fact(
         self, run_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Return latest strict verification fact for one run."""
-        pass
 
     # Export & Compatibility
     @abstractmethod
-    def export_workflows_json(self) -> Dict[str, Any]:
+    def export_workflows_json(self) -> dict[str, Any]:
         """Export current workflows in legacy workflows.json format."""
-        pass
 
     @abstractmethod
-    def export_tasks_json(self) -> Dict[str, Any]:
+    def export_tasks_json(self) -> dict[str, Any]:
         """Export current tasks in legacy tasks.json format."""
-        pass
 
     @abstractmethod
-    def export_steering_json(self) -> Dict[str, Any]:
+    def export_steering_json(self) -> dict[str, Any]:
         """Export current steering queues and history in legacy steering.json format."""
-        pass
 
     @abstractmethod
-    def export_all_json(self, target_dir: Optional[Path] = None) -> Dict[str, Any]:
+    def export_all_json(self, target_dir: Path | None = None) -> dict[str, Any]:
         """Export all state to disk as JSON for external tools/inspection."""
-        pass
 
     @abstractmethod
     def import_from_json(
         self,
-        workflows_file: Optional[Path] = None,
-        tasks_file: Optional[Path] = None,
-        steering_file: Optional[Path] = None,
-        checkpoints_dir: Optional[Path] = None,
-    ) -> Dict[str, Any]:
+        workflows_file: Path | None = None,
+        tasks_file: Path | None = None,
+        steering_file: Path | None = None,
+        checkpoints_dir: Path | None = None,
+    ) -> dict[str, Any]:
         """Migrate legacy JSON files into SQLite database."""
-        pass
 
 
 class SQLiteStateStore(StateStore):
@@ -650,7 +601,7 @@ class SQLiteStateStore(StateStore):
 
     def __init__(
         self,
-        db_path: Optional[Path] = None,
+        db_path: Path | None = None,
         auto_migrate_json: bool = False,
     ) -> None:
         self.db_path = Path(db_path) if db_path else state_db.get_default_db_path()
@@ -685,9 +636,9 @@ class SQLiteStateStore(StateStore):
     # Workflows
     def register_workflow(
         self,
-        workflow: Dict[str, Any],
-        event_payload: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        workflow: dict[str, Any],
+        event_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return state_db.register_workflow(
             workflow,
             event_payload=event_payload,
@@ -697,19 +648,19 @@ class SQLiteStateStore(StateStore):
 
     def save_workflow(
         self,
-        workflow: Dict[str, Any],
-        conn: Optional[sqlite3.Connection] = None,
+        workflow: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
     ) -> None:
         state_db.save_workflow(workflow, db_path=self.db_path, conn=conn)
 
-    def get_workflow(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+    def get_workflow(self, workflow_id: str) -> dict[str, Any] | None:
         return state_db.get_workflow(workflow_id, db_path=self.db_path)
 
     def read_workflow_snapshot(self, workflow_id):
         from .recovery_store import read_snapshot
         return read_snapshot(self.db_path, workflow_id)
 
-    def list_workflows(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_workflows(self, status: str | None = None) -> list[dict[str, Any]]:
         return state_db.list_workflows(status=status, db_path=self.db_path)
 
     def delete_workflow(self, workflow_id: str) -> bool:
@@ -721,10 +672,10 @@ class SQLiteStateStore(StateStore):
         to_status: str,
         reason: str,
         source: str = "system",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         force: bool = False,
-        expected_status: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        expected_status: str | None = None,
+    ) -> dict[str, Any]:
         return state_db.transition_workflow(
             workflow_id=workflow_id,
             to_status=to_status,
@@ -739,8 +690,8 @@ class SQLiteStateStore(StateStore):
     def update_workflow_metadata(
         self,
         workflow_id: str,
-        updates: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
         return state_db.update_workflow_metadata(
             workflow_id=workflow_id,
             updates=updates,
@@ -748,17 +699,17 @@ class SQLiteStateStore(StateStore):
         )
 
     # Tasks
-    def save_task(self, task: Dict[str, Any], fail_if_exists: bool = False) -> None:
+    def save_task(self, task: dict[str, Any], fail_if_exists: bool = False) -> None:
         state_db.save_task(task, db_path=self.db_path, fail_if_exists=fail_if_exists)
 
-    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
         return state_db.get_task(task_id, db_path=self.db_path)
 
     def list_tasks(
         self,
-        workflow_id: Optional[str] = None,
-        status: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        workflow_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
         return state_db.list_tasks(workflow_id=workflow_id, status=status, db_path=self.db_path)
 
     def delete_task(self, task_id: str) -> bool:
@@ -770,10 +721,10 @@ class SQLiteStateStore(StateStore):
         to_status: str,
         reason: str,
         source: str = "system",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         force: bool = False,
-        intent: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        intent: str | None = None,
+    ) -> dict[str, Any]:
         return state_db.transition_task(
             task_id=task_id,
             to_status=to_status,
@@ -796,7 +747,7 @@ class SQLiteStateStore(StateStore):
         expected_status: str | None = None,
         expected_version: int | None = None,
         expected_updated_at: float | None = None,
-        intent: Optional[str] = None,
+        intent: str | None = None,
     ) -> dict[str, Any]:
         return state_db.compare_and_set_task_transition(
             task_id=task_id,
@@ -890,9 +841,9 @@ class SQLiteStateStore(StateStore):
     def update_task_metadata(
         self,
         task_id: str,
-        updates: Dict[str, Any],
-        expected_version: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        updates: dict[str, Any],
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         return state_db.update_task_metadata(
             task_id=task_id,
             updates=updates,
@@ -906,15 +857,17 @@ class SQLiteStateStore(StateStore):
         gate_node_id: str,
         note: str = "human forced pass",
         operator: str = "human",
-        expected_version: Optional[int] = None,
-        task_id: Optional[str] = None,
-        expected_pane_id: Optional[str] = None,
-        expected_task_versions: Optional[Dict[str, int]] = None,
-        token: Optional[str] = None,
-        credentials_path: Optional[str] = None,
-        strict_auth: Optional[bool] = None,
-        secret: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        expected_version: int | None = None,
+        task_id: str | None = None,
+        expected_pane_id: str | None = None,
+        expected_task_versions: dict[str, int] | None = None,
+        token: str | None = None,
+        credentials_path: str | None = None,
+        strict_auth: bool | None = None,
+        secret: str | None = None,
+        principal: Any = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         return state_db.force_pass_gate(
             workflow_id=workflow_id,
             gate_node_id=gate_node_id,
@@ -929,27 +882,29 @@ class SQLiteStateStore(StateStore):
             credentials_path=credentials_path,
             strict_auth=strict_auth,
             secret=secret,
+            principal=principal,
+            **kwargs,
         )
 
     # Steering
-    def save_steer(self, steer_item: Dict[str, Any]) -> None:
+    def save_steer(self, steer_item: dict[str, Any]) -> None:
         state_db.save_steer(steer_item, db_path=self.db_path)
 
-    def get_steer(self, steer_id: str) -> Optional[Dict[str, Any]]:
+    def get_steer(self, steer_id: str) -> dict[str, Any] | None:
         return state_db.get_steer(steer_id, db_path=self.db_path)
 
     def list_steers(
         self,
-        task_id: Optional[str] = None,
-        status: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        task_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
         return state_db.list_steers(task_id=task_id, status=status, db_path=self.db_path)
 
     def update_steer_status(
         self,
         steer_id: str,
         status: str,
-        dispatched_at: Optional[float] = None,
+        dispatched_at: float | None = None,
     ) -> bool:
         return state_db.update_steer_status(
             steer_id=steer_id,
@@ -958,24 +913,24 @@ class SQLiteStateStore(StateStore):
             db_path=self.db_path,
         )
 
-    def record_steering_history(self, record: Dict[str, Any]) -> None:
+    def record_steering_history(self, record: dict[str, Any]) -> None:
         state_db.record_steering_history(record, db_path=self.db_path)
 
-    def list_steering_history(self, task_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_steering_history(self, task_id: str | None = None) -> list[dict[str, Any]]:
         return state_db.list_steering_history(task_id=task_id, db_path=self.db_path)
 
     # Events
     def record_event(
         self,
         event_type: str,
-        payload: Dict[str, Any],
-        workflow_id: Optional[str] = None,
-        node_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
+        payload: dict[str, Any],
+        workflow_id: str | None = None,
+        node_id: str | None = None,
+        task_id: str | None = None,
+        agent_id: str | None = None,
         source: str = "system",
-        timestamp: Optional[float] = None,
-        run_id: Optional[str] = None,
+        timestamp: float | None = None,
+        run_id: str | None = None,
     ) -> Any:
         return state_db.record_event({
             "workflow_id": workflow_id,
@@ -991,15 +946,15 @@ class SQLiteStateStore(StateStore):
 
     def list_events(
         self,
-        workflow_id: Optional[str] = None,
-        node_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        event_type: Optional[str] = None,
-        source: Optional[str] = None,
-        limit: Optional[int] = None,
+        workflow_id: str | None = None,
+        node_id: str | None = None,
+        task_id: str | None = None,
+        agent_id: str | None = None,
+        event_type: str | None = None,
+        source: str | None = None,
+        limit: int | None = None,
         desc: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         return state_db.list_events(
             workflow_id=workflow_id,
             node_id=node_id,
@@ -1012,28 +967,28 @@ class SQLiteStateStore(StateStore):
             desc=desc,
         )
 
-    def create_intervention(self, intervention: Dict[str, Any]) -> Dict[str, Any]:
+    def create_intervention(self, intervention: dict[str, Any]) -> dict[str, Any]:
         return state_db.create_intervention(intervention, db_path=self.db_path)
 
     def create_intervention_with_limit(
-        self, intervention: Dict[str, Any], verification_limit: int,
-    ) -> Dict[str, Any]:
+        self, intervention: dict[str, Any], verification_limit: int,
+    ) -> dict[str, Any]:
         return state_db.create_intervention(
             intervention,
             db_path=self.db_path,
             verification_limit=verification_limit,
         )
 
-    def get_intervention(self, intervention_id: str) -> Optional[Dict[str, Any]]:
+    def get_intervention(self, intervention_id: str) -> dict[str, Any] | None:
         return state_db.get_intervention(intervention_id, db_path=self.db_path)
 
     def list_interventions(
         self,
-        run_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        statuses: Optional[List[str]] = None,
-        limit: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+        run_id: str | None = None,
+        task_id: str | None = None,
+        statuses: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         return state_db.list_interventions(
             run_id=run_id, task_id=task_id, statuses=statuses, limit=limit, db_path=self.db_path,
         )
@@ -1041,10 +996,10 @@ class SQLiteStateStore(StateStore):
     def claim_intervention(
         self,
         intervention_id: str,
-        execution_owner: Optional[str] = None,
+        execution_owner: str | None = None,
         lease_seconds: float = 300.0,
         recover_running: bool = False,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return state_db.claim_intervention(
             intervention_id,
             db_path=self.db_path,
@@ -1054,18 +1009,18 @@ class SQLiteStateStore(StateStore):
         )
 
     def complete_intervention(
-        self, intervention_id: str, result: Dict[str, Any],
-        execution_owner: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        self, intervention_id: str, result: dict[str, Any],
+        execution_owner: str | None = None,
+    ) -> dict[str, Any]:
         return state_db.complete_intervention(
             intervention_id, result, db_path=self.db_path,
             execution_owner=execution_owner,
         )
 
     def fail_intervention(
-        self, intervention_id: str, error: Dict[str, Any],
-        execution_owner: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        self, intervention_id: str, error: dict[str, Any],
+        execution_owner: str | None = None,
+    ) -> dict[str, Any]:
         return state_db.fail_intervention(
             intervention_id, error, db_path=self.db_path,
             execution_owner=execution_owner,
@@ -1075,12 +1030,12 @@ class SQLiteStateStore(StateStore):
     def create_checkpoint(
         self,
         workflow_id: str,
-        tag: Optional[str] = None,
-        parent_checkpoint_id: Optional[str] = None,
-        checkpoint_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        tag: str | None = None,
+        parent_checkpoint_id: str | None = None,
+        checkpoint_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
         expected_identity=None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return state_db.create_checkpoint(
             workflow_id=workflow_id,
             tag=tag,
@@ -1092,21 +1047,21 @@ class SQLiteStateStore(StateStore):
         )
 
     # Semantic ContextPack working memory
-    def save_context_pack(self, context_pack: Dict[str, Any]) -> Dict[str, Any]:
+    def save_context_pack(self, context_pack: dict[str, Any]) -> dict[str, Any]:
         return state_db.save_context_pack(context_pack, db_path=self.db_path)
 
-    def get_context_pack(self, context_id: str) -> Optional[Dict[str, Any]]:
+    def get_context_pack(self, context_id: str) -> dict[str, Any] | None:
         return state_db.get_context_pack(context_id, db_path=self.db_path)
 
-    def get_latest_context_pack(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_latest_context_pack(self, run_id: str) -> dict[str, Any] | None:
         return state_db.get_latest_context_pack(run_id, db_path=self.db_path)
 
-    def list_context_packs(self, run_id: str) -> List[Dict[str, Any]]:
+    def list_context_packs(self, run_id: str) -> list[dict[str, Any]]:
         return state_db.list_context_packs(run_id, db_path=self.db_path)
 
     def save_working_context(
-        self, context: Dict[str, Any], *, fingerprint_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        self, context: dict[str, Any], *, fingerprint_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if fingerprint_config is None:
             from .context_projection import _config
             fingerprint_config = _config(None)
@@ -1114,36 +1069,36 @@ class SQLiteStateStore(StateStore):
             context, db_path=self.db_path, fingerprint_config=fingerprint_config,
         )
 
-    def get_working_context(self, context_id: str) -> Optional[Dict[str, Any]]:
+    def get_working_context(self, context_id: str) -> dict[str, Any] | None:
         return state_db.get_working_context(context_id, db_path=self.db_path)
 
     def get_latest_working_context(
-        self, task_id: str, agent_role: Optional[str] = None,
-        run_scope: Optional[str] = None, workflow_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        self, task_id: str, agent_role: str | None = None,
+        run_scope: str | None = None, workflow_id: str | None = None,
+    ) -> dict[str, Any] | None:
         return state_db.get_latest_working_context(
             task_id, agent_role=agent_role, db_path=self.db_path,
             run_scope=run_scope, workflow_id=workflow_id,
         )
 
     def list_working_contexts(
-        self, task_id: str, agent_role: Optional[str] = None,
-        run_scope: Optional[str] = None, workflow_id: Optional[str] = None,
+        self, task_id: str, agent_role: str | None = None,
+        run_scope: str | None = None, workflow_id: str | None = None,
         limit: int = 1000, offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         return state_db.list_working_contexts(
             task_id, agent_role=agent_role, db_path=self.db_path,
             run_scope=run_scope, workflow_id=workflow_id,
             limit=limit, offset=offset,
         )
 
-    def list_checkpoints(self, workflow_id: str) -> List[Dict[str, Any]]:
+    def list_checkpoints(self, workflow_id: str) -> list[dict[str, Any]]:
         return state_db.list_checkpoints(workflow_id=workflow_id, db_path=self.db_path)
 
-    def get_checkpoint(self, workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
+    def get_checkpoint(self, workflow_id: str, checkpoint_id: str) -> dict[str, Any]:
         return state_db.get_checkpoint(workflow_id=workflow_id, checkpoint_id=checkpoint_id, db_path=self.db_path)
 
-    def restore_checkpoint(self, workflow_id: str, checkpoint_id: str, expected_identity=None) -> Dict[str, Any]:
+    def restore_checkpoint(self, workflow_id: str, checkpoint_id: str, expected_identity=None) -> dict[str, Any]:
         return state_db.restore_checkpoint(workflow_id=workflow_id, checkpoint_id=checkpoint_id,
                                            db_path=self.db_path, expected_identity=expected_identity)
 
@@ -1151,8 +1106,8 @@ class SQLiteStateStore(StateStore):
         self,
         checkpoint_id: str,
         new_workflow_id: str,
-        new_title: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        new_title: str | None = None,
+    ) -> dict[str, Any]:
         return state_db.fork_workflow_from_checkpoint(
             checkpoint_id=checkpoint_id,
             new_workflow_id=new_workflow_id,
@@ -1160,15 +1115,15 @@ class SQLiteStateStore(StateStore):
             db_path=self.db_path,
         )
 
-    def get_checkpoint_lineage(self, workflow_id: str) -> List[Dict[str, Any]]:
+    def get_checkpoint_lineage(self, workflow_id: str) -> list[dict[str, Any]]:
         return state_db.get_checkpoint_lineage(workflow_id=workflow_id, db_path=self.db_path)
 
     # Eval results (delegated without side effects on projections)
     def record_eval_result(
         self,
         run_id: str,
-        revision: Optional[int] = None,
-        evidence: Optional[Any] = None,
+        revision: int | None = None,
+        evidence: Any | None = None,
         requirements_satisfied: bool | None = None,
         verification_passed: bool | None = None,
         human_intervention_count: int | None = None,
@@ -1176,7 +1131,7 @@ class SQLiteStateStore(StateStore):
         warnings: list[Any] | None = None,
         task_id: str | None = None,
         workflow_id: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return eval_store.record_eval_result(
             run_id,
             revision=revision,
@@ -1193,18 +1148,18 @@ class SQLiteStateStore(StateStore):
 
     def get_eval_result(
         self, run_id: str, revision: int,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return eval_store.get_eval_result(run_id, revision, db_path=self.db_path)
 
-    def get_latest_eval_result(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_latest_eval_result(self, run_id: str) -> dict[str, Any] | None:
         return eval_store.get_latest_eval_result(run_id, db_path=self.db_path)
 
     def list_eval_results(
-        self, run_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        self, run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         return eval_store.list_eval_results(run_id, db_path=self.db_path)
 
-    def get_max_eval_revision(self, run_id: str) -> Optional[int]:
+    def get_max_eval_revision(self, run_id: str) -> int | None:
         return eval_store.get_max_eval_revision(run_id, db_path=self.db_path)
 
     # Replay specs (delegated without touching source run state)
@@ -1212,12 +1167,12 @@ class SQLiteStateStore(StateStore):
         self,
         source_run_id: str,
         replay_run_id: str,
-        workflow_id: Optional[str] = None,
-        definition: Optional[Any] = None,
-        lineage: Optional[Any] = None,
+        workflow_id: str | None = None,
+        definition: Any | None = None,
+        lineage: Any | None = None,
         snapshot: str | None = None,
         policy: dict[str, Any] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return eval_store.record_replay_spec(
             source_run_id,
             replay_run_id,
@@ -1231,43 +1186,43 @@ class SQLiteStateStore(StateStore):
 
     def get_replay_spec(
         self, replay_run_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return eval_store.get_replay_spec(replay_run_id, db_path=self.db_path)
 
     def get_replay_spec_by_id(
         self, spec_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return eval_store.get_replay_spec_by_id(spec_id, db_path=self.db_path)
 
     def list_replay_specs(
         self,
-        source_run_id: Optional[str] = None,
-        workflow_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        source_run_id: str | None = None,
+        workflow_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         return eval_store.list_replay_specs(
             source_run_id, workflow_id=workflow_id, db_path=self.db_path,
         )
 
-    def get_replay_lineage(self, replay_run_id: str) -> List[str]:
+    def get_replay_lineage(self, replay_run_id: str) -> list[str]:
         return eval_store.get_replay_lineage(replay_run_id, db_path=self.db_path)
 
     def latest_run_verification_fact(
         self, run_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return eval_store.latest_run_verification_fact(run_id, db_path=self.db_path)
 
     # Export & Compatibility
-    def export_workflows_json(self) -> Dict[str, Any]:
+    def export_workflows_json(self) -> dict[str, Any]:
         wfs = self.list_workflows()
         return {"workflows": {w["workflow_id"]: w for w in wfs}}
 
-    def export_tasks_json(self) -> Dict[str, Any]:
+    def export_tasks_json(self) -> dict[str, Any]:
         tasks = self.list_tasks()
         return {"tasks": tasks}
 
-    def export_steering_json(self) -> Dict[str, Any]:
+    def export_steering_json(self) -> dict[str, Any]:
         steers = self.list_steers()
-        queues: Dict[str, List[Dict[str, Any]]] = {}
+        queues: dict[str, list[dict[str, Any]]] = {}
         for s in steers:
             tid = s.get("task_id")
             if tid:
@@ -1275,7 +1230,7 @@ class SQLiteStateStore(StateStore):
         history = self.list_steering_history()
         return {"steering_queues": queues, "history": history}
 
-    def export_all_json(self, target_dir: Optional[Path] = None) -> Dict[str, Any]:
+    def export_all_json(self, target_dir: Path | None = None) -> dict[str, Any]:
         out_dir = Path(target_dir) if target_dir else self.db_path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1297,11 +1252,11 @@ class SQLiteStateStore(StateStore):
 
     def import_from_json(
         self,
-        workflows_file: Optional[Path] = None,
-        tasks_file: Optional[Path] = None,
-        steering_file: Optional[Path] = None,
-        checkpoints_dir: Optional[Path] = None,
-    ) -> Dict[str, Any]:
+        workflows_file: Path | None = None,
+        tasks_file: Path | None = None,
+        steering_file: Path | None = None,
+        checkpoints_dir: Path | None = None,
+    ) -> dict[str, Any]:
         return state_db.migrate_v1_to_v2(
             workflows_file=workflows_file,
             tasks_file=tasks_file,
@@ -1311,23 +1266,21 @@ class SQLiteStateStore(StateStore):
         )
 
 
-_GLOBAL_STATE_STORE: Optional[StateStore] = None
+_GLOBAL_STATE_STORE: StateStore | None = None
 
 
-def get_state_store(db_path: Optional[Path] = None) -> StateStore:
+def get_state_store(db_path: Path | None = None) -> StateStore:
     """Get or instantiate global StateStore singleton."""
     global _GLOBAL_STATE_STORE
     resolved_path = Path(db_path) if db_path else state_db.get_default_db_path()
 
-    if _GLOBAL_STATE_STORE is None:
-        _GLOBAL_STATE_STORE = SQLiteStateStore(db_path=resolved_path)
-    elif isinstance(_GLOBAL_STATE_STORE, SQLiteStateStore) and _GLOBAL_STATE_STORE.db_path != resolved_path:
+    if _GLOBAL_STATE_STORE is None or isinstance(_GLOBAL_STATE_STORE, SQLiteStateStore) and _GLOBAL_STATE_STORE.db_path != resolved_path:
         _GLOBAL_STATE_STORE = SQLiteStateStore(db_path=resolved_path)
 
     return _GLOBAL_STATE_STORE
 
 
-def set_state_store(store: Optional[StateStore]) -> None:
+def set_state_store(store: StateStore | None) -> None:
     """Explicitly set global StateStore (useful for testing or mocking)."""
     global _GLOBAL_STATE_STORE
     _GLOBAL_STATE_STORE = store

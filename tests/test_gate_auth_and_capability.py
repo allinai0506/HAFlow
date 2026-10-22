@@ -654,7 +654,7 @@ class TestCleanroomFindingsRegression:
                 "confirmed": True,
                 "expected_version": 1,
                 "operator": "lead_op",
-                "auth_token": "lead_secret_tok_456",
+                "operator_token": "lead_secret_tok_456",
             }
             res = control_api.api_controller_execute_action(payload)
             assert res.get("ok") is True
@@ -702,3 +702,13 @@ class TestCleanroomFindingsRegression:
         }
         assert getattr(handler, "get_operator_token", lambda: None)() == "op_token_123"
 
+    def test_b6_ontology_and_adr_m12_alignment(self):
+        """B6: gate_bypass_policy.yaml must have roles_implemented: false per ADR M-12."""
+        import yaml
+        policy_path = Path(__file__).resolve().parent.parent / "ontology" / "policies" / "gate_bypass_policy.yaml"
+        assert policy_path.exists(), f"Policy file not found: {policy_path}"
+        data = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+        assert data.get("subjects", {}).get("roles_implemented") is False, (
+            "Per ADR M-12, subjects.roles_implemented must remain false until role hierarchy is enforced in code"
+        )
+        assert data.get("lifecycle") == "active"

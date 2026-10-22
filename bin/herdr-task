@@ -260,6 +260,87 @@ def bypass_gate_cli(task_id, reason, operator="human", note=None, as_json=False,
         sys.exit(1)
 
 
+def issue_operator_token_cli(
+    operator,
+    role="human_operator",
+    capabilities=None,
+    expires_in=3600.0,
+    secret=None,
+    out=None,
+    register_db=False,
+    db_path=None,
+    as_json=False,
+):
+    """Controlled operator credential issuance CLI entrypoint."""
+    import hashlib
+    from herdr.operator_auth import issue_operator_hmac_token, is_worker_environment, OperatorImpersonationError
+
+    if is_worker_environment():
+        print("Error: operator token issuance is prohibited within worker clone environments.", file=sys.stderr)
+        sys.exit(1)
+
+    caps = None
+    if capabilities:
+        caps = [c.strip() for c in str(capabilities).split(",") if c.strip()]
+
+    try:
+        tok = issue_operator_hmac_token(
+            operator_id=operator,
+            role=role,
+            capabilities=caps,
+            secret=secret,
+            expires_in=expires_in,
+        )
+
+        fp = hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16]
+
+        if out:
+            p = Path(out).expanduser().resolve()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            temp_out = p.parent / f".tmp_{p.name}_{os.getpid()}"
+            fd = os.open(temp_out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(tok)
+            os.replace(temp_out, p)
+            try:
+                p.chmod(0o600)
+            except OSError:
+                pass
+
+        if register_db:
+            from herdr import state_db
+            resolved_db = Path(db_path).resolve() if db_path else None
+            state_db.save_user_token(operator, "operator", tok, db_path=resolved_db)
+
+        result = {
+            "operator": operator,
+            "role": role,
+            "capabilities": caps or ["bypass_gate", "force_pass_gate", "force_review"],
+            "expires_in": expires_in,
+            "fingerprint": fp,
+            "token": tok,
+            "saved_to": str(out) if out else None,
+            "registered_db": bool(register_db),
+        }
+
+        if as_json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
+        msg = (
+            f"[OPERATOR TOKEN ISSUED] operator={operator} role={role} "
+            f"fingerprint={fp} registered_db={bool(register_db)}"
+        )
+        if out:
+            msg += f" saved_to={out}"
+        print(msg)
+        print(f"TOKEN={tok}")
+        return 0
+    except Exception as exc:
+        print(f"Error issuing operator token for {operator}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def adopt_verdict_cli(task_id, verdict=None, note=None, operator="human", as_json=False):
     from herdr.task_cli_status import adopt_task_verdict
     return adopt_task_verdict(

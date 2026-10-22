@@ -3,6 +3,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
 from herdr.task_cli_parser import build_parser
 
 
@@ -46,6 +47,7 @@ def main(argv=None, *, handlers):
     force_advance = handlers["force_advance"]
     get_task = handlers["get_task"]
     integrate_task = handlers["integrate_task"]
+    issue_operator_token_cli = handlers.get("issue_operator_token_cli")
     launch_task = handlers["launch_task"]
     list_tasks = handlers["list_tasks"]
     merge_pull_request = handlers["merge_pull_request"]
@@ -66,7 +68,6 @@ def main(argv=None, *, handlers):
     supersede_task = handlers["supersede_task"]
     verify_baseline = handlers["verify_baseline"]
     verify_metrics = handlers["verify_metrics"]
-    from herdr.task_cli_parser import build_parser
 
     args = build_parser().parse_args(argv)
     if args.command == "sync-experience":
@@ -332,6 +333,18 @@ def main(argv=None, *, handlers):
             expected_version=getattr(args, "expected_version", None),
             token=getattr(args, "token", None),
             credentials_path=getattr(args, "credentials_path", None),
+        )
+    elif args.command == "issue-operator-token":
+        issue_operator_token_cli(
+            args.operator,
+            role=getattr(args, "role", "human_operator"),
+            capabilities=getattr(args, "capabilities", None),
+            expires_in=getattr(args, "expires_in", 3600.0),
+            secret=getattr(args, "secret", None),
+            out=getattr(args, "out", None),
+            register_db=getattr(args, "register_db", False),
+            db_path=getattr(args, "db_path", None),
+            as_json=getattr(args, "json", False),
         )
     elif args.command == "stage-status":
         stage_status(args.workflow_id, args.stage)

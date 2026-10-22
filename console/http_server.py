@@ -1,12 +1,23 @@
-import json, urllib.parse
+import json
+import urllib.parse
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+
+from console import (
+    common,
+    control_api,
+    inventory,
+    read_api,
+    runtime,
+    task_api,
+    workflow_api,
+)
+from console.page import HTML, HTML_TEMPLATE
+from herdr import deliverables as herdr_deliverables
 from herdr import projects as herdr_projects
 from herdr.kernel import state_db_path
-from herdr import deliverables as herdr_deliverables
-from console import common, control_api, inventory, read_api, runtime, task_api, workflow_api
-from console.page import HTML, HTML_TEMPLATE
+
 
 def _get_console_hub_client(token=None):
     from herdr.experience.client import ExperienceClient
@@ -302,7 +313,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/task/force-review':
                 b = b or {}
                 op_tok = self.get_operator_token()
-                if op_tok and 'operator_token' not in b and 'auth_token' not in b and 'token' not in b:
+                if op_tok and 'operator_token' not in b and 'token' not in b:
                     b['operator_token'] = op_tok
                 return self.send_json(200,task_api.api_task_force_review(b))
             if p=='/api/workflow/retry-advance':return self.send_json(200,control_api.api_workflow_retry_advance(b))
@@ -312,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/task/signoff':
                 b = b or {}
                 op_tok = self.get_operator_token()
-                if op_tok and 'operator_token' not in b and 'auth_token' not in b and 'token' not in b:
+                if op_tok and 'operator_token' not in b and 'token' not in b:
                     b['operator_token'] = op_tok
                 return self.send_json(200,task_api.api_task_signoff(b))
             if p=='/api/slot/bind':return self.send_json(200,workflow_api.bind_slot(str(b['pane_id']),str(b.get('agent') or 'auto')))
@@ -323,7 +334,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/kernel/force-pass':
                 b = b or {}
                 op_tok = self.get_operator_token()
-                if op_tok and 'operator_token' not in b and 'auth_token' not in b and 'token' not in b:
+                if op_tok and 'operator_token' not in b and 'token' not in b:
                     b['operator_token'] = op_tok
                 return self.send_json(200,control_api.api_kernel_force_pass(b))
             if p=='/api/kernel/checkpoint':return self.send_json(200,control_api.api_kernel_checkpoint_create(b))
@@ -331,7 +342,7 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/controller/execute-action':
                 b = b or {}
                 op_tok = self.get_operator_token()
-                if op_tok and 'operator_token' not in b and 'auth_token' not in b and 'token' not in b:
+                if op_tok and 'operator_token' not in b and 'token' not in b:
                     b['operator_token'] = op_tok
                 return self.send_json(200,control_api.api_controller_execute_action(b))
             if p=='/api/workflow/decision/raise':return self.send_json(200,control_api.api_workflow_decide_raise(b))

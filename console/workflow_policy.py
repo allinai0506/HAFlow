@@ -99,9 +99,12 @@ def _validate_force_pass_params(payload, wid, wf=None, task=None, db_path=None):
     raw_op = payload.get('operator')
     if raw_op is None and 'operator' not in payload:
         raw_op = 'human'
-    token = payload.get('auth_token') or payload.get('token') or payload.get('operator_token')
-    credentials_path = payload.get('credentials_path') or payload.get('operator_credentials')
-    from herdr.operator_auth import OperatorAuthError, authenticate_and_authorize_operator
+    token = payload.get('operator_token') or payload.get('token')
+    credentials_path = payload.get('operator_credentials') or payload.get('credentials_path')
+    from herdr.operator_auth import (
+        OperatorAuthError,
+        authenticate_and_authorize_operator,
+    )
     from herdr.transitions import InvalidOperatorError, validate_operator
     try:
         op = validate_operator(raw_op)
@@ -113,11 +116,10 @@ def _validate_force_pass_params(payload, wid, wf=None, task=None, db_path=None):
             task=task,
             db_path=db_path,
         )
-        op = principal.operator_id
     except InvalidOperatorError as exc:
         raise RuntimeError(f"无效的操作人标识: {exc}")
     except OperatorAuthError as exc:
         raise RuntimeError(f"操作人凭据或能力鉴权失败: {exc}")
     except ValueError as exc:
         raise RuntimeError(f"无效的操作人标识: {exc}")
-    return gate, reason, op
+    return gate, reason, principal
