@@ -3508,3 +3508,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 修复：状态查询写入条件语境并做 3 次有界重试；重试耗尽显式归因为「未能确证其加载代际」并置 `status=1`，不得吞成成功。`tests/test_installer_bash_compat.py` 注入 `FAKE_LIST_FAILURES` 各锁一侧（瞬时不中断 / 持续 fail-closed），先 RED（exit 1、自检零条结果、无末行摘要）后 GREEN。
 - 未重启真机验证修复路径：逐字抽取脚本自检段对**真实 launchd** 只读执行，5 个服务全部 `✓ … 指向 4c7b8546c4a7`、末行摘要出现、exit 0。
 - Evidence：`pytest tests/test_installer_bash_compat.py tests/test_service_release.py tests/test_install_herdr_console_deploy.py` → `52 passed, 2 skipped, 11 subtests passed`；`bash -n` 通过；`docs/lessons/lessons-learned.md` §192 增补该失败模式。
+## [2026-10-22] Ops | #330 合并后重启：自检在负载 44 下首次真机跑完 5/5
+
+- 部署执行：`origin/main` = `84b033d`（#330 合并点）→ 5 个 LaunchAgent 全部重启并加载 `releases/84b033d9dfe6`（console 22821 / controller 22823 / sentinel 22825 / notifier 22827 / experience-hub 22829，`127.0.0.1:8780` 在听），`installer exit=0`，末行摘要出现。运行态指纹：controller / factory-console / sentinel 自报 `running_sha=84b033d9dfe6`；notifier 与 hub 不打印该指纹，其证据仅为 argv + `last_exit=0` + 端口。部署前预检：53 个工作流全终态、活跃任务 0。
+- 修复生效的边界要说准：本次宿主负载 44（上次被打断时约同量级），自检 5/5 完整跑完；但部署日志中查询失败计数为 0，即**重试分支这次未被触发**。真机证明的是「自检不再中断」，有界重试与 fail-closed 归因的证明仍是 `tests/test_installer_bash_compat.py` 的 3 条注入故障测试。
+- 未纳管漂移复扫：`[]`（#329 的清单收口在生产部署路径上第二次兑现）。
+- 对自己此前判断的更正：我曾依据 `state=OPEN`、`mergedAt=null`、`c6a3eb4 不在 main 内` 三项断言 #330 未合并，而实际合并时间为 `07:15:29` —— 这些读取来自 API 的短暂过期状态。教训：多个读取一致不等于它们独立，缓存窗口内的同一事实源会被当成三重印证；读到与用户陈述矛盾时应报告矛盾与时效风险，而不是断言用户错。
+- Evidence：`docs/lessons/lessons-learned.md` §192；`installer exit=0` 与 5 条 `✓` 输出记录于 `/tmp/haflow-deploy-84b033d.log`。
