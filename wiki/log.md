@@ -3501,3 +3501,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 旧测试前提失效并已重指向：`test_points_plist_at_the_new_snapshot` 与 `test_kickstart_only_services_are_still_covered` 原断言「标签字面量出现在脚本文本里」，保护的正是该消除的重复；改为断言 `SCRIPTS` 覆盖 + 标签不得硬编码回脚本。`test_installer_bash_compat.py` 自备的第三份清单副本删除，改从 `SCRIPTS` 派生（bash 3.2 矩阵现真实遍历 5 个服务）。
 - Evidence：`tests/test_service_release.py` 新增 13 项（词表接受/拒绝、宿主状态保留、三字段同代际、漂移检出与 workspace 不误报、installer 先拒绝后豁免、带参数服务端到端纳管）；三文件合计 `48 passed, 2 skipped, 11 subtests passed`；用真机 plist 在临时 `HOME` 预演 `--no-restart` 得到 exit 0 且 9 项 argv 全保留；`docs/lessons/lessons-learned.md` §192。
 
+## [2026-10-22] Ops | 部署 main 到 4c7b8546c4a7；自检被瞬时 launchctl 失败静默中断，已修
+
+- 部署执行：5 个 LaunchAgent 全部重启并加载 `releases/4c7b8546c4a7`（console 2751 / controller 2753 / sentinel 2755 / notifier 2757 / **experience-hub 2759**，后者取代了钉在 `ad17b85e9a6a` 达 7 天的旧进程并在 `127.0.0.1:8780` 重新监听）。运行态证据取自服务自报的 `HERDR_RUNTIME_FINGERPRINT`：controller / factory-console / sentinel 三者 `running_sha=4c7b8546c4a7` 且 `running_import_root` 同代际——该 sha 由 manifest 逐文件哈希校验，不是目录名推断。部署前预检：53 个工作流全部终态、活跃任务 0，故无在途派发被打断；`wf-haflow-1021-01` 现为 `completed`（此前记录的 `paused` 已被推进，更正）。
+- 新缺陷（由本次部署当场暴露，属 §192 同一族）：自检 `pid="$(launchctl list | awk …)"` 在 `set -euo pipefail` 下，`launchctl` 的瞬时失败经 pipefail 变成**赋值语句**失败，errexit 直接终止脚本且无提示——实测表现为「部署已成功，但后续服务不再被核验、stderr 全空、只剩一个无法解释的非零退出」。服务由 4 增至 5 且含重启一个占端口的进程，扩大了 bootout/bootstrap 后的扰动窗口，使罕见竞态变必现。
+- 修复：状态查询写入条件语境并做 3 次有界重试；重试耗尽显式归因为「无法证明其加载代际」并置 `status=1`，不得吞成成功。`tests/test_installer_bash_compat.py` 注入 `FAKE_LIST_FAILURES` 各锁一侧（瞬时不中断 / 持续 fail-closed），先 RED（exit 1、stderr 空、自检零条结果）后 GREEN。
+- 未重启真机验证修复路径：逐字抽取脚本自检段对**真实 launchd** 只读执行，5 个服务全部 `✓ … 指向 4c7b8546c4a7`、末行摘要出现、exit 0。
+- Evidence：`pytest tests/test_installer_bash_compat.py tests/test_service_release.py tests/test_install_herdr_console_deploy.py` → `51 passed, 2 skipped, 11 subtests passed`；`bash -n` 通过；`docs/lessons/lessons-learned.md` §192 增补该失败模式。
