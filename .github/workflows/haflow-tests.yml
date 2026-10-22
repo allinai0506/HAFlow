@@ -147,17 +147,10 @@ jobs:
           # without a user identity. Seed one inside the CI-owned HOME only.
           git config --file "$HOME/.gitconfig" user.name "HAFlow CI"
           git config --file "$HOME/.gitconfig" user.email "ci@haflow.invalid"
-          # Use pytest-xdist if available for multi-core parallelism.
-          # loadgroup, not the default load scheduler: the real-browser console
-          # journeys (tests/test_console_controller_cockpit_e2e.py) all drive one
-          # shared ego-browser daemon and pin themselves with xdist_group. Under
-          # `load` that marker is ignored, so concurrent workers queue CDP input
-          # requests through the same daemon and journeys fail intermittently
-          # with `CDP request timed out` or `<article> intercepts pointer events`.
-          # Ungrouped tests keep spreading across workers exactly as before.
+          # Use pytest-xdist if available for multi-core parallelism
           if "${{ steps.python.outputs.python }}" -c 'import xdist' >/dev/null 2>&1; then
-            echo "→ running pytest with pytest-xdist parallelism (-n auto --dist loadgroup)"
-            "${{ steps.python.outputs.python }}" -m pytest -q -n auto --dist loadgroup 2>&1 | tee pytest.log
+            echo "→ running pytest with pytest-xdist parallelism (-n auto)"
+            "${{ steps.python.outputs.python }}" -m pytest -q -n auto 2>&1 | tee pytest.log
           else
             echo "→ running pytest single-threaded (xdist not installed)"
             "${{ steps.python.outputs.python }}" -m pytest -q 2>&1 | tee pytest.log
