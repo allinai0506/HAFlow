@@ -3437,3 +3437,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 测试从「断言文件落盘」升级为「断言真实 push 被拒」；既有夹具只覆盖相对路径 `.task-hooks`，继承绝对路径这一形态首次被覆盖（RED 精确复现生产缺陷）。
 - 遗留已记录：`herdr-worker.py:197-205` 仍原样传播源仓 `core.hooksPath`，绝对路径情形由本次修复在护栏安装阶段失效化；是否改为传播时重定位属克隆装配语义的单独决策。
 - Evidence：`tests/test_worker_push_guard.py`（新增 2 例）、`services/herdr-worker.py`；受影响 23 个测试文件回归 `380 passed`；`docs/lessons/lessons-learned.md` §189。
+
+## [2026-10-22] Herdr Core | 验证节点身份改为模板声明语义（修 wf-haflow-1021-01 门禁验错版本）
+
+- Updated [[architecture]]：新增 `herdr/node_roles.py` 作为「是否独立验证冻结候选」的唯一权威判据，来自模板声明的 `default_task_type`（经 `resolve_task_type` 解析）而非节点 id 字面量；`candidate_identity_applies` 用权威 `execution_mode` 把 fail-closed 候选门禁限定在 Git 语义工作流。
+- 替换 11 个站点的 `{"test","review"}` 字面量（全库扫描为 15 处出现、12 个站点）：候选身份证明、分配后基线门、并行验证者分支归属、wrapup 双门禁汇聚、receipt-v1 force-pass 防护、acceptance-record 指令下发、跨阶段独立性、可写性判定。
+- 全模板分类断言固化：`software-development-v1` / `spec-development-v1` 的 `test`/`review` 判据前后完全等价（零行为变化）；`code-craft-v1` 的 `cleanroom_test`/`cleanroom_review` 新命中，`craft`/`wrapup` 不命中；context 模板（`bidding`、`business-research-v1`）的验证节点由 Git 守卫排除，派发不受影响。
+- 自审拦下一处回归：`agent_router.py` 的 FR-6.1 fail-closed 默认排除若机械替换为 `verifier_node_ids(wf_cfg)`，在 `wf_cfg` 为 None 时会返回空集而丢失 legacy 保护；改用不依赖 config 的 `is_verifier_node_id`。
+- 与 Lesson 186 的关系：该条给 `resolve_gate_config` 补的是**名字正则**，本条改为**声明语义**。两者互补（前者判「有无门禁契约」，后者判「是否独立验证候选」，`wrapup` 有 `gate:` 但不是 verifier），但按名字打补丁覆盖不到 `audit`/`qa_gate` 这类命名，剩余两处名字正则仍应收敛到声明语义。
+- 遗留已记录未修：`coordinator_messages.py:261` 仍是字面量，只影响兜底路径给总指挥的建议命令文本，正确修需改纯函数签名；其残余风险已被本次修好的分配后基线门兜住。
+- Evidence：`herdr/node_roles.py`、`tests/test_node_roles.py`、`tests/test_verifier_identity_parity.py`、`tests/test_task_cli_launch_preflight.py`、`tests/test_fix_bug1002_parallel_candidate.py`；受影响 66 个测试文件回归 `1542 passed, 2 skipped, 237 subtests passed`；`docs/lessons/lessons-learned.md` §187。
