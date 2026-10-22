@@ -12,6 +12,7 @@ import time
 
 from . import state_db
 from .bounded_tools import run_bounded, validate_tool_input
+from .node_roles import is_verifier_task
 from .repo_hygiene import INTERNAL_EXACT, INTERNAL_PREFIXES
 from .supervisor.state import redact_text
 from .task_resources import workflow_launch_lock
@@ -85,7 +86,7 @@ def scope_conflicts(contract):
 def writable_task(task):
     role = ' '.join(str(task.get(k) or '') for k in ('dispatch_role', 'agent_role', 'role')).lower()
     return (task.get('integration_mode') == 'git' and task.get('execution_mode') != 'context'
-            and (task.get('node') or task.get('stage')) not in {'test', 'review'}
+            and not is_verifier_task(task)
             and not re.search(r'(?:^|[^a-z])(review(?:er)?|adversarial|read.?only)(?:$|[^a-z])', role))
 
 
