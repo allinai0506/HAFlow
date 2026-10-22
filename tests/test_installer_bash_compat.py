@@ -115,7 +115,7 @@ if sys.argv[1:] == ['list']:
         print('5:3: the domain is busy; try again', file=sys.stderr)
         sys.exit(1)                      # launchd 扰动期的瞬时失败
     for label in json.loads(os.environ['FAKE_SERVICE_LABELS']):
-        pid = os.environ.get('FAKE_LIST_PID', '777')
+        pid = '777'
         if label == os.environ.get('FAKE_LIST_DASHED'):
             pid = '-'                    # 已停止的 job：PID 列是 '-'
         print(pid + ' 0 ' + label)

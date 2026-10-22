@@ -3505,6 +3505,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 - 部署执行：5 个 LaunchAgent 全部重启并加载 `releases/4c7b8546c4a7`（console 2751 / controller 2753 / sentinel 2755 / notifier 2757 / **experience-hub 2759**，后者取代了钉在 `ad17b85e9a6a` 达 7 天的旧进程并在 `127.0.0.1:8780` 重新监听）。运行态证据取自服务自报的 `HERDR_RUNTIME_FINGERPRINT`：controller / factory-console / sentinel 三者 `running_sha=4c7b8546c4a7` 且 `running_import_root` 同代际——该 sha 由 manifest 逐文件哈希校验，不是目录名推断。部署前预检：53 个工作流全部终态、活跃任务 0，故无在途派发被打断；`wf-haflow-1021-01` 现为 `completed`（此前记录的 `paused` 已被推进，更正）。
 - 新缺陷（由本次部署当场暴露，属 §192 同一族）：自检 `pid="$(launchctl list | awk …)"` 在 `set -euo pipefail` 下，`launchctl` 的瞬时失败经 pipefail 变成**赋值语句**失败，errexit 直接终止脚本且无提示——实测表现为「部署已成功，但后续服务不再被核验、stderr 全空、只剩一个无法解释的非零退出」。服务由 4 增至 5 且含重启一个占端口的进程，扩大了 bootout/bootstrap 后的扰动窗口，使罕见竞态变必现。
-- 修复：状态查询写入条件语境并做 3 次有界重试；重试耗尽显式归因为「无法证明其加载代际」并置 `status=1`，不得吞成成功。`tests/test_installer_bash_compat.py` 注入 `FAKE_LIST_FAILURES` 各锁一侧（瞬时不中断 / 持续 fail-closed），先 RED（exit 1、stderr 空、自检零条结果）后 GREEN。
+- 修复：状态查询写入条件语境并做 3 次有界重试；重试耗尽显式归因为「未能确证其加载代际」并置 `status=1`，不得吞成成功。`tests/test_installer_bash_compat.py` 注入 `FAKE_LIST_FAILURES` 各锁一侧（瞬时不中断 / 持续 fail-closed），先 RED（exit 1、stderr 空、自检零条结果）后 GREEN。
 - 未重启真机验证修复路径：逐字抽取脚本自检段对**真实 launchd** 只读执行，5 个服务全部 `✓ … 指向 4c7b8546c4a7`、末行摘要出现、exit 0。
 - Evidence：`pytest tests/test_installer_bash_compat.py tests/test_service_release.py tests/test_install_herdr_console_deploy.py` → `51 passed, 2 skipped, 11 subtests passed`；`bash -n` 通过；`docs/lessons/lessons-learned.md` §192 增补该失败模式。

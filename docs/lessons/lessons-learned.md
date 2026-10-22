@@ -8093,7 +8093,7 @@ pytest -q tests/test_console_controller_cockpit_e2e.py
 | 参数合同用「禁止参数」实现安全 | 用一个太窄的合同换取简单性，代价是合法的服务被静默排除在部署之外，且排除方式是放行不是报错 | 合同从「禁止」改为「校验词表」：声明每个服务允许的 flag，**flag 名校验、参数值逐字保留**（`--port`/`--db-path` 是宿主状态，被改写反而错）。未知 flag 仍 fail-closed |
 | 只迁移 `ProgramArguments` 与 `HERDR_ROOT` | 纳管带 `WorkingDirectory` 的服务时会产生分裂代际：代码从新 release 起、cwd 仍在旧 release——比继续钉死更糟 | 所有 release 作用域字段必须**同批**迁移；断言「脚本路径、`HERDR_ROOT`、`WorkingDirectory` 指向同一 root」。缺失的字段不凭空创建 |
 | 未纳管的钉死服务不可见 | 「没被部署」必须是一条能被机器检出的事实，而不是靠人事后 `ls` 出来 | 部署前枚举 `~/Library/LaunchAgents/com.user.herdr-*.plist`，凡钉在 `releases/<sha>` 且不在 `SCRIPTS` 者，连同落后提交数报错并**拒绝部署**（不写任何 plist）；`--allow-unmanaged <label>` 作为显式豁免 |
-| `set -euo pipefail` 下的命令替换赋值（§192 落地后真机部署当场暴露） | 自检第 189 行 `pid="$(launchctl list \| awk …)"`：pipefail 让 `launchctl` 的瞬时失败变成**赋值语句**的失败，errexit 随即在无 `if` 保护的位置终止整个脚本。实测后果是「部署已成功，但自检既不打印剩余服务、stderr 全空、只留一个说不清原因的非零退出」——恰是本节要消灭的静默失效，被部署工具自己踩了一遍。服务从 4 个增到 5 个（含重启一个占端口的进程）扩大了扰动窗口，使原本罕见的竞态变成必现 | 状态查询必须写进条件语境并做**有界重试**；重试耗尽要显式归因（`无法证明其加载代际`）而不是吞成成功；「容忍瞬时失败」与「fail-closed」各需一条测试锁住，前者防静默中断、后者防误报成功 |
+| `set -euo pipefail` 下的命令替换赋值（§192 落地后真机部署当场暴露） | 自检第 189 行 `pid="$(launchctl list \| awk …)"`：pipefail 让 `launchctl` 的瞬时失败变成**赋值语句**的失败，errexit 随即在无 `if` 保护的位置终止整个脚本。实测后果是「部署已成功，但自检既不打印剩余服务、stderr 全空、只留一个说不清原因的非零退出」——恰是本节要消灭的静默失效，被部署工具自己踩了一遍。服务从 4 个增到 5 个（含重启一个占端口的进程）扩大了扰动窗口，使原本罕见的竞态变成必现 | 状态查询必须写进条件语境并做**有界重试**；重试耗尽要显式归因（`未能确证其加载代际`）而不是吞成成功；「容忍瞬时失败」与「fail-closed」各需一条测试锁住，前者防静默中断、后者防误报成功 |
 | 把宿主现象直接归因到自己的链路上 | 我曾在 issue 里写「22 个 defunct 疑似 worker 派发未回收子进程」，未按父子归属验证；实测 24 个 defunct 的父进程是 `verge-mihomo`(20)/`agy`(2)/`project_launcher.py`(1)/`aitrust-server`(1)，HAFlow 全部服务 PID 的僵尸子进程数为 0 | 归因前先看 `ps -eo ppid,stat` 的父进程分布并反向核对自身；错误归因要在原地公开更正，并把「本 issue 不是什么」写进新 issue 防止他人去不存在的缺陷里排查 |
 
 ### 验证命令 / 守护测试
