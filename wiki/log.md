@@ -3504,7 +3504,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 ## [2026-10-22] Ops | 部署 main 到 4c7b8546c4a7；自检被瞬时 launchctl 失败静默中断，已修
 
 - 部署执行：5 个 LaunchAgent 全部重启并加载 `releases/4c7b8546c4a7`（console 2751 / controller 2753 / sentinel 2755 / notifier 2757 / **experience-hub 2759**，后者取代了钉在 `ad17b85e9a6a` 达 7 天的旧进程并在 `127.0.0.1:8780` 重新监听）。运行态证据取自服务自报的 `HERDR_RUNTIME_FINGERPRINT`：controller / factory-console / sentinel 三者 `running_sha=4c7b8546c4a7` 且 `running_import_root` 同代际——该 sha 由 manifest 逐文件哈希校验，不是目录名推断。部署前预检：53 个工作流全部终态、活跃任务 0，故无在途派发被打断；`wf-haflow-1021-01` 现为 `completed`（此前记录的 `paused` 已被推进，更正）。
-- 新缺陷（由本次部署当场暴露，属 §192 同一族）：自检 `pid="$(launchctl list | awk …)"` 在 `set -euo pipefail` 下，`launchctl` 的瞬时失败经 pipefail 变成**赋值语句**失败，errexit 直接终止脚本且无提示——实测表现为「部署已成功，但后续服务不再被核验、stderr 全空、只剩一个无法解释的非零退出」。服务由 4 增至 5 且含重启一个占端口的进程，扩大了 bootout/bootstrap 后的扰动窗口，使罕见竞态变必现。
+- 新缺陷（由本次部署当场暴露，属 §192 同一族）：自检 `pid="$(launchctl list | awk …)"` 在 `set -euo pipefail` 下，`launchctl` 的瞬时失败经 pipefail 变成**赋值语句**失败，errexit 直接终止脚本且无提示——实测表现为「部署已成功，但后续服务不再被核验、不给出中断原因、只剩一个无法解释的非零退出」。服务由 4 增至 5 且含重启一个占端口的进程，扩大了 bootout/bootstrap 后的扰动窗口，使罕见竞态变必现。
 - 修复：状态查询写入条件语境并做 3 次有界重试；重试耗尽显式归因为「未能确证其加载代际」并置 `status=1`，不得吞成成功。`tests/test_installer_bash_compat.py` 注入 `FAKE_LIST_FAILURES` 各锁一侧（瞬时不中断 / 持续 fail-closed），先 RED（exit 1、自检零条结果、无末行摘要）后 GREEN。
 - 未重启真机验证修复路径：逐字抽取脚本自检段对**真实 launchd** 只读执行，5 个服务全部 `✓ … 指向 4c7b8546c4a7`、末行摘要出现、exit 0。
 - Evidence：`pytest tests/test_installer_bash_compat.py tests/test_service_release.py tests/test_install_herdr_console_deploy.py` → `52 passed, 2 skipped, 11 subtests passed`；`bash -n` 通过；`docs/lessons/lessons-learned.md` §192 增补该失败模式。
+
+## [2026-10-22] Ops | #330 合并后重启：自检首次真机跑完 5/5（预检 load≈44）
+
+- 部署执行：`origin/main` = `84b033d`（#330 合并点）→ 5 个 LaunchAgent 全部重启并加载 `releases/84b033d9dfe6`（console 22821 / controller 22823 / sentinel 22825 / notifier 22827 / experience-hub 22829，`127.0.0.1:8780` 在听），`installer exit=0`，末行摘要出现。运行态指纹取自各服务自身 stdout（`~/.herdr-controller/logs/{controller,factory-console,sentinel}.out.log` 末条 `HERDR_RUNTIME_FINGERPRINT`）：三者 `running_sha=84b033d9dfe6`；notifier 与 hub 不打印该指纹，其证据仅为 argv + `last_exit=0` + 端口。部署前预检：53 个工作流全终态、活跃任务 0。
+- 修复生效的边界要说准：预检时 1 分钟均值 load 约 44（瞬时读数，只说明本次是在扰动条件下跑完的，不构成对重试分支的覆盖证明），自检 5/5 完整跑完；但部署日志中查询失败计数为 0，即**重试分支这次未被触发**。真机证明的是「自检不再中断」，有界重试与 fail-closed 归因的证明仍是 `tests/test_installer_bash_compat.py` 的 3 条注入故障测试。
+- 未纳管漂移复扫：`[]`（#329 的清单收口在生产部署路径上第二次兑现）。
+- 对自己此前判断的更正：我曾依据 `state=OPEN`、`mergedAt=null`、`c6a3eb4 不在 main 内` 三项断言 #330 未合并，而实际合并时间为 `07:15:29` —— 这些读取来自 API 的短暂过期状态。教训：多个读取一致不等于它们独立，缓存窗口内的同一事实源会被当成三重印证；读到与用户陈述矛盾时应报告矛盾与时效风险，而不是断言用户错。
+- Evidence：`docs/lessons/lessons-learned.md` §192；部署 stdout/stderr 全量存于 `/tmp/haflow-deploy-84b033d.log`（含 5 条 `✓` 与末行摘要），`exit=0` 由执行时直接捕获、不在该文件内。
