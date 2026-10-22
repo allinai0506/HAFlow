@@ -125,11 +125,18 @@ def browser(script, *, page_label):
     prelude = f"const task=await taskSpace({json.dumps(SPACE)});"
     if page_label is not None:
         prelude += f"const page=task.page({json.dumps(page_label)});"
-    result = subprocess.run([binary, "nodejs", "-e", prelude + script],
-                            capture_output=True, text=True, timeout=45)
-    if result.returncode != 0:
-        diagnostics = collect_cockpit_failure_diagnostics(binary, page_label, script, result)
-        assert result.returncode == 0, (result.stdout + result.stderr + diagnostics)
+    for attempt in range(3):
+        result = subprocess.run([binary, "nodejs", "-e", prelude + script],
+                                capture_output=True, text=True, timeout=45)
+        if result.returncode == 0:
+            return result.stdout + result.stderr
+        output = result.stdout + result.stderr
+        if ("CDP request timed out" in output or "CdpRequestTimeoutError" in output) and attempt < 2:
+            time.sleep(1.0)
+            continue
+        break
+    diagnostics = collect_cockpit_failure_diagnostics(binary, page_label, script, result)
+    assert result.returncode == 0, (result.stdout + result.stderr + diagnostics)
     return result.stdout + result.stderr
 
 
