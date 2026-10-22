@@ -700,6 +700,77 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(self.notified, ["test"])
 
+    def _bound_item(self):
+        """A stage-advance item carrying a durable operation, as the sweep queues it."""
+        return dict(self._item(), dispatch_operation_id=211810,
+                    dispatch_owner="controller")
+
+    def _durable_operation(self):
+        return (
+            patch("herdr.node_dispatch_store.start",
+                  return_value={"id": 211810, "attempts": 3}),
+            patch("herdr.node_dispatch_store.direct_finished",
+                  return_value={"id": 211810, "status": "waiting_human"}),
+        )
+
+    def test_permanent_refusal_escalates_without_a_second_transport(self):
+        """A refusal no retry can clear must surface, not spin.
+
+        wf-haflow-1021-01: baseline_stale then a predecessor mismatch re-queued
+        the same node for 17.5 minutes with zero attention entries, so neither
+        the console nor the coordinator ever learned the workflow was stuck.
+        """
+        refusal = ("[BASELINE STALE] workflow=wf-1 task=wf-1-test-auto-r2; "
+                   "candidate d24d2d3a 落后 dev 9 个提交 （dev=5b0fb38c）；派发前拒绝")
+        notes = []
+        started, finished = self._durable_operation()
+        with patch.object(
+            self.ctrl.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 2, "", refusal),
+        ), started, finished, \
+             patch.object(self.ctrl, "attention_get", return_value=None), \
+             patch.object(self.ctrl, "attention_note",
+                          side_effect=lambda *a, **kw: notes.append((a, kw))):
+            result = self.ctrl.try_direct_stage_advance(self._bound_item())
+        self.assertTrue(result)
+        self.assertEqual(self.notified, ["test"])
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][1]["reason"], "baseline_stale")
+        self.assertEqual(notes[0][1]["key"], "wf-1-test-auto:dispatch_refused")
+        self.assertEqual(notes[0][1]["task"],
+                         {"task_id": "wf-1-test-auto", "workflow_id": "wf-1"})
+        self.assertIn("落后 dev 9 个提交", notes[0][1]["detail"])
+        # Escalating must not become a second transport.
+        self.assertFalse(any(c[:2] == ["herdr", "agent"] for c in self.commands))
+
+    def test_permanent_refusal_is_not_re_noted(self):
+        refusal = "[DISPATCH REJECTED] replacement dispatch requires its predecessor"
+        notes = []
+        started, finished = self._durable_operation()
+        with patch.object(
+            self.ctrl.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 2, "", refusal),
+        ), started, finished, \
+             patch.object(self.ctrl, "attention_get", return_value={"attempts": 3}), \
+             patch.object(self.ctrl, "attention_note",
+                          side_effect=lambda *a, **kw: notes.append((a, kw))):
+            self.ctrl.try_direct_stage_advance(self._bound_item())
+        self.assertEqual(notes, [])
+
+    def test_transient_failure_on_a_durable_operation_does_not_escalate_as_permanent(self):
+        notes = []
+        started, finished = self._durable_operation()
+        with patch.object(
+            self.ctrl.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 1, "", "boom"),
+        ), started, finished, \
+             patch.object(self.ctrl, "attention_get", return_value=None), \
+             patch.object(self.ctrl, "attention_note",
+                          side_effect=lambda *a, **kw: notes.append((a, kw))):
+            result = self.ctrl.try_direct_stage_advance(self._bound_item())
+        self.assertTrue(result)
+        self.assertEqual(notes, [])
+
     def test_wait_mode_marks_notified_without_launch(self):
         with patch.object(
             self.ctrl,
@@ -962,3 +1033,59 @@ class CoordinatorIntakeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PermanentDispatchRefusalTest(unittest.TestCase):
+    """Pure classification: which launch refusals a retry cannot clear."""
+
+    def setUp(self):
+        from herdr import direct_dispatch as planner
+
+        self.classify = planner.permanent_dispatch_refusal
+
+    def test_production_refusals_map_to_stable_codes(self):
+        cases = {
+            "[BASELINE STALE] candidate d24d2d3a 落后 dev 9 个提交": "baseline_stale",
+            "[BASELINE REJECTED] delivery_missing: workflow=wf task=t": "baseline_rejected",
+            "[DISPATCH REJECTED] replacement dispatch requires its predecessor":
+                "dispatch_rejected",
+            "[ROUTER REJECTED] No READY Agent found": "router_isolation_rejected",
+            "ROUTER OPT-OUT AUDIT FAILED": "router_isolation_rejected",
+        }
+        for output, code in cases.items():
+            with self.subTest(output=output[:32]):
+                self.assertEqual(self.classify(output), code)
+
+    def test_transient_and_empty_output_do_not_escalate(self):
+        for output in ("boom", "", None, 42, "[WORKER] clone=/tmp/x"):
+            with self.subTest(output=output):
+                self.assertIsNone(self.classify(output))
+
+    def test_escalation_carries_ready_to_apply_effects(self):
+        from herdr import direct_dispatch as planner
+
+        escalation = planner.permanent_refusal_escalation(
+            "[BASELINE STALE] candidate d24d2d3a 落后 dev 9 个提交",
+            "wf-1-test-auto-r2", "wf-1", "test")
+        self.assertEqual(escalation["key"], "wf-1-test-auto-r2:dispatch_refused")
+        self.assertEqual(escalation["reason"], "baseline_stale")
+        # The shell performs two effects and decides nothing: the note must be
+        # directly applicable to attention_note's own parameter names.
+        self.assertEqual(
+            sorted(escalation["note"]),
+            ["attempts", "detail", "event_type", "key", "reason", "task"])
+        self.assertEqual(escalation["note"]["task"],
+                         {"task_id": "wf-1-test-auto-r2", "workflow_id": "wf-1"})
+        self.assertIn("[DIRECT DISPATCH REFUSED]", escalation["log"])
+
+    def test_escalation_detail_is_bounded(self):
+        from herdr import direct_dispatch as planner
+
+        escalation = planner.permanent_refusal_escalation(
+            "[DISPATCH REJECTED] " + "x" * 5000, "t", "wf", "node")
+        self.assertEqual(len(escalation["note"]["detail"]), 500)
+
+    def test_no_escalation_without_a_permanent_refusal(self):
+        from herdr import direct_dispatch as planner
+
+        self.assertIsNone(planner.permanent_refusal_escalation("boom", "t", "wf", "node"))

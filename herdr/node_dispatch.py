@@ -127,6 +127,30 @@ def registered_tasks(operation, workflow, tasks):
             and t.get('status') != 'superseded' and not t.get('superseded_by')]
 
 
+def _declared_successor(predecessor, operation, workflow, tasks):
+    """The replacement named by either lineage pointer, scoped to this execution.
+
+    lineage_redispatch_candidates links a lineage from both directions, so the
+    planner only ever supersedes the leaf. The back pointer is written at the end
+    of a successful launch, so a replacement refused fail-fast (a stale baseline,
+    a router rejection) leaves the forward pointer as the only evidence that the
+    predecessor moved on. Trusting one pointer but not the other lets an operation
+    keep a predecessor the planner can no longer dispatch for.
+    """
+    if predecessor.get('superseded_by'):
+        return predecessor['superseded_by']
+    node_id = operation['payload']['node_id']
+    for task in tasks:
+        if (task.get('supersedes') == predecessor['task_id']
+                and task.get('task_id') != predecessor['task_id']
+                and task.get('workflow_id') == operation['workflow_id']
+                and (task.get('node') or task.get('stage')) == node_id
+                and (not task.get('execution_id')
+                     or task['execution_id'] == workflow.get('execution_id'))):
+            return task['task_id']
+    return None
+
+
 def predecessors_current(operation, workflow, tasks):
     registered = registered_tasks(operation, workflow, tasks)
     for predecessor in operation['payload'].get('predecessors') or []:
@@ -137,8 +161,9 @@ def predecessors_current(operation, workflow, tasks):
                 or (task.get('execution_id') and task['execution_id'] != workflow.get('execution_id'))
                 or task.get('status') != 'superseded' or task.get('replacement_pending') is False):
             return False
-        if task.get('superseded_by') and not any(
-                t['task_id'] == task['superseded_by'] and t.get('supersedes') == task['task_id']
+        successor = _declared_successor(task, operation, workflow, tasks)
+        if successor and not any(
+                t['task_id'] == successor and t.get('supersedes') == task['task_id']
                 for t in registered):
             return False
     return True

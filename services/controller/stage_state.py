@@ -164,6 +164,20 @@ def is_node_complete(ports, workflow_id, node_id):
         for t in active
     )
 
+
+def dispatch_awaiting_human(ports, workflow_id, node_id):
+    """True when this node's durable dispatch operation has escalated to a human.
+
+    waiting_human is the recovery contract's terminal parking state: the operation
+    stays there until a person decides. Re-queueing the stage underneath it does
+    not produce a different launch, it produces the same refusal again.
+    """
+    from herdr.node_dispatch_store import operation_for_node
+
+    operation = operation_for_node(ports._get_store().db_path, workflow_id, node_id)
+    return bool(operation and operation["status"] == "waiting_human")
+
+
 def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
     """Revoke 'notified' stage-state entries when the node they guard has
     regressed — either because a predecessor regressed, or because the node's
@@ -221,6 +235,11 @@ def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
                         ports.direct_dispatch_planner.node_tasks_for_latch(wf_tasks, workflow_id, node_id)
                     )
                 ):
+                    # The durable operation owns this decision once it escalates:
+                    # revoking here would re-queue a dispatch that can only be
+                    # refused again, spinning with no backoff and no terminal state.
+                    if ports.dispatch_awaiting_human(workflow_id, node_id):
+                        continue
                     reason = "own lineage fully superseded with no live task"
                 else:
                     continue
@@ -248,7 +267,9 @@ DEPENDENCIES = {'load_stage_state': ('STAGE_STATE_FILE', 'json', 'os'),
  'get_stage_status': ('TASK_MANAGER', 'json', 'subprocess'),
  'is_node_complete': ('_reverification_satisfies_node', 'load_tasks', 'scheduler_core',
                       'workflow_config_for'),
- 'reconcile_stage_advance_states': ('direct_dispatch_planner', 'is_node_complete',
-                                    'load_stage_state', 'load_tasks', 'lock', 'save_stage_state')}
+ 'dispatch_awaiting_human': ('_get_store',),
+ 'reconcile_stage_advance_states': ('direct_dispatch_planner', 'dispatch_awaiting_human',
+                                    'is_node_complete', 'load_stage_state', 'load_tasks',
+                                    'lock', 'save_stage_state')}
 
 __all__ = tuple(DEPENDENCIES)

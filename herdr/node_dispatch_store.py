@@ -170,8 +170,12 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
                 continue
             if op['status'] == 'waiting' and (op['next_due_at'] or 0) > now and core.current(op, workflow, config):
                 continue
-            absence = _absence_result(conn, op, workflow, config, tasks,
-                                      op['detail'].get('expected_task_ids'), now)
+            # An operation whose predecessors moved on is not awaiting resources,
+            # it is stale; reporting absence here would shadow the supersede that
+            # lets the next sweep re-register with the current lineage leaf.
+            absence = (_absence_result(conn, op, workflow, config, tasks,
+                                       op['detail'].get('expected_task_ids'), now)
+                       if core.predecessors_current(op, workflow, tasks) else None)
             if absence:
                 _write(conn, op, *absence, now, started=0,
                        next_due=now + core.CHECK_SECONDS if absence[0] == 'pending' else None)

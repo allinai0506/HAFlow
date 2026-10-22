@@ -370,6 +370,11 @@ def try_direct_stage_advance(ports, item):
                 from herdr.node_dispatch_store import direct_finished
                 receipt = direct_finished(ports._get_store().db_path, dispatch_operation_id,
                     dispatch_owner, [*launched, spec['task_id']])
+                refusal = ports.direct_dispatch_planner.permanent_refusal_escalation(
+                    output, spec["task_id"], workflow_id, ready_id)
+                if refusal and not ports.attention_get(refusal["key"]):
+                    ports.attention_note(**refusal["note"])
+                    print(refusal["log"])
                 ports.mark_stage_advance_notified(workflow_id, ready_id)
                 print(f"[STAGE DISPATCH AWAITING_TASK] workflow={workflow_id} "
                       f"node={ready_id} operation={receipt['id']} status={receipt['status']}")

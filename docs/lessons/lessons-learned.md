@@ -7852,6 +7852,61 @@ git diff --check
 
 ---
 
+## 188. 补派活锁：两条前驱规则口径不一致 + 撤销闩不看人工裁决状态（2026-10-22）
+
+### 问题背景
+
+`wf-haflow-1021-01` 的 craft 节点在 22:16:45 → 22:34:09 之间活锁 **17.5 分钟**，`controller.out.log` 末尾整段是同一组四行循环，无退避、无上限、无终态：
+
+```text
+[STAGE ADVANCE QUEUED]  workflow=wf-haflow-1021-01 start -> craft
+[DIRECT DISPATCH ERROR] task=...-craft-auto-r3: [DISPATCH REJECTED] replacement dispatch requires its predecessor
+[STAGE DISPATCH AWAITING_TASK] workflow=... node=craft operation=211810 status=waiting_human
+[STAGE REVOKE] workflow=... node=craft: own lineage fully superseded with no live task, revoking 'notified' lock
+```
+
+用生产库数据复现后确认是**四个独立缺陷叠加**，任修其一都不够：
+
+1. **两条前驱规则口径不一致（核心）**。op 211810 的 `predecessors` 冻结为 `[craft-auto]`（在 `-r2` 存在之前算出）；而 `lineage_redispatch_candidates` 按设计只取谱系**叶子**，选中 `-r2`，于是 launch 带 `supersedes=craft-auto-r2`，被 `node_dispatch_store.py:437` 的 `supersedes ∈ op.predecessors` 永久拒绝。自愈路径本来存在（`predecessors_current` 判 False → `dispatch_predecessor_changed` → op 作废 → 下轮按当前叶子重注册），但 `predecessors_current` **只读反向指针** `superseded_by`；而 `superseded_by` 的回填位于成功 launch 的末尾（`task_cli_launch_orchestrator.py:555`），`-r2` 因 `baseline_stale` 在 `:399` 就被 fail-fast 拒绝，回填永远到不了，`craft-auto.superseded_by` 保持 `None`，判定于是认为「前驱仍然当前」。反观 `lineage_redispatch_candidates`（`task_lineage.py:31-35`）是**双向建链**的，看得见 `-r2`。同一事实，两条规则给出相反答案。
+2. **absence 分支遮蔽 staleness 判定**。`reconcile_workflow` 先算 `_absence_result` 并 `continue`，`core.result()` 里的 `predecessors_current` 分支长期不可达。
+3. **撤销闩不看人工裁决状态**。`reconcile_stage_advance_states` 仅凭谱系就撤 `notified` 锁，op 已是 `waiting_human` 也照撤，撤完立刻重新排队。`waiting_human` 名义上是恢复契约的终态停车位，实际不是刹车。
+4. **永久失败不出声**。操作绑定路径 launch 一失败就 `return True`（契约："A started launch must never fall through to a second transport"），不升级。全程 **0 次 attention、0 次 COORDINATOR INTAKE**，总指挥只收到 3 次 `/compact`。
+
+活锁最终在 22:34:09 以 `dispatch_predecessor_changed` 自行逃出——靠的是 22:26:43 一次**无关的候选轮转**改变了 absence 判定条件，不是设计使然。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 同一事实存在两条判定规则 | 「前驱是否仍然有效」和「该补派谁」必须共用同一份谱系事实。一条双向建链、一条只信反向指针，就会在指针不完整时给出相反结论 | 判定谱系关系时，正反指针任一存在即为证据；只在成功路径末尾写反向指针，等于让所有 fail-fast 分支都留下断链 |
+| fail-fast 拒绝跳过收尾 | 拒绝得越早，越容易跳过位于成功路径末尾的状态收尾，留下半连接的谱系 | 任何会写入「替代关系」的路径，必须检查 fail-fast 分支是否也需要同一份连接；回填不能只挂在成功尾部 |
+| 恢复状态机分支互相遮蔽 | `reconcile` 里先命中的分支会 `continue` 掉后面的判定；把「资源缺失」排在「身份过期」之前，会让过期 op 永远等不到作废重注册 | 身份/时效类判定优先于资源缺失类判定：身份都不对了，「资源没到」没有意义 |
+| 终态停车位不是刹车 | `waiting_human` 只是 op 的状态，其他机制（阶段闩）若不读它，就会继续在它底下重新排队 | 任何「等人工」状态必须被所有会重新触发同一动作的机制读取；否则升级等于没升级 |
+| 有意的「不二次投递」契约吞掉了升级 | `return True` 保证不走第二条 transport 是对的，但它同时是唯一出口，于是永久失败也静默返回 | 「不二次投递」与「必须出声」是两件事：拒绝可以既不走第二条 transport，又写 attention |
+
+### 关于「通知总指挥」的修正
+
+原计划是永久失败时「升级 attention **并通知总指挥**」。读码后只做前者：薄编排改造（`7d3ab69`）明确把总指挥移出 durable operation 的失败路径，`return True` 的注释就是这条契约。再往总指挥投递等于给同一个节点开第二条 transport，与契约冲突。`attention` 本就是既有的、Console 待裁决项可见的升级通道——本次事故的真正缺口是它**一条都没写**，不是没通知总指挥。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_predecessor_lineage_consistency.py \
+  tests/test_stage_advance_and_supersede.py \
+  tests/test_direct_stage_dispatch.py \
+  tests/test_controller_modularity.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：`herdr/node_dispatch.py#_declared_successor` 让前驱判定同时接受正反指针（按 workflow / node / execution 三重作用域隔离，跨作用域的声明不算证据）；`herdr/node_dispatch_store.py#reconcile_workflow` 让 staleness 优先于 absence；`services/controller/stage_state.py#dispatch_awaiting_human` 在 op 已 `waiting_human` 时保留 `notified` 锁，且人工裁决后自动恢复撤销能力；`herdr/direct_dispatch.py#permanent_refusal_escalation` 作为纯函数产出可直接施加的 attention 参数，外壳只做两次副作用调用。
+
+RED 用例均以生产数据形态构造：前驱测试直接照抄 op 211810 的 `predecessors` 与两个 task 的指针状态；派发测试的夹具绑定 durable operation，复现出的日志行与事故现场逐字一致。`tests/test_controller_modularity.py` 的行数上限（`services/controller/*.py` ≤ 500）在实现过程中真实拦下一次越界（514 行），据此把分类与升级构造下沉到 `herdr/`。
+
+**遗留（已记录未修）**：`services/controller/direct_dispatch.py` 改动后为 **500 行，正好压在强制上限**（改动前 495）。该模块在本次之前已接近饱和，下一次任何 +1 行都会触发 `test_controller_modularity.py` 失败，需要单独一次抽取重构恢复余量。
+
+---
+
 ## 189. 沙箱护栏沿继承配置逃逸，反把开发者主仓锁死（2026-10-22）
 
 ### 问题背景
