@@ -7999,3 +7999,27 @@ pytest -q tests/test_console_controller_cockpit_e2e.py
 证据：`tests/test_console_cockpit_e2e_harness.py` 5 项护栏（不启动浏览器）；已反向验证把 `--dist loadgroup` 改回 `load` 时 `test_ci_uses_the_scheduler_that_honours_xdist_group` 立即 FAIL。真实验收以本 PR 的 CI 全量（`-n auto --dist loadgroup`，干净 runner）为准；本地因与生产 Agent 共用浏览器守护，不作为判据。
 
 **遗留**：若 CI 仍出现同文件抖动，下一步是把浏览器 E2E 拆成独立 serial job（与主套件分离），而不是继续加高超时值。
+
+### 补充：两类超时是两回事（#325 首轮 CI 实测推翻了一半修复）
+
+#325 自己的 CI 又失败了，签名与前两次**不同**：
+
+```text
+1 failed, 6148 passed  ·  test_header_pause_checkpoint_rollback_and_step_use_cockpit_receipts
+AssertionError: CdpRequestTimeoutError: CDP request timed out: Input.dispatchMouseEvent
+```
+
+由此确认存在两个独立超时，不要混为一谈：
+
+| 类别 | 错误签名 | 是否可调 | 有效修法 |
+|------|---------|---------|---------|
+| 动作可用性等待 | `page.click timed out after 3000ms: <article> intercepts pointer events` | **可调**（`click/press/fill` 的 `timeout`，默认 3000） | 提高 `ACTION_TIMEOUT` |
+| CDP 请求往返 | `CdpRequestTimeoutError: CDP request timed out: Input.dispatch*` | **不可调**（二进制内仅暴露 `EGO_TASK_SPACE_NAME_IN_USE`，无超时环境变量） | **只能消除争抢**——把这些 journey 串行到单 worker |
+
+即：把动作预算从 3 秒提到 15 秒对第二类失败**完全无效**。原修复里真正治它的是 `--dist loadgroup` 那一半。
+
+### 教训：workflow 定义改动无法在自己的 PR 里被验证
+
+`HAFlow Test Suite` 只在 `pull_request_target`（+ `workflow_dispatch`）触发，**没有 push 触发**；而 `pull_request_target` 的 **job 定义取自 base 分支**，只有 checkout 的是 merge 结果。日志实证：#325 的 PR run 里 echo 出的仍是 `-n auto`（main 的旧文案），我的 `--dist loadgroup` 从未生效——所以那次失败同时验证了两件事：修复的一半没被跑到，以及「改 workflow 的 PR 天然自证不了自己」。
+
+规范：**修改 workflow 文件的 PR，必须用 `gh workflow run --ref <branch>` 在自身分支上跑一次 `workflow_dispatch`**（该路径按分支文件执行、`mode=full` 跑全量）作为验收证据；只看 PR 的必需检查绿灯等于没验。这类改动在合入前的 CI 绿灯，不能作为其生效性的证据。
