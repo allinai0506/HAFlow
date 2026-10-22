@@ -117,8 +117,23 @@ def _selective_gate_inventory_block(ports, workflow_id, workflow_cfg):
     policy = ports.selective_replan_core.policy_from_workflow(workflow_cfg)
     if policy is None:
         return None
+    tasks = ports.load_tasks()
+    retry_node = policy["retry_node"]
+    frozen_sha = ""
+    if hasattr(ports, "_scheduler_current_frozen_candidate_sha"):
+        try:
+            frozen_sha = ports._scheduler_current_frozen_candidate_sha(workflow_id)
+        except Exception:
+            frozen_sha = ""
+    if frozen_sha:
+        from herdr.workflow_progress import candidate_responsible_source
+        store = ports._get_store() if hasattr(ports, "_get_store") else None
+        wf = store.get_workflow(workflow_id) if store else {"workflow_id": workflow_id}
+        src_node, _ = candidate_responsible_source(wf or {}, tasks or [], frozen_sha)
+        if src_node:
+            retry_node = src_node
     inventory = ports.selective_replan_core.build_task_inventory(
-        ports.load_tasks(), workflow_id=workflow_id, retry_node=policy["retry_node"]
+        tasks, workflow_id=workflow_id, retry_node=retry_node
     )
     return ports.selective_replan_core.render_inventory_block(inventory)
 

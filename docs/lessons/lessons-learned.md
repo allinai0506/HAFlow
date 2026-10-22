@@ -8096,14 +8096,40 @@ pytest -q tests/test_console_controller_cockpit_e2e.py
 | `set -euo pipefail` 下的命令替换赋值（§192 落地后真机部署当场暴露） | 自检第 189 行 `pid="$(launchctl list \| awk …)"`：pipefail 让 `launchctl` 的瞬时失败变成**赋值语句**的失败，errexit 随即在无 `if` 保护的位置终止整个脚本。实测后果是「部署已成功，但自检既不打印剩余服务、也不说明为何中断，只留一个说不清原因的非零退出」——恰是本节要消灭的静默失效，被部署工具自己踩了一遍。服务从 4 个增到 5 个（含重启一个占端口的进程）扩大了扰动窗口，使原本罕见的竞态变成必现 | 状态查询必须写进条件语境并做**有界重试**；重试耗尽要显式归因（`未能确证其加载代际`）而不是吞成成功；「容忍瞬时失败」与「fail-closed」各需一条测试锁住，前者防静默中断、后者防误报成功 |
 | 把宿主现象直接归因到自己的链路上 | 我曾在 issue 里写「22 个 defunct 疑似 worker 派发未回收子进程」，未按父子归属验证；实测 24 个 defunct 的父进程是 `verge-mihomo`(20)/`agy`(2)/`project_launcher.py`(1)/`aitrust-server`(1)，HAFlow 全部服务 PID 的僵尸子进程数为 0 | 归因前先看 `ps -eo ppid,stat` 的父进程分布并反向核对自身；错误归因要在原地公开更正，并把「本 issue 不是什么」写进新 issue 防止他人去不存在的缺陷里排查 |
 
+## 193. wrapup 新候选失败后的自动返工闭环（2026-10-22）
+
+### 背景与现象
+
+当 implementation 产出 X 并通过认证后，wrapup 产出新候选 Y。若 Y 被 review 判定为 blocked，自动化闭环出现三重断点：
+1. 失败归属仍按 implementation 查找当前 candidate，导致默认进入 `waiting_human / affected_tasks_unknown`，或显式指定 implementation 时出现 `candidate_mismatch`；
+2. 即使显式指定 wrapup，返工指令确认送达后，下游失效处理（`invalidate_for_fix_loop`）因拓扑收集逻辑包含 wrapup，将正在返工的 wrapup 再次 supersede，导致 `waiting_human / recovery_coverage_incomplete`；
+3. wrapup 准备提交修复 Z 时，`wrapup_delivery.begin` 仍要求当前候选 Y 必须已有认证交付（delivery note），导致正常入口报 `wrapup parent has no effective certified delivery`，无法将 Z 作为修复候选集成。
+
+### 根因分析
+
+1. **候选来源判定缺失动态谱系**：`workflow_progress.assess_workflow`、`selective_facts` 以及 `selective_plan` 假定失败门禁的 `retry_node` 恒为模板配置的 `implementation`，未根据当前候选 SHA 的真实产出者（`candidate_responsible_source`）动态区分是 implementation 还是 wrapup。
+2. **下游失效处理未保留已确认目标**：`ports.invalidate_for_fix_loop` 从门禁节点收集下游节点，而 wrapup 处于门禁节点的下游拓扑中。失效逻辑此前不支持 `preserve_task_ids`，将刚刚完成返工登记的 target 一同作废。
+3. **修复提交合法入口缺口**：`wrapup_delivery.begin` 仅检查已认证的交付记录（`_find_effective_delivery`），没有识别因当前失败候选 Y 处于合法恢复状态（`_find_active_candidate_recovery`）且已确认返工授权的有效修复场景。
+4. **恢复结算条件未适配 wrapup 阶段**：`workflow_recovery.result_status` 要求 target 的状态必须是 `integrated`，而 wrapup 任务在整个 wrapup 阶段一直保持 `status: working`（通过 `integrated_commit` 证明集成）；且 `check_workflow_recovery` 的 `next_due_at` 延时调度需要允许调用方提供时间驱动结算。
+
+### 修复与防护
+
+1. **`candidate_responsible_source`**：在 `herdr/workflow_progress.py` 中增加候选发布来源的严格核验，根据 candidate commit、integrated_commit、run_id、execution_id 识别 wrapup 与 implementation 产出；在 `services/controller/selective_facts.py` 中向门禁提示可归因任务；在 `services/controller/selective_plan.py` 中对 wrapup 调整重试目标；
+2. **`preserve_task_ids` 门禁隔离**：在 `services/controller/fix_invalidation.py` 和 `services/controller/workflow_recovery.py` 中传递并校验 `preserve_task_ids`，避免正在修复的确认任务被下游失效处理 supersede；
+3. **恢复态修复提交准入**：在 `herdr/wrapup_delivery.py` 中增加 `_find_active_candidate_recovery`，核查当前任务的活动 fix_loop 恢复操作、返工确认、任务谱系及预算（round <= 3），安全允许修复提交；
+4. **闭环结算适配与时间驱动**：在 `herdr/workflow_recovery.py` 中允许 wrapup 任务以 `(integrated_commit or commit) == candidate` 满足目标集成状态，并在 `check_workflow_recovery` 中透传 `now`；
+5. **完整 E2E 验收守护**：在 `tests/test_wrapup_failure_recovery_closed_loop.py` 中构建包含 16 项回归测试的完整测试矩阵，端到端覆盖 `software-development-v1` 与 `spec-development-v1` 两个默认模板的整条恢复闭环。
+
 ### 验证命令 / 守护测试
 
 ```bash
-pytest -q tests/test_service_release.py tests/test_installer_bash_compat.py \
-  tests/test_install_herdr_console_deploy.py
+pytest -q tests/test_wrapup_failure_recovery_closed_loop.py
+pytest -q tests/test_workflow_recovery.py tests/test_workflow_repair_contracts.py tests/test_recovery_store.py
+pytest -q tests/test_selective_replan_*.py
 python3 -m compileall -q herdr services bin tests
 git diff --check
 ```
+
 
 证据：`tests/test_service_release.py` 新增 13 项（词表校验通过/拒绝、宿主状态逐字保留、三字段同代际、`WorkingDirectory` 不凭空创建、`--labels` 单一权威、未纳管漂移检出与 workspace 不误报、installer 先拒绝后豁免、带参数服务端到端纳管）；`tests/test_installer_bash_compat.py` 的清单副本删除并改为从 `SCRIPTS` 派生，因此 bash 3.2 兼容矩阵现在真实遍历 5 个服务（含 hub）；同文件另 2 项注入 `launchctl list` 故障，分别锁住「瞬时失败不得静默中断自检」与「持续失败必须 fail-closed 且逐服务归因」。用**真机 plist** 在临时 `HOME` 预演 `--no-restart`：hub 的 9 项 argv 全保留、`--db-path` 仍指向 `~/.herdr-controller/experience_hub.db`、三字段同代际、exit 0。同一份未改动的真机 plist 在「改动前清单」下被 `unmanaged_release_plists` 报出 `ad17b85e9a6a`，在「当前清单」下为空——历史案例成为可机检的事实。
 

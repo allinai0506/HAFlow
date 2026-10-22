@@ -145,7 +145,7 @@ def _invalidate_single_task(ports, task_id, gate_node_id, reuse=False):
         return False, f"supersede:{err}"
     return True, ""
 
-def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retry_node=None, selective_target_task_ids=None):
+def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retry_node=None, selective_target_task_ids=None, preserve_task_ids=None):
     """作废 gate 节点及其全部下游、以及 retry_node 到 gate 间全部中间节点的非 superseded 任务(fix-loop 回流前提)。
 
     completed/cleanup_ready 中间态先 finalize 规范化到 cleaned——
@@ -274,7 +274,7 @@ def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retr
 
         if selective_targets is None and ports._preserve_same_gate_task(task, retry_node, [gate_node_id]):
             continue
-        if task_id in reused or status == "superseded" or (selective_targets is not None and task_id in selective_targets):
+        if task_id in reused or status == "superseded" or (selective_targets is not None and task_id in selective_targets) or (preserve_task_ids is not None and task_id in preserve_task_ids):
             continue
 
         if (

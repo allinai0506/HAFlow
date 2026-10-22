@@ -51,11 +51,14 @@ def _workflow_snapshot(conn, workflow_id):
     epoch = max(float(workflow.get('created_at') or 0), float(workflow.get('reopened_at') or 0))
     latest = conn.execute("SELECT id,event_type,payload_json FROM events WHERE workflow_id=? AND event_type IN ('candidate_frozen','candidate_invalidated') AND source='critical-path-scheduler' AND timestamp>=? ORDER BY id DESC LIMIT 1", (workflow_id, epoch)).fetchone()
     if latest and latest['event_type'] == 'candidate_frozen':
-        workflow['candidate_sha'] = json.loads(latest['payload_json']).get('candidate_sha')
+        frozen_payload = json.loads(latest['payload_json'])
+        workflow['candidate_sha'] = frozen_payload.get('candidate_sha')
         workflow['candidate_episode_id'] = latest['id']
+        workflow['candidate_source_node'] = frozen_payload.get('source_node')
     else:
         workflow['candidate_sha'] = None
         workflow['candidate_episode_id'] = 0
+        workflow['candidate_source_node'] = None
     workflow['config'] = config
     if workflow['status'] == 'paused':
         transition = conn.execute("SELECT event_type,payload_json FROM events WHERE workflow_id=? "

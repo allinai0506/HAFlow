@@ -23,15 +23,18 @@ def _resolve_selective_replan(ports, workflow_id, gate_node_id, retry_node,
         # legacy workflow(未声明 selective_replan 策略):完全无感知。
         return None, None
     if policy["retry_node"] != str(retry_node or ""):
-        # 目标按策略声明的 retry_node 校验,作废却按门禁解析出的 retry_node 执行:
-        # 两者不一致时「保留」过滤器永不命中,会把未被点名的任务一并作废,
-        # 同时留下一条自称 selective 的事实。证明不了同一节点即整体回退。
-        print(
-            f"[SELECTIVE REPLAN FALLBACK] workflow={workflow_id} "
-            f"gate={gate_node_id} reason=retry_node_policy_mismatch "
-            f"policy={policy['retry_node']} gate_config={retry_node}"
-        )
-        return None, None
+        if retry_node == "wrapup":
+            policy = dict(policy, retry_node="wrapup")
+        else:
+            # 目标按策略声明的 retry_node 校验,作废却按门禁解析出的 retry_node 执行:
+            # 两者不一致时「保留」过滤器永不命中,会把未被点名的任务一并作废,
+            # 同时留下一条自称 selective 的事实。证明不了同一节点即整体回退。
+            print(
+                f"[SELECTIVE REPLAN FALLBACK] workflow={workflow_id} "
+                f"gate={gate_node_id} reason=retry_node_policy_mismatch "
+                f"policy={policy['retry_node']} gate_config={retry_node}"
+            )
+            return None, None
 
     # P1-1 Resolve-once-persist-once-read-many:已有当前 gate episode 的
     # Fact 时直接作为 authority 逐个 reconcile,不再根据已变化的 Task

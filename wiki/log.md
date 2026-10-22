@@ -3516,3 +3516,32 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 未纳管漂移复扫：`[]`（#329 的清单收口在生产部署路径上第二次兑现）。
 - 对自己此前判断的更正：我曾依据 `state=OPEN`、`mergedAt=null`、`c6a3eb4 不在 main 内` 三项断言 #330 未合并，而实际合并时间为 `07:15:29` —— 这些读取来自 API 的短暂过期状态。教训：多个读取一致不等于它们独立，缓存窗口内的同一事实源会被当成三重印证；读到与用户陈述矛盾时应报告矛盾与时效风险，而不是断言用户错。
 - Evidence：`docs/lessons/lessons-learned.md` §192；部署 stdout/stderr 全量存于 `/tmp/haflow-deploy-84b033d.log`（含 5 条 `✓` 与末行摘要），`exit=0` 由执行时直接捕获、不在该文件内。
+
+## [2026-10-22] Workflow | 修复 wrapup 新候选失败后的自动返工闭环
+
+- 背景：
+  1. implementation 产出 X 并通过认证后，wrapup 产出新候选 Y。若 Y 被 review 判定为 blocked，自动化闭环出现三重断点：
+     - 失败归属仍按 implementation 查找当前 candidate，导致默认进入 `waiting_human / affected_tasks_unknown`，或显式指定 implementation 时出现 `candidate_mismatch`；
+     - 显式指定 wrapup 后，返工指令确认送达后，下游失效处理（`invalidate_for_fix_loop`）因拓扑收集逻辑包含 wrapup，将正在返工的 wrapup 再次 supersede，导致 `waiting_human / recovery_coverage_incomplete`；
+     - wrapup 准备提交修复 Z 时，`wrapup_delivery.begin` 仍要求当前候选 Y 必须已有认证交付，导致正常入口报 `wrapup parent has no effective certified delivery`，无法将 Z 作为修复候选集成。
+- 变更：
+  1. **候选发布来源动态溯源 (`herdr/workflow_progress.py`, `services/controller/selective_facts.py`, `services/controller/selective_plan.py`)**：
+     - 新增 `candidate_responsible_source(workflow, tasks, candidate_sha)`，严格核验任务与候选关联（commit / integrated_commit / wrapup_delivery.integrated_sha / run_id / execution_id / 非 supersede 状态），精准识别当前候选的产出责任节点与任务（`wrapup` vs `implementation`）；
+     - `assess_workflow` 针对门禁节点（`_gate(nodes, node_id) is not None`）采用候选责任节点进行归因与预算统计；在 `selective_facts.py` 中动态向门禁提示可归因任务；在 `selective_plan.py` 中对 wrapup 调整重试目标策略。
+  2. **已确认修复目标保留与失效隔离 (`services/controller/fix_invalidation.py`, `services/controller/workflow_recovery.py`)**：
+     - `invalidate_for_fix_loop` 增加 `preserve_task_ids` 支持；
+     - `execute_workflow_recovery` 将已确认返工与继任目标（rework_ids / repair_map target / successor_ids）传入 `ports.invalidate_for_fix_loop`，只作废下游应当失效的门禁与旧结果，保留正在返工的 wrapup 活跃态。
+  3. **恢复态修复提交合法入口与结算 (`herdr/wrapup_delivery.py`, `herdr/workflow_recovery.py`)**：
+     - `wrapup_delivery.begin` 增加 `_find_active_candidate_recovery`，核实当前任务存在有效活动 `fix_loop` 恢复操作、返工已确认且谱系合法后，允许登记与集成修复提交 Z，纳入 round <= 3 重试预算；
+     - `herdr/workflow_recovery.py:result_status` 适配 wrapup 阶段集成判定（`(integrated_commit or commit) == candidate`）；`services/controller/workflow_recovery.py` 中透传 `now` 参数驱动有界延时结算。
+  4. **全链路端到端回归守护 (`tests/test_wrapup_failure_recovery_closed_loop.py`)**：
+     - 包含 16 项回归测试，在 `software-development-v1` 和 `spec-development-v1` 两个默认模板上全量验证 X 认证 -> Y 产出 -> Y blocked -> 自动归属与返工 -> 产出 Z -> 验证重新通过 -> 发布 PR -> 审核闭环 -> wrapup 顺利完成；
+     - 覆盖显式/自动归属一致性、普通 implementation 返工不回归、非法归属拒绝、未授权提交拒绝、旧凭证防复用、预算耗尽人工介入、幂等重试不重复返工。
+- 证据：
+  - `pytest -q tests/test_wrapup_failure_recovery_closed_loop.py` → 16 passed；
+  - `pytest -q tests/test_workflow_recovery.py tests/test_workflow_repair_contracts.py tests/test_recovery_store.py` → 97 passed；
+  - `pytest -q tests/test_workflow_progress.py` → 34 passed；
+  - `pytest -q tests/test_selective_replan_*.py` → 113 passed；
+  - `python3 -m compileall -q herdr services bin tests` clean；
+  - `git diff --check` clean；
+  - `docs/lessons/lessons-learned.md` §193。
