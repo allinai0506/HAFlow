@@ -39,7 +39,7 @@ HAFlow 针对门禁强制放行 (`force_pass_gate`)、任务门禁豁免 (`bypas
 1. 凭据目录不存在时自动以 `0700` 权限创建。
 2. 通过 `secrets.token_hex(32)` 生成 256 位高熵随机密钥。
 3. 通过独占模式 (`os.O_CREAT | os.O_EXCL`) 创建临时文件，原子权限设为 `0600`。
-4. 写入完成后原子重命名为 `~/.herdr-controller/credentials/operator_signing.key`。
+4. 写入完成后原子重命名为 `~/.herdr-controller/credentials/operator_hmac_signing.key`。
 
 ### 3.2 密钥轮换机制 (Key Rotation)
 当主签名密钥发生泄露风险或遵循合规周期轮换时，按以下步骤执行无缝轮换：
@@ -50,8 +50,8 @@ HAFlow 针对门禁强制放行 (`force_pass_gate`)、任务门禁豁免 (`bypas
 2. **更新控制器配置**：
    将新密钥写入持久化密钥文件或更新环境变量 `HERDR_OPERATOR_SIGNING_SECRET`：
    ```bash
-   install -m 0600 /dev/null ~/.herdr-controller/credentials/operator_signing.key
-   echo -n "<NEW_SECRET_HEX>" > ~/.herdr-controller/credentials/operator_signing.key
+   install -m 0600 /dev/null ~/.herdr-controller/credentials/operator_hmac_signing.key
+   echo -n "<NEW_SECRET_HEX>" > ~/.herdr-controller/credentials/operator_hmac_signing.key
    ```
 3. **重新签发操作人 Token**：
    旧 Token 在密钥轮换后立即失效，管理员使用新密钥为授权操作人重新发放 Token。
