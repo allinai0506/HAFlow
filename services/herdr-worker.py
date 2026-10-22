@@ -235,11 +235,26 @@ def install_worker_sandbox_push_guard(clone):
                 ["git", "-C", str(clone), "config", "--get", "core.hooksPath"],
                 capture_output=True, text=True,
             )
-            if hp.returncode == 0 and hp.stdout.strip():
-                custom_hooks = Path(hp.stdout.strip())
+            configured = hp.stdout.strip() if hp.returncode == 0 else ""
+            if configured:
+                custom_hooks = Path(configured)
                 if not custom_hooks.is_absolute():
                     custom_hooks = Path(clone) / custom_hooks
-                target_dirs.append(custom_hooks)
+                custom_hooks = custom_hooks.resolve()
+                if custom_hooks.is_relative_to(Path(clone).resolve()):
+                    target_dirs.append(custom_hooks)
+                else:
+                    # A CoW clone inherits the source repo's core.hooksPath
+                    # verbatim, so an absolute value points back outside the
+                    # sandbox. Installing the guard there disabled `git push`
+                    # from the developer's own checkout and every linked
+                    # worktree, and git ignores .git/hooks while that value
+                    # stands -- so the guard would have been inert anyway.
+                    # Repin the clone to its own hooks directory.
+                    subprocess.run(
+                        ["git", "-C", str(clone), "config", "--unset", "core.hooksPath"],
+                        capture_output=True, check=False,
+                    )
 
             for hdir in target_dirs:
                 try:

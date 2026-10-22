@@ -20,6 +20,7 @@ import os
 import re
 from pathlib import Path
 
+from .node_roles import is_verifier_node
 from .task_lineage import REPLACEMENT_SUFFIX_RE, lineage_key, lineage_redispatch_candidates
 
 # onto 只接受合法分支名:非法值一律丢弃(fail-open 原行为)。
@@ -504,7 +505,7 @@ def _dispatch_spec(
 ):
     from .workflow import validate_artifact_contract
     validate_artifact_contract(node.get("artifact_mode"), integration_mode or node["integration_mode"], node_id=node.get("id"), task_type=node.get("task_type"))
-    if node["id"] in {"test", "review"} and str(candidate_sha or "").strip():
+    if is_verifier_node(node) and str(candidate_sha or "").strip():
         # Parallel verifiers own separate branches at one immutable candidate.
         onto_branch = None
     elif onto_branch is None:
@@ -547,7 +548,7 @@ def _dispatch_spec(
         spec["supersedes"] = redispatch_of
     if onto_branch:
         spec["onto_branch"] = onto_branch
-    elif node["id"] in {"test", "review"} and candidate_sha and context_branch:
+    elif is_verifier_node(node) and candidate_sha and context_branch:
         spec["candidate_branch"] = sanitize_branch_name(context_branch)
     frozen_sha = str(candidate_sha or "").strip()
     if frozen_sha:

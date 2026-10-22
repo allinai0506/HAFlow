@@ -7794,6 +7794,64 @@ git diff --check
 
 ---
 
+## 187. 验证节点身份用字面量 id 判定，模板改名即静默失效（2026-10-22）
+
+### 问题背景
+
+`wf-haflow-1021-01`（模板 `code-craft-v1`，需求 issue #307）跑完一轮后两个洁净室门禁都 blocked，但结论对候选无效。现场证据链：
+
+```text
+20:30:32  candidate_published   d24d2d3   craft 交出候选
+20:34:11  initial_dispatch_prepared  cleanroom_test    candidate_sha=None
+20:35:21  initial_dispatch_prepared  cleanroom_review  candidate_sha=None
+22:13:04  candidate_frozen      d24d2d3   冻结晚了 1 小时 43 分
+```
+
+洁净室测试工位的结论原文：`Controller candidate_sha=null，洁净室工位 HEAD=9128462 未加载 craft 候选 d24d2d3`。即两个门禁都在 baseline 上跑，验的不是 craft 的产物，整轮门禁白跑。
+
+根因不是「冻结太晚」这一件事，而是**验证节点身份用硬编码字面量 `{"test","review"}` 判定**。`code-craft-v1` 把门禁节点声明为 `cleanroom_test` / `cleanroom_review`，于是所有以该字面量为条件的保护对这套模板**全部静默失效**——不报错、不告警、照常放行：
+
+| 站点 | 失效后果 |
+|------|---------|
+| `task_cli_launch_preflight.py:38` `preflight_delivery_identity` | fail-closed 候选身份证明直接 `return None`，洁净室带着 `candidate_sha=None` 派发成功 |
+| `task_cli_launch_preflight.py:432/463` `validate_allocated_launch_baselines` | 分配后基线门（clone HEAD 是否等于冻结候选）不执行，正是「HEAD 停在 9128462」无人拦截的原因 |
+| `direct_dispatch.py:463/506` | 并行验证者不锁 `candidate_branch`，反而拿到 `onto_branch` |
+| `business_gate.py:96/110/116` | `dependencies & {'test','review'}` 恒为空集，wrapup 的双门禁汇聚校验形同虚设 |
+| `task_checkpoint.py:412` / `task_cli_status.py:27` | receipt-v1 业务门禁可被 stage verdict 单独 force-pass（洁净室评审独立报出的 B1 正是此类） |
+| `task_checkpoint.py:26` | 不下发 `acceptance-record` 绑定指令，验证工位不知道该发布凭据 |
+| `agent_router.py:505/547` | 跨阶段独立性（`exclude_stage_agents`）与 FR-6.1 fail-closed 默认排除不生效 |
+| `task_delivery.py:88` | 验证工位被当作可写任务 |
+
+全库扫描共 **15 处出现、12 个站点**（初判 7 处偏低）。
+
+**同一缺陷已有三套并存的补丁式词表**（本次修复前）：`task_cli_verification.py:_is_gate_task` 自带一份字面量清单加正则；§186 又给 `node_policy.resolve_gate_config` 补了同一条正则 `(^|[_-])(gate|cleanroom)($|[_-])`；其余站点仍是裸 `{"test","review"}`。**按名字打补丁只能覆盖已被想到的名字**——模板把验证节点命名为 `audit`、`qa_gate`、`independent_check` 时，正则同样漏掉，缺陷原样复发。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 语义角色用字面量 id / 名字模式判定 | 模板 id 是**命名**，不是**契约**。以 id 字面量或名字正则为条件的保护，会在模板改名时静默失效，且失效方式是「放行」而非「报错」；逐个补名字只是把复发改晚一点 | 角色判定必须来自模板**声明的语义字段**（`default_task_type` / `gate`），收敛为单一权威纯函数，禁止在调用点散落字面量集合或名字正则 |
+| 判据只有一个形状 | 同一角色在模板原始节点、`normalize_node` 后的派发节点、持久化 Task 上是三种不同字段形状（`default_task_type` / `declared_task_type`+`task_type` / `task_type`），只吃一种形状的判据会在另一条链路上静默降级 | 权威判据必须同时提供 node 级、task 级、id+config 级三个入口，并分别有测试 |
+| 替换判据时未检查上下文可得性 | `agent_router.py:547` 若机械替换成 `stage in verifier_node_ids(wf_cfg)`，当 `wf_cfg` 为 None 时返回空集，legacy `test`/`review` 会**丢掉 FR-6.1 fail-closed 默认排除**——把一处静默失效换成另一处 | 替换判据必须逐站点核对「配置不可得时」的退化方向，fail-closed 语义要用不依赖 config 的 legacy 兜底保住 |
+| fail-closed 门禁跨执行模式复用 | 候选 SHA 是 Git 事实；context 模式模板（`bidding`、`business-research-v1`）全程无 Git 语义，对它们的验证节点强制候选证明会直接打断派发 | fail-closed 门禁必须显式声明适用范围，用权威 `execution_mode(workflow)` 守卫，而不是假定所有工作流都有候选 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_node_roles.py tests/test_verifier_identity_parity.py \
+  tests/test_task_cli_launch_preflight.py tests/test_fix_bug1002_parallel_candidate.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：新增 `herdr/node_roles.py` 作为验证节点身份的唯一权威来源（`is_verifier_node` / `is_verifier_task` / `is_verifier_node_id` / `verifier_node_ids` / `candidate_identity_applies`），替换 11 个站点。全模板分类断言固化在 `tests/test_node_roles.py`：`software-development-v1` 与 `spec-development-v1` 的 `test`/`review` 判据前后**完全等价**（零行为变化），`code-craft-v1` 的两个洁净室节点新命中，`craft`/`wrapup` 不命中。受影响 66 个测试文件回归 **1542 passed, 2 skipped, 237 subtests passed**。
+
+**遗留（已记录未修）**：`coordinator_messages.py:261` 仍是字面量。该处只生成兜底路径给总指挥的**建议命令文本**（是否附 `--onto`），不是强制门禁；且 `build_stage_advance_context` 是有意的纯函数，只拿得到 `next_stage` 字符串、拿不到下一个节点的 dict，正确修需要改签名由调用方传入。其残余风险已被本次修好的 `validate_allocated_launch_baselines` 兜住：即便建议文本带了 `--onto`，洁净室节点仍会走候选基线门而非 selective 分支。
+
+**同源不同概念（未合并）**：`_is_gate_task` 与 §186 对齐的 `resolve_gate_config` 回答「是否产出门禁结论 / 是否有门禁契约」（含 `wrapup`、`acceptance`），`is_verifier_node` 回答「是否独立验证冻结候选」（不含 `wrapup`）。两者语义不同，不是平行事实源；但**四套词表并存**本身是债务——`node_roles` 已消除其中按字面量判定的那一类，剩下按名字正则的两处仍应收敛到声明语义，需要单独的规格决策。
+
+---
+
 ## 188. 补派活锁：两条前驱规则口径不一致 + 撤销闩不看人工裁决状态（2026-10-22）
 
 ### 问题背景
@@ -7846,3 +7904,51 @@ git diff --check
 RED 用例均以生产数据形态构造：前驱测试直接照抄 op 211810 的 `predecessors` 与两个 task 的指针状态；派发测试的夹具绑定 durable operation，复现出的日志行与事故现场逐字一致。`tests/test_controller_modularity.py` 的行数上限（`services/controller/*.py` ≤ 500）在实现过程中真实拦下一次越界（514 行），据此把分类与升级构造下沉到 `herdr/`。
 
 **遗留（已记录未修）**：`services/controller/direct_dispatch.py` 改动后为 **500 行，正好压在强制上限**（改动前 495）。该模块在本次之前已接近饱和，下一次任何 +1 行都会触发 `test_controller_modularity.py` 失败，需要单独一次抽取重构恢复余量。
+
+---
+
+## 189. 沙箱护栏沿继承配置逃逸，反把开发者主仓锁死（2026-10-22）
+
+### 问题背景
+
+推送两个已完成的修复分支时，`git push` 被无条件拒绝：
+
+```text
+[GIT GUARD REJECT] Worker Agent is restricted to local sandbox testing only.
+Direct git push/PR from worker clone is disabled.
+```
+
+但该护栏按设计只应装进 worker 沙箱克隆（`services/herdr-worker.py#install_worker_sandbox_push_guard` 写入 `<clone>/.git/hooks`），且有 `tests/test_worker_push_guard.py` 断言其存在。实际它出现在**主仓库** `~/HAFlow/.git/hooks/pre-push`，于是主仓及其所有 linked worktree 一律无法推送——包括开发者本人，以及 wrapup 阶段「建立交付 PR」那一步。
+
+根因是一条**跨边界继承信道**：
+
+1. 主仓本地设了 `core.hooksPath = /Users/user/HAFlow/.git/hooks`（绝对路径，且与 git 默认位置相同，本身冗余）；
+2. worker 克隆是主仓的 CoW 副本，`herdr-worker.py:197-205` 还会显式把源仓的 `core.hooksPath` 传播给 clone，于是克隆**原样继承了这个绝对路径**；
+3. `install_worker_sandbox_push_guard` 只对**相对**路径做重定位（`if not custom_hooks.is_absolute(): custom_hooks = Path(clone) / custom_hooks`），绝对路径被当作「已经指向正确位置」直接写入——而这个「正确位置」是主仓库。
+
+证据链：主仓 `pre-push` 的 mtime 为 Oct 21 **23:24**，与 `wf-haflow-1021-01-cleanroom_review-auto-r2` 克隆的创建时间**同分钟**；两者 inode 不同（1213918188 / 1213966688），证明克隆自己有一份、主仓**也**被写了一份。
+
+**二阶后果更容易被忽略**：`core.hooksPath` 一旦设置，git 就**不再读** `.git/hooks`。所以在修复前，克隆自己那份护栏是**惰性的**——沙箱真正生效的 hook 是它与主仓共享的那一个。也就是说这个缺陷同时造成两个反向错误：主仓被锁死，而沙箱的有效防护并非它自己那份。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 沙箱边界按值的字面形式判定 | 「相对路径需要重定位、绝对路径无需处理」是把**语法形式**当成了**位置语义**。绝对路径恰恰是最容易逃逸的一种 | 沙箱写入必须对**解析后的真实路径**做包含性校验（`resolve()` + `is_relative_to(clone_root)`），而不是按相对/绝对分支 |
+| 继承配置是跨边界信道 | CoW 克隆继承源仓的全部 git config；任何「读配置再据此写文件」的逻辑都可能被继承值带到沙箱外 | 消费继承配置前必须判定它是否仍指向沙箱内；指向外部时要么重定位、要么显式失效，不能原样使用 |
+| 护栏有效性未被验证 | 既有测试写了护栏文件、也断言了文件存在，但 `core.hooksPath` 生效时那份文件根本不被 git 读取 | 沙箱护栏测试必须断言**行为**（真实 `git push` 被拒），不能只断言文件落盘；本次两条新用例都以 push 结果为准 |
+| 测试只覆盖了安全的那条分支 | 既有夹具把 `core.hooksPath` 设为相对值 `.task-hooks`，只走到重定位分支，继承绝对路径这一形态从未被覆盖 | 对「按输入形态分支」的逻辑，每种形态都要有反例；缺的那种往往正是生产里出现的那种 |
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_worker_push_guard.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+证据：`install_worker_sandbox_push_guard` 改为对解析后的路径做沙箱包含性校验；逃逸时 `git config --unset core.hooksPath`，让 git 回落到已被护栏覆盖的 `<clone>/.git/hooks`，因此护栏既**不外泄**也**不失效**。新增 `test_push_guard_never_escapes_the_sandbox`（RED 精确复现生产缺陷：护栏被写进源仓）与 `test_push_guard_keeps_an_absolute_path_inside_the_sandbox`（沙箱内绝对路径仍按原样尊重），两者均断言真实 `git push` 被拒。受影响 23 个测试文件回归 **380 passed**。
+
+**遗留（已记录未修）**：`herdr-worker.py:197-205` 仍会把源仓 `core.hooksPath` 原样传播给独立克隆。该传播对相对路径仍有意义（保留项目自定义 hook），对绝对路径则由本次修复在护栏安装阶段失效化；是否应改为「传播时就重定位」属于克隆装配语义的单独决策，未在本轮夹带。
+
+**现场处置**：仅删除主仓泄漏的那一份 `~/HAFlow/.git/hooks/pre-push`（155 字节，内容已记录可原样恢复）；逐个确认 7 个 worker 克隆的护栏均保留（`GUARDED`），沙箱策略未受影响。未使用 `--no-verify` 绕过。

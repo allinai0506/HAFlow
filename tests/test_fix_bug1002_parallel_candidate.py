@@ -22,13 +22,30 @@ def repository(tmp_path):
     return repo, sha
 
 
-@pytest.mark.parametrize('node_id', ['test', 'review'])
-def test_frozen_verifier_spec_uses_owned_branch(node_id):
-    node = dd.normalize_node({'id': node_id})
+@pytest.mark.parametrize('node_id,declared', [
+    ('test', None),
+    ('review', None),
+    # code-craft-v1 declares its gates by role, not by the legacy literal ids.
+    # wf-haflow-1021-01: both cleanroom stations were dispatched without a
+    # candidate_branch and verified the baseline instead of the frozen candidate.
+    ('cleanroom_test', 'test'),
+    ('cleanroom_review', 'test'),
+])
+def test_frozen_verifier_spec_uses_owned_branch(node_id, declared):
+    node = dd.normalize_node({'id': node_id, 'default_task_type': declared})
     spec = dd._dispatch_spec(node, 'requirement', 'goal', [], 'verify-'+node_id,
                              context_branch='herdr/integration-impl', candidate_sha='a'*40)
     assert spec['candidate_sha'] == 'a'*40
     assert 'onto_branch' not in spec
+    assert spec['candidate_branch'] == 'herdr/integration-impl'
+
+
+def test_producer_spec_still_owns_its_integration_branch():
+    node = dd.normalize_node({'id': 'craft', 'default_task_type': 'feat'})
+    spec = dd._dispatch_spec(node, 'requirement', 'goal', [], 'craft-auto',
+                             context_branch='herdr/integration-impl', candidate_sha='a'*40)
+    assert spec['onto_branch'] == 'herdr/integration-impl'
+    assert 'candidate_branch' not in spec
 
 
 def test_two_real_git_verifiers_share_candidate_without_sharing_branch(tmp_path):

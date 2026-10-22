@@ -1,5 +1,6 @@
 """Authorize forward effects against one current business-evidence cohort."""
 from . import recovery_store, state_db, task_checkpoint as checkpoint
+from .node_roles import is_verifier_task, verifier_node_ids
 from .workflow_progress import active_tasks, _hash
 
 
@@ -91,9 +92,10 @@ def business_gate_blockers(store, workflow, config, tasks, node_id=None):
     stage policy; this does not certify their business acceptance.
     """
     nodes = {n['id']: n for n in config.get('nodes') or []}
+    verifier_ids = verifier_node_ids(config)
     if not nodes and any(t.get('workflow_id') == workflow.get('workflow_id')
                          and t.get('completion_protocol') == 'receipt-v1'
-                         and (t.get('node') or t.get('stage')) in {'test', 'review'} for t in tasks):
+                         and is_verifier_task(t) for t in tasks):
         return ['<unknown:configuration>']
     if node_id is None:
         dependencies = set(nodes)
@@ -107,11 +109,11 @@ def business_gate_blockers(store, workflow, config, tasks, node_id=None):
             pending.extend((nodes.get(dependency) or {}).get('depends_on') or [])
     missing, gates = [], []
     current = active_tasks(workflow, tasks)
-    for dependency in sorted(dependencies & {'test', 'review'}):
+    for dependency in sorted(dependencies & verifier_ids):
         verifiers = [t for t in current if (t.get('node') or t.get('stage')) == dependency]
         requires_business = any(t.get('completion_protocol') == 'receipt-v1' for t in current)
         if not verifiers and workflow.get('candidate_sha') and requires_business:
             missing.append('<missing:' + dependency + '>')
         gates.extend(verifiers)
-    missing.extend(business_gates_blockers(store, workflow, gates, dependencies & {'test', 'review'}))
+    missing.extend(business_gates_blockers(store, workflow, gates, dependencies & verifier_ids))
     return sorted(set(missing))

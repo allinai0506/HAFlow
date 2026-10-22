@@ -17,9 +17,11 @@ RESERVATIONS_FILE = ROOT / "agent-reservations.json"
 ROUTER_LOCK_FILE = ROOT / "agent-router.lock"
 
 try:
+    from .node_roles import is_verifier_node_id
     from .projects import workflow_config_for
     from .workflow import find_node
 except ImportError:
+    from herdr.node_roles import is_verifier_node_id
     from herdr.projects import workflow_config_for
     from herdr.workflow import find_node
 
@@ -502,7 +504,7 @@ def _choose_agent_locked(
     # This delivery contract requires independent fresh gates. Reject reuse at
     # routing admission instead of spending work that publication must refuse.
     from .wrapup_delivery import TEMPLATES, is_current_round
-    strict_wrapup = bool(stage in {"test", "review"} and wf_cfg
+    strict_wrapup = bool(is_verifier_node_id(wf_cfg, stage) and wf_cfg
         and wf_cfg.get("name") in TEMPLATES and record.get("candidate_sha")
         and is_current_round(_get_store(), workflow_id, record["candidate_sha"]))
     if strict_wrapup:
@@ -540,9 +542,9 @@ def _choose_agent_locked(
     )
     if isinstance(exclude_stages, str):
         exclude_stages = [exclude_stages]
-    # FR-6.1 default: test/review automatically exclude implementation
+    # FR-6.1 default: a declared verifier automatically excludes implementation
     # agents even without explicit node_policy (fail-closed by default).
-    if not exclude_stages and stage in ("test", "review"):
+    if not exclude_stages and is_verifier_node_id(wf_cfg, stage):
         exclude_stages = ["implementation"]
 
     stage_used_agents = set()
