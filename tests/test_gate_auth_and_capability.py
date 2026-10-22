@@ -702,6 +702,85 @@ class TestCleanroomFindingsRegression:
         }
         assert getattr(handler, "get_operator_token", lambda: None)() == "op_token_123"
 
+    def test_b5_endpoint_force_review_fail_closed_without_operator_token(self, tmp_path, monkeypatch):
+        """B5 endpoint-level: /api/task/force-review (api_task_force_review) must fail-closed when
+        only a hub Authorization Bearer token is present and no operator token is supplied.
+        When a valid operator token IS supplied, the call must succeed.
+
+        This complements test_b5_console_http_server_does_not_inject_hub_token, which tests
+        get_operator_token() in isolation.  Here we verify the full call chain:
+
+        Handler._dispatch_post('/api/task/force-review')
+          → get_operator_token() returns None  (hub Bearer token is NOT forwarded)
+          → api_task_force_review({'task_id': ..., operator_token: None})
+          → authenticate_and_authorize_operator(..., token=None)
+          → OperatorAuthError raised  (fail-closed, B1 / B5)
+        """
+        from console import task_api
+        from herdr.operator_auth import OperatorAuthError
+
+        # ------- setup: an isolated DB with a registered operator token -------
+        db_path = tmp_path / "b5ep_test.db"
+        monkeypatch.setenv("HERDR_STATE_DB", str(db_path))
+
+        store = SQLiteStateStore(db_path)
+        store.save_workflow({
+            "workflow_id": "wf-b5ep",
+            "title": "B5 EP Test",
+            "status": "running",
+            "config": {"nodes": [{"id": "review", "label": "Review"}]},
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        })
+        store.save_task({
+            "task_id": "task-b5ep-1",
+            "workflow_id": "wf-b5ep",
+            "run_id": "run-b5ep",
+            "node": "review",
+            "stage": "review",
+            "status": "working",
+            "stage_verdict": "pending",
+            "agent": "gemini",
+            "version": 1,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        })
+
+        # Register the legitimate operator token in the isolated DB
+        state_db.save_user_token("lead_reviewer", "operator", "op_secret_b5ep_789", db_path=db_path)
+        # Also register a hub token (simulating the experience_hub token that must NOT be used)
+        state_db.save_user_token("local-console-reviewer", "experience_hub", "hub_secret_b5ep", db_path=db_path)
+
+        orig_store = kernel._get_store
+        kernel._get_store = lambda s=None: store
+
+        try:
+            # --- Case 1: Hub Bearer token only — no operator_token in payload ---
+            # Simulates: Handler gets Authorization: Bearer hub_secret_b5ep,
+            # get_operator_token() returns None (hub token is NOT forwarded),
+            # payload reaches api_task_force_review with operator_token=None.
+            payload_no_op_token = {
+                "task_id": "task-b5ep-1",
+                "operator": "lead_reviewer",
+                # operator_token deliberately absent — mimicking hub-only header
+            }
+            monkeypatch.delenv("HERDR_ALLOW_UNAUTHENTICATED_OPERATOR", raising=False)
+            monkeypatch.setenv("HERDR_OPERATOR_AUTH_STRICT", "1")
+            with pytest.raises((RuntimeError, OperatorAuthError), match="凭据|credential|auth|token|missing"):
+                task_api.api_task_force_review(payload_no_op_token)
+
+            # --- Case 2: Valid operator token supplied — must succeed ---
+            payload_with_op_token = {
+                "task_id": "task-b5ep-1",
+                "operator": "lead_reviewer",
+                "operator_token": "op_secret_b5ep_789",
+                "reason": "B5 endpoint regression: valid operator token",
+            }
+            result = task_api.api_task_force_review(payload_with_op_token)
+            assert result.get("status") == "agent_done", f"Expected agent_done with valid operator token, got: {result}"
+        finally:
+            kernel._get_store = orig_store
+
     def test_b6_ontology_and_adr_m12_alignment(self):
         """B6: gate_bypass_policy.yaml must have roles_implemented: false per ADR M-12."""
         import yaml
