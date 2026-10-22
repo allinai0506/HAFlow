@@ -8093,6 +8093,7 @@ pytest -q tests/test_console_controller_cockpit_e2e.py
 | 参数合同用「禁止参数」实现安全 | 用一个太窄的合同换取简单性，代价是合法的服务被静默排除在部署之外，且排除方式是放行不是报错 | 合同从「禁止」改为「校验词表」：声明每个服务允许的 flag，**flag 名校验、参数值逐字保留**（`--port`/`--db-path` 是宿主状态，被改写反而错）。未知 flag 仍 fail-closed |
 | 只迁移 `ProgramArguments` 与 `HERDR_ROOT` | 纳管带 `WorkingDirectory` 的服务时会产生分裂代际：代码从新 release 起、cwd 仍在旧 release——比继续钉死更糟 | 所有 release 作用域字段必须**同批**迁移；断言「脚本路径、`HERDR_ROOT`、`WorkingDirectory` 指向同一 root」。缺失的字段不凭空创建 |
 | 未纳管的钉死服务不可见 | 「没被部署」必须是一条能被机器检出的事实，而不是靠人事后 `ls` 出来 | 部署前枚举 `~/Library/LaunchAgents/com.user.herdr-*.plist`，凡钉在 `releases/<sha>` 且不在 `SCRIPTS` 者，连同落后提交数报错并**拒绝部署**（不写任何 plist）；`--allow-unmanaged <label>` 作为显式豁免 |
+| `set -euo pipefail` 下的命令替换赋值（§192 落地后真机部署当场暴露） | 自检第 189 行 `pid="$(launchctl list \| awk …)"`：pipefail 让 `launchctl` 的瞬时失败变成**赋值语句**的失败，errexit 随即在无 `if` 保护的位置终止整个脚本。实测后果是「部署已成功，但自检既不打印剩余服务、也不说明为何中断，只留一个说不清原因的非零退出」——恰是本节要消灭的静默失效，被部署工具自己踩了一遍。服务从 4 个增到 5 个（含重启一个占端口的进程）扩大了扰动窗口，使原本罕见的竞态变成必现 | 状态查询必须写进条件语境并做**有界重试**；重试耗尽要显式归因（`未能确证其加载代际`）而不是吞成成功；「容忍瞬时失败」与「fail-closed」各需一条测试锁住，前者防静默中断、后者防误报成功 |
 | 把宿主现象直接归因到自己的链路上 | 我曾在 issue 里写「22 个 defunct 疑似 worker 派发未回收子进程」，未按父子归属验证；实测 24 个 defunct 的父进程是 `verge-mihomo`(20)/`agy`(2)/`project_launcher.py`(1)/`aitrust-server`(1)，HAFlow 全部服务 PID 的僵尸子进程数为 0 | 归因前先看 `ps -eo ppid,stat` 的父进程分布并反向核对自身；错误归因要在原地公开更正，并把「本 issue 不是什么」写进新 issue 防止他人去不存在的缺陷里排查 |
 
 ### 验证命令 / 守护测试
@@ -8104,7 +8105,7 @@ python3 -m compileall -q herdr services bin tests
 git diff --check
 ```
 
-证据：`tests/test_service_release.py` 新增 13 项（词表校验通过/拒绝、宿主状态逐字保留、三字段同代际、`WorkingDirectory` 不凭空创建、`--labels` 单一权威、未纳管漂移检出与 workspace 不误报、installer 先拒绝后豁免、带参数服务端到端纳管）；`tests/test_installer_bash_compat.py` 的清单副本删除并改为从 `SCRIPTS` 派生，因此 bash 3.2 兼容矩阵现在真实遍历 5 个服务（含 hub）。用**真机 plist** 在临时 `HOME` 预演 `--no-restart`：hub 的 9 项 argv 全保留、`--db-path` 仍指向 `~/.herdr-controller/experience_hub.db`、三字段同代际、exit 0。同一份未改动的真机 plist 在「改动前清单」下被 `unmanaged_release_plists` 报出 `ad17b85e9a6a`，在「当前清单」下为空——历史案例成为可机检的事实。
+证据：`tests/test_service_release.py` 新增 13 项（词表校验通过/拒绝、宿主状态逐字保留、三字段同代际、`WorkingDirectory` 不凭空创建、`--labels` 单一权威、未纳管漂移检出与 workspace 不误报、installer 先拒绝后豁免、带参数服务端到端纳管）；`tests/test_installer_bash_compat.py` 的清单副本删除并改为从 `SCRIPTS` 派生，因此 bash 3.2 兼容矩阵现在真实遍历 5 个服务（含 hub）；同文件另 2 项注入 `launchctl list` 故障，分别锁住「瞬时失败不得静默中断自检」与「持续失败必须 fail-closed 且逐服务归因」。用**真机 plist** 在临时 `HOME` 预演 `--no-restart`：hub 的 9 项 argv 全保留、`--db-path` 仍指向 `~/.herdr-controller/experience_hub.db`、三字段同代际、exit 0。同一份未改动的真机 plist 在「改动前清单」下被 `unmanaged_release_plists` 报出 `ad17b85e9a6a`，在「当前清单」下为空——历史案例成为可机检的事实。
 
 **未做（需单独授权）**：把线上 experience-hub 切到新 release（改 plist + `bootout`/`bootstrap`）。代码变更后的首次正常部署会自动完成这件事。
 

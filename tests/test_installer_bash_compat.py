@@ -101,3 +101,98 @@ if sys.argv[1:] == ['list']:
         data = plistlib.loads((agents / (label + ".plist")).read_bytes())
         assert data["ProgramArguments"] == ["/usr/bin/python3", str(root / services[label])]
         assert data["EnvironmentVariables"]["HERDR_ROOT"] == str(root)
+
+
+FAKE_LAUNCHCTL = """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['FAKE_LAUNCHCTL_LOG'], 'a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\\n')
+if sys.argv[1:] == ['list']:
+    counter = os.environ['FAKE_LIST_COUNTER']
+    seen = int(open(counter).read()) if os.path.exists(counter) else 0
+    open(counter, 'w').write(str(seen + 1))
+    if seen < int(os.environ.get('FAKE_LIST_FAILURES', '0')):
+        print('5:3: the domain is busy; try again', file=sys.stderr)
+        sys.exit(1)                      # launchd 扰动期的瞬时失败
+    for label in json.loads(os.environ['FAKE_SERVICE_LABELS']):
+        pid = '777'
+        if label == os.environ.get('FAKE_LIST_DASHED'):
+            pid = '-'                    # 已停止的 job：PID 列是 '-'
+        print(pid + ' 0 ' + label)
+"""
+
+
+def run_installer_with_fake_launchd(tmp_path, list_failures="0", dashed=None):
+    """跑真安装脚本，用假 launchctl 注入 `list` 的失败/停止态。"""
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    services = managed_scripts()
+    agents = tmp_path / "Library/LaunchAgents"
+    agents.mkdir(parents=True)
+    for label, relative in services.items():
+        script = tmp_path / "releases/old" / relative
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.touch()
+        (agents / (label + ".plist")).write_bytes(plistlib.dumps({
+            "ProgramArguments": ["/usr/bin/python3", str(script)]}))
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    launchctl = fake_bin / "launchctl"
+    launchctl.write_text(FAKE_LAUNCHCTL)
+    launchctl.chmod(0o755)
+    for name, content in {
+        "sleep": "#!/bin/sh\nexit 0\n",
+        "ps": "#!/bin/sh\nprintf '%s\\n' \"$FAKE_PROCESS_SHA\"\n",
+    }.items():
+        executable = fake_bin / name
+        executable.write_text(content)
+        executable.chmod(0o755)
+    env = dict(os.environ, HOME=str(tmp_path),
+               PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+               FAKE_LAUNCHCTL_LOG=str(tmp_path / "launchctl.jsonl"),
+               FAKE_LIST_COUNTER=str(tmp_path / "list-calls"),
+               FAKE_LIST_FAILURES=list_failures,
+               FAKE_PROCESS_SHA=sha,
+               FAKE_SERVICE_LABELS=json.dumps(list(services)))
+    if dashed:
+        env["FAKE_LIST_DASHED"] = dashed
+    result = subprocess.run(
+        ["/bin/bash", str(ROOT / "scripts/install-herdr-console.sh"), "--sha", sha],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=90,
+    )
+    return sha, services, result
+
+
+def test_transient_launchctl_failure_must_not_abort_selfcheck(tmp_path):
+    """自检的状态查询在 bootout/bootstrap 刚结束时会瞬时失败。
+
+    真机实测（部署 5 个服务）：一次 `launchctl list` 失败就让 `set -euo pipefail`
+    在 pid 赋值处**无提示地**中断脚本 —— 部署其实成功了，但后续服务的结果不再打印，
+    末行「已部署到 release」也缺失，调用方只看到一个说不清原因的非零退出。
+    """
+    sha, services, result = run_installer_with_fake_launchd(tmp_path, list_failures="1")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert ("已部署到 release " + sha[:12]) in output, output
+    for label in services:
+        assert ("✓ " + label) in output, f"{label} 的自检结果因瞬时查询失败而丢失"
+
+
+def test_persistent_launchctl_query_failure_fails_closed(tmp_path):
+    """容忍瞬时失败 ≠ 把查不到说成查得到。"""
+    sha, services, result = run_installer_with_fake_launchd(tmp_path, list_failures="999")
+    assert result.returncode != 0, "launchd 全程查不到状态却报告部署成功"
+    assert "未能确证其加载代际" in result.stderr
+    assert "the domain is busy" in result.stderr, "launchctl 原始报错被丢弃，排障时无信息可看"
+    assert "已部署到 release" not in result.stdout
+
+
+def test_stopped_job_is_reported_not_running(tmp_path):
+    """`launchctl list` 的 PID 列对已停止的 job 是 '-'：不得被当成 pid 报成 ✓。"""
+    stopped = next(iter(managed_scripts()))
+    sha, services, result = run_installer_with_fake_launchd(tmp_path, dashed=stopped)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert ("✗ " + stopped + " 未运行") in output, output
+    for label in services:
+        if label != stopped:
+            assert ("✓ " + label) in output, output

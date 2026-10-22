@@ -186,8 +186,37 @@ done
 sleep 3
 status=0
 for service in ${SNAPSHOT_SERVICES[@]+"${SNAPSHOT_SERVICES[@]}"}; do
-  pid="$(launchctl list | awk -v s="${service}" '$3==s {print $1; exit}')"
-  if [[ -z "${pid}" || "${pid}" == "-" ]]; then
+  # bootout/bootstrap 刚结束时 launchd 仍在扰动：`launchctl list` 可以瞬时失败，
+  # 而 `set -euo pipefail` 会让它在赋值处**无提示地**终止整个自检
+  # （部署已成功，却既不打印剩余服务，也不说明原因）。有界重试并显式归因。
+  pid=""
+  query_failed=0
+  last_error=""
+  for attempt in 1 2 3; do
+    if ! attempt_out="$(launchctl list 2>&1)"; then
+      query_failed=1
+      last_error="${attempt_out}"
+    elif ! attempt_pid="$(printf '%s\n' "${attempt_out}" \
+      | awk -v s="${service}" '$1 ~ /^[0-9]+$/ && $3 == s {print $1; exit}')"; then
+      # 解析同样是命令替换赋值：不加守卫就与本段的原始缺陷只差一行
+      query_failed=1
+      last_error="状态解析失败"
+    else
+      query_failed=0
+      if [[ -n "${attempt_pid}" ]]; then
+        pid="${attempt_pid}"
+        break
+      fi
+    fi
+    [[ "${attempt}" == "3" ]] || sleep 2
+  done
+  if [[ "${query_failed}" == "1" ]]; then
+    echo "  ✗ ${service}: launchctl 状态查询未能确证其加载代际" >&2
+    if [[ -n "${last_error}" ]]; then echo "      launchctl: ${last_error}" >&2; fi
+    status=1
+    continue
+  fi
+  if [[ -z "${pid}" ]]; then
     echo "  ✗ ${service} 未运行" >&2
     status=1
     continue
