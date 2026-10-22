@@ -3491,3 +3491,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 新记两条可复用事实：`HAFlow Test Suite` 只有 `pull_request_target`（无 push 触发）且 job 定义取自 base 分支，故**改 workflow 的 PR 无法在自己的 PR run 里自证**，必须用 `gh workflow run --ref <branch>` 的 `workflow_dispatch`（按分支文件、`mode=full`）验收；`PageEvaluationTimeoutError` 显示存在挂起 >15s 的 evaluate，属第三类独立故障。
 - 仍未修（转 issue，不在本 PR 假装解决）：`<article> intercepts pointer events`（可能是驾驶舱层级/布局被真实用户同样咬到的产品缺陷）与挂起的 `page.evaluate`。禁止用提高超时或 `--reruns` 掩盖。
 - Evidence：`tests/test_console_cockpit_e2e_harness.py`（3 项护栏，逐条反向验证：删除打开等待即 FAIL）、`tests/test_console_controller_cockpit_e2e.py`（本地 14 passed）；`docs/lessons/lessons-learned.md` §191 已按实测重写。
+
+## [2026-10-22] Ops | 部署纳管清单收口到单一权威，未纳管的钉死服务改为拒绝部署
+
+- Updated `docs/operations/service-management.md`：`SCRIPTS`（`herdr/service_release.py`）成为服务纳管清单的唯一权威，部署脚本改由 `python3 -m herdr.service_release --labels` 索取；参数合同从「禁止参数」改为「校验 flag 词表、参数值逐字保留」，`ProgramArguments` / `HERDR_ROOT` / `WorkingDirectory` 必须同批迁移。补入此前未记录的 `com.user.herdr-experience-hub`（`bin/herdr-experience-hub`，端口 8780，独立 SQLite `experience_hub.db`）。
+- 现场事实：该服务的 plist 三处全部钉在 `releases/ad17b85e9a6a`，落后已部署的 `3777ff7fc7ae` 301 个提交，且部署脚本对它零引用。严重性已校正——`git diff ad17b85..3777ff7 -- bin/herdr-experience-hub herdr/experience/` 为空，故属潜在债而非现役故障；缺陷是「未部署」这件事不可被机器检出。
+- 新增部署前门禁：枚举 `~/Library/LaunchAgents/com.user.herdr-*.plist`，凡钉在 `releases/<sha>` 而不在 `SCRIPTS` 者，连同落后提交数报错并拒绝部署（不写任何 plist）；`--allow-unmanaged <label>` 为显式豁免。
+- 自我更正一条公开错误归因：#326 上写的「22 个 defunct 疑似 worker 派发未回收子进程」被父子归属实测推翻（24 个 defunct 的父进程为 `verge-mihomo` 20 / `agy` 2 / `project_launcher.py` 1 / `aitrust-server` 1，HAFlow 全部服务 PID 僵尸子进程数为 0）。HAFlow 自身真实的卫生缺陷另开 #328：`herdr-experience-hub` 只有 `start`、无 `stop`/`status`，10-15 两个 joint 探针进程 `ppid=1` 孤儿化 7 天、数据目录已空仍占 `127.0.0.1:18901/18902`。
+- 旧测试前提失效并已重指向：`test_points_plist_at_the_new_snapshot` 与 `test_kickstart_only_services_are_still_covered` 原断言「标签字面量出现在脚本文本里」，保护的正是该消除的重复；改为断言 `SCRIPTS` 覆盖 + 标签不得硬编码回脚本。`test_installer_bash_compat.py` 自备的第三份清单副本删除，改从 `SCRIPTS` 派生（bash 3.2 矩阵现真实遍历 5 个服务）。
+- Evidence：`tests/test_service_release.py` 新增 13 项（词表接受/拒绝、宿主状态保留、三字段同代际、漂移检出与 workspace 不误报、installer 先拒绝后豁免、带参数服务端到端纳管）；三文件合计 `48 passed, 2 skipped, 11 subtests passed`；用真机 plist 在临时 `HOME` 预演 `--no-restart` 得到 exit 0 且 9 项 argv 全保留；`docs/lessons/lessons-learned.md` §192。
+
