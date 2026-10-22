@@ -8,6 +8,8 @@ inputs:
 - reason
 - operator
 - note（可选）
+- token（可选凭据）
+- credentials_path（可选凭据路径）
 preconditions:
 - gate_bypass_audited
 - review_closure_required_for_wrapup

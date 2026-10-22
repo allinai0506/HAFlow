@@ -359,16 +359,20 @@ def force_pass_gate(
     gate_node_id: str,
     note: str = "human forced pass",
     operator: str = "human",
-    db_path: Optional[Path] = None,
-    conn: Optional[sqlite3.Connection] = None,
-    expected_version: Optional[int] = None,
-    task_id: Optional[str] = None,
-    expected_pane_id: Optional[str] = None,
-    expected_task_versions: Optional[Dict[str, int]] = None,
-) -> Dict[str, Any]:
+    db_path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+    expected_version: int | None = None,
+    task_id: str | None = None,
+    expected_pane_id: str | None = None,
+    expected_task_versions: dict[str, int] | None = None,
+    token: str | None = None,
+    credentials_path: str | None = None,
+    strict_auth: bool | None = None,
+    secret: str | None = None,
+    principal: Any | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     """Atomically check and force-pass a gate node within a single immediate transaction."""
-    from herdr.transitions import validate_operator
-    operator = validate_operator(operator)
     should_close = False
     if conn is None:
         conn = _facade().get_db_connection(db_path)
@@ -394,7 +398,7 @@ def force_pass_gate(
             if gate_node_id in (t.get("node"), t.get("stage")) and t.get("status") != "superseded"
         ]
 
-        tasks_to_update = []
+        target_task = None
         if task_id:
             target_task = next((t for t in matching_tasks if t.get("task_id") == task_id), None)
             if not target_task:
@@ -405,6 +409,47 @@ def force_pass_gate(
                     raise RuntimeError(f"任务 {task_id} 已被替换或作废，请刷新页面")
                 t_node = any_t.get("node") or any_t.get("stage")
                 raise RuntimeError(f"任务 {task_id} 属于节点 {t_node}，与目标门禁节点 {gate_node_id} 不匹配")
+        elif matching_tasks:
+            for mt in matching_tasks:
+                m_agent = str(mt.get("agent") or "").strip().lower()
+                op_name = operator.operator_id if hasattr(operator, "operator_id") else str(operator or "")
+                if m_agent and op_name.strip().lower() == m_agent:
+                    from herdr.operator_auth import OperatorImpersonationError
+                    raise OperatorImpersonationError(
+                        "the operator must be independent of the task worker; agent cannot bypass its own gate"
+                    )
+
+        from herdr.operator_auth import (
+            OperatorPrincipal,
+            authenticate_and_authorize_operator,
+        )
+        if principal is None and isinstance(operator, OperatorPrincipal):
+            principal = operator
+
+        if principal is None:
+            principal = authenticate_and_authorize_operator(
+                operator_id=operator,
+                action="force_pass_gate",
+                token=token,
+                credentials_path=credentials_path,
+                task=target_task,
+                db_path=db_path,
+                strict_auth=strict_auth,
+                secret=secret,
+            )
+            operator = principal.operator_id
+        else:
+            operator = principal.operator_id
+            if target_task:
+                t_agent = str(target_task.get("agent") or "").strip().lower()
+                if t_agent and operator.strip().lower() == t_agent:
+                    from herdr.operator_auth import OperatorImpersonationError
+                    raise OperatorImpersonationError(
+                        "the operator must be independent of the task worker; agent cannot bypass its own gate"
+                    )
+
+        tasks_to_update = []
+        if task_id:
 
             if expected_pane_id is not None:
                 cur_pane = str(target_task.get("pane_id") or "").strip()
@@ -505,6 +550,9 @@ def force_pass_gate(
             "verdict": "pass",
             "note": note,
             "operator": operator,
+            "role": principal.role,
+            "authenticated": principal.authenticated,
+            "auth_method": principal.auth_method,
             "timestamp": now,
         }
         if task_id:

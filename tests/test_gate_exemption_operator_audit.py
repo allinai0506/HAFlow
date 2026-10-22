@@ -24,9 +24,12 @@ import time
 import unittest
 from pathlib import Path
 
-from herdr import direct_dispatch, kernel, state_db
+from herdr import kernel, state_db
+from herdr.operator_auth import issue_operator_hmac_token
 from herdr.state_store import SQLiteStateStore
 from herdr.transitions import InvalidOperatorError, validate_operator
+
+os.environ.setdefault("HERDR_OPERATOR_SIGNING_SECRET", "sc010_test_signing_secret_32bytes_hex_valid")
 
 
 class TestOperatorValidationPure(unittest.TestCase):
@@ -219,6 +222,7 @@ class TestKernelAndStateDBOperatorAudit(unittest.TestCase):
     def test_bypass_task_gate_accepts_valid_operator(self):
         tid = "task-bypass-op-ok"
         self._seed_task(tid)
+        tok = issue_operator_hmac_token("lead_alice")
 
         res = kernel.bypass_task_gate(
             tid,
@@ -226,6 +230,7 @@ class TestKernelAndStateDBOperatorAudit(unittest.TestCase):
             operator="lead_alice",
             note="Ticket SEC-404",
             store=self.store,
+            token=tok,
         )
         self.assertEqual(res.get("operator"), "lead_alice")
         self.assertEqual(res.get("status"), "completed")
@@ -266,6 +271,7 @@ class TestKernelAndStateDBOperatorAudit(unittest.TestCase):
     def test_force_pass_gate_accepts_valid_operator(self):
         tid = "task-force-op-ok"
         self._seed_task(tid)
+        tok = issue_operator_hmac_token("security_auditor", role="admin")
 
         res = kernel.force_pass_gate(
             self.workflow_id,
@@ -273,6 +279,7 @@ class TestKernelAndStateDBOperatorAudit(unittest.TestCase):
             note="Manual force pass by security auditor",
             operator="security_auditor",
             store=self.store,
+            token=tok,
         )
         self.assertTrue(res.get("ok"))
         self.assertIn(tid, res.get("updated_tasks", []))
@@ -341,14 +348,16 @@ class TestConsoleOperatorPolicyAudit(unittest.TestCase):
                 self.assertIn("无效的操作人标识", str(cm.exception))
 
         # 2. Omitted operator safely defaults to 'human'
-        omitted_payload = dict(base_payload)
+        tok_human = issue_operator_hmac_token("human")
+        omitted_payload = dict(base_payload, operator_token=tok_human)
         gate, reason, op = _validate_force_pass_params(omitted_payload, self.workflow_id, wf=self.wf_dict)
-        self.assertEqual(op, "human")
+        self.assertEqual(str(op), "human")
 
         # 3. Valid operator passes through
-        valid_payload = dict(base_payload, operator="lead_bob")
+        tok_bob = issue_operator_hmac_token("lead_bob")
+        valid_payload = dict(base_payload, operator="lead_bob", operator_token=tok_bob)
         gate, reason, op = _validate_force_pass_params(valid_payload, self.workflow_id, wf=self.wf_dict)
-        self.assertEqual(op, "lead_bob")
+        self.assertEqual(str(op), "lead_bob")
 
     def test_api_task_force_review_operator_validation(self):
         from console.task_api import api_task_force_review
@@ -388,9 +397,11 @@ class TestConsoleOperatorPolicyAudit(unittest.TestCase):
                     self.assertEqual(self.store.get_task(tid)["status"], "working")
 
             # 2. Valid operator succeeds and is recorded
+            tok_carol = issue_operator_hmac_token("lead_carol")
             res = api_task_force_review({
                 "task_id": tid,
                 "operator": "lead_carol",
+                "operator_token": tok_carol,
                 "reason": "Legitimate force review by lead",
                 "expected_version": 1,
             })
@@ -453,6 +464,8 @@ class TestCLIOperatorAudit(unittest.TestCase):
             HERDR_STATE_DB=str(self.db_path),
             TASKS_FILE=str(self.db_path.parent / "tasks.json"),
             WORKFLOWS_FILE=str(self.db_path.parent / "workflows.json"),
+            HERDR_OPERATOR_SIGNING_SECRET="sc010_test_signing_secret_32bytes_hex_valid",
+            PYTEST_CURRENT_TEST="1",
         )
 
     def test_herdr_task_bypass_gate_cli_rejects_invalid_operator(self):
@@ -479,6 +492,7 @@ class TestCLIOperatorAudit(unittest.TestCase):
                 self.assertEqual(task["status"], "blocked")
 
     def test_herdr_task_bypass_gate_cli_accepts_valid_operator(self):
+        tok_alice = issue_operator_hmac_token("lead_alice")
         proc = subprocess.run(
             [
                 "python3",
@@ -489,6 +503,8 @@ class TestCLIOperatorAudit(unittest.TestCase):
                 "Emergency fix bypass audited",
                 "--operator",
                 "lead_alice",
+                "--token",
+                tok_alice,
                 "--json",
             ],
             env=self._env(),
@@ -527,6 +543,7 @@ class TestCLIOperatorAudit(unittest.TestCase):
                 self.assertNotEqual(proc.returncode, 0, f"Expected non-zero exit code for operator '{op}'")
 
     def test_herdr_factory_force_pass_cli_accepts_valid_operator(self):
+        tok_auditor = issue_operator_hmac_token("security_auditor", role="admin")
         proc = subprocess.run(
             [
                 "python3",
@@ -538,6 +555,8 @@ class TestCLIOperatorAudit(unittest.TestCase):
                 "Manual force pass audited",
                 "--operator",
                 "security_auditor",
+                "--token",
+                tok_auditor,
             ],
             env=self._env(),
             capture_output=True,
