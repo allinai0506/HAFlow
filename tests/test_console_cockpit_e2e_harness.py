@@ -76,3 +76,19 @@ def test_prelude_injects_the_timeout_once():
     assert text.count("const ACTION_TIMEOUT=") == 1, (
         "the timeout must reach each browser subprocess through the shared prelude"
     )
+
+
+def test_modal_open_is_awaited_before_the_reason_field_is_filled():
+    """The modal opens asynchronously after Enter.
+
+    The first CI run after loadgroup failed a *different* way --
+    `page.fill: Selector #cockpitReason matched 0 elements` -- because the
+    journey filled the reason field without waiting for the modal. Serialization
+    and action budgets cannot cover that; the wait must be explicit and
+    symmetric with the close-wait that already followed the confirm click.
+    """
+    text = source()
+    press = re.search(r"press\([^\n]*'Enter'[^\n]*\);\n(\s*)await page\.waitForFunction\(\(\)=>document\.getElementById\('modal'\)\.classList\.contains\('open'\)\);", text)
+    assert press, "no explicit wait for the modal to open after Enter"
+    close = re.search(r"waitForFunction\(\(\)=>!document\.getElementById\('modal'\)\.classList\.contains\('open'\)\)", text)
+    assert close, "the matching wait for the modal to close went missing"

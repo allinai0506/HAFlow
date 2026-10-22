@@ -159,6 +159,7 @@ def open_cockpit(fixture, wid="wf-e2e"):
 def confirm_action(fixture, aid, *, instruction=None, reason="人工核查当前身份和证据"):
     fixture.browser(f"""
         await page.press('loc=css:[data-action-id="{aid}"] button','Enter',{{timeout:ACTION_TIMEOUT}});
+        await page.waitForFunction(()=>document.getElementById('modal').classList.contains('open'));
         {f'await page.fill("#cockpitInstruction",{json.dumps(instruction)},{{timeout:ACTION_TIMEOUT}});' if instruction is not None else ''}
         await page.fill('#cockpitReason',{json.dumps(reason)},{{timeout:ACTION_TIMEOUT}});
         await page.click('#cockpitActionConfirm',{{timeout:ACTION_TIMEOUT}});
