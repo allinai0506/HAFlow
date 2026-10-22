@@ -35,9 +35,18 @@ def execute_workflow_recovery(ports, operation, owner):
     targets = [by_id.get(tid) for tid in target_ids or []]
     if not targets or any(t is None for t in targets):
         return 'waiting_human', {'reason': 'recovery_target_unknown'}
+    if payload.get('retry_node') == 'wrapup':
+        resolved_gate_nodes = sorted({
+            n['id'] for n in config.get('nodes') or []
+            if n['id'] != 'wrapup' and (n['id'] in (payload.get('gate_nodes') or []) or n['id'] in {'test', 'review', 'acceptance'})
+        })
+    else:
+        resolved_gate_nodes = sorted({
+            n['id'] for n in config.get('nodes') or []
+            if n['id'] != 'wrapup' and (ports.resolve_gate_config(n, n['id']) or {}).get('retry_node') == payload.get('retry_node')
+        })
     details = {'execution_id': workflow.get('execution_id'), 'successor_ids': [], 'rework_ids': [], 'target_runs': {}, 'source_runs': {}, 'repair_map': {}, 'rework_requests': {},
-               'gate_nodes': sorted({n['id'] for n in config.get('nodes') or []
-                   if n['id'] != 'wrapup' and (ports.resolve_gate_config(n, n['id']) or {}).get('retry_node') == payload.get('retry_node')})}
+               'gate_nodes': resolved_gate_nodes}
     if verifying:
         details.update(operation['detail'])
     details['gate_nodes'] = [gate for gate in details['gate_nodes'] if gate != 'wrapup']
@@ -140,10 +149,10 @@ def execute_workflow_recovery(ports, operation, owner):
             request_id = 'recovery:' + ports.uuid.uuid4().hex
             details['rework_requests'][tid] = request_id
             step('rework_started')
-            ok, _ = ports._rework_retry_task(task, '+'.join(payload['gate_nodes']), request_id=request_id, failure_facts=payload.get('facts') or [])
+            ok, err = ports._rework_retry_task(task, '+'.join(payload['gate_nodes']), request_id=request_id, failure_facts=payload.get('facts') or [])
             fresh = store.get_task(tid) or {}
             if not ok or not has_confirmed_rework(store, fresh, request_id):
-                return 'waiting_human', {'reason': 'rework_delivery_unconfirmed', **details}
+                return 'waiting_human', {'reason': 'rework_delivery_unconfirmed', 'rework_error': err, **details}
             details['repair_map'][tid] = {'kind':'rework', 'task_id':tid,
                 'run_id':task.get('run_id'), 'source_run_id':task.get('run_id'),
                 'request_id':request_id, 'completion_epoch':fresh.get('completion_epoch'),
@@ -159,10 +168,17 @@ def execute_workflow_recovery(ports, operation, owner):
     if verifying and workflow.get('candidate_sha') != payload.get('candidate_sha'):
         return 'awaiting_result', {'step': 'awaiting_new_candidate', **details}
     step('gates_invalidating')
+    confirmed_targets = set(details.get('rework_ids') or []) | {
+        entry['task_id'] for entry in (details.get('repair_map') or {}).values()
+        if isinstance(entry, dict) and entry.get('task_id')
+    } | set(details.get('successor_ids') or [])
     for gate in payload['gate_nodes']:
         if gate in details.get('invalidated_gate_nodes', []):
             continue
-        ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None)
+        try:
+            ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None, preserve_task_ids=confirmed_targets)
+        except TypeError:
+            ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None)
         details.setdefault('invalidated_gate_nodes', []).append(gate)
         step('gate_invalidated', validate=False)
     remaining = [t for t in store.list_tasks(workflow_id=wid) if t.get('status') != 'superseded'
@@ -181,10 +197,10 @@ def next_recovery_task_id(ports, task_id, tasks):
         next_id = next_replacement_id(next_id)
     return next_id
 
-def check_workflow_recovery(ports, workflow_id):
+def check_workflow_recovery(ports, workflow_id, now=None):
     ports.reconcile_node_dispatches(workflow_id, discover=False)
     from herdr.workflow_recovery import drive_recovery
-    return drive_recovery(ports._get_store(), workflow_id, ports.execute_workflow_recovery)
+    return drive_recovery(ports._get_store(), workflow_id, ports.execute_workflow_recovery, now=now)
 
 
 DEPENDENCIES = {'execute_workflow_recovery': ('REWORKABLE_STATUSES', 'TASK_MANAGER', '_get_store',

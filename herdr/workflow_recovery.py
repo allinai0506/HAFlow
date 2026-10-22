@@ -129,7 +129,10 @@ def result_status(operation, workflow, tasks, acceptance=None):
     if any(t.get('status') in {'failed', 'blocked', 'interrupted'} or t.get('stage_verdict') == 'blocked'
            for t in targets):
         return 'waiting_human', {'reason': 'recovery_successor_failed'}
-    if any(t.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'} for t in targets):
+    candidate = workflow.get('candidate_sha')
+    if any(t.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}
+           and not (t.get('node') == 'wrapup' and (t.get('integrated_commit') or t.get('commit')) == candidate)
+           for t in targets):
         return None
     if payload.get('kind') in {'finalize', 'delivery'}:
         if all(not t.get('finalize_escalated') and t.get('status') in {'integrated', 'cleanup_ready', 'cleaned'} for t in targets):

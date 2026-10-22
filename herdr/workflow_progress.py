@@ -60,6 +60,87 @@ def _gate(nodes, node_id):
     return _DEFAULT_GATES.get(node_id)
 
 
+def candidate_responsible_source(workflow, tasks, candidate_sha):
+    """Identify the legitimate candidate producer node and task(s).
+
+    Returns (source_node, target_task_ids).
+    When the candidate is produced by wrapup:
+      returns ('wrapup', [wrapup_task_id])
+    When the candidate is produced by implementation:
+      returns ('implementation', [impl_task_ids...])
+    Otherwise returns (None, []).
+    """
+    if not candidate_sha or not isinstance(candidate_sha, str):
+        return None, []
+    if not re.fullmatch(r'[0-9a-fA-F]{40}', candidate_sha):
+        return None, []
+
+    wid = workflow.get('workflow_id')
+    eid = workflow.get('execution_id')
+
+    # 1. Check wrapup producer
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        if wid and task.get('workflow_id') not in (None, '', wid):
+            continue
+        if eid and task.get('execution_id') != eid:
+            continue
+        if (task.get('node') or task.get('stage')) != 'wrapup':
+            continue
+        if task.get('status') == 'superseded' or task.get('superseded_by'):
+            continue
+        if not task.get('run_id'):
+            continue
+        delivery = task.get('wrapup_delivery') or {}
+        matches_candidate = (
+            task.get('integrated_commit') == candidate_sha
+            or delivery.get('integrated_sha') == candidate_sha
+            or task.get('commit') == candidate_sha
+        )
+        if matches_candidate:
+            if delivery:
+                if eid and delivery.get('execution_id') != eid:
+                    continue
+                if delivery.get('run_id') != task.get('run_id'):
+                    continue
+            return 'wrapup', [task['task_id']]
+
+    # 2. Check implementation producer
+    impl_targets = []
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        if wid and task.get('workflow_id') not in (None, '', wid):
+            continue
+        if eid and task.get('execution_id') != eid:
+            continue
+        if (task.get('node') or task.get('stage')) != 'implementation':
+            continue
+        if task.get('status') == 'superseded' or task.get('superseded_by'):
+            continue
+        if not task.get('run_id'):
+            continue
+        matches_candidate = (
+            task.get('commit') == candidate_sha
+            or task.get('integrated_commit') == candidate_sha
+        )
+        if matches_candidate:
+            impl_targets.append(task['task_id'])
+    if impl_targets:
+        return 'implementation', sorted(impl_targets)
+
+    # 3. Check workflow snapshot candidate_source_node
+    if workflow.get('candidate_source_node') == 'wrapup' and workflow.get('candidate_sha') == candidate_sha:
+        for task in tasks or []:
+            if isinstance(task, dict) and (task.get('node') or task.get('stage')) == 'wrapup':
+                if (not wid or task.get('workflow_id') in (None, '', wid)) and (not eid or task.get('execution_id') == eid):
+                    if task.get('status') != 'superseded' and not task.get('superseded_by') and task.get('run_id'):
+                        return 'wrapup', [task['task_id']]
+
+    return None, []
+
+
 def gate_retry_node(config, node_id):
     """Public gate accessor: the node a gate retries ('' when not a gate).
 
@@ -115,8 +196,17 @@ def assess_workflow(workflow, config, tasks):
         node_id = task.get('node') or task.get('stage')
         kind = ('delivery' if task.get('finalize_escalate_reason') == 'delivery_incomplete'
                 and task.get('delivery_failure') else 'finalize' if task.get('finalize_escalated') else 'fix_loop')
-        retry = node_id if kind in {'finalize', 'delivery'} else _gate(nodes, node_id)
-        key = (kind, retry, (task.get('commit') or task.get('candidate_sha')))
+        candidate = (task.get('commit') or task.get('candidate_sha'))
+        if kind in {'finalize', 'delivery'}:
+            retry = node_id
+        else:
+            gate_target = _gate(nodes, node_id)
+            if gate_target is not None:
+                source_node, _ = candidate_responsible_source(workflow, current, candidate)
+                retry = source_node or gate_target
+            else:
+                retry = None
+        key = (kind, retry, candidate)
         groups.setdefault(key, []).append(task)
     obligations = []
     for (kind, retry, candidate), failed in groups.items():
@@ -125,9 +215,14 @@ def assess_workflow(workflow, config, tasks):
             affected.update(task.get('affected_task_ids') or [])
             affected.update(task.get('stage_verdict_affected_task_ids') or [])
         if not affected:
-            affected.update(task['task_id'] for task in current
-                            if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
-                            and (task.get('commit') or task.get('candidate_sha')) == candidate)
+            source_node, source_targets = candidate_responsible_source(workflow, current, candidate)
+            if source_node == retry and source_targets:
+                affected.update(source_targets)
+            else:
+                affected.update(task['task_id'] for task in current
+                                if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
+                                and (task.get('commit') or task.get('candidate_sha')
+                                     or (task.get('wrapup_delivery') or {}).get('integrated_sha')) == candidate)
         facts = sorted(failed, key=lambda task: str(task.get('task_id') or ''))
         affected_facts = [task for task in current if task.get('task_id') in affected and task not in facts]
         if kind == 'delivery':
@@ -147,8 +242,13 @@ def assess_workflow(workflow, config, tasks):
             reason = 'workflow_inactive'
         if reason is None and kind == 'fix_loop':
             from .node_capacity import launch_capacity_error, node_usage
-            verifiers = [n for n in nodes.values() if n.get('id') != 'wrapup'
-                         and _gate(nodes, n.get('id')) == retry]
+            if retry == 'wrapup':
+                verifiers = [n for n in nodes.values() if n.get('id') != 'wrapup'
+                             and (n.get('id') in {t.get('node') or t.get('stage') for t in failed}
+                                  or n.get('id') in {'test', 'review', 'acceptance'})]
+            else:
+                verifiers = [n for n in nodes.values() if n.get('id') != 'wrapup'
+                             and _gate(nodes, n.get('id')) == retry]
             if any(launch_capacity_error(node_usage(n, tasks, workflow.get('workflow_id')))
                    for n in verifiers):
                 reason = 'verifier_budget_exhausted'

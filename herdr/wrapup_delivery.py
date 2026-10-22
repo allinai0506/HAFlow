@@ -80,6 +80,99 @@ def has_worktree_output(task):
     )
 
 
+def _find_active_candidate_recovery(store, task, workflow, parent, prior, note):
+    """Admit a failed wrapup candidate Y only when entering legitimate recovery for Z.
+
+    Checks:
+    1. Lineage: this wrapup task produced and integrated parent Y (prior['integrated_sha'] == parent).
+    2. Certified origin: wrapup lineage originally derived from certified X across recovery rounds.
+    3. Active recovery: an active fix_loop recovery operation for parent Y exists in workflow_recovery_operations.
+    4. Confirmed repair authorization: this wrapup task is an authorized repair target in the recovery operation.
+    5. Confirmed rework delivery: rework command has been verified as delivered to task.
+    6. Real failure facts exist: blocked gate on parent Y.
+    7. Valid task identity: execution_id and run_id match workflow and prior.
+    """
+    if not prior or prior.get("phase") != "integrated":
+        return None
+    if prior.get("integrated_sha") != parent or task.get("integrated_commit") != parent:
+        return None
+    from .delivery_record import _body_value
+    certified_sha = _body_value(note, "candidate_sha") if note else None
+    if not certified_sha:
+        return None
+    origin_ok = (
+        prior.get("certified_sha") == certified_sha
+        or prior.get("parent_sha") == certified_sha
+        or task.get("candidate_sha") == certified_sha
+    )
+    if not origin_ok:
+        return None
+    from .pr_delivery import _git
+    try:
+        _git(task["clone_path"], "merge-base", "--is-ancestor", certified_sha, parent)
+    except Exception:
+        return None
+    if (
+        prior.get("run_id") != task.get("run_id")
+        or prior.get("execution_id") != workflow.get("execution_id")
+        or task.get("execution_id") != workflow.get("execution_id")
+        or task.get("superseded_by")
+    ):
+        return None
+    if not task.get("integration_ref"):
+        return None
+
+    fresh_task = store.get_task(task["task_id"]) if hasattr(store, "get_task") else task
+    active_task = fresh_task or task
+    if active_task.get("status") not in ACTIVE:
+        return None
+
+    from .recovery_successor import has_confirmed_rework
+
+    # Query active recovery operations for workflow
+    conn = state_db.get_readonly_db_connection(store.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM workflow_recovery_operations WHERE workflow_id=? AND status IN ('awaiting_result', 'running', 'pending') ORDER BY id DESC",
+            (task["workflow_id"],),
+        ).fetchall()
+        for row in rows:
+            op_payload = json.loads(row["payload_json"] or "{}")
+            op_detail = json.loads(row["detail_json"] or "{}")
+            if op_payload.get("kind") != "fix_loop":
+                continue
+            if op_payload.get("candidate_sha") != parent:
+                continue
+            # Real failure facts
+            facts = op_payload.get("facts") or []
+            if not any(
+                f.get("stage_verdict") == "blocked" or f.get("blocker")
+                for f in facts
+            ):
+                continue
+            # Authorized target
+            tid = task["task_id"]
+            authorized = (
+                tid in (op_payload.get("affected_task_ids") or [])
+                or tid in (op_detail.get("rework_ids") or [])
+                or tid in (op_detail.get("repair_map") or {})
+            )
+            if not authorized:
+                continue
+            expected_request = (
+                (op_detail.get("repair_map") or {}).get(tid, {}).get("request_id")
+                or (op_detail.get("rework_requests") or {}).get(tid)
+            )
+            if not expected_request:
+                continue
+            if not has_confirmed_rework(store, active_task, expected_request):
+                continue
+            return dict(row, payload=op_payload, detail=op_detail)
+        return None
+    finally:
+        conn.close()
+
+
 def begin(store, task):
     """Pin parent episode before Git effects; repeat registration resumes it."""
     from .pr_delivery import _git, _publication
@@ -126,19 +219,24 @@ def begin(store, task):
     notes = wd.load_notes(task["workflow_id"])
     note = select_effective_delivery(wd.annotate_notes(notes))
     parent = workflow.get("candidate_sha")
-    if not note or _body_value(note, "candidate_sha") != parent:
-        raise ValueError("wrapup parent has no effective certified delivery")
-    for publisher in tasks:
-        if not publisher.get("integration_ref"):
-            continue
-        try:
-            certified = _publication(publisher, notes, store)[0]
-        except ValueError:
-            continue
-        if certified == parent:
-            break
+    has_certified_parent = bool(note and _body_value(note, "candidate_sha") == parent)
+    recovery_op = None
+    if not has_certified_parent:
+        recovery_op = _find_active_candidate_recovery(store, task, workflow, parent, prior, note)
+        if not recovery_op:
+            raise ValueError("wrapup parent has no effective certified delivery")
     else:
-        raise ValueError("wrapup parent has no integrated certified delivery")
+        for publisher in tasks:
+            if not publisher.get("integration_ref"):
+                continue
+            try:
+                certified = _publication(publisher, notes, store)[0]
+            except ValueError:
+                continue
+            if certified == parent:
+                break
+        else:
+            raise ValueError("wrapup parent has no integrated certified delivery")
     if not parent or not workflow.get("candidate_episode_id"):
         raise ValueError("wrapup parent candidate unknown")
     if head == parent and not has_worktree_output(task):
@@ -147,6 +245,7 @@ def begin(store, task):
     round_number = int(prior.get("round") or 0) + 1
     if round_number > 3:
         raise ValueError("wrapup candidate update budget exhausted")
+    certified_sha = _body_value(note, "candidate_sha") if note else None
     delivery = {
         "phase": "registered",
         "run_id": task["run_id"],
@@ -154,6 +253,8 @@ def begin(store, task):
         "parent_sha": parent,
         "parent_episode_id": workflow["candidate_episode_id"],
         "round": round_number,
+        **({"certified_sha": certified_sha} if certified_sha else {}),
+        **({"recovery_operation_id": recovery_op["id"]} if recovery_op else {}),
     }
     return _write(
         store,
