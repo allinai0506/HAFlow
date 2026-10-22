@@ -73,6 +73,13 @@ def test_open_cockpit_waits_for_decision_data():
     assert "state.decisionData!==undefined" in text, "open_cockpit must await decisionData settlement"
 
 
+def test_return_from_controller_cockpit_is_awaited_before_canvas_click():
+    """Returning from controller cockpit must wait for flowWrap display before clicking canvas."""
+    text = source()
+    assert "returnFromControllerCockpit" in text
+    assert "state.workflowId!=='__ctl__'&&document.getElementById('flowWrap')?.style.display==='flex'" in text
+
+
 def test_collect_cockpit_failure_diagnostics_handles_missing_page_or_binary():
     from tests.test_console_controller_cockpit_e2e import collect_cockpit_failure_diagnostics
     assert collect_cockpit_failure_diagnostics(None, "p1", "await page.click('x')", None) == ""

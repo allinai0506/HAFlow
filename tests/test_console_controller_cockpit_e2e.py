@@ -36,7 +36,7 @@ SPACE = f"HAFlow Controller Cockpit Task 6 20261021 process {os.getpid()}"
 def collect_cockpit_failure_diagnostics(binary, page_label, script, result):
     if page_label is None or not binary:
         return ""
-    selectors = re.findall(r"(?:click|press|fill|waitForFunction|querySelector)\(['\"]([^'\"]+)['\"]", script)
+    selectors = [m.group("sel") for m in re.finditer(r"(?:click|press|fill|waitForFunction|querySelector)\(\s*(?P<q>['\"])(?P<sel>.*?)(?P=q)", script)]
     selectors_json = json.dumps(selectors)
     diag_script = f"""
     const task=await taskSpace({json.dumps(SPACE)});
@@ -330,6 +330,7 @@ def test_canvas_deeplink_and_responsive_cockpit(cockpit):
     open_cockpit(cockpit)
     out = cockpit.browser("""
         await page.evaluate(()=>returnFromControllerCockpit());
+        await page.waitForFunction(()=>state.workflowId!=='__ctl__'&&document.getElementById('flowWrap')?.style.display==='flex');
         await page.click('loc=css:.x6-node[data-cell-id="gate"]');
         await page.waitForFunction(()=>state.flowSelectedNodeId==='gate'&&state.selectedTaskId==='blocked');
         await page.keyboard.press('Escape');
