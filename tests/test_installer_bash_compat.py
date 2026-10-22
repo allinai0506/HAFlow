@@ -112,6 +112,7 @@ if sys.argv[1:] == ['list']:
     seen = int(open(counter).read()) if os.path.exists(counter) else 0
     open(counter, 'w').write(str(seen + 1))
     if seen < int(os.environ.get('FAKE_LIST_FAILURES', '0')):
+        print('5:3: the domain is busy; try again', file=sys.stderr)
         sys.exit(1)                      # launchd 扰动期的瞬时失败
     for label in json.loads(os.environ['FAKE_SERVICE_LABELS']):
         print('777 0 ' + label)
@@ -204,4 +205,5 @@ def test_persistent_launchctl_query_failure_fails_closed(tmp_path):
     )
     assert result.returncode != 0, "launchd 全程查不到状态却报告部署成功"
     assert "无法证明其加载代际" in result.stderr
+    assert "the domain is busy" in result.stderr, "launchctl 原始报错被丢弃，排障时无信息可看"
     assert "已部署到 release" not in result.stdout

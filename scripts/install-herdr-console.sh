@@ -191,21 +191,26 @@ for service in ${SNAPSHOT_SERVICES[@]+"${SNAPSHOT_SERVICES[@]}"}; do
   # （部署已成功，却既不打印剩余服务，也不说明原因）。有界重试并显式归因。
   pid=""
   query_failed=0
+  last_error=""
   for attempt in 1 2 3; do
-    if ! attempt_pid="$(launchctl list 2>/dev/null | awk -v s="${service}" '$3==s {print $1; exit}')"; then
+    if ! attempt_out="$(launchctl list 2>&1)"; then
       query_failed=1
-      sleep 2
+      last_error="${attempt_out}"
+      [[ "${attempt}" == "3" ]] || sleep 2
       continue
     fi
     query_failed=0
+    attempt_pid="$(printf '%s\n' "${attempt_out}" \
+      | awk -v s="${service}" '$3==s {print $1; exit}')"
     if [[ -n "${attempt_pid}" && "${attempt_pid}" != "-" ]]; then
       pid="${attempt_pid}"
       break
     fi
-    sleep 2
+    [[ "${attempt}" == "3" ]] || sleep 2
   done
   if [[ "${query_failed}" == "1" ]]; then
     echo "  ✗ ${service}: launchctl 状态查询连续失败，无法证明其加载代际" >&2
+    if [[ -n "${last_error}" ]]; then echo "      launchctl: ${last_error}" >&2; fi
     status=1
     continue
   fi
