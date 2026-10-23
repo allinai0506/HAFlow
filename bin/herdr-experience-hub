@@ -550,16 +550,8 @@ def _cmd_status(args) -> int:
 def _reprobe_listeners(selector, port: int, *, ignore_pids=()):
     outcome = lifecycle.run_lsof(port)
     if outcome.kind == "unverifiable":
-        # Never report success on an unverifiable probe.
-        return (
-            lifecycle.Listener(
-                pid=-1,
-                host="unknown",
-                port=port,
-                wildcard=False,
-                is_hub=None,
-            ),
-        )
+        # Never report success on an unverifiable probe; do not fabricate evidence.
+        return None
     if outcome.kind == "empty":
         return ()
     selected = lifecycle.select_listeners(outcome.listeners, selector.host)
@@ -679,7 +671,7 @@ def _cmd_stop(args) -> int:
         probe_listeners=lambda: _reprobe_listeners(
             selector, collection.port, ignore_pids=ignored_pids
         ),
-        pid_alive=lambda pid: lifecycle.run_ps(pid).status == "alive",
+        pid_alive=lambda pid: lifecycle.run_ps(pid).status,
         manager_for_pid=lambda pid: lifecycle.run_launchctl(pid).manager,
     )
 

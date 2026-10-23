@@ -1254,8 +1254,8 @@ def stop_endpoint(
     *,
     target_pid: int,
     verify: Callable[[], IdentityCheck],
-    probe_listeners: Callable[[], Sequence[Listener]],
-    pid_alive: Callable[[int], bool],
+    probe_listeners: Callable[[], Sequence[Listener] | None],
+    pid_alive: Callable[[int], bool | str],
     manager_for_pid: Callable[[int], str] | None = None,
     send_signal: Callable[[int, int], None] | None = None,
     timeout_seconds: float = STOP_TIMEOUT_SECONDS,
@@ -1296,8 +1296,40 @@ def stop_endpoint(
     deadline = clock() + max(0.0, float(timeout_seconds))
     empty_streak = 0
     while True:
-        listeners = tuple(probe_listeners())
-        alive = bool(pid_alive(target_pid))
+        raw_listeners = probe_listeners()
+        if raw_listeners is None or getattr(raw_listeners, "kind", None) == "unverifiable":
+            return StopOutcome(
+                exit_code=EXIT_UNVERIFIABLE,
+                state=STATE_UNVERIFIABLE,
+                message="endpoint listener probe cannot be verified; registry preserved",
+                signaled=True,
+                reoccupied=False,
+                timed_out=False,
+            )
+
+        alive_status = pid_alive(target_pid)
+        if alive_status == "unverifiable":
+            return StopOutcome(
+                exit_code=EXIT_UNVERIFIABLE,
+                state=STATE_UNVERIFIABLE,
+                message="process alive status cannot be verified; registry preserved",
+                signaled=True,
+                reoccupied=False,
+                timed_out=False,
+            )
+
+        listeners = tuple(raw_listeners)
+        if any(listener.pid <= 0 for listener in listeners):
+            return StopOutcome(
+                exit_code=EXIT_UNVERIFIABLE,
+                state=STATE_UNVERIFIABLE,
+                message="endpoint listener probe cannot be verified; registry preserved",
+                signaled=True,
+                reoccupied=False,
+                timed_out=False,
+            )
+
+        alive = bool(alive_status in (True, "alive"))
         if not listeners:
             # B22: success is defined on the endpoint.  Require it to stay
             # empty for two probes so an immediate re-occupier is observed;

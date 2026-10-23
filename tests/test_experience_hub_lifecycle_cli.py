@@ -567,6 +567,104 @@ def test_manager_unknown_cli_fixture(sandbox, monkeypatch):
     assert cleanup.returncode == 0, cleanup.stderr
 
 
+def test_stop_cli_unverifiable_lsof_reprobe(sandbox, monkeypatch, capsys):
+    hub = sandbox.spawn_hub()
+    module = _load_cli_module()
+    monkeypatch.setattr(module.lifecycle, "CONTROLLER_DIR", sandbox.home / ".herdr-controller")
+
+    real_run_lsof = module.lifecycle.run_lsof
+    lsof_calls = 0
+
+    def mock_run_lsof(port, **kwargs):
+        nonlocal lsof_calls
+        lsof_calls += 1
+        # First 2 calls: collection and verify target
+        if lsof_calls <= 2:
+            return real_run_lsof(port, **kwargs)
+        # Reprobe during stop loop is unverifiable
+        return lifecycle.ProbeOutcome(kind="unverifiable", detail="simulated lsof failure")
+
+    monkeypatch.setattr(module.lifecycle, "run_lsof", mock_run_lsof)
+
+    exit_code = module.main(["stop", "--port", str(hub.port), "--json"])
+    assert exit_code == lifecycle.EXIT_UNVERIFIABLE
+    assert hub.registry_path.exists()
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "-1" not in combined
+    assert "pid -1" not in combined
+    payload = json.loads(captured.out)
+    assert payload["exit_code"] == lifecycle.EXIT_UNVERIFIABLE
+    assert payload["state"] == lifecycle.STATE_UNVERIFIABLE
+    assert payload["reoccupied"] is False
+
+    hub.proc.terminate()
+    hub.proc.wait(timeout=5)
+
+
+def test_stop_cli_unverifiable_ps_reprobe(sandbox, monkeypatch, capsys):
+    hub = sandbox.spawn_hub()
+    module = _load_cli_module()
+    monkeypatch.setattr(module.lifecycle, "CONTROLLER_DIR", sandbox.home / ".herdr-controller")
+
+    real_run_ps = module.lifecycle.run_ps
+    ps_calls = 0
+
+    def mock_run_ps(pid, **kwargs):
+        nonlocal ps_calls
+        ps_calls += 1
+        # Initial collection and verify calls
+        if ps_calls <= 2:
+            return real_run_ps(pid, **kwargs)
+        # Polling pid_alive probe is unverifiable
+        return lifecycle.ProcessInfo(pid=pid, status="unverifiable", detail="simulated ps failure")
+
+    monkeypatch.setattr(module.lifecycle, "run_ps", mock_run_ps)
+
+    exit_code = module.main(["stop", "--port", str(hub.port), "--json"])
+    assert exit_code == lifecycle.EXIT_UNVERIFIABLE
+    assert hub.registry_path.exists()
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "-1" not in combined
+    assert "pid -1" not in combined
+    payload = json.loads(captured.out)
+    assert payload["exit_code"] == lifecycle.EXIT_UNVERIFIABLE
+    assert payload["state"] == lifecycle.STATE_UNVERIFIABLE
+    assert payload["reoccupied"] is False
+
+    hub.proc.terminate()
+    hub.proc.wait(timeout=5)
+
+
+def test_stop_cli_unverifiable_launchctl_preserves_registry(sandbox, monkeypatch, capsys):
+    hub = sandbox.spawn_hub()
+    module = _load_cli_module()
+    monkeypatch.setattr(module.lifecycle, "CONTROLLER_DIR", sandbox.home / ".herdr-controller")
+    monkeypatch.setattr(
+        module.lifecycle,
+        "run_launchctl",
+        lambda pid, **kwargs: lifecycle.ManagerProbe(lifecycle.MANAGER_UNKNOWN, pid, "simulated launchctl failure"),
+    )
+
+    exit_code = module.main(["stop", "--port", str(hub.port), "--json"])
+    assert exit_code == lifecycle.EXIT_UNVERIFIABLE
+    assert hub.registry_path.exists()
+    assert hub.proc.poll() is None
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "-1" not in combined
+    assert "pid -1" not in combined
+    payload = json.loads(captured.out)
+    assert payload["exit_code"] == lifecycle.EXIT_UNVERIFIABLE
+
+    hub.proc.terminate()
+    hub.proc.wait(timeout=5)
+
+
 # ---------------------------------------------------------------------------
 # AC-11 token redaction
 # ---------------------------------------------------------------------------

@@ -446,6 +446,56 @@ def test_stop_endpoint_refuses_when_recheck_fails():
     assert sent == []
 
 
+def test_stop_endpoint_unverifiable_lsof_probe_returns_5():
+    sent = []
+    outcome = lifecycle.stop_endpoint(
+        target_pid=100,
+        verify=lambda: lifecycle.IdentityCheck(True, True, True),
+        probe_listeners=lambda: None,
+        pid_alive=lambda pid: "alive",
+        send_signal=lambda pid, sig: sent.append((pid, sig)),
+    )
+    assert outcome.exit_code == lifecycle.EXIT_UNVERIFIABLE
+    assert outcome.state == lifecycle.STATE_UNVERIFIABLE
+    assert outcome.reoccupied is False
+    assert outcome.timed_out is False
+    assert outcome.reoccupied_pid is None
+    assert "-1" not in outcome.message
+    assert sent == [(100, signal.SIGTERM)]
+
+
+def test_stop_endpoint_unverifiable_ps_returns_5():
+    sent = []
+    outcome = lifecycle.stop_endpoint(
+        target_pid=100,
+        verify=lambda: lifecycle.IdentityCheck(True, True, True),
+        probe_listeners=lambda: (),
+        pid_alive=lambda pid: "unverifiable",
+        send_signal=lambda pid, sig: sent.append((pid, sig)),
+    )
+    assert outcome.exit_code == lifecycle.EXIT_UNVERIFIABLE
+    assert outcome.state == lifecycle.STATE_UNVERIFIABLE
+    assert outcome.reoccupied is False
+    assert outcome.timed_out is False
+    assert outcome.reoccupied_pid is None
+    assert "-1" not in outcome.message
+    assert sent == [(100, signal.SIGTERM)]
+
+
+def test_stop_launchctl_unverifiable_returns_5():
+    classification = lifecycle.classify(
+        operation="stop",
+        selector=selector(),
+        listeners=(listener(pid=100, is_hub=True),),
+        registry=None,
+        registry_state="absent",
+        manager=lifecycle.MANAGER_UNKNOWN,
+    )
+    assert classification.exit_code == lifecycle.EXIT_UNVERIFIABLE
+    assert classification.action == lifecycle.ACTION_REFUSE
+    assert classification.state == lifecycle.STATE_RUNNING
+
+
 # ---------------------------------------------------------------------------
 # B26 probe classification
 # ---------------------------------------------------------------------------
