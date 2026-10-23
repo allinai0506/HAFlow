@@ -2,12 +2,16 @@
 """HAFlow Experience Hub Standalone CLI Service.
 
 Usage:
-  bin/herdr-experience-hub start [--host 0.0.0.0] [--port 8780] [--db-path <path>]
+  bin/herdr-experience-hub start [--host 127.0.0.1] [--port 8780] [--db-path <path>]
+  bin/herdr-experience-hub status [--port <p> | --db-path <path>] [--host <h>] [--json]
+  bin/herdr-experience-hub stop [--port <p> | --db-path <path>] [--host <h>] [--pid <n>] [--json]
   bin/herdr-experience-hub token create --token <token> --user <user> --role <role> [--customers <c1,c2>]
 """
 
 import argparse
+import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -16,25 +20,48 @@ HERDR_ROOT = Path(__file__).resolve().parent.parent
 if str(HERDR_ROOT) not in sys.path:
     sys.path.insert(0, str(HERDR_ROOT))
 
-from herdr.experience.hub_server import ExperienceHubServer, HubStorage, DEFAULT_HUB_DB_PATH
+from herdr.experience import hub_lifecycle as lifecycle
+
+RUNBOOK_HINT = "docs/operations/troubleshooting-faq.md#无主-experience-hub-探针"
+INSECURE_DEFAULT_TOKEN = "admin_secret_token_123"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
-def main():
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw)
+
+
+# ---------------------------------------------------------------------------
+# argparse
+# ---------------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="HAFlow Experience Hub CLI")
     subparsers = parser.add_subparsers(dest="command")
 
-    # start
     p_start = subparsers.add_parser("start", help="Start the Experience Hub server")
     p_start.add_argument("--host", default=os.environ.get("HERDR_HUB_HOST", "127.0.0.1"), help="Host to bind")
-    p_start.add_argument("--port", type=int, default=int(os.environ.get("HERDR_HUB_PORT", 8780)), help="Port to bind")
-    p_start.add_argument("--db-path", default=os.environ.get("HERDR_HUB_DB_PATH", str(DEFAULT_HUB_DB_PATH)), help="SQLite DB path")
+    p_start.add_argument("--port", type=int, default=_env_int("HERDR_HUB_PORT", 8780), help="Port to bind")
+    p_start.add_argument("--db-path", default=os.environ.get("HERDR_HUB_DB_PATH", ""), help="SQLite DB path")
     p_start.add_argument("--admin-token", default=os.environ.get("HERDR_HUB_ADMIN_TOKEN"), help="Admin token for initial setup")
     p_start.add_argument("--cert-file", default=os.environ.get("HERDR_HUB_CERT_FILE"), help="Path to TLS certificate file")
     p_start.add_argument("--key-file", default=os.environ.get("HERDR_HUB_KEY_FILE"), help="Path to TLS private key file")
     p_start.add_argument("--allow-insecure-http", action="store_true", default=(os.environ.get("HERDR_HUB_ALLOW_INSECURE_HTTP") == "1"), help="Allow HTTP on non-loopback (e.g. behind TLS reverse proxy)")
-    p_start.add_argument("--check-init-only", action="store_true", help="Check admin initialization and exit immediately")
+    p_start.add_argument("--check-init-only", action="store_true", help="Check admin initialization (read-only) and exit immediately")
 
-    # token
+    for command in ("status", "stop"):
+        sub = subparsers.add_parser(command, help=f"{command.capitalize()} Experience Hub instances")
+        sub.add_argument("--port", type=int, default=None, help="Target port (required unless --db-path is given)")
+        sub.add_argument("--db-path", default=None, help="Match registry entries by DB path")
+        sub.add_argument("--host", default=None, help="Narrow a --port target to one binding address")
+        sub.add_argument("--json", action="store_true", dest="as_json", help="Emit a machine-readable JSON report")
+        if command == "stop":
+            sub.add_argument("--pid", type=int, default=None, help="Narrow a --port target to one pid")
+
     p_token = subparsers.add_parser("token", help="Manage authentication tokens")
     token_subs = p_token.add_subparsers(dest="token_command")
     p_token_create = token_subs.add_parser("create", help="Create or update an auth token")
@@ -42,64 +69,706 @@ def main():
     p_token_create.add_argument("--user", required=True, help="User ID / Employee ID")
     p_token_create.add_argument("--role", choices=["contributor", "reviewer", "admin"], default="contributor", help="User role")
     p_token_create.add_argument("--customers", default="*", help="Comma-separated allowed customer IDs or '*'")
-    p_token_create.add_argument("--db-path", default=os.environ.get("HERDR_HUB_DB_PATH", str(DEFAULT_HUB_DB_PATH)), help="SQLite DB path")
+    p_token_create.add_argument("--db-path", default=os.environ.get("HERDR_HUB_DB_PATH", ""), help="SQLite DB path")
 
-    args = parser.parse_args()
+    return parser
+
+
+def _selector(args, command: str):
+    try:
+        return lifecycle.parse_selector(
+            command=command,
+            port=args.port,
+            db_path=(args.db_path or None),
+            host=args.host,
+            pid=getattr(args, "pid", None),
+        )
+    except lifecycle.UsageError as exc:
+        print(f"[Experience Hub ERROR] {exc}", file=sys.stderr)
+        return None
+
+
+def _default_db_path() -> Path:
+    """Deferred import keeps status/stop independent from hub_server."""
+    from herdr.experience.hub_server import DEFAULT_HUB_DB_PATH
+
+    return Path(DEFAULT_HUB_DB_PATH)
+
+
+# ---------------------------------------------------------------------------
+# start
+# ---------------------------------------------------------------------------
+
+
+def _check_init_only(db_path: Path) -> int:
+    state = lifecycle.admin_state_readonly(db_path)
+    if state == "initialized":
+        print("[Experience Hub] Admin initialization verified.")
+        return 0
+    if state == "missing":
+        print(f"[Experience Hub ERROR] DB not found: {db_path}", file=sys.stderr)
+        print(
+            "首次启动必须通过 --admin-token / 环境变量 HERDR_HUB_ADMIN_TOKEN 提供管理员凭证；"
+            "--check-init-only 为只读检查，不会创建数据库。",
+            file=sys.stderr,
+        )
+    elif state == "no_admin":
+        print("[Experience Hub ERROR] 尚未初始化管理员凭证 (No admin credentials configured).", file=sys.stderr)
+        print(
+            "首次启动必须通过 --admin-token / 环境变量 HERDR_HUB_ADMIN_TOKEN 提供管理员凭证，",
+            file=sys.stderr,
+        )
+        print(
+            "或执行: bin/herdr-experience-hub token create --token <secret> --user admin --role admin",
+            file=sys.stderr,
+        )
+    else:
+        print(f"[Experience Hub ERROR] DB is unreadable or corrupt: {db_path}", file=sys.stderr)
+    return 1
+
+
+def _preflight_hub_conflict(host: str, port: int) -> str | None:
+    """Fail fast only for a confirmed hub on the requested endpoint.
+
+    B26/P0-6: a missing/timed-out/unparsable probe, a foreign listener or a
+    non-hub owner must not block a start; bind is authoritative.
+    """
+    outcome = lifecycle.run_lsof(port)
+    if outcome.kind != "data":
+        return None
+    listeners = lifecycle.select_listeners(outcome.listeners, host)
+    for listener in listeners:
+        process = lifecycle.run_ps(listener.pid)
+        if process.status != "alive" or not lifecycle.is_hub_argv(process.argv):
+            continue
+        db_hint = lifecycle.extract_db_path(process.argv)
+        db_text = db_hint if db_hint else "unknown"
+        return (
+            f"[Experience Hub ERROR] {host}:{port} is already served by hub pid {listener.pid} "
+            f"(db={db_text}); refusing to start a conflicting instance. "
+            f"See {RUNBOOK_HINT}"
+        )
+    return None
+
+
+def _bind_failure_message(host: str, port: int, exc: OSError) -> str:
+    details = ""
+    outcome = lifecycle.run_lsof(port)
+    if outcome.kind == "data":
+        listeners = lifecycle.select_listeners(outcome.listeners, host)
+        if listeners:
+            rendered = ", ".join(
+                f"pid={listener.pid} {listener.host}:{listener.port}" for listener in listeners
+            )
+            details = f" Current listeners: {rendered}."
+    return (
+        f"[Experience Hub ERROR] failed to bind {host}:{port}: {exc}.{details} "
+        f"See {RUNBOOK_HINT}"
+    )
+
+
+def _cmd_start(args) -> int:
+    selector = _selector(args, "start")
+    if selector is None:
+        return lifecycle.EXIT_USAGE
+    db_path = selector.db_path if selector.db_path is not None else _default_db_path()
+
+    admin_token = args.admin_token
+    if admin_token == INSECURE_DEFAULT_TOKEN:
+        print(f"[Experience Hub ERROR] 严禁使用硬编码默认 Token '{INSECURE_DEFAULT_TOKEN}'！", file=sys.stderr)
+        return lifecycle.EXIT_ERROR
+
+    is_loopback = args.host in LOOPBACK_HOSTS
+    if not is_loopback and not (args.cert_file and args.key_file) and not args.allow_insecure_http:
+        print(f"[Experience Hub ERROR] 严禁在非回环地址 {args.host} 直接明文运行 HTTP 暴露 Bearer Token！", file=sys.stderr)
+        print("请配置 TLS 证书 (--cert-file 与 --key-file) 启用 HTTPS，或在反向代理后使用 --allow-insecure-http 明确授权。", file=sys.stderr)
+        return lifecycle.EXIT_ERROR
+
+    if getattr(args, "check_init_only", False):
+        return _check_init_only(db_path)
+
+    if not admin_token and lifecycle.admin_state_readonly(db_path) != "initialized":
+        return _check_init_only(db_path)
+
+    if selector.port != 0:
+        conflict = _preflight_hub_conflict(args.host, selector.port)
+        if conflict is not None:
+            print(conflict, file=sys.stderr)
+            return lifecycle.EXIT_AMBIGUOUS
+
+    from herdr.experience.hub_server import ExperienceHubServer
+
+    server = ExperienceHubServer(
+        host=args.host,
+        port=selector.port,
+        db_path=db_path,
+        cert_file=Path(args.cert_file) if args.cert_file else None,
+        key_file=Path(args.key_file) if args.key_file else None,
+        allow_insecure_http=args.allow_insecure_http,
+    )
+
+    try:
+        actual_port = server.bind()
+    except OSError as exc:
+        print(_bind_failure_message(args.host, selector.port or 0, exc), file=sys.stderr)
+        return lifecycle.EXIT_ERROR
+    except RuntimeError as exc:
+        print(f"[Experience Hub ERROR] {exc}", file=sys.stderr)
+        return lifecycle.EXIT_ERROR
+
+    try:
+        storage = server.storage
+        if admin_token:
+            storage.register_token(
+                admin_token,
+                user_id="admin",
+                role="admin",
+                allowed_customers=["*"],
+            )
+            print("[Experience Hub] 管理员凭据初始化完成 (Admin credentials initialized).")
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        # Post-bind failure: close the socket, write no registry, never serve.
+        server.close()
+        print(
+            f"[Experience Hub ERROR] initialization after bind failed: "
+            f"{lifecycle.redact_text(str(exc), secrets=(admin_token,))}",
+            file=sys.stderr,
+        )
+        return lifecycle.EXIT_ERROR
+
+    try:
+        lifecycle.write_registry(
+            pid=os.getpid(),
+            host=args.host,
+            port=actual_port,
+            db_path=db_path,
+            script=Path(__file__).resolve(),
+            manager=lifecycle.MANAGER_UNKNOWN,
+        )
+    except OSError as exc:
+        print(
+            f"[Experience Hub WARN] registry write failed ({exc}); "
+            f"this instance is attributable only by port (attribution=port).",
+            file=sys.stderr,
+        )
+
+    proto = "https" if (args.cert_file and args.key_file) else "http"
+    print(f"[Experience Hub] Starting server on {proto}://{args.host}:{actual_port}")
+    print(f"[Experience Hub] DB: {db_path}")
+    sys.stdout.flush()
+    server.start(block=True)
+    return lifecycle.EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# status / stop shared collection
+# ---------------------------------------------------------------------------
+
+
+class _Collection:
+    def __init__(
+        self,
+        *,
+        port: int,
+        probe: lifecycle.ProbeOutcome,
+        listeners,
+        all_listeners,
+        registry,
+        registry_state: str,
+        process,
+        processes,
+        manager: str,
+        registry_ambiguous: bool,
+    ):
+        self.port = port
+        self.probe = probe
+        self.listeners = tuple(listeners)
+        self.all_listeners = tuple(all_listeners)
+        self.registry = registry
+        self.registry_state = registry_state
+        self.process = process
+        self.processes = processes
+        self.manager = manager
+        self.registry_ambiguous = registry_ambiguous
+
+
+def _select_registry(entries, selector, port, listeners):
+    valid = [entry for entry in entries if not entry.corrupt and entry.port == port]
+    if selector.db_path is not None:
+        valid = [entry for entry in valid if lifecycle.paths_equal(entry.db_path, selector.db_path)]
+    if selector.pid is not None:
+        valid = [entry for entry in valid if entry.pid == selector.pid]
+
+    if not valid:
+        return None, False
+    if len(valid) == 1:
+        return valid[0], False
+
+    if selector.host is not None:
+        exact = [
+            entry for entry in valid
+            if not lifecycle.is_wildcard_host(entry.host) and lifecycle.host_matches(selector.host, entry.host)
+        ]
+        matched = exact or [entry for entry in valid if lifecycle.is_wildcard_host(entry.host)]
+        if len(matched) == 1:
+            return matched[0], False
+        return None, True
+
+    if len(listeners) == 1:
+        matched = [entry for entry in valid if entry.pid == listeners[0].pid]
+        if len(matched) == 1:
+            return matched[0], False
+    return None, True
+
+
+def _collect(selector):
+    """Return (collection, exit_code, message). exit_code != 0 means stop here."""
+    entries = lifecycle.scan_registry()
+    resolution = lifecycle.resolve_registry_port(selector, entries)
+    if resolution.exit_code != lifecycle.EXIT_OK:
+        return None, resolution.exit_code, resolution.message
+
+    port = int(resolution.port)
+    probe = lifecycle.run_lsof(port)
+    all_listeners = probe.listeners
+    narrowed = lifecycle.select_listeners(all_listeners, selector.host)
+    if selector.pid is not None:
+        narrowed = tuple(listener for listener in narrowed if listener.pid == selector.pid)
+    processes = {}
+    listeners = []
+    for listener in narrowed:
+        process = processes.get(listener.pid)
+        if process is None:
+            process = lifecycle.run_ps(listener.pid)
+            processes[listener.pid] = process
+        if process.status == "dead":
+            continue
+        is_hub = lifecycle.is_hub_argv(process.argv) if process.status == "alive" else None
+        listeners.append(
+            lifecycle.Listener(
+                pid=listener.pid,
+                host=listener.host,
+                port=listener.port,
+                wildcard=listener.wildcard,
+                is_hub=is_hub,
+                argv=process.argv,
+            )
+        )
+    listeners = tuple(listeners)
+
+    registry, registry_ambiguous = _select_registry(entries, selector, port, listeners)
+    process = None
+    if registry is not None and registry.pid:
+        process = processes.get(registry.pid)
+        if process is None:
+            process = lifecycle.run_ps(registry.pid)
+
+    corrupt_relevant = any(
+        entry.corrupt and entry.port == port for entry in entries
+    )
+    if corrupt_relevant:
+        registry_state = "corrupt"
+    elif registry is not None or registry_ambiguous:
+        registry_state = "valid"
+    else:
+        registry_state = "absent"
+
+    target_pid = None
+    hub_listeners = [listener for listener in listeners if listener.is_hub]
+    if len(hub_listeners) == 1:
+        target_pid = hub_listeners[0].pid
+    elif registry is not None and process is not None and process.status == "alive":
+        target_pid = registry.pid
+
+    manager = lifecycle.MANAGER_UNKNOWN
+    if target_pid is not None:
+        manager = lifecycle.run_launchctl(target_pid).manager
+
+    return (
+        _Collection(
+            port=port,
+            probe=probe,
+            listeners=listeners,
+            all_listeners=all_listeners,
+            registry=registry,
+            registry_state=registry_state,
+            process=process,
+            processes=processes,
+            manager=manager,
+            registry_ambiguous=registry_ambiguous,
+        ),
+        lifecycle.EXIT_OK,
+        "",
+    )
+
+
+def _classify(collection: _Collection, selector, operation: str):
+    return lifecycle.classify(
+        operation=operation,
+        selector=selector,
+        listeners=collection.listeners,
+        registry=collection.registry,
+        registry_state=collection.registry_state,
+        process=collection.process,
+        manager=collection.manager,
+        probe_status=collection.probe.kind,
+        registry_ambiguous=collection.registry_ambiguous,
+    )
+
+
+def _cleanup_registry(
+    selector,
+    entries,
+    port: int,
+    *,
+    corrupt_only: bool = False,
+    target_host=None,
+    target_pid=None,
+    only_entry=None,
+) -> int:
+    if only_entry is not None:
+        return 1 if lifecycle.remove_registry_entry(only_entry) else 0
+
+    candidates = []
+    for entry in entries:
+        if entry.port != port:
+            continue
+        if corrupt_only:
+            if not entry.corrupt:
+                continue
+        else:
+            if entry.corrupt:
+                continue
+            if selector.db_path is not None and not lifecycle.paths_equal(entry.db_path, selector.db_path):
+                continue
+            if target_pid is not None and entry.pid != target_pid:
+                continue
+        candidates.append(entry)
+
+    if target_pid is not None and not corrupt_only:
+        # The pid filter above is already exact; host is only a fallback for
+        # entries written before the pid was known to the selector.
+        pass
+    elif target_host is not None and not corrupt_only:
+        exact = [entry for entry in candidates if entry.host == target_host]
+        if exact:
+            candidates = exact
+        else:
+            candidates = [
+                entry for entry in candidates
+                if lifecycle.is_wildcard_host(entry.host) and lifecycle.host_matches(target_host, entry.host)
+            ]
+    elif selector.host is not None and not corrupt_only:
+        exact = [entry for entry in candidates if entry.host == selector.host]
+        if exact:
+            candidates = exact
+        else:
+            candidates = [entry for entry in candidates if lifecycle.is_wildcard_host(entry.host)]
+
+    removed = 0
+    for entry in candidates:
+        if lifecycle.remove_registry_entry(entry):
+            removed += 1
+    return removed
+
+
+def _state_message(classification, collection: _Collection, selector) -> str:
+    prefix = f"state: {classification.state}"
+    if classification.state == lifecycle.STATE_RUNNING:
+        prefix += f" pid={collection.registry.pid if classification.attribution == lifecycle.ATTRIBUTION_REGISTRY and collection.registry else (collection.listeners[0].pid if collection.listeners else 'unknown')}"
+    detail = f" ({classification.detail})" if classification.detail else ""
+    if classification.exit_code == lifecycle.EXIT_LAUNCHD_MANAGED:
+        return (
+            f"{prefix}{detail}; managed by launchd (KeepAlive). Refusing to signal. "
+            f"Stop/restart via: launchctl bootout gui/$(id -u)/{lifecycle.LAUNCHD_LABEL} "
+            f"and launchctl kickstart -k gui/$(id -u)/{lifecycle.LAUNCHD_LABEL}"
+        )
+    if classification.exit_code == lifecycle.EXIT_UNVERIFIABLE:
+        return f"{prefix}{detail}; unverifiable, no signal sent"
+    if classification.state == lifecycle.STATE_FOREIGN:
+        return f"{prefix}{detail}; endpoint is held by a foreign process, no signal sent"
+    if classification.state == lifecycle.STATE_AMBIGUOUS:
+        return f"{prefix}{detail}; ambiguous, no signal sent"
+    if classification.state == lifecycle.STATE_DEGRADED:
+        return f"{prefix}{detail}; process is alive but does not hold the endpoint"
+    if classification.state == lifecycle.STATE_STALE:
+        return f"{prefix}{detail}; stale registry entry"
+    if classification.state == lifecycle.STATE_ABSENT:
+        return f"{prefix}{detail}"
+    return f"{prefix}{detail}"
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+
+def _cmd_status(args) -> int:
+    selector = _selector(args, "status")
+    if selector is None:
+        return lifecycle.EXIT_USAGE
+
+    collection, exit_code, message = _collect(selector)
+    if collection is None:
+        print(f"[Experience Hub ERROR] {message}", file=sys.stderr)
+        return exit_code
+
+    classification = _classify(collection, selector, lifecycle.COMMAND_STATUS)
+    selector_with_port = lifecycle.Selector(
+        command=selector.command,
+        port=collection.port,
+        db_path=selector.db_path,
+        host=selector.host,
+        pid=selector.pid,
+    )
+    report = lifecycle.build_status_report(
+        classification,
+        selector=selector_with_port,
+        listeners=collection.listeners,
+        registry=collection.registry,
+        process=collection.process,
+    )
+
+    if args.as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(lifecycle.format_status_text(report))
+        if classification.detail:
+            print(f"detail: {classification.detail}")
+    return classification.exit_code
+
+
+# ---------------------------------------------------------------------------
+# stop
+# ---------------------------------------------------------------------------
+
+
+def _reprobe_listeners(selector, port: int, *, ignore_pids=()):
+    outcome = lifecycle.run_lsof(port)
+    if outcome.kind == "unverifiable":
+        # Never report success on an unverifiable probe.
+        return (
+            lifecycle.Listener(
+                pid=-1,
+                host="unknown",
+                port=port,
+                wildcard=False,
+                is_hub=None,
+            ),
+        )
+    if outcome.kind == "empty":
+        return ()
+    selected = lifecycle.select_listeners(outcome.listeners, selector.host)
+    ignored = set(ignore_pids)
+    return tuple(listener for listener in selected if listener.pid not in ignored)
+
+
+def _verify_target(target_pid: int, selector, port: int, registry):
+    outcome = lifecycle.run_lsof(port)
+    if outcome.kind != "data":
+        return lifecycle.IdentityCheck(
+            holds_endpoint=False,
+            holds_cmdline=False,
+            holds_registry=False,
+            reasons=("endpoint cannot be verified",),
+        )
+    fresh_listeners = lifecycle.select_listeners(outcome.listeners, selector.host)
+    fresh_process = lifecycle.run_ps(target_pid)
+    return lifecycle.check_identity(
+        target_pid=target_pid,
+        listeners=fresh_listeners,
+        process=fresh_process,
+        registry=registry,
+        selector=selector,
+    )
+
+
+def _cmd_stop(args) -> int:
+    selector = _selector(args, "stop")
+    if selector is None:
+        return lifecycle.EXIT_USAGE
+
+    collection, exit_code, message = _collect(selector)
+    if collection is None:
+        print(f"[Experience Hub ERROR] {message}", file=sys.stderr)
+        return exit_code
+
+    classification = _classify(collection, selector, lifecycle.COMMAND_STOP)
+    state_message = _state_message(classification, collection, selector)
+
+    target_pid = None
+    if collection.listeners:
+        target_pid = collection.listeners[0].pid
+    elif collection.registry is not None:
+        target_pid = collection.registry.pid
+
+    payload = {
+        "schema_version": lifecycle.REGISTRY_SCHEMA_VERSION,
+        "state": classification.state,
+        "exit_code": classification.exit_code,
+        "signaled": False,
+        "timed_out": False,
+        "reoccupied": False,
+        "manager": classification.manager,
+        "attribution": classification.attribution,
+        "pid": target_pid,
+        "host": collection.listeners[0].host if collection.listeners else selector.host,
+        "port": collection.port,
+        "db_path": collection.registry.db_path if collection.registry else None,
+        "registry_state": collection.registry_state,
+        "message": classification.detail,
+    }
+
+    def emit_json(extra=None) -> None:
+        if getattr(args, "as_json", False):
+            if extra:
+                payload.update(extra)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    if classification.state == lifecycle.STATE_RUNNING and classification.exit_code != lifecycle.EXIT_OK:
+        print(f"[Experience Hub] {state_message}", file=sys.stderr)
+        emit_json()
+        return classification.exit_code
+
+    if classification.exit_code != lifecycle.EXIT_OK:
+        if classification.action == lifecycle.ACTION_CLEANUP_REFUSE:
+            _cleanup_registry(
+                selector,
+                lifecycle.scan_registry(),
+                collection.port,
+                corrupt_only=True,
+            )
+        print(f"[Experience Hub] {state_message}", file=sys.stderr)
+        emit_json()
+        return classification.exit_code
+
+    if classification.action == lifecycle.ACTION_NONE:
+        if not getattr(args, "as_json", False):
+            print(f"[Experience Hub] {state_message}; no signal sent")
+        emit_json()
+        return lifecycle.EXIT_OK
+
+    if classification.action == lifecycle.ACTION_CLEANUP:
+        _cleanup_registry(
+            selector,
+            lifecycle.scan_registry(),
+            collection.port,
+            only_entry=collection.registry,
+        )
+        if not getattr(args, "as_json", False):
+            print(f"[Experience Hub] {state_message}; stale registry cleaned")
+        emit_json()
+        return lifecycle.EXIT_OK
+
+    if classification.action != lifecycle.ACTION_SIGNAL or not collection.listeners:
+        print(f"[Experience Hub] {state_message}", file=sys.stderr)
+        emit_json()
+        return classification.exit_code
+
+    target = collection.listeners[0]
+    ignored_pids = {
+        listener.pid for listener in collection.all_listeners if listener.pid != target.pid
+    }
+    outcome = lifecycle.stop_endpoint(
+        target_pid=target.pid,
+        verify=lambda: _verify_target(target.pid, selector, collection.port, collection.registry),
+        probe_listeners=lambda: _reprobe_listeners(
+            selector, collection.port, ignore_pids=ignored_pids
+        ),
+        pid_alive=lambda pid: lifecycle.run_ps(pid).status == "alive",
+        manager_for_pid=lambda pid: lifecycle.run_launchctl(pid).manager,
+    )
+
+    payload.update(
+        {
+            "state": outcome.state,
+            "exit_code": outcome.exit_code,
+            "signaled": outcome.signaled,
+            "timed_out": outcome.timed_out,
+            "reoccupied": outcome.reoccupied,
+            "message": outcome.message,
+        }
+    )
+
+    if outcome.exit_code == lifecycle.EXIT_OK:
+        _cleanup_registry(
+            selector,
+            lifecycle.scan_registry(),
+            collection.port,
+            target_host=target.host,
+            target_pid=target.pid,
+        )
+        if not getattr(args, "as_json", False):
+            print(f"[Experience Hub] {outcome.message}")
+        emit_json()
+        return lifecycle.EXIT_OK
+
+    if outcome.exit_code == lifecycle.EXIT_TIMEOUT:
+        print(
+            f"[Experience Hub ERROR] {outcome.message}. Manual investigation required; "
+            f"see {RUNBOOK_HINT}",
+            file=sys.stderr,
+        )
+    elif outcome.exit_code == lifecycle.EXIT_LAUNCHD_MANAGED:
+        print(
+            f"[Experience Hub ERROR] {outcome.message}; managed by launchd (KeepAlive). "
+            f"Use launchctl bootout gui/$(id -u)/{lifecycle.LAUNCHD_LABEL} "
+            f"or launchctl kickstart -k gui/$(id -u)/{lifecycle.LAUNCHD_LABEL}",
+            file=sys.stderr,
+        )
+    else:
+        print(f"[Experience Hub ERROR] {outcome.message}", file=sys.stderr)
+    emit_json()
+    return outcome.exit_code
+
+
+# ---------------------------------------------------------------------------
+# token create
+# ---------------------------------------------------------------------------
+
+
+def _cmd_token(args) -> int:
+    if args.token == INSECURE_DEFAULT_TOKEN:
+        print(f"[Experience Hub ERROR] 严禁使用硬编码默认 Token '{INSECURE_DEFAULT_TOKEN}'！", file=sys.stderr)
+        return lifecycle.EXIT_ERROR
+    if args.db_path:
+        db_path = lifecycle.normalize_db_path(args.db_path)
+    else:
+        from herdr.experience.hub_server import DEFAULT_HUB_DB_PATH
+
+        db_path = Path(DEFAULT_HUB_DB_PATH)
+
+    from herdr.experience.hub_server import HubStorage
+
+    storage = HubStorage(db_path)
+    customers = [customer.strip() for customer in args.customers.split(",") if customer.strip()]
+    storage.register_token(args.token, user_id=args.user, role=args.role, allowed_customers=customers)
+    print(f"[Token Created] user={args.user}, role={args.role}, customers={customers}")
+    return lifecycle.EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# entry point
+# ---------------------------------------------------------------------------
+
+
+def main(argv=None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()
-        sys.exit(1)
-
+        return lifecycle.EXIT_ERROR
     if args.command == "start":
-        db_path = Path(args.db_path)
-        storage = HubStorage(db_path)
-
-        admin_token = args.admin_token
-        if admin_token:
-            if admin_token == "admin_secret_token_123":
-                print("[Experience Hub ERROR] 严禁使用硬编码默认 Token 'admin_secret_token_123'！", file=sys.stderr)
-                sys.exit(1)
-            storage.register_token(admin_token, user_id="admin", role="admin", allowed_customers=["*"])
-            print("[Experience Hub] 管理员凭据初始化完成 (Admin credentials initialized).")
-        elif not storage.has_admin():
-            print("[Experience Hub ERROR] 尚未初始化管理员凭证 (No admin credentials configured).", file=sys.stderr)
-            print("首次启动必须通过 --admin-token / 环境变量 HERDR_HUB_ADMIN_TOKEN 提供管理员凭证，", file=sys.stderr)
-            print("或执行: bin/herdr-experience-hub token create --token <secret> --user admin --role admin", file=sys.stderr)
-            sys.exit(1)
-
-        if getattr(args, "check_init_only", False):
-            print("[Experience Hub] Admin initialization verified.")
-            sys.exit(0)
-
-        is_loopback = args.host in ("127.0.0.1", "localhost", "::1")
-        if not is_loopback and not (args.cert_file and args.key_file) and not args.allow_insecure_http:
-            print(f"[Experience Hub ERROR] 严禁在非回环地址 {args.host} 直接明文运行 HTTP 暴露 Bearer Token！", file=sys.stderr)
-            print("请配置 TLS 证书 (--cert-file 与 --key-file) 启用 HTTPS，或在反向代理后使用 --allow-insecure-http 明确授权。", file=sys.stderr)
-            sys.exit(1)
-
-        proto = "https" if (args.cert_file and args.key_file) else "http"
-        print(f"[Experience Hub] Starting server on {proto}://{args.host}:{args.port}")
-        print(f"[Experience Hub] DB: {db_path}")
-
-        server = ExperienceHubServer(
-            host=args.host,
-            port=args.port,
-            db_path=db_path,
-            cert_file=Path(args.cert_file) if args.cert_file else None,
-            key_file=Path(args.key_file) if args.key_file else None,
-            allow_insecure_http=args.allow_insecure_http,
-        )
-        server.start(block=True)
-
-    elif args.command == "token" and args.token_command == "create":
-        if args.token == "admin_secret_token_123":
-            print("[Experience Hub ERROR] 严禁使用硬编码默认 Token 'admin_secret_token_123'！", file=sys.stderr)
-            sys.exit(1)
-        db_path = Path(args.db_path)
-        storage = HubStorage(db_path)
-        custs = [c.strip() for c in args.customers.split(",") if c.strip()]
-        storage.register_token(args.token, user_id=args.user, role=args.role, allowed_customers=custs)
-        print(f"[Token Created] user={args.user}, role={args.role}, customers={custs}")
+        return _cmd_start(args)
+    if args.command == "status":
+        return _cmd_status(args)
+    if args.command == "stop":
+        return _cmd_stop(args)
+    if args.command == "token" and getattr(args, "token_command", None) == "create":
+        return _cmd_token(args)
+    parser.print_help()
+    return lifecycle.EXIT_USAGE
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
