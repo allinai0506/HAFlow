@@ -152,6 +152,8 @@ class AcceptanceDecisionTest(unittest.TestCase):
         self.assertNotIn("gate_declared", requirements)
         self.assertTrue(node_uses_gate_loop(audit, "audit"))
         self.assertFalse(node_uses_gate_loop(requirements, "requirements"))
+        again = normalize_workflow(normalized)
+        self.assertEqual(again["nodes"], normalized["nodes"])
         actions = self._actions([
             _task("audit-1", "cleaned", "audit", stage_verdict="blocked",
                   stage_verdict_note="P0"),

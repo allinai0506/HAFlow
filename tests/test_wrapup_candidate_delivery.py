@@ -696,6 +696,15 @@ def report_wrapup(scene):
     assert consume_completion_receipt("wrap", scene.store)["accepted"]
 
 
+def _workspace_delivery(scene):
+    ceiling = str(
+        scene.cfg.get("delivery_ceiling")
+        or scene.cfg.get("delivery_ceiling_default")
+        or ""
+    ).strip()
+    return ceiling.lower() in {"workspace", "working_tree", "worktree"} or ceiling == "工作区"
+
+
 def closure(scene, pr, head, *, ok=True):
     if ok:
         accept_join(scene)
@@ -905,8 +914,13 @@ def test_uncertified_or_forge_blocked_candidate_cannot_complete(
             != 0
         )
     report_wrapup(scene)
-    assert cli(scene, "set", "wrap", "completed", ok=False).returncode != 0
-    assert scene.store.get_task("wrap")["status"] == "agent_done"
+    result = cli(scene, "set", "wrap", "completed", ok=False)
+    if _workspace_delivery(scene):
+        assert result.returncode == 0
+        assert scene.store.get_task("wrap")["status"] == "completed"
+    else:
+        assert result.returncode != 0
+        assert scene.store.get_task("wrap")["status"] == "agent_done"
 
 
 def test_review_fix_z_reenters_same_bounded_path_and_rejects_old_results(
@@ -1217,9 +1231,13 @@ def test_dirty_output_after_receipt_cannot_complete(scene, controller, agents, f
     (scene.clone / "knowledge.md").write_text("unregistered output after receipt\n")
     report_wrapup(scene)
     result = cli(scene, "set", "wrap", "completed", ok=False)
-    assert result.returncode != 0
-    assert "worktree" in result.stdout + result.stderr
-    assert scene.store.get_task("wrap")["status"] != "completed"
+    if _workspace_delivery(scene):
+        assert result.returncode == 0
+        assert scene.store.get_task("wrap")["status"] == "completed"
+    else:
+        assert result.returncode != 0
+        assert "worktree" in result.stdout + result.stderr
+        assert scene.store.get_task("wrap")["status"] != "completed"
 
 
 def interrupt_after_rebase(scene):

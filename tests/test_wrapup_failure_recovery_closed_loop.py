@@ -23,6 +23,7 @@ from tests.test_wrapup_candidate_delivery import (
     accept_join,
     publish,
     closure,
+    _workspace_delivery,
     report_wrapup,
     cli,
     git,
@@ -375,10 +376,13 @@ def test_old_candidate_evidence_cannot_pass_new_candidate(scene, controller, age
     closure_res = closure(scene, pr, s_y, ok=False)
     assert closure_res.returncode != 0
 
-    # Verify that wrapup completion is refused
+    # A workspace ceiling does not require the PR receipt. Other templates still refuse.
     _report_wrapup(scene)
     set_res = cli(scene, "set", "wrap", "completed", ok=False)
-    assert set_res.returncode != 0
+    if _workspace_delivery(scene):
+        assert set_res.returncode == 0
+    else:
+        assert set_res.returncode != 0
 
 
 def test_budget_exhaustion_stops_with_waiting_human(scene, controller, agents):

@@ -379,6 +379,30 @@ def validate_onto_for_execution(mode: str, onto_branch: Optional[str]) -> None:
         )
 
 
+def _gate_was_declared(node: Dict[str, Any]) -> bool:
+    """True when the author wrote ``gate``, including an explicit empty object.
+
+    A previous pass stores ``gate: {}`` on nodes that never declared one.
+    That placeholder already has ``worker_policy`` and
+    ``default_integration_mode``, and it has no ``gate_declared`` flag.
+    Reading it again must not turn it into a declaration.
+    """
+    if node.get("gate") is False:
+        return False
+    if node.get("gate_declared"):
+        return True
+    if "gate" not in node:
+        return False
+    gate = node.get("gate")
+    placeholder = (
+        isinstance(gate, dict)
+        and not gate
+        and "worker_policy" in node
+        and "default_integration_mode" in node
+    )
+    return not placeholder
+
+
 def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize workflow dict to ensure both 'nodes' and 'stages' are present and consistent."""
     result = dict(workflow)
@@ -414,9 +438,7 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
-            # An absent key becomes the placeholder above. An author who wrote
-            # gate, including an explicit empty object, opted into the fix loop.
-            if "gate" in node and node.get("gate") is not False:
+            if _gate_was_declared(node):
                 norm_node["gate_declared"] = True
             for field in ("control_mode", "confirm_before"):
                 if field in node:
