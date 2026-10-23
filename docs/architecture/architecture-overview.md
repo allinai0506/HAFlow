@@ -83,7 +83,7 @@ graph TD
 
 ### 3.4 运行时自愈系统 (`herdr/projects.py`)
 - **逻辑事实 vs 运行时映射**：模板定义是逻辑事实，Tab/Pane ID 仅为运行时映射。
-- **`ensure_node_runtime`**：在每次任务派发前动态探活 Tab 与 Anchor Pane。如遇人为误关，在任务派发前自动检测并补全重建，避免运行时报错。
+- **`ensure_node_runtime`**：在每次任务派发前确认节点页签还在。页签被关掉时会重建；已有任务窗格旁边的项目根目录空壳会被关掉。
 
 ### 3.5 隔离与沙盒层
 - **CoW (Copy-on-Write) 工作区隔离**：Task 执行在独立 git clone / branch 目录中，保护主干代码。

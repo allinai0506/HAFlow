@@ -40,25 +40,25 @@ Evidence:
 
 ---
 
-## 2. Anchor Pane (母体锚点) 机制
+## 2. 阶段页签的父窗格
 
-### 2.1 为什么必须有 Anchor Pane？
-`FACT` 底层 Herdr 终端在已有标签页中新建工位时，依赖指令：
+`FACT` 在已有标签页里再开一个工位，要指定一个还活着的父窗格：
+
 ```bash
 herdr pane split <parent_pane_id> --direction right ...
 ```
-这意味着：**在 Tab 内新增窗格必须指定一个存活的父 Pane。**  
-如果一个 Tab 中的所有任务工位在执行完毕后均被用户关闭，且该 Tab 内没有常驻底座，该 Tab 将彻底失去通过常规 `split` 分裂新工位的能力。
 
-因此，Herdr 为每个 Node Tab 建立一个专门的 **Anchor Pane**：
-1. **命名固定**: 窗格 Label 固定命名为 `"Anchor"`（或 `Herdr Anchor · <node_id>`）。
-2. **绝对干净**: 严禁在 Anchor Pane 上启动任何 Agent 或执行耗时任务，使其保持只读。
-3. **母体作用**: 当为该 Node 派发新的 Task 时，系统统一以 Anchor Pane 为 parent 执行 `pane split` 分裂新工位。
+新建标签页时终端会自带一个窗格，所以页签不能是空的。这个窗格不再命名为 `Anchor`，也不留在任务旁边空转。
+
+1. 本阶段第一个任务直接占用这个窗格，标签改为 `task:<task_id>`。
+2. 父窗格上已经有 Agent，或标签已是 `task:` 开头时，才从它 split 出下一个工位。
+3. 同页已经有任务窗格时，停在项目根目录且没有 Agent 的空壳会被关掉。最后一个窗格保留，避免标签页一起消失。
+4. `anchor_pane_id` 只保存下一次 split 用的父窗格编号。回收时仍保护这个编号。
 
 Evidence:
-- `herdr/projects.py:provision_project`
-- `herdr/pane_pool.py#list_slots_for_project` (显式跳过 anchor_pane_id)
-- `services/herdr-worker.py#create_pane`
+- `herdr/topology.py#_resolve_or_create_anchor`
+- `services/herdr-worker.py#allocate_task_pane`
+- `herdr/pane_pool.py#list_slots_for_project`
 
 ---
 
@@ -71,25 +71,23 @@ flowchart TD
     Req([准备派发任务至 Node]) --> ReadCfg[加载当前 workflow.json]
     ReadCfg --> CheckTab{Tab 是否仍然存活?<br/>herdr tab get tab_id}
 
-    CheckTab -- 否 (已误关) --> CreateTab[herdr tab create 创建新 Tab]
-    CreateTab --> SetRootAnchor[将新 Tab 默认 Root Pane 命名为 Anchor]
-    SetRootAnchor --> SaveWF[原子回写 workflow.json]
+    CheckTab -- 否 (已误关) --> CreateTab[herdr tab create 创建新 Tab，保留它自带的窗格]
+    CreateTab --> SaveWF[回写运行时映射]
 
-    CheckTab -- 是 (Tab 存活) --> CheckAnchor{Anchor Pane 存活?<br/>herdr pane get anchor_id}
-    CheckAnchor -- 是 --> Ready([现场完全就绪，开始派发 Task])
+    CheckTab -- 是 (Tab 存活) --> CheckParent{记录的父窗格还在?}
+    CheckParent -- 是 --> Ready([现场可派发])
 
-    CheckAnchor -- 否 (Anchor 丢失) --> ScanPanes[扫描该 Tab 下其他存活的 Panes]
-    ScanPanes --> HasLabled{存在名为 Anchor 的 Pane?}
-    HasLabled -- 是 --> AdoptAnchor[采纳现有 Anchor Pane]
-    HasLabled -- 否 --> SplitNew[从存活 Pane 执行 split 分裂新 Pane 并命名为 Anchor]
-    AdoptAnchor --> SaveWF
-    SplitNew --> SaveWF
+    CheckParent -- 否 --> ScanPanes[扫描该 Tab 下仍存活的窗格]
+    ScanPanes --> HasPane{还有窗格?}
+    HasPane -- 是 --> Adopt[改记其中一个，并关掉多余的项目根目录空壳]
+    HasPane -- 否 --> CreateTab
+    Adopt --> SaveWF
     SaveWF --> Ready
 ```
 
 ### 关键自愈规则：
 1. `FACT` **工作区不灭原则**: 缺失 Anchor 或 Tab 仅属于可自愈的局部现场故障，**绝对不会**触发重新 provision 整个项目 Workspace。
-2. `FACT` **历史工位隔离原则**: 正在跑历史任务或带有 Agent 进程的 Pane 绝对不会被挪用为 Anchor，确保历史工位现场可审计。
+2. `FACT` **不覆盖已有工位**: 已经有 Agent 的窗格只作为下一次 split 的父窗格，不会在里面再启动一个任务。
 3. `FACT` **自动回写**: 一旦检测到 Tab 或 Anchor ID 发生变化，系统立即通过原子写入更新 `<project_dir>/workflow.json`。
 
 Evidence:

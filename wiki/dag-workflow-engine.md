@@ -20,7 +20,7 @@ HAFlow 支持声明式 YAML 与 JSON 工作流模板。
 2. **仓库内置目录**: `workflow_templates/`（随代码仓库分发）。
 
 已内置的标准模板包括：
-- `software-development-v1.yaml`: 标准 6 阶段研发闭环（需求分析 ➔ 计划 ➔ 实现 ➔ 测试 ➔ 评审 ➔ 收尾）。
+- `software-development-v1.yaml`: 标准 6 阶段研发闭环（需求分析 ➔ 计划 ➔ 实现 ➔ 测试 ➔ 评审 ➔ 收尾）。HAFlow 是唯一主控，阶段按 unified-dev-flow 使用对应技能。需求单人起草；计划保留一次方案对抗。默认交付到工作区。
 - `bidding.yaml`: 7 阶段标书制作与审批流程。
 - `customer-service.yaml`: 客诉分流与处置流程。
 
@@ -145,17 +145,25 @@ Evidence:
 
 ### 4.4 任务级门禁结论对称性
 
-`FACT` 任务级 `blocked` 验收结论对自动推进一律有效，不问节点有无 gate 配置：
-sweep 发现就绪节点的任一依赖存在未作废 blocked 结论时，不 queue、不作废下游，
-只记 attention（`upstream_blocked`，可退避）并通知总指挥裁决，作废过期结论后自动恢复；
-`try_direct_stage_advance` 在规划前复查同一条件，命中则 `DIRECT DISPATCH BLOCKED`
-回退总指挥。未知依赖时保持原行为（fail-open）。fix-loop 的销毁式回流仍仅对有
-gate 配置的节点（test/review/wrapup）触发。
+`FACT` 代码门禁（test / review / wrapup，以及节点或阶段策略上的 gate）的
+`blocked` 仍停住自动推进，并走原有 fix-loop。不销毁下游。
+
+`FACT` 非代码门禁（需求、计划）返回 `blocked` 时，不交给总指挥裁决。
+模板规范化在作者没写 `gate` 时补的空 `gate: {}` 不是门禁声明。作者写了
+`gate`（包括显式空对象）会记 `gate_declared`，空对象也走 fix-loop。
+当前任务都已落定，就自动打回本节点重做一次：两侧任务一起作废，沿用现有补派，
+说明里写上阻断和「已知限制」。同一次执行里已经有带 `same_node_redo` 的
+作废 blocked、这一轮仍 blocked，节点即完成：`stage_verdict` 保持 blocked，
+任务带 `accepted_with_limits`，下一节点可以启动。别的原因作废、另一次执行、
+或状态仍是 `failed`，都不盖这个章。还有任务在跑则等待，不打回。不无限重做。
 
 Evidence:
-- `services/herdr-controller.py#blocked_verdict_dep`
-- `services/herdr-controller.py#check_workflow_stage_advance`
-- `services/herdr-controller.py#try_direct_stage_advance`
+- `herdr/node_acceptance.py#acceptance_actions`
+- `services/controller/node_acceptance.py#apply_node_acceptance`
+- `services/controller/node_policy.py#blocked_verdict_dep`
+- `services/controller/advancement.py#check_workflow_stage_advance`
+- `herdr/direct_dispatch.py#plan_stage_dispatch`
+- `tests/test_node_acceptance.py`
 - `tests/test_gate_verdict_symmetry.py`
 
 ## 5. 选择性重新验证：候选轮换后哪些 verifier 必须重跑
@@ -420,7 +428,7 @@ Evidence:
 
 ## SPEC 规格研发模板与浏览器验收契约
 
-`FACT`：`spec-development-v1` 将规格/澄清和方案/拆任务分别合并为单节点，实现后独立 test/review 同时就绪，acceptance 汇聚后进入 wrapup。review 要求只读依次执行 `ai-slop-cleaner --review` 与 `google-code-review`。三套研发模板的测试节点均声明本地服务与 ego-browser 真实 E2E 必过，缺失时 blocked；这是执行指令契约，未新增程序化 E2E 回执验证。
+`FACT`：`spec-development-v1` 将规格/澄清和方案/拆任务分别合并为单节点，实现后独立 test/review 同时就绪，acceptance 汇聚后进入 wrapup。review 要求只读依次执行 `ai-slop-cleaner --review` 与 `google-code-review`。`code-craft-v1` 与 `spec-development-v1` 的测试节点把本地服务和 ego-browser 真实 E2E 放在必交产出里。`software-development-v1` 只在界面旅程的规则里要求这三件，非界面改动不写进每条测试任务的验收。这是执行指令契约，未新增程序化 E2E 回执验证。
 
 Evidence:
 - `workflow_templates/spec-development-v1.yaml`

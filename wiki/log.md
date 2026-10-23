@@ -8,6 +8,42 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-23] fix | 空门禁标记不能在第二次规范化时凭空出现
+
+- 背景：没写 `gate` 的节点第一次规范化后是占位 `gate: {}`。再规范化一次时，这个占位被当成作者声明，多出 `gate_declared`。
+- 变更：已经带有规范化字段、且没有 `gate_declared` 的空对象仍是占位。作者第一次写的 `gate: {}` 继续记为显式门禁。工作区交付的收尾没有 PR 回执也可以完成；`spec-development-v1` 没有这个上限，仍然要回执。
+
+## [2026-10-23] fix | 审阅 P1：重做次数、门禁身份、窗格探活、工作区收尾
+
+- 背景：PR #334 的审阅指出，非门禁放行会把别的执行的作废结果算进重做次数，失败任务会被标成已知限制；规范化写出的空 `gate: {}` 和作者显式写的空门禁被当成同一件事；关空壳和复用窗格时，探活失败被当成没有 Agent；工作区交付仍被要求 PR 回执，非界面改动仍被要求 E2E。
+- 变更：只有同一次执行里带 `same_node_redo` 的作废 blocked 才消耗那一次重做。失败任务不盖章。作者写了 `gate`（含空对象）记 `gate_declared`，才进入 fix-loop；没写的占位 `{}` 仍不是门禁。关空壳前要探活确认没有 Agent，探活失败不关，并且和动态窗格回收共用同一把锁，不关最后一个窗格。借用的窗格在身份没写上时改回原标签和目录，不关掉。`delivery_ceiling_default: workspace` 的收尾不再要 PR 回执；只写了 `review_closure_required`、没有交付上限的旧配置仍然要。标准模板的 E2E 三件套只在界面旅程的规则里要求。
+- 生效：推到 PR #334。运行中的工作流配置不改。控制器和本机用户模板要等授权后才会按新代码走。新启动的工作流读本机模板副本。
+
+## [2026-10-23] fix | 阶段页签不再保留空的 Anchor 窗格
+
+- 背景：每个阶段页签都被放进一个停在项目根目录、标签为 Anchor 的空壳。任务窗格拆在它旁边，打开页签时先看到这个空壳。
+- 变更：第一个任务直接占用页签自带的窗格。父窗格已经有 Agent 时才 split。同页已有任务窗格时，项目根目录上的空壳会被关掉。最后一个窗格保留，避免页签消失。见 [[tab-node-model]]、[[domain-model]]。
+- 生效：控制器快照更新后，下一次派发才会关掉已有空壳。尚未开始的阶段仍会显示页签自带的那一个窗格。
+
+## [2026-10-23] feat | 标准研发模板对齐统一开发流程
+
+- 背景：`software-development-v1` 六个阶段都在，但证明方式被写成永远做浏览器验收，收尾被写成永远建 PR，实现阶段没有先失败再写，也没有离开前的清理。
+- 变更：模板版本 1.1。HAFlow 仍是唯一主控。需求对应准备、意图和规格；计划对应 writing-plans，对抗只评审；实现先写失败证明，离开前做删除式清理；测试按计划里的证明方式验收；评审按 google-code-review，三轮仍 blocked 就停给人；收尾停在需求记下的交付上限。见 [[dag-workflow-engine]]。
+- 生效：本机 `~/.herdr-controller/templates/software-development-v1.yaml` 与仓库模板对齐。只影响之后新启动的工作流。
+
+## [2026-10-23] feat | 标准研发模板的需求节点改为单人起草
+
+- 背景：`software-development-v1` 的需求节点固定起草加对抗两个工位。小需求也会先开两个人，审查 blocked 后再重做一轮，变成四个 Agent。
+- 变更：需求节点改为 1 个 Task、1 个 Pane，只留 executor。计划节点仍是 executor 加 challenger。见 [[dag-workflow-engine]]。
+- 生效：本机 `~/.herdr-controller/templates/software-development-v1.yaml` 覆盖了仓库内置模板，已同步该节点。只影响之后新启动的工作流。
+
+## [2026-10-23] feat | 非门禁节点 blocked 自动重做一次，第二次带已知限制放行
+
+- 背景：需求、计划返回 blocked 后，调度因为没有候选 SHA、节点也不是代码门禁，停在 waiting_human，只能把裁决交给总指挥。
+- 变更：非门禁节点的落定 blocked 结果自动打回本节点一次；再用完这一次仍 blocked，则保持原结论并标 `accepted_with_limits`，下一节点可以启动。代码门禁仍走 fix-loop。见 [[dag-workflow-engine]] §4.4。
+- 证据：`tests/test_node_acceptance.py`、`tests/test_gate_verdict_symmetry.py`。运行中的控制器要装上这份代码并重启后才会按新规则走。
+- 口径：`normalize_workflow` 给每个节点写的空 `gate: {}` 不是门禁声明。需求、计划因此仍走一次重做；test / review / wrapup 和名字像 gate 的节点仍是代码门禁。
+
 ## [2026-10-21] fix | 控制台告警生命周期感知、已完成工作流与替代任务过滤、可操作交互与前端消警闭环
 
 - 背景：

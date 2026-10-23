@@ -88,7 +88,7 @@ class TestWorkerStartupAtomicRollback(unittest.TestCase):
                  patch.object(mod, "build_baseline_fingerprint", return_value={"tracked": {}, "untracked": {}}), \
                  patch.object(mod, "write_task_context", return_value=({}, {})), \
                  patch.object(mod, "verify_request_preflight", return_value={"preflight_identity": {}}), \
-                 patch.object(mod, "create_pane", return_value="p-dynamic-99"), \
+                 patch.object(mod, "allocate_task_pane", return_value=("p-dynamic-99", "dynamic")), \
                  patch.object(mod, "start_agent", return_value={"name": "test-agent", "agent_session": "s1"}), \
                  patch.object(mod, "wait_startup_ready", return_value={"status": "TRUST_REQUIRED", "interactive_ready": False, "reason": "blocked"}), \
                  patch.object(mod, "rollback_unready_startup", return_value=True) as mock_rollback, \
@@ -105,6 +105,69 @@ class TestWorkerStartupAtomicRollback(unittest.TestCase):
                     self.assertFalse(payload["agent_started"])
                     self.assertFalse(payload["recovery_required"])
                     self.assertEqual(payload["disposition"], "rolled_back")
+
+    def test_prebuilt_write_failure_restores_the_borrowed_pane(self):
+        import importlib.machinery
+        import importlib.util
+        import io
+        import tempfile
+        worker_path = HERDR_ROOT / "services" / "herdr-worker.py"
+        spec = importlib.util.spec_from_loader(
+            "worker_mod_restore_borrowed",
+            importlib.machinery.SourceFileLoader("worker_mod_restore_borrowed", str(worker_path)),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        test_args = [
+            "herdr-worker.py",
+            "--task-id", "task-restore-borrowed",
+            "--source", str(HERDR_ROOT),
+            "--agent", "grok",
+            "--base-branch", "main",
+            "--parent-pane", "p0",
+            "--launch-intent-id", "intent-restore-1",
+            "--run-id", "run-restore-1",
+        ]
+
+        def allocate(parent, clone, identity, task_id):
+            identity.update(previous_label="Anchor", previous_cwd="/proj")
+            return "parent", "prebuilt"
+
+        def write(clone, identity, initial=False):
+            if identity.get("pane_source") == "prebuilt":
+                raise OSError("disk")
+
+        with tempfile.TemporaryDirectory() as tmp_clone_dir:
+            tmp_clone = Path(tmp_clone_dir)
+            with patch.object(sys, "argv", test_args), \
+                 patch.object(mod, "create_clone", return_value=tmp_clone), \
+                 patch.object(mod, "create_task_branch", return_value="agent/grok/test"), \
+                 patch.object(mod, "capture_head_sha", return_value="sha123"), \
+                 patch.object(mod, "_rev_parse_head", return_value="sha123"), \
+                 patch.object(mod, "build_baseline_fingerprint", return_value={"tracked": {}, "untracked": {}}), \
+                 patch.object(mod, "write_task_context", return_value=({}, {})), \
+                 patch.object(mod, "verify_request_preflight", return_value={"preflight_identity": {}}), \
+                 patch.object(mod, "allocate_task_pane", side_effect=allocate), \
+                 patch.object(mod, "start_agent") as start, \
+                 patch.object(mod, "restore_borrowed_pane", return_value=True) as restore, \
+                 patch.object(mod, "rollback_unstarted_pane") as rollback, \
+                 patch.object(mod, "is_task_active_in_registry", return_value=False), \
+                 patch("herdr.task_resources.write_worker_launch_identity", side_effect=write), \
+                 patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                with self.assertRaises(OSError):
+                    mod.main()
+            start.assert_not_called()
+            rollback.assert_not_called()
+            restore.assert_called_once_with("parent", "Anchor", "/proj")
+            stderr_output = mock_stderr.getvalue()
+            self.assertIn("HERDR_WORKER_FAILURE=", stderr_output)
+            for line in stderr_output.splitlines():
+                if line.startswith("HERDR_WORKER_FAILURE="):
+                    payload = json.loads(line.split("=", 1)[1])
+                    self.assertEqual(payload["disposition"], "borrowed_pane_restored")
+                    self.assertFalse(payload["recovery_required"])
+                    self.assertIsNone(payload["pane_id"])
 
 
 if __name__ == "__main__":

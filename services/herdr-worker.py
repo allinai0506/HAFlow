@@ -794,6 +794,122 @@ def prepare_existing_pane(pane_id, clone):
     time.sleep(0.5)
 
 
+_UNKNOWN_AGENT = object()
+
+
+def _agent_on_pane(pane_id):
+    """Agent dict, None when confirmed absent, or a truthy unknown.
+
+    A nonzero exit, empty stdout, timeout, or unreadable payload is occupied.
+    Only ``result.agent`` null or ``{}`` on a successful payload may be reused.
+    """
+    try:
+        result = subprocess.run(
+            ["herdr", "agent", "get", pane_id],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _UNKNOWN_AGENT
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return _UNKNOWN_AGENT
+    from herdr.observer.live import _agent_payload
+    valid, agent, explicit_empty = _agent_payload(result.stdout)
+    if not valid:
+        return _UNKNOWN_AGENT
+    if explicit_empty:
+        return None
+    return agent or _UNKNOWN_AGENT
+
+
+def _pane_fields(pane_id):
+    data = run_json(["herdr", "pane", "get", pane_id], timeout=10)
+    pane = (data.get("result") or {}).get("pane") or {}
+    cwd = pane.get("cwd") or pane.get("foreground_cwd") or ""
+    return pane.get("label") or "", cwd
+
+
+def _pane_label(pane_id):
+    return _pane_fields(pane_id)[0]
+
+
+def restore_borrowed_pane(pane_id, previous_label, previous_cwd):
+    """Give a borrowed pane back. Do not close the tab's only pane."""
+    if not pane_id or (not previous_label and not previous_cwd):
+        return False
+    try:
+        if previous_label:
+            renamed = subprocess.run(
+                ["herdr", "pane", "rename", pane_id, previous_label],
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            if renamed.returncode != 0:
+                return False
+        if previous_cwd:
+            moved = subprocess.run(
+                ["herdr", "pane", "run", pane_id, f"cd {shlex.quote(str(previous_cwd))}"],
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            if moved.returncode != 0:
+                return False
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def allocate_task_pane(parent_pane, clone, launch_identity=None, task_id=None):
+    """Use an idle parent for this task. Split only when that pane is taken."""
+    from herdr.task_resources import workflow_launch_lock
+    from herdr.state_store import get_state_store
+    with workflow_launch_lock(get_state_store().db_path, 'managed-dynamic-pane-lifecycle'):
+        label, previous_cwd = _pane_fields(parent_pane)
+        if label.startswith("task:") or _agent_on_pane(parent_pane):
+            return _create_pane(parent_pane, clone, launch_identity), "dynamic"
+        claim = f"task:{task_id}" if task_id else "task"
+        renamed = subprocess.run(
+            ["herdr", "pane", "rename", parent_pane, claim],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        if renamed.returncode != 0:
+            return _create_pane(parent_pane, clone, launch_identity), "dynamic"
+        try:
+            prepare_existing_pane(parent_pane, clone)
+        except Exception:
+            if label:
+                subprocess.run(
+                    ["herdr", "pane", "rename", parent_pane, label],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+            raise
+        if launch_identity is not None:
+            launch_identity.update(
+                pane_id=parent_pane,
+                pane_source="prebuilt",
+                phase="pane_allocated",
+                previous_label=label,
+                previous_cwd=previous_cwd,
+            )
+            try:
+                from herdr.task_resources import write_worker_launch_identity
+                write_worker_launch_identity(clone, launch_identity)
+            except Exception:
+                if restore_borrowed_pane(parent_pane, label, previous_cwd):
+                    launch_identity.pop("pane_id", None)
+                    launch_identity.pop("pane_source", None)
+                    launch_identity["borrowed_pane_restored"] = True
+                raise
+        return parent_pane, "prebuilt"
+
+
 
 
 def unique_agent_name(task_id, pane_id):
@@ -1212,8 +1328,9 @@ def main():
                 raise RuntimeError(
                     "--parent-pane is required when --pane-id is not provided"
                 )
-            pane_id = create_pane(args.parent_pane, clone, launch_identity)
-            pane_source = "dynamic"
+            pane_id, pane_source = allocate_task_pane(
+                args.parent_pane, clone, launch_identity, args.task_id,
+            )
 
         print(f"[PANE] {pane_id}")
         print(f"[PANE SOURCE] {pane_source}")
@@ -1316,7 +1433,22 @@ def main():
         if (readiness or {}).get("trust_evidence"):
             failure["trust_evidence"] = readiness["trust_evidence"]
         pane_rolled_back = False
-        if not agent_start_attempted and pane_id and rollback_unstarted_pane(clone, pane_id, pane_source, launch_identity):
+        borrowed_restored = bool(launch_identity and launch_identity.pop("borrowed_pane_restored", None))
+        if (
+            not agent_start_attempted
+            and pane_id
+            and pane_source == "prebuilt"
+            and launch_identity
+            and restore_borrowed_pane(
+                pane_id,
+                launch_identity.get("previous_label") or "",
+                launch_identity.get("previous_cwd") or "",
+            )
+        ):
+            borrowed_restored = True
+            pane_rolled_back = True
+            pane_id = None
+        elif not agent_start_attempted and pane_id and rollback_unstarted_pane(clone, pane_id, pane_source, launch_identity):
             pane_rolled_back = True
             pane_id = None
         elif agent_start_attempted and not agent_started and pane_id and pane_source == 'dynamic' and rollback_unready_startup(clone, pane_id, pane_source, launch_identity, agent):
@@ -1342,7 +1474,13 @@ def main():
                 )
 
         clone_absent = not clone or not os.path.lexists(clone)
-        if clone_absent and pane_id is None:
+        if borrowed_restored and pane_id is None:
+            failure.update(
+                disposition="borrowed_pane_restored",
+                pane_id=None,
+                recovery_required=not clone_absent,
+            )
+        elif clone_absent and pane_id is None:
             if not agent_start_attempted and pane_rolled_back:
                 failure.update(disposition='pane_reclaimed', recovery_required=False)
             elif agent_start_attempted and not agent_started and pane_rolled_back:

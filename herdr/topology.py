@@ -117,8 +117,104 @@ def _resolve_or_create_tab(workspace_id, project_root, stage):
     return created["result"]["tab"]["tab_id"], True
 
 
-def _anchor_label(stage_key):
-    return f"Herdr Anchor · {stage_key}"
+def _lifecycle_lock():
+    """Same lock the dynamic-pane reaper holds while it closes a pane."""
+    from herdr.state_store import get_state_store
+    from herdr.task_resources import workflow_launch_lock
+    return workflow_launch_lock(
+        get_state_store().db_path, "managed-dynamic-pane-lifecycle",
+    )
+
+
+def _confirmed_agent_absent(pane_id):
+    """True only when a successful probe says this pane has no agent."""
+    try:
+        result = subprocess.run(
+            ["herdr", "agent", "get", pane_id],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return False
+    from herdr.observer.live import _agent_payload
+    valid, _agent, explicit_empty = _agent_payload(result.stdout)
+    return bool(valid and explicit_empty)
+
+
+def _is_idle_root_shell(pane, project_root):
+    """A project-root pane is idle only after a live probe confirms no agent.
+
+    A missing agent field on the pane list is not proof. A failed, empty, or
+    unreadable probe is occupied, so it does not authorize a close.
+    """
+    if pane.get("agent"):
+        return False
+    if not project_root or project_root == "/" or not pane.get("pane_id"):
+        return False
+    raw = pane.get("cwd") or pane.get("foreground_cwd") or ""
+    if not raw:
+        return False
+    try:
+        same_root = (
+            os.path.realpath(os.path.expanduser(raw))
+            == os.path.realpath(os.path.expanduser(project_root))
+        )
+    except OSError:
+        return False
+    if not same_root:
+        return False
+    return _confirmed_agent_absent(pane["pane_id"])
+
+
+def _choose_anchor(pool, cached_id):
+    chosen = next(
+        (pane for pane in pool if pane.get("pane_id") == cached_id),
+        None,
+    )
+    if chosen is None:
+        if not pool:
+            return None, False
+        return pool[0]["pane_id"], True
+    return chosen["pane_id"], False
+
+
+def _close_idle_panes(workspace_id, tab_id, project_root, victims):
+    """Re-list under the lifecycle lock. Never close the last pane."""
+    with _lifecycle_lock():
+        fresh = [
+            pane for pane in _panes(workspace_id)
+            if pane.get("tab_id") == tab_id and pane.get("pane_id")
+        ]
+        if len(fresh) <= 1:
+            return fresh, False
+        victim_ids = {pane.get("pane_id") for pane in victims}
+        still = [
+            pane for pane in fresh
+            if pane.get("pane_id") in victim_ids
+            and _is_idle_root_shell(pane, project_root)
+        ]
+        survivor_ids = {
+            pane.get("pane_id") for pane in fresh
+            if pane.get("pane_id") not in {item.get("pane_id") for item in still}
+        }
+        if not survivor_ids:
+            return fresh, False
+        pool = [pane for pane in fresh if pane.get("pane_id") in survivor_ids]
+        changed = False
+        for pane in still:
+            result = subprocess.run(
+                ["herdr", "pane", "close", pane["pane_id"]],
+                text=True,
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                changed = True
+            else:
+                pool.append(pane)
+        return pool, changed
 
 
 def _resolve_or_create_anchor(
@@ -127,75 +223,50 @@ def _resolve_or_create_anchor(
     project_root,
     stage,
 ):
-    panes = _panes(workspace_id)
-    cached_anchor_id = stage.get("anchor_pane_id")
-    cached = next(
-        (x for x in panes if x.get("pane_id") == cached_anchor_id),
-        None,
-    )
+    """Pick a living pane in the tab. Do not add or label an idle shell.
 
-    def safe_anchor(pane):
-        return (
-            pane
-            and pane.get("tab_id") == tab_id
-            and (pane.get("cwd") or pane.get("foreground_cwd")) == project_root
-            and not pane.get("agent")
-        )
-
-    if safe_anchor(cached):
-        return cached["pane_id"], False
-
-    stage_key = stage.get("key") or stage.get("id") or ""
-    label = _anchor_label(stage_key)
-
-    labeled = [
-        x for x in panes
-        if x.get("tab_id") == tab_id
-        and x.get("label") == label
-        and safe_anchor(x)
+    A tab cannot exist without a pane. The recorded id is only the parent
+    used for the next split. When a task pane already exists, project-root
+    shells whose probe confirms no agent are closed. One pane is never
+    probed and never closed.
+    """
+    panes = [
+        pane for pane in _panes(workspace_id)
+        if pane.get("tab_id") == tab_id and pane.get("pane_id")
     ]
-    if len(labeled) == 1:
-        return labeled[0]["pane_id"], True
-
-    plain = [
-        x for x in panes
-        if x.get("tab_id") == tab_id
-        and safe_anchor(x)
-    ]
-    if len(plain) == 1:
-        pane_id = plain[0]["pane_id"]
-        subprocess.run(
-            ["herdr", "pane", "rename", pane_id, label],
-            text=True,
-            capture_output=True,
-        )
-        return pane_id, True
-
-    parents = [x for x in panes if x.get("tab_id") == tab_id]
-    if not parents:
+    if not panes:
         raise RuntimeError(f"Stage tab has no panes: {tab_id}")
 
-    parent = parents[0]["pane_id"]
-    created = _run_json([
-        "herdr", "pane", "split",
-        parent,
-        "--direction", "right",
-        "--ratio", "0.30",
-        "--cwd", project_root,
-        "--no-focus",
-    ])
-    result = created["result"]
-    pane = result.get("pane") or result.get("new_pane")
-    if not pane:
-        raise RuntimeError(f"Herdr pane split returned no pane: {result}")
+    cached_id = stage.get("anchor_pane_id")
+    if len(panes) == 1:
+        pane_id, changed = _choose_anchor(panes, cached_id)
+        return pane_id, changed
 
-    pane_id = pane["pane_id"]
-    subprocess.run(
-        ["herdr", "pane", "rename", pane_id, label],
-        text=True,
-        capture_output=True,
-    )
-    return pane_id, True
+    idle = [pane for pane in panes if _is_idle_root_shell(pane, project_root)]
+    busy = [pane for pane in panes if pane not in idle]
+    if busy:
+        victims, pool = idle, list(busy)
+    elif len(idle) > 1:
+        kept = next(
+            (pane for pane in idle if pane.get("pane_id") == cached_id),
+            idle[0],
+        )
+        victims = [
+            pane for pane in idle if pane.get("pane_id") != kept.get("pane_id")
+        ]
+        pool = [kept]
+    else:
+        victims, pool = [], list(panes)
+
+    changed = False
+    if victims:
+        pool, changed = _close_idle_panes(
+            workspace_id, tab_id, project_root, victims,
+        )
+    pane_id, choose_changed = _choose_anchor(pool, cached_id)
+    if pane_id is None:
+        raise RuntimeError(f"Stage tab has no panes: {tab_id}")
+    return pane_id, changed or choose_changed
 
 
 def ensure_stage_topology(workflow_id, stage_key):

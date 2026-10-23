@@ -51,7 +51,7 @@ class TestWorkerRollbackCloneCleanup(unittest.TestCase):
                  patch.object(mod, "build_baseline_fingerprint", return_value={"tracked": {}, "untracked": {}}), \
                  patch.object(mod, "write_task_context", return_value=({}, {})), \
                  patch.object(mod, "verify_request_preflight", return_value={"preflight_identity": {}}), \
-                 patch.object(mod, "create_pane", return_value="p-dynamic-99"), \
+                 patch.object(mod, "allocate_task_pane", return_value=("p-dynamic-99", "dynamic")), \
                  patch.object(mod, "start_agent", return_value={"name": "test-agent", "agent_session": "s1"}), \
                  patch.object(mod, "wait_startup_ready", return_value={"status": "TRUST_REQUIRED", "interactive_ready": False, "reason": "blocked"}), \
                  patch.object(mod, "rollback_unready_startup", return_value=True), \
@@ -98,7 +98,7 @@ class TestWorkerRollbackCloneCleanup(unittest.TestCase):
                  patch.object(mod, "build_baseline_fingerprint", return_value={"tracked": {}, "untracked": {}}), \
                  patch.object(mod, "write_task_context", return_value=({}, {})), \
                  patch.object(mod, "verify_request_preflight", return_value={"preflight_identity": {}}), \
-                 patch.object(mod, "create_pane", return_value="p-dynamic-99"), \
+                 patch.object(mod, "allocate_task_pane", return_value=("p-dynamic-99", "dynamic")), \
                  patch.object(mod, "start_agent", return_value={"name": "test-agent", "agent_session": "s1"}), \
                  patch.object(mod, "wait_startup_ready", return_value={"status": "TRUST_REQUIRED", "interactive_ready": False, "reason": "blocked"}), \
                  patch.object(mod, "rollback_unready_startup", return_value=True), \

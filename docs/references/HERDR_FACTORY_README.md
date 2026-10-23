@@ -731,21 +731,21 @@ Clone      默认长期保留
 
 # 16. Stage Anchor
 
-每个 Workflow Node / Stage 当前有一个 Anchor Pane。
+每个 Workflow Node / Stage 记下 `anchor_pane_id`，它是下一次 `pane split` 的父窗格。
 
 例如：
 
 ```text
 requirements
 → tab w9:t2
-→ anchor w9:pN
+→ parent w9:pN
 ```
 
-Anchor 的职责：
+这个编号的职责：
 
 ```text
 作为动态 Pane split 的父 Pane
-保证该 Node 有稳定的运行入口
+第一个任务直接占用页签自带的窗格，不再另留空的 Anchor
 ```
 
 一个重要教训：
@@ -1207,7 +1207,8 @@ import re
 
 ```text
 绝不自动删除 Tab
-绝不自动关闭 Anchor Pane
+绝不关闭一个页签里的最后一个窗格
+同页已经有任务窗格时，可以关掉停在项目根目录且没有 Agent 的空壳
 ```
 
 ---

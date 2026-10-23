@@ -41,6 +41,10 @@ def active_tasks(workflow, tasks):
 
 
 def _blocking(task):
+    # A second blocked delivery on a non-gate node is a known limit. The
+    # verdict stays blocked; it just no longer stops the next node.
+    if task.get('accepted_with_limits') and not task.get('finalize_escalated'):
+        return False
     return (task.get('stage_verdict') == 'blocked'
             or task.get('status') in {'blocked', 'failed', 'rework', 'interrupted'}
             or bool(str(task.get('blocker') or '').strip())

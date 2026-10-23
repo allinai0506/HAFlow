@@ -22,13 +22,25 @@ def resolve_gate_config(ports, node, node_id):
 
     if explicit_gate is False:
         return None
+    # gate_declared marks an author who wrote gate, including an explicit
+    # empty object. The placeholder normalize writes when the key is absent
+    # has no flag and is not a declaration. Named code gates still match below.
+    gate = None
+    if node.get("gate_declared") and isinstance(explicit_gate, dict):
+        gate = explicit_gate
+    elif isinstance(explicit_gate, dict) and not explicit_gate:
+        explicit_gate = None
 
-    if explicit_gate is not None:
+    if gate is not None:
+        pass
+    elif explicit_gate is not None:
         gate = explicit_gate if isinstance(explicit_gate, dict) else {}
     elif node.get("node_type") == "gate":
         gate = {}
     else:
         stage_policy_gate = ports.get_stage_policy(node_id).get("gate") if hasattr(ports, "get_stage_policy") else None
+        if isinstance(stage_policy_gate, dict) and not stage_policy_gate:
+            stage_policy_gate = None
         if stage_policy_gate is False:
             return None
         if stage_policy_gate is not None:
@@ -50,7 +62,11 @@ def resolve_gate_config(ports, node, node_id):
     }
 
 def gate_verdict(ports, workflow_id, node_id):
-    """Fail-safe 门禁结论:任一未作废任务的 blocked 结论即 blocked。"""
+    """Fail-safe 门禁结论:任一未作废任务的 blocked 结论即 blocked。
+
+    accepted_with_limits 是非门禁节点用完一次重做后的已知限制，
+    结论仍记在任务上，但不再把整条下游停住。
+    """
     verdict = None
 
     for task in ports.load_tasks():
@@ -59,6 +75,8 @@ def gate_verdict(ports, workflow_id, node_id):
         if node_id not in (task.get("node"), task.get("stage")):
             continue
         if task.get("status") == "superseded":
+            continue
+        if task.get("accepted_with_limits") and not task.get("finalize_escalated"):
             continue
 
         task_verdict = task.get("stage_verdict")
@@ -88,8 +106,9 @@ def latest_branch_for_node(ports, workflow_id, node_id):
 def blocked_verdict_dep(ports, workflow_id, node):
     """依赖中是否存在任务级 blocked 验收结论(不问 gate_cfg)。
 
-    plan/requirements 等节点没有 gate 配置,sweep 的 fix-loop 看不见它们,
-    但自动推进同样不得越过 blocked 结论。返回首个被阻断的依赖 id。
+    plan/requirements 等节点没有 gate 配置,sweep 的 fix-loop 看不见它们。
+    第一次 blocked 会打回本节点；用完这一次后，带已知限制的结论不再阻断。
+    返回首个仍被阻断的依赖 id。
     """
     for dep in ((node or {}).get("depends_on") or []):
         if ports.gate_verdict(workflow_id, dep) == "blocked":

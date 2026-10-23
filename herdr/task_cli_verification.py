@@ -342,22 +342,10 @@ def _is_gate_task(t):
 
     node = str(node_id or "").lower()
     if wf_cfg and isinstance(wf_cfg, dict):
+        from herdr.node_acceptance import node_uses_gate_loop
         for n in wf_cfg.get("nodes", []):
             if n.get("id") == node_id:
-                if n.get("gate") is False:
-                    return False
-                if n.get("gate") is not None or n.get("node_type") == "gate":
-                    return True
-                if node in (
-                    "test",
-                    "review",
-                    "wrapup",
-                    "gate",
-                    "cleanroom",
-                    "cleanroom_test",
-                    "cleanroom_review",
-                    "cleanroom_gate",
-                ) or re.search(r"(^|[_-])(gate|cleanroom)($|[_-])", node):
+                if node_uses_gate_loop(n, node_id):
                     return True
                 if n.get("node_type") in (
                     "agent",

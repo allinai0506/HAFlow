@@ -27,19 +27,41 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
                 f"Node '{node['id']}' contains unbounded parallelism phrase",
             )
 
-    def test_requirements_dual_adversarial_spec(self):
+    def test_requirements_is_a_single_drafter(self):
         node = self.node_map["requirements"]
         policy = node.get("agent_policy", {})
-        self.assertEqual(policy.get("max_concurrency"), 2)
-        self.assertTrue(node.get("parallel"))
+        self.assertEqual(node.get("max_tasks_per_node"), 1)
+        self.assertEqual(policy.get("max_concurrency"), 1)
+        self.assertFalse(node.get("parallel"))
 
         roles = policy.get("roles", [])
         role_names = [r.get("name") for r in roles]
-        self.assertEqual(role_names, ["executor", "challenger"])
+        self.assertEqual(role_names, ["executor"])
 
         outputs = node.get("required_outputs", [])
         self.assertTrue(any("需求规格与验收标准" in o for o in outputs))
-        self.assertTrue(any("需求对抗审查与边界漏洞清单" in o for o in outputs))
+        self.assertFalse(any("对抗" in o for o in outputs))
+        rules = " ".join(node.get("rules", []))
+        self.assertIn("unified-dev-flow", rules)
+        self.assertIn("brainstorming", rules)
+        self.assertIn("工作区", rules)
+
+    def test_nodes_follow_unified_dev_flow_stages(self):
+        plan = " ".join(self.node_map["plan"].get("rules", []))
+        implementation = " ".join(self.node_map["implementation"].get("rules", []))
+        test = " ".join(self.node_map["test"].get("rules", []))
+        review = " ".join(self.node_map["review"].get("rules", []))
+        wrapup = " ".join(self.node_map["wrapup"].get("rules", []))
+        self.assertIn("writing-plans", plan)
+        self.assertIn("plan-eng-review", plan)
+        self.assertIn("test-driven-development", implementation)
+        self.assertIn("ai-slop-cleaner", implementation)
+        self.assertIn("verification-before-completion", test)
+        self.assertIn("非界面改动不要强开浏览器", test)
+        self.assertIn("google-code-review", review)
+        self.assertIn("三轮", review)
+        self.assertIn("交付停在需求记下的上限", wrapup)
+        self.assertIn("knowledge-capture", wrapup)
 
     def test_plan_dual_adversarial_spec(self):
         node = self.node_map["plan"]
@@ -130,11 +152,28 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertTrue(any("审核闭环证据" in o for o in outputs))
         self.assertTrue(any("CI 状态" in o for o in outputs))
 
+    def test_workspace_ceiling_skips_the_receipt_and_e2e_is_conditional(self):
+        from herdr.review_closure import _closure_demanded
+
+        self.assertEqual(self.tmpl.get("delivery_ceiling_default"), "workspace")
+        self.assertFalse(_closure_demanded(self.tmpl))
+        self.assertTrue(_closure_demanded({
+            **self.tmpl, "delivery_ceiling": "pr",
+        }))
+        self.assertTrue(_closure_demanded({
+            "nodes": [{"id": "wrapup", "review_closure_required": True}],
+        }))
+        outputs = self.node_map["test"].get("required_outputs", [])
+        self.assertFalse(any("ego-browser" in item for item in outputs))
+        rules = "\n".join(self.node_map["test"].get("rules", []))
+        self.assertIn("ego-browser 真实 E2E 报告", rules)
+        self.assertIn("非界面改动不要强开浏览器", rules)
+
 
 class TestNodeBudgets(unittest.TestCase):
     def test_bundled_budgets_survive_normalization(self):
         from pathlib import Path
         template = load_template(str(Path(__file__).resolve().parents[1] / 'workflow_templates/software-development-v1.yaml'))
         self.assertEqual({n['id']: n['max_tasks_per_node'] for n in template['nodes']},
-                         {'requirements': 2, 'plan': 2, 'implementation': 12,
+                         {'requirements': 1, 'plan': 2, 'implementation': 12,
                           'test': 4, 'review': 4, 'wrapup': 1})

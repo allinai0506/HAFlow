@@ -1,7 +1,17 @@
 name: software-development-v1
 label: 软件开发标准流程
-version: "1.0"
-description: 标准 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)。适用于需求含隐式规则、多模块依赖、需架构拆分与需求对抗的大中型研发任务。
+version: "1.1"
+description: 标准 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)。按 unified-dev-flow 的阶段思想执行：HAFlow 是唯一主控，各节点只调用对应技能。需求由一人起草；计划保留一次方案对抗。默认交付到工作区，PR、合并和部署要另有授权。
+delivery_ceiling_default: workspace
+
+# 统一开发流程映射。不在节点里再启动 speckit-chain、executing-plans、
+# autopilot 或第二套工作流。
+# requirements    = S0 准备 + S1 意图 + S2 规格
+# plan            = S3 计划。对抗只评审，不改写成第二份方案
+# implementation  = S4 实现。先有失败证明，离开前做删除式清理
+# test            = S5 按计划里的证明方式做新鲜验证
+# review          = S6 独立评审。同一候选打回三轮仍不通过就停给人
+# wrapup          = S7 收尾 + S8 沉淀。停在需求记下的交付上限
 
 # 选择性重新验证策略 (Scheduler v1 / PR #108)
 #
@@ -38,17 +48,17 @@ selective_replan:
 
 nodes:
   - id: requirements
-    max_tasks_per_node: 2
+    max_tasks_per_node: 1
     label: 2需求分析
     node_type: agent
     depends_on: []
-    parallel: true
+    parallel: false
     purpose: 理解需求、澄清范围、识别约束、形成可验收需求规格。
     default_integration_mode: none
     default_task_type: docs
     agent_policy:
       preferred: [claude, qodercli, opencode, codex, agy, pi, grok, kimi]
-      max_concurrency: 2
+      max_concurrency: 1
       roles:
         - name: executor
           label: 需求主起草与边界澄清
@@ -58,16 +68,8 @@ nodes:
             - 需求规格与验收标准
             - 需求目标与功能范围
             - 非目标与业务规则约束
-        - name: challenger
-          label: 需求对抗性质询与漏洞挖掘
-          goal: 对抗性破防审查、挖掘隐式假设、识别未覆盖边界与潜在缺陷
-          purpose_suffix: 负责破防性质询、深挖隐式假设、漏洞挖掘与风险审查
-          outputs:
-            - 需求对抗审查与边界漏洞清单
-            - 风险与待确认事项
     required_outputs:
       - 需求规格与验收标准
-      - 需求对抗审查与边界漏洞清单
       - 需求目标
       - 功能范围
       - 非目标与边界
@@ -75,10 +77,13 @@ nodes:
       - 关键约束
       - 风险与待确认事项
     rules:
-      - 严格限定最多 2 个 Task / 2 个 Pane：1 个主执行者（需求分析与边界澄清），1 个对抗性质询者（破防性质询、隐式假设挖掘与漏洞审查）。严禁开设第 3 个及以上 Task 或 Pane。
-      - 严禁按前端、后端、数据库、UI 切割细碎 Pane；所有需求工作收敛在双工位内完成。
+      - 严格限定 1 个 Task / 1 个 Pane：只做需求起草与边界澄清。对抗审查留在计划节点，不在本节点再开审查工位。
+      - 先读 unified-dev-flow 技能再写规格。HAFlow 是唯一主控，本节点不启动 speckit-chain、executing-plans、autopilot 或第二套工作流。已有规格和现场对得上就接着写，对不上再重开。
+      - 规格写清四件事：问题与假设、最小改动和文件、不做什么、用哪条命令证明。意图用 brainstorming 收口。验收要能失败，不把百分百边界写进这一轮。
+      - 写明意图（缺陷、功能、重构、迁移或配置）、复杂度（微、小、中、大）、风险、证明方式和交付上限。需求没有授权推送、PR、合并或部署时，交付上限记为工作区。
+      - 严禁按前端、后端、数据库、UI 切割细碎 Pane。
       - 以分析和方案输出为主，默认不得修改业务代码，不得直接进入实现阶段。
-      - 两份核心产出（需求规格与对抗审查清单）均完备方可通过验收推进。
+      - 需求规格与验收标准完备即可进入计划。
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择；只有存在明确理由或用户显式指定时才固定具体 Agent。
 
@@ -120,6 +125,8 @@ nodes:
       - 风险与验证方案
     rules:
       - 严格限定最多 2 个 Task / 2 个 Pane：1 个主架构师（技术方案制定与任务解耦拆分），1 个对抗性质询者（架构合理性、循环依赖、过度设计与技术风险审查）。严禁开设第 3 个及以上 Task 或 Pane。
+      - 计划按 writing-plans 写：每个实现任务有文件范围、验收命令和放弃的做法。有结构变化时用 architect 定边界。微改动只列文件和证明命令，不单拆架构。
+      - 对抗工位按 plan-eng-review 只挑问题：循环依赖、过度拆分、验收跑不起来。不改写成第二份方案，不另开实现工位。
       - 承接需求基线原则：直接继承 requirements 已确认需求规格与约束，严禁在计划阶段重复进行需求分析或范围定义。
       - 解耦拆分与并发依据：计划阶段制定的“任务拆分”是为后续实现阶段规划的，严禁在计划阶段提前为每个拆分子任务开设 Pane！必须明确各子任务修改文件预估与重叠分析，无文件冲突且解耦时方作为实现阶段并发的事实依据；同时为每个 Task 制定独立验收标准，支撑后续 Selective Replan 精准定位。
       - 默认不得修改业务代码。
@@ -147,6 +154,8 @@ nodes:
       - 风险说明
     rules:
       - 严格按照 Task 定义的范围执行，必须保证修改仅局限于 Task 目标内。
+      - 缺陷和功能先按 test-driven-development 留下会失败的证明，再写实现。改动停在计划点名的文件里。
+      - 离开本节点前用 ai-slop-cleaner 做删除式清理，去掉死代码和重复包装。清理后的代码才算本节点交付。不在本节点推送、建 PR 或再开一条工作流。
       - "预算与并发控制：max_tasks_per_node 为 12（节点全生命周期累计最大任务预算，包含返工补派），max_concurrency 为 3（同时运行并发上限）。"
       - 自适应解耦并发原则：仅当计划阶段拆解的任务完全解耦且修改文件互不重叠时，允许派发多 Agent 并发执行（上限 3 个）；若模块强耦合或属于单点重构，必须强制单 Agent 顺序执行，严禁无序切碎制造 Git 合并冲突与 Pane 膨胀。
       - 提交前必须自测，确保修改与验收标准一致。
@@ -174,16 +183,15 @@ nodes:
       - 回归测试结果
       - 边界条件验证情况
       - "门禁测试结论（HERDR_GATE_VERDICT: pass / blocked）"
-      - 本地服务启动与候选版本核验记录（命令、工作目录、URL、隔离环境）
-      - ego-browser 真实 E2E 报告（步骤、预期/实际结果、业务主路径及失败边界）
-      - E2E 截图/浏览器记录与状态回读证据（绑定候选 SHA 和 Task/Run）
     rules:
-      - 真实 E2E 为本测试节点必过门禁：必须在隔离测试环境启动当前冻结候选版本的本地服务，执行真实端到端测试；不得用单元测试、静态检查、截图、页面可打开或 HTTP 200 替代。
+      - 按计划写明的证明方式做新鲜验证，并读取 verification-before-completion。验证对象是实现节点清理之后的同一个冻结 candidate_sha。命令、退出码和结论写入记录。旧结果不能证明已经改过的代码。
+      - 计划或需求把证明方式定成界面旅程，或这次改动用户能在界面上看到时，真实 E2E 才是必过项，并使用 ego-browser。这时必须交出：本地服务启动与候选版本核验记录（命令、工作目录、URL、隔离环境）；ego-browser 真实 E2E 报告（步骤、预期/实际结果、业务主路径及失败边界）；E2E 截图/浏览器记录与状态回读证据（绑定候选 SHA 和 Task/Run）。不得用单元测试、静态检查、截图、页面可打开或 HTTP 200 替代，也不得标成不适用。
+      - 证明方式是测试命令、静态检查或配置校验时，必须实跑计划里的命令。没跑、失败或证据不足就是 blocked。非界面改动不要强开浏览器。
       - 浏览器 E2E 必须使用 ego-browser 技能：先读取目标环境技能并运行 ego-browser skill，遵循当前版本指南操作真实本地应用；不得用静态 mock/demo 页面、测试替身或伪造成功页面替代被验收业务链。
       - 按项目文档启动所需前后端及依赖，使用隔离端口、临时数据库和测试账号；服务实际加载版本必须对应冻结 candidate_sha。记录启动命令、工作目录、端口/URL、版本核验及就绪证据；不得复用身份不明的旧服务或重启生产服务。
       - 从 spec/需求与本次影响面选择关键用户旅程，使用 ego-browser 实际输入、点击、提交并检查结果，覆盖至少一条完整业务主路径及相关失败/边界路径；跨持久化功能须验证写入后的读取/刷新/重新打开，必要时核对 API/数据库，不能只看成功提示。
       - 保存可回放步骤、预期/实际结果、截图或浏览器记录及后端状态回读证据，并绑定 workflow/task/run 与 candidate_sha；报告不得含凭据或未脱敏敏感数据。测试结束仅清理由本任务启动且身份明确的服务及临时资源。
-      - '只有真实本地服务 E2E 全部必要场景通过且其他必需验收也通过，才允许 HERDR_GATE_VERDICT: pass。未运行、跳过、失败、技能缺失、环境未就绪或证据不足均须 HERDR_GATE_VERDICT: blocked，说明原因并交主控恢复/裁决；不得标为不适用后放行，也不得以 unknown 当 PASS。'
+      - '该跑的证明没有实跑、失败、技能缺失、环境未就绪或证据不足时，HERDR_GATE_VERDICT 必须是 blocked，并说明原因。不得标成不适用后放行，不得用 unknown 当 pass。界面旅程只有真实本地服务 E2E 的必要场景通过，才允许 pass。'
       - 单工位专注执行（严格限定 1 个 Task / 1 个 Pane）。
       - 跨阶段 Agent 硬隔离红线（一等公民）：测试 Agent 严禁复用实现（implementation）阶段的主要 Agent！必须由不同的 Agent 独立运行测试与边界核验，杜绝思维惯性与“自证自清”。
       - 以验证为主，不得随意修改代码；发现问题必须提报明确缺陷清单与复现步骤。
@@ -215,6 +223,8 @@ nodes:
       - "门禁评审结论（HERDR_GATE_VERDICT: pass / blocked）"
     rules:
       - 单工位独立评审（严格限定 1 个 Task / 1 个 Pane）。
+      - 按 google-code-review 评审；仓库指定了自己的审查技能时用那个技能。评审只下结论，不改实现。没有阻塞缺陷才是 pass，有阻塞缺陷就是 blocked。
+      - 同一候选被评审打回累计三轮仍不通过，就停止再派，写明需要人工处理。实现在评审之后又改了代码，这一轮结论作废，必须重测重审。
       - 跨阶段 Agent 硬隔离红线（一等公民）：评审 Agent 严禁复用实现（implementation）阶段的主要 Agent！坚决杜绝实现者自己评审自己的代码。
       - 评审必须独立执行，重点检查范围蔓延、未处理异常和潜在性能缺陷；验证对象必须为派发注入的冻结 candidate_sha。
       - "门禁结论契约：结论必须明确（HERDR_GATE_VERDICT: pass 或 blocked）；未发现阻塞缺陷时输出 pass，存在必须返工的阻塞缺陷时输出 blocked 触发返工流程。"
@@ -247,6 +257,7 @@ nodes:
       - 遗留问题与后续建议
     rules:
       - 单工位收尾（严格限定 1 个 Task / 1 个 Pane）。
+      - 交付停在需求记下的上限。上限是工作区时，不推送、不建 PR、不合并、不部署；下面的 PR 与审核闭环条款整段跳过，只核对工作区证据并调用 knowledge-capture。上限包含 PR 时才执行那些条款，并且仍然不自动合并。合并和部署必须另有明确授权。
       - 执行者独立性红线：收尾 Agent 严禁复用实现阶段 Agent，由独立客观视角核查全流程交付清单并执行收尾。
       - 必须核对全流程所有阶段的交付物是否完备，汇聚确认 test 与 review 均基于同一 candidate_sha 判定 pass，负责生成交付汇总和合并指引。
       - 必须使用 six-step-finish 技能执行收尾，禁止自创收尾流程。技能说明（仓库内）：.agents/skills/six-step-finish/SKILL.md；收尾脚本（仓库内）：.agents/skills/six-step-finish/scripts/finish-task.sh；绝对兜底：~/.agents/skills/six-step-finish/。基准分支必须显式传入：--base <本工作流 base_branch，见 stage advance 事件头部 base_branch 字段>。

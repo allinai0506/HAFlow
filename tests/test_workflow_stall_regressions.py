@@ -41,7 +41,7 @@ def test_worker_git_launch_intent_survives_branch_preparation(tmp_path, monkeypa
     monkeypatch.setattr(worker, '_registered_tasks', lambda: [])
     monkeypatch.setattr(worker, 'is_task_active_in_registry', lambda tid: False)
     monkeypatch.setattr(worker, 'verify_request_preflight', lambda *a: {'request_verified': True})
-    monkeypatch.setattr(worker, 'create_pane', lambda *a: 'test-pane')
+    monkeypatch.setattr(worker, 'allocate_task_pane', lambda *a: ('test-pane', 'dynamic'))
     monkeypatch.setattr(worker, 'start_agent', lambda *a: {
         'agent': 'codex', 'name': 'owned', 'agent_session': 'owned-session'})
     monkeypatch.setattr(worker, 'wait_startup_ready', lambda *a: {
@@ -152,7 +152,7 @@ def frozen_worker(tmp_path, monkeypatch):
         'task_id': 'impl', 'status': 'integrated', 'branch': 'implementation'}])
     monkeypatch.setattr(worker, 'is_task_active_in_registry', lambda tid: False)
     monkeypatch.setattr(worker, 'verify_request_preflight', lambda *a: {'request_verified': True})
-    monkeypatch.setattr(worker, 'create_pane', lambda *a: 'test-pane')
+    monkeypatch.setattr(worker, 'allocate_task_pane', lambda *a: ('test-pane', 'dynamic'))
     monkeypatch.setattr(worker, 'start_agent', lambda *a: {
         'agent': 'codex', 'name': 'owned', 'agent_session': 'owned-session'})
     monkeypatch.setattr(worker, 'wait_startup_ready', lambda *a: {

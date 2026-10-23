@@ -447,6 +447,7 @@ install_modules(globals(), (
     "infra_recovery",
     "join_gates",
     "merged_fix_loop",
+    "node_acceptance",
     "node_policy",
     "persistence",
     "registry",

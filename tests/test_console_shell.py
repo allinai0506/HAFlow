@@ -151,3 +151,62 @@ verify([{workflow_id: 'wf-current', title: 'Delivered', status: 'completed'}], 1
             ["node", "-e", script], capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_workflow_tabs_stay_visible_on_every_page(self):
+        self.assertNotIn("view==='workbench'?'flex':'none'", self.html)
+        match = re.search(
+            r"function paintCrumb\([^)]*\)\{.*?\n\}",
+            self.html,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        script = r"""
+const assert = require('node:assert/strict');
+const tabsBar = {style: {display: 'none'}};
+const crumb = {classes: new Set(['visually-hidden']), classList: null};
+crumb.classList = {
+  add(name) { crumb.classes.add(name); },
+  toggle(name, on) { if (on) crumb.classes.add(name); else crumb.classes.delete(name); },
+};
+const shell = {dataset: {}};
+const document = {
+  getElementById(id) {
+    if (id === 'workflowTabsBar') return tabsBar;
+    return {textContent: '', hidden: false};
+  },
+  querySelector(sel) {
+    if (sel === '.top .crumb') return crumb;
+    if (sel === '.shell') return shell;
+    return null;
+  },
+  querySelectorAll() { return []; },
+};
+const state = {overview: {}, project: {workflows: [], agents: []}};
+function relationText() { return ''; }
+""" + match.group(0) + r"""
+for (const next of [
+  {shellView: 'workbench'},
+  {shellView: 'templates'},
+  {shellView: 'workflows'},
+  {shellView: 'alerts'},
+  {shellView: 'agents'},
+  {shellView: 'slots'},
+  {shellView: 'experience'},
+  {dashMode: true, shellView: 'workbench'},
+  {opsMode: true, shellView: 'workbench'},
+]) {
+  tabsBar.style.display = 'none';
+  crumb.classes.delete('visually-hidden');
+  state.opsMode = !!next.opsMode;
+  state.dashMode = !!next.dashMode;
+  state.shellView = next.shellView;
+  state.workflowId = next.shellView === 'templates' ? '__templates__' : 'wf-1';
+  paintCrumb();
+  assert.equal(tabsBar.style.display, 'flex', JSON.stringify(next));
+  assert.equal(crumb.classes.has('visually-hidden'), true, JSON.stringify(next));
+}
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
