@@ -264,10 +264,15 @@ def confirm_action(fixture, aid, *, instruction=None, reason="人工核查当前
 
 
 def test_steer_custom_instruction_roundtrips_to_current_run(cockpit):
-    """Catches an Action modal that silently sends the core's generic default."""
+    """Catches an Action modal that silently sends the core's generic default.
+
+    Enter is the opener used by the rest of this file. A mouse click on this
+    button does not return before the browser call is killed.
+    """
     open_cockpit(cockpit)
     out = cockpit.browser("""
-        await page.click('loc=css:[data-action-id="working:steer"] button');
+        await page.press('loc=css:[data-action-id="working:steer"] button','Enter');
+        await page.waitForFunction(()=>document.getElementById('modal').classList.contains('open'));
         console.log('INSTRUCTION_FIELD='+await page.evaluate(()=>!!document.getElementById('cockpitInstruction')));
     """)
     assert "INSTRUCTION_FIELD=true" in out, "steer confirmation must accept the human instruction"
