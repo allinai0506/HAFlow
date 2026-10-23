@@ -414,6 +414,10 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            # An absent key becomes the placeholder above. An author who wrote
+            # gate, including an explicit empty object, opted into the fix loop.
+            if "gate" in node and node.get("gate") is not False:
+                norm_node["gate_declared"] = True
             for field in ("control_mode", "confirm_before"):
                 if field in node:
                     norm_node[field] = node[field]

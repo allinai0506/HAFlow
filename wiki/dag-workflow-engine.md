@@ -149,11 +149,13 @@ Evidence:
 `blocked` 仍停住自动推进，并走原有 fix-loop。不销毁下游。
 
 `FACT` 非代码门禁（需求、计划）返回 `blocked` 时，不交给总指挥裁决。
-模板规范化写在每个节点上的空 `gate: {}` 不是门禁声明。
+模板规范化在作者没写 `gate` 时补的空 `gate: {}` 不是门禁声明。作者写了
+`gate`（包括显式空对象）会记 `gate_declared`，空对象也走 fix-loop。
 当前任务都已落定，就自动打回本节点重做一次：两侧任务一起作废，沿用现有补派，
-说明里写上阻断和「已知限制」。已经有过一次作废的 blocked 结果、这一轮仍 blocked，
-节点即完成：`stage_verdict` 保持 blocked，任务带 `accepted_with_limits`，
-下一节点可以启动。还有任务在跑则等待，不打回。不无限重做。
+说明里写上阻断和「已知限制」。同一次执行里已经有带 `same_node_redo` 的
+作废 blocked、这一轮仍 blocked，节点即完成：`stage_verdict` 保持 blocked，
+任务带 `accepted_with_limits`，下一节点可以启动。别的原因作废、另一次执行、
+或状态仍是 `failed`，都不盖这个章。还有任务在跑则等待，不打回。不无限重做。
 
 Evidence:
 - `herdr/node_acceptance.py#acceptance_actions`
@@ -426,7 +428,7 @@ Evidence:
 
 ## SPEC 规格研发模板与浏览器验收契约
 
-`FACT`：`spec-development-v1` 将规格/澄清和方案/拆任务分别合并为单节点，实现后独立 test/review 同时就绪，acceptance 汇聚后进入 wrapup。review 要求只读依次执行 `ai-slop-cleaner --review` 与 `google-code-review`。三套研发模板的测试节点均声明本地服务与 ego-browser 真实 E2E 必过，缺失时 blocked；这是执行指令契约，未新增程序化 E2E 回执验证。
+`FACT`：`spec-development-v1` 将规格/澄清和方案/拆任务分别合并为单节点，实现后独立 test/review 同时就绪，acceptance 汇聚后进入 wrapup。review 要求只读依次执行 `ai-slop-cleaner --review` 与 `google-code-review`。`code-craft-v1` 与 `spec-development-v1` 的测试节点把本地服务和 ego-browser 真实 E2E 放在必交产出里。`software-development-v1` 只在界面旅程的规则里要求这三件，非界面改动不写进每条测试任务的验收。这是执行指令契约，未新增程序化 E2E 回执验证。
 
 Evidence:
 - `workflow_templates/spec-development-v1.yaml`

@@ -4,9 +4,11 @@ A settled blocked result goes back to the same node once. The next blocked
 result stays blocked and can advance: the verdict is not rewritten to pass.
 Code gates stay on the existing fix loop. In-flight work is left alone.
 
-REDO_LIMIT is one round per node. A superseded blocked task on that node
-spends it. Raising the limit needs a real round counter; a task count would
-treat the executor and the challenger as two rounds.
+REDO_LIMIT is one round per node. Only a blocked task this execution
+superseded for ``same_node_redo`` spends it. Another reason, or another
+execution, does not. A failed task is not settled and is not stamped
+``accepted_with_limits``. Raising the limit needs a real round counter; a
+task count would treat the executor and the challenger as two rounds.
 """
 
 import re
@@ -20,7 +22,7 @@ REDO_INSTRUCTION = (
     "写成已知限制，不要为了百分之百再扩一轮。"
 )
 
-_SETTLED = COMPLETED_TASK_STATUSES | {"failed"}
+_SETTLED = COMPLETED_TASK_STATUSES
 _CODE_GATE_IDS = frozenset({
     "test", "review", "wrapup", "gate",
     "cleanroom", "cleanroom_test", "cleanroom_review", "cleanroom_gate",
@@ -39,14 +41,27 @@ def _declared_gate(value):
     return value
 
 
-def _is_code_gate(node):
-    gate = _declared_gate(node.get("gate"))
-    if gate is False:
+def node_uses_gate_loop(node, node_id=None):
+    """True when a blocked result stays on the gate fix loop.
+
+    ``normalize_workflow`` still writes ``gate: {}`` on nodes that never
+    declared one. That placeholder is not a gate. ``gate_declared`` marks an
+    author who wrote ``gate``, including an explicit empty object.
+    """
+    node = node or {}
+    if node.get("gate") is False:
         return False
-    if gate is not None or node.get("node_type") == "gate":
+    if node.get("gate_declared") or node.get("node_type") == "gate":
         return True
-    node_id = str(node.get("id") or "").lower()
-    return node_id in _CODE_GATE_IDS or bool(_GATE_NAME.search(node_id))
+    gate = _declared_gate(node.get("gate"))
+    if gate is not None:
+        return True
+    text = str(node_id if node_id is not None else node.get("id") or "").lower()
+    return text in _CODE_GATE_IDS or bool(_GATE_NAME.search(text))
+
+
+def _is_code_gate(node):
+    return node_uses_gate_loop(node)
 
 
 def _live(task):
@@ -57,9 +72,35 @@ def _blocked(task):
     return task.get("stage_verdict") == "blocked"
 
 
-def _spent(tasks):
-    """1 when this node already returned blocked and was superseded, else 0."""
-    return 1 if any((not _live(task)) and _blocked(task) for task in tasks) else 0
+def _redo_marker(task):
+    if task.get("same_node_redo_note"):
+        return True
+    for entry in task.get("status_history") or []:
+        if isinstance(entry, dict) and entry.get("reason") == "same_node_redo":
+            return True
+    return False
+
+
+def _same_execution(task, live_tasks):
+    current = {
+        item.get("execution_id")
+        for item in live_tasks
+        if item.get("execution_id")
+    }
+    if not current:
+        return True
+    return task.get("execution_id") in current
+
+
+def _spent(tasks, live_tasks):
+    """1 after this execution already spent its automatic same-node redo."""
+    return 1 if any(
+        (not _live(task))
+        and _blocked(task)
+        and _redo_marker(task)
+        and _same_execution(task, live_tasks)
+        for task in tasks
+    ) else 0
 
 
 def _note(blocked_tasks):
@@ -106,7 +147,7 @@ def acceptance_actions(config, tasks, workflow_id, gate_ids=()):
         blocked = [task for task in live if _blocked(task)]
         if not blocked:
             continue
-        if _spent(node_tasks) >= REDO_LIMIT:
+        if _spent(node_tasks, live) >= REDO_LIMIT:
             pending = [task for task in blocked if not task.get("accepted_with_limits")]
             if pending:
                 actions.append({
@@ -115,6 +156,8 @@ def acceptance_actions(config, tasks, workflow_id, gate_ids=()):
                     "tasks": pending,
                     "note": "",
                 })
+            continue
+        if all(task.get("accepted_with_limits") for task in blocked):
             continue
         actions.append({
             "op": "rework",

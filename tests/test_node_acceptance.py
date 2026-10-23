@@ -68,7 +68,7 @@ class AcceptanceDecisionTest(unittest.TestCase):
     def test_second_blocked_result_is_accepted_without_another_redo(self):
         actions = self._actions([
             _task("req-ch", "superseded", "requirements", stage_verdict="blocked",
-                  stage_verdict_note="B1"),
+                  stage_verdict_note="B1", same_node_redo_note="自动重做"),
             _task("req-exec", "cleaned", "requirements", stage_verdict="pass",
                   supersedes="req-exec-old"),
             _task("req-ch2", "cleaned", "requirements", stage_verdict="blocked",
@@ -95,7 +95,8 @@ class AcceptanceDecisionTest(unittest.TestCase):
             {"id": "review", "node_type": "agent", "gate": {}},
         ]}
         actions = self._actions([
-            _task("req-old", "superseded", "requirements", stage_verdict="blocked"),
+            _task("req-old", "superseded", "requirements", stage_verdict="blocked",
+                  same_node_redo_note="自动重做"),
             _task("req-exec", "cleaned", "requirements", stage_verdict="pass"),
             _task("req-ch2", "cleaned", "requirements", stage_verdict="blocked",
                   stage_verdict_note="B1 仍在"),
@@ -130,6 +131,67 @@ class AcceptanceDecisionTest(unittest.TestCase):
             Ports, {"id": "requirements", "gate": {"retry_node": "plan"}},
             "requirements")
         self.assertEqual(explicit["retry_node"], "plan")
+        declared = node_policy.resolve_gate_config(
+            Ports, {"id": "audit", "node_type": "agent", "gate": {},
+                    "gate_declared": True},
+            "audit")
+        self.assertIsNotNone(declared)
+        self.assertIsNone(node_policy.resolve_gate_config(
+            Ports, {"id": "audit", "node_type": "agent", "gate": {}}, "audit"))
+
+    def test_explicit_empty_gate_stays_on_the_fix_loop(self):
+        from herdr.node_acceptance import node_uses_gate_loop
+        from herdr.workflow import normalize_workflow
+
+        normalized = normalize_workflow({"nodes": [
+            {"id": "audit", "node_type": "agent", "gate": {}},
+            {"id": "requirements", "node_type": "agent"},
+        ]})
+        audit, requirements = normalized["nodes"]
+        self.assertTrue(audit.get("gate_declared"))
+        self.assertNotIn("gate_declared", requirements)
+        self.assertTrue(node_uses_gate_loop(audit, "audit"))
+        self.assertFalse(node_uses_gate_loop(requirements, "requirements"))
+        actions = self._actions([
+            _task("audit-1", "cleaned", "audit", stage_verdict="blocked",
+                  stage_verdict_note="P0"),
+        ], nodes=normalized)
+        self.assertEqual(actions, [])
+
+    def test_unrelated_supersede_does_not_spend_the_redo(self):
+        actions = self._actions([
+            _task("req-ch", "superseded", "requirements", stage_verdict="blocked",
+                  stage_verdict_note="别的原因"),
+            _task("req-ch2", "cleaned", "requirements", stage_verdict="blocked",
+                  stage_verdict_note="B1 仍在", supersedes="req-ch"),
+        ])
+        self.assertEqual(actions[0]["op"], "rework")
+
+    def test_redo_from_another_execution_does_not_spend(self):
+        actions = self._actions([
+            _task("req-ch", "superseded", "requirements", stage_verdict="blocked",
+                  same_node_redo_note="自动重做", execution_id="old"),
+            _task("req-ch2", "cleaned", "requirements", stage_verdict="blocked",
+                  stage_verdict_note="B1 仍在", execution_id="new"),
+        ])
+        self.assertEqual(actions[0]["op"], "rework")
+
+    def test_same_execution_history_spends_the_redo(self):
+        actions = self._actions([
+            _task("req-ch", "superseded", "requirements", stage_verdict="blocked",
+                  execution_id="e1",
+                  status_history=[{"reason": "same_node_redo"}]),
+            _task("req-ch2", "cleaned", "requirements", stage_verdict="blocked",
+                  stage_verdict_note="B1 仍在", execution_id="e1"),
+        ])
+        self.assertEqual(actions[0]["op"], "accept")
+
+    def test_failed_task_is_not_accepted(self):
+        actions = self._actions([
+            _task("req", "failed", "requirements", stage_verdict="blocked",
+                  stage_verdict_note="启动失败"),
+        ])
+        self.assertEqual(actions, [])
 
     def test_code_gate_is_not_redone_here(self):
         actions = self._actions([
@@ -151,7 +213,8 @@ class AcceptanceDecisionTest(unittest.TestCase):
 
     def test_already_accepted_residual_is_not_rewritten(self):
         actions = self._actions([
-            _task("req-ch", "superseded", "requirements", stage_verdict="blocked"),
+            _task("req-ch", "superseded", "requirements", stage_verdict="blocked",
+                  same_node_redo_note="自动重做"),
             _task("req-ch2", "cleaned", "requirements", stage_verdict="blocked",
                   accepted_with_limits=True, supersedes="req-ch"),
         ])

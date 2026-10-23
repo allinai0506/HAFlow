@@ -189,7 +189,7 @@ class SweepBlockedVerdictTest(unittest.TestCase):
         registry = [
             _task("plan-e", "superseded", "plan", stage_verdict="pass"),
             _task("plan-c", "superseded", "plan", stage_verdict="blocked",
-                  stage_verdict_note="P0 未修"),
+                  stage_verdict_note="P0 未修", same_node_redo_note="已知限制"),
             _task("plan-e2", "cleaned", "plan", stage_verdict="pass",
                   supersedes="plan-e"),
             _task("plan-c2", "cleaned", "plan", stage_verdict="blocked",

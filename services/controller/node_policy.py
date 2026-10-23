@@ -22,13 +22,18 @@ def resolve_gate_config(ports, node, node_id):
 
     if explicit_gate is False:
         return None
-    # normalize_workflow writes gate: {} on every node. An empty object is
-    # "no gate declared", same as a missing key. A non-empty object or
-    # gate: true is an explicit gate. Named code gates still match below.
-    if isinstance(explicit_gate, dict) and not explicit_gate:
+    # gate_declared marks an author who wrote gate, including an explicit
+    # empty object. The placeholder normalize writes when the key is absent
+    # has no flag and is not a declaration. Named code gates still match below.
+    gate = None
+    if node.get("gate_declared") and isinstance(explicit_gate, dict):
+        gate = explicit_gate
+    elif isinstance(explicit_gate, dict) and not explicit_gate:
         explicit_gate = None
 
-    if explicit_gate is not None:
+    if gate is not None:
+        pass
+    elif explicit_gate is not None:
         gate = explicit_gate if isinstance(explicit_gate, dict) else {}
     elif node.get("node_type") == "gate":
         gate = {}

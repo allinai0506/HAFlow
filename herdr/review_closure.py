@@ -737,6 +737,43 @@ def _wrapup_flag(config: Any) -> bool:
     return False
 
 
+_WORKSPACE_CEILINGS = frozenset({
+    "workspace", "working_tree", "worktree", "工作区",
+})
+
+
+def _recorded_ceiling(config: Any) -> str:
+    """Explicit delivery ceiling. An absent field is not a workspace default."""
+    if not isinstance(config, dict):
+        return ""
+    for key in ("delivery_ceiling", "delivery_ceiling_default"):
+        value = config.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for node in config.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        if (node.get("id") or node.get("key")) != "wrapup":
+            continue
+        for key in ("delivery_ceiling", "delivery_ceiling_default"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _workspace_ceiling(value: str) -> bool:
+    text = str(value or "").strip()
+    return text in _WORKSPACE_CEILINGS or text.lower() in _WORKSPACE_CEILINGS
+
+
+def _closure_demanded(config: Any) -> bool:
+    """Workspace delivery skips the PR receipt. No recorded ceiling still demands it."""
+    if not _wrapup_flag(config):
+        return False
+    return not _workspace_ceiling(_recorded_ceiling(config))
+
+
 def closure_required(store, task: Any) -> bool:
     """True when the workflow's pinned configuration opts into the contract.
 
@@ -755,7 +792,7 @@ def closure_required(store, task: Any) -> bool:
         return True  # authoritative snapshot unreadable → fail closed
     config = workflow.get("config")
     if isinstance(config, dict) and config.get("nodes"):
-        return _wrapup_flag(config)
+        return _closure_demanded(config)
     path = str(task.get("workflow_config") or "").strip()
     if not path:
         return False  # legacy: no pinned nodes definition anywhere
@@ -768,7 +805,7 @@ def closure_required(store, task: Any) -> bool:
         return True  # pinned configuration unreadable → fail closed
     if not isinstance(file_config, dict):
         return True
-    return _wrapup_flag(file_config)
+    return _closure_demanded(file_config)
 
 
 def validate_receipt_payload(payload: Any, require_verification: bool = True) -> Tuple[bool, str]:

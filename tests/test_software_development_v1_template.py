@@ -152,6 +152,23 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertTrue(any("审核闭环证据" in o for o in outputs))
         self.assertTrue(any("CI 状态" in o for o in outputs))
 
+    def test_workspace_ceiling_skips_the_receipt_and_e2e_is_conditional(self):
+        from herdr.review_closure import _closure_demanded
+
+        self.assertEqual(self.tmpl.get("delivery_ceiling_default"), "workspace")
+        self.assertFalse(_closure_demanded(self.tmpl))
+        self.assertTrue(_closure_demanded({
+            **self.tmpl, "delivery_ceiling": "pr",
+        }))
+        self.assertTrue(_closure_demanded({
+            "nodes": [{"id": "wrapup", "review_closure_required": True}],
+        }))
+        outputs = self.node_map["test"].get("required_outputs", [])
+        self.assertFalse(any("ego-browser" in item for item in outputs))
+        rules = "\n".join(self.node_map["test"].get("rules", []))
+        self.assertIn("ego-browser 真实 E2E 报告", rules)
+        self.assertIn("非界面改动不要强开浏览器", rules)
+
 
 class TestNodeBudgets(unittest.TestCase):
     def test_bundled_budgets_survive_normalization(self):
