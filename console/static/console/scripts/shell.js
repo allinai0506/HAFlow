@@ -27,8 +27,8 @@ function paintCrumb(){
   if(sec)sec.textContent=map[view]||'工作台';
   const tabsBar=document.getElementById('workflowTabsBar');
   const crumbEl=document.querySelector('.top .crumb');
-  if(tabsBar&&tabsBar.style)tabsBar.style.display=(view==='workbench'?'flex':'none');
-  if(crumbEl&&crumbEl.classList)crumbEl.classList.toggle('visually-hidden', view==='workbench');
+  if(tabsBar&&tabsBar.style)tabsBar.style.display='flex';
+  if(crumbEl&&crumbEl.classList)crumbEl.classList.add('visually-hidden');
   document.querySelectorAll('[data-nav]').forEach(el=>el.classList&&el.classList.toggle('on', el.getAttribute('data-nav')===view));
   const ctlBtn=document.getElementById('navController');
   const tplBtn=document.getElementById('navTemplates');
