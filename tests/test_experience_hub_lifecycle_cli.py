@@ -10,6 +10,7 @@ Case -> acceptance map::
 
     test_stop_absent_free_port                  AC-1
     test_status_json_after_start                AC-2
+    test_status_without_registry_uses_argv_db_path  BD-10 / §3.2.3
     test_start_second_same_hostport             AC-3 / AC-9
     test_start_stop_roundtrip                   AC-4 / AC-8
     test_foreign_listener_fail_closed           AC-5
@@ -295,6 +296,26 @@ def test_status_json_after_start(sandbox):
     ]
 
 
+def test_status_without_registry_uses_argv_db_path(sandbox):
+    """BD-10/§3.2.3: no registry -> db_path comes from argv, never a default."""
+    hub = sandbox.spawn_hub()
+    hub.registry_path.unlink()
+
+    result = run_cli(["status", "--port", str(hub.port), "--json"], sandbox.env)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["state"] == "running"
+    assert report["attribution"] == "port"
+    assert report["registry_state"] == "absent"
+    assert report["pid"] == hub.pid
+    assert Path(report["db_path"]).resolve() == hub.db_path.resolve()
+    assert report["db_exists"] is True
+    assert report["started_at"] is not None
+    assert report["listeners"] == [
+        {"pid": hub.pid, "host": "127.0.0.1", "port": hub.port, "wildcard": False}
+    ]
+
+
 def test_start_second_same_hostport(sandbox):
     hub = sandbox.spawn_hub()
     second_db = sandbox.tmp_path / "second" / "hub.db"
@@ -315,6 +336,7 @@ def test_start_second_same_hostport(sandbox):
     assert result.returncode != 0
     assert str(hub.pid) in result.stderr
     assert str(hub.db_path) in result.stderr
+    assert "orphan-hub-probe" in result.stderr
     assert "管理员凭据初始化完成" not in result.stdout
     assert not second_db.exists()
     assert not second_db.parent.exists()

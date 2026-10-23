@@ -1157,4 +1157,3 @@ class ExperienceHubServer:
         if self._thread:
             self._thread.join(timeout=3)
             self._thread = None
-            self._thread = None

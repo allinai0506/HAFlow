@@ -22,7 +22,7 @@ if str(HERDR_ROOT) not in sys.path:
 
 from herdr.experience import hub_lifecycle as lifecycle
 
-RUNBOOK_HINT = "docs/operations/troubleshooting-faq.md#无主-experience-hub-探针"
+RUNBOOK_HINT = "docs/operations/troubleshooting-faq.md#orphan-hub-probe"
 INSECURE_DEFAULT_TOKEN = "admin_secret_token_123"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
@@ -362,6 +362,10 @@ def _collect(selector):
         process = processes.get(registry.pid)
         if process is None:
             process = lifecycle.run_ps(registry.pid)
+    elif len(listeners) == 1:
+        # BD-10/§3.2.3: without a registry the db path may only come from the
+        # running instance's argv, so expose its ps snapshot to the report.
+        process = processes.get(listeners[0].pid)
 
     corrupt_relevant = any(
         entry.corrupt and entry.port == port for entry in entries
