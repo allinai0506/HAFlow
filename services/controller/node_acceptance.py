@@ -83,6 +83,25 @@ def apply_node_acceptance(ports, workflow_id, config, tasks):
     return written
 
 
+def reread_after_acceptance(ports, workflow_id, record, config, tasks, assessment):
+    """Re-read after a redo so advance sees superseded rows, not the old block."""
+    from herdr import recovery_store
+    from herdr.workflow_progress import assess_workflow
+
+    try:
+        wrote = ports.apply_node_acceptance(workflow_id, config, tasks)
+    except Exception as exc:
+        print(f"[NODE ACCEPTANCE] workflow={workflow_id}: {exc}")
+        wrote = 0
+    if not wrote:
+        return record, config, tasks, assessment
+    recovery_store.reconcile(ports._get_store().db_path, workflow_id)
+    ports.reconcile_node_dispatches(workflow_id)
+    record, config, tasks = recovery_store.read_snapshot(
+        ports._get_store().db_path, workflow_id)
+    return record, config, tasks, assess_workflow(record, config, tasks)
+
+
 DEPENDENCIES = {
     "apply_node_acceptance": ("_get_store", "resolve_gate_config"),
 }

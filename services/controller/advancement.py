@@ -88,6 +88,7 @@ def check_workflow_stage_advance(ports, workflow_id):
     # in the bounded background sweep; the database owns the obligation.
     from herdr import recovery_store
     from herdr.workflow_progress import assess_workflow
+    from services.controller.node_acceptance import reread_after_acceptance
     record = ports._get_store().get_workflow(workflow_id)
     if record and record.get('status') == 'running':
         recovery_store.reconcile(ports._get_store().db_path, workflow_id)
@@ -95,21 +96,8 @@ def check_workflow_stage_advance(ports, workflow_id):
         ports.reconcile_stage_advance_states(workflow_id, snapshot_config)
         ports.reconcile_node_dispatches(workflow_id)
         assessment = assess_workflow(record, snapshot_config, snapshot_tasks)
-        try:
-            wrote = ports.apply_node_acceptance(
-                workflow_id, snapshot_config, snapshot_tasks)
-        except Exception as exc:
-            print(f"[NODE ACCEPTANCE] workflow={workflow_id}: {exc}")
-            wrote = 0
-        if wrote:
-            # The unstarted human obligation was opened from the blocked
-            # tasks. They are no longer the current result, so reconcile
-            # drops it, and the existing redispatch sees the superseded rows.
-            recovery_store.reconcile(ports._get_store().db_path, workflow_id)
-            ports.reconcile_node_dispatches(workflow_id)
-            record, snapshot_config, snapshot_tasks = recovery_store.read_snapshot(
-                ports._get_store().db_path, workflow_id)
-            assessment = assess_workflow(record, snapshot_config, snapshot_tasks)
+        record, snapshot_config, snapshot_tasks, assessment = reread_after_acceptance(
+            ports, workflow_id, record, snapshot_config, snapshot_tasks, assessment)
         if not assessment['can_advance']:
             return
 
