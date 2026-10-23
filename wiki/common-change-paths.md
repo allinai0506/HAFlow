@@ -101,7 +101,7 @@ Evidence:
    ./bin/herdr-factory templates
    ```
 4. **应用至项目**:
-   - 在新项目根目录下执行 `./bin/herdr-factory project --template <name>`，系统将自动为模板中的每一个 Node 创建 Tab 与只读 Anchor Pane。
+   - 在新项目根目录下执行 `./bin/herdr-factory project --template <name>`，系统为模板中的每一个 Node 创建一个 Tab。Tab 自带的窗格留给该阶段第一个任务。
 
 Evidence:
 - `workflow_templates/`
@@ -110,23 +110,21 @@ Evidence:
 
 ---
 
-## 4. 场景四：修改现场自愈或 Tab / Anchor 逻辑
+## 4. 场景四：修改阶段页签的窗格分配
 
 当调整终端窗格分配策略或修改 `ensure_node_runtime` 时：
 
 1. **核心逻辑定位**:
-   - `herdr/projects.py#ensure_node_runtime`: Node 级 Tab/Anchor 探活与重建。
-   - `herdr/topology.py#ensure_stage_topology`: 阶段现场原子修复。
+   - `herdr/projects.py#ensure_node_runtime`: 节点页签探活。页签没了就重建。
+   - `herdr/topology.py#_resolve_or_create_anchor`: 选择下一次 split 的父窗格，并关掉多余空壳。
+   - `services/herdr-worker.py#allocate_task_pane`: 空闲父窗格直接给任务，已被占用才 split。
 2. **红线警示**:
-   - 绝不可将包含 Agent 运行历史的 Pane 重命名或借用为 Anchor。
-   - 绝不能因为单个 Anchor 丢失而触发重新 provision 整个 Workspace。
-   - 必须通过原子写入更新 `<project>/workflow.json`。
-3. **验证自愈能力**:
+   - 已经有 Agent 的窗格不能再启动第二个任务。
+   - 不能关掉一个页签里的最后一个窗格，否则页签会一起消失。
+   - 不能因为一个父窗格丢失而重新 provision 整个 Workspace。
+3. **验证**:
    ```bash
-   # 1. 运行全局体检确认系统状态
-   ./bin/herdr-factory doctor
-   # 2. 模拟误关某节点 Tab 或 Anchor Pane，运行 ensure-runtime 测试自动自愈与修复
-   ./bin/herdr-task ensure-runtime --node <node_id> --workflow <workflow_id>
+   pytest -q tests/test_stage_pane_parent.py tests/test_fix_bug1002_config.py
    ```
 
 Evidence:

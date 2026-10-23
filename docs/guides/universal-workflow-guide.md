@@ -41,7 +41,7 @@ Project (项目 / 业务空间)
 | :--- | :--- | :--- |
 | **Workspace** | **Project / 项目空间** | 每个被托管的项目在终端多工位底座中对应独立的 Workspace（如 `w9`）。 |
 | **Tab** | **Workflow Node (节点)** | 每个节点对应一个独立的 Tab，名称带有节点序号与业务标签。 |
-| **Pane** | **Agent 工位 / 任务现场** | 每个 Tab 维护一个只读 Anchor Pane 作为锚点，Task 运行时自动 Split 独立工作工位。 |
+| **Pane** | **Agent 工位 / 任务现场** | 阶段第一个任务占用页签自带的窗格。父窗格已有任务时，再 split 出下一个工位。 |
 | **Agent** | **Executor (执行者)** | Claude Code, OpenCode, Codex, QoderCLI, Agy, Pi 等多样化模型。 |
 | **Task** | **Work Unit (工作单)** | 带有明确目标 (goal)、验收标准 (acceptance criteria) 的执行单元。 |
 
@@ -51,18 +51,18 @@ graph TD
         TabCoord[Tab 1: Coordinator 协调器]
         
         subgraph TabNodeA [Tab 2: Node A - 需求/解析]
-            AnchorA[Anchor Pane]
+            TaskA0[第一个任务占用页签自带的窗格]
             TaskA1[Agent Pane: Claude]
         end
 
         subgraph TabNodeB [Tab 3: Node B - 评分/实现]
-            AnchorB[Anchor Pane]
+            TaskB0[第一个任务占用页签自带的窗格]
             TaskB1[Agent Pane: Codex]
             TaskB2[Agent Pane: OpenCode]
         end
 
         subgraph TabNodeC [Tab 4: Node C - 评审/终审]
-            AnchorC[Anchor Pane]
+            TaskC0[第一个任务占用页签自带的窗格]
             TaskC1[Agent Pane: Claude]
         end
     end
@@ -115,7 +115,7 @@ herdr-factory run "处理客户关于退款延迟的严重投诉" --template cus
 ### 步骤 3：系统自动执行的初始化行为
 1. **识别/初始化 Workspace**：为目标项目挂载独立的 Herdr 工作空间。
 2. **Tab 动态创建**：按照模板定义的 Node 列表，依次自动创建对应 Tab（如标书流程自动创建 7 个 Tab）。
-3. **Anchor 锚点建立**：在每个 Tab 内部自动生成并锁定一个 `Anchor` Pane，作为后续动态派生 Agent 工位的母体。
+3. **页签自带窗格**：每个 Tab 创建时自带一个窗格。第一个任务直接占用它；已经有任务时才再 split。
 4. **Agent Deep Preflight**：自动对本地已安装的 Agent（Claude, Codex, OpenCode, Qoder 等）进行深层沙盒试跑探测，记录当前健康的 Agent 候选集。
 5. **通知 Coordinator**：在 `wX:p1` (Coordinator Pane) 注入带有完整上下文、当前就绪 Node 和执行规范的初始 Prompt。
 
@@ -178,7 +178,7 @@ herdr-task launch \
   --criteria "输出废标条款清单到 docs/bidding/compliance_matrix.md"
 ```
 
-> **系统自愈保障**：派发前系统会自动调用 `ensure_node_runtime`，若该 Node 的 Tab 或 Anchor Pane 不慎被关闭，系统会在任务派发前自动检测并修复重建，避免报 `pane_not_found` 错误。
+> **系统自愈保障**：派发前系统会自动调用 `ensure_node_runtime`。节点页签被关掉时会重建，第一个任务占用新建页签自带的窗格。
 
 ### 4.2 查看当前 Workflow 各 Node 推进状态
 
@@ -217,13 +217,12 @@ herdr-task node-status --workflow-id wf-myproject-20260912-160000
 
 ### 5.1 自愈工作原理 (`ensure_node_runtime`)
 每次派发任务前，系统都会调用 `ensure_node_runtime(workflow_id, node_id)`：
-1. **检查 Tab 存活性**：通过 `herdr tab get <tab_id>` 探测。如果 Tab 已被关闭，系统自动为该节点创建新 Tab，并将 Root Pane 设为 Anchor Pane。
-2. **检查 Anchor Pane 存活性**：通过 `herdr pane get <anchor_id>` 探测。如果 Anchor Pane 已死：
-   - 自动扫描该 Tab 下当前仍存活的其他 Pane；
-   - 通过 `herdr pane split <alive_pane>` 切割出一个崭新的 Anchor Pane；
-   - 将其重命名为 `"Anchor"`；
-   - 将新的 `anchor_pane_id` 自动回写并持久化到 `workflow.json`；
-   - 平滑继续执行任务创建。
+1. **检查 Tab 存活性**：通过 `herdr tab get <tab_id>` 探测。如果 Tab 已被关闭，系统为该节点新建 Tab，并记下它自带的窗格。
+2. **检查父窗格**：通过 `herdr pane get` 探测记录的父窗格。如果它已经没了：
+   - 改记该 Tab 里仍存活的一个窗格；
+   - 同页已经有任务窗格时，关掉停在项目根目录且没有 Agent 的空壳；
+   - 页签里一个窗格都不剩时，才新建 Tab；
+   - 把新的 `anchor_pane_id` 回写到运行时映射。
 
 ### 5.2 手动触发自愈检测
 如需手动检查并修复某个节点的工作环境，可执行：
@@ -408,9 +407,8 @@ sequenceDiagram
 
 ## 10. 常见问题与故障排查 (FAQ)
 
-### Q1：如果不小心在 Herdr 界面里把某个节点的 Tab 或 Anchor Pane 关闭了怎么办？
-**完全不需要担心。**
-系统已经实现自动自愈。当你通过 `herdr-task launch` 或 Controller 自动调度向该节点派发新任务时，系统会自动探测并瞬间完成 Tab 或 Anchor Pane 的重建，继续平滑派发任务。
+### Q1：如果不小心在 Herdr 界面里把某个节点的页签关掉了怎么办？
+下次 `herdr-task launch` 或控制器向该节点派发任务时，会把页签建回来。第一个任务占用新建页签自带的窗格。
 
 ### Q2：如何知道当前哪些 Agent 可用？
 运行以下命令检查环境中的 Agent：

@@ -37,24 +37,20 @@ Workspace (项目空间)
   │     └── Pane Task-B: Agent 工位 2 (并发执行)
   │
   └── Tab N: Node N (其他工作流节点现场)
-        ├── Pane Anchor: 只读母体锚点
-        └── Pane Task-X: Agent 工位
+        ├── Pane: 本阶段第一个任务直接占用页签自带的窗格
+        └── Pane Task-X: 父窗格已有任务时再 split 出的工位
 ```
 
 ---
 
-## 3. Anchor Pane (母体锚点) 机制
+## 3. 阶段页签的父窗格
 
-### 3.1 为什么必须有 Anchor Pane？
-在底层终端多工位设计中：
-- 创建新 Tab 时会附带一个初始 Root Pane。
-- 在已有 Tab 中新增工位，依赖 `herdr pane split <parent_pane>` 指令，必须指定一个既有的父 Pane。
-- 如果一个 Tab 中的任务 Pane 在执行完成后被用户全部关闭，且没有固定的底座，该 Tab 将无法再通过常规方式分裂新的工位。
+创建新 Tab 时会自带一个窗格。再开一个工位时，`herdr pane split` 必须指定一个还活着的父窗格。页签里最后一个窗格被关掉时，页签会一起消失，下次派发会把页签建回来。
 
-因此，HAFlow 为每个 Node Tab 建立一个只读的 **Anchor Pane**：
-1. 名称固定为 `"Anchor"`；
-2. 不承载具体的 Agent 任务执行，保持干净；
-3. 作为后续该 Node 派发所有 Task 时的 Split 母体。
+因此不再为每个节点留一个名为 `Anchor` 的空窗格：
+1. 第一个任务直接占用页签自带的窗格。
+2. 这个窗格已经有 Agent 时，才从它 split 出下一个工位。
+3. 同页已经有任务窗格时，停在项目根目录且没有 Agent 的空壳会被关掉。
 
 ---
 
@@ -68,16 +64,14 @@ flowchart TD
     ReadNode --> CheckTab{Tab 是否仍存活?}
     
     CheckTab -- 否 --> RecreateTab[调用 herdr tab create 建立新 Tab]
-    RecreateTab --> SetRootAnchor[将新 Tab 的 Root Pane 设为 Anchor]
-    SetRootAnchor --> UpdateCfg[回写并持久化 workflow.json]
+    RecreateTab --> UpdateCfg[回写运行时父窗格编号]
     
-    CheckTab -- 是 --> CheckAnchor{Anchor Pane 存活?}
-    CheckAnchor -- 是 --> Ready([工位环境就绪, 执行任务创建])
+    CheckTab -- 是 --> CheckParent{记录的父窗格还在?}
+    CheckParent -- 是 --> Ready([可以派发])
     
-    CheckAnchor -- 否 --> ScanTabPanes[扫描该 Tab 下其他存活 Pane]
-    ScanTabPanes --> SplitNewAnchor[从存活 Pane 执行 split 分裂新 Anchor]
-    SplitNewAnchor --> RenameAnchor[重命名为 Anchor]
-    RenameAnchor --> UpdateCfg
+    CheckParent -- 否 --> ScanTabPanes[扫描该 Tab 下其他存活窗格]
+    ScanTabPanes --> Adopt[改记一个仍在的窗格，并关掉多余空壳]
+    Adopt --> UpdateCfg
     UpdateCfg --> Ready
 ```
 

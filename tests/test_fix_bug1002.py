@@ -218,7 +218,7 @@ def test_worker_retains_identity_if_pane_allocated_before_identity_write_failure
         write_worker_launch_identity(clone, identity, **kwargs)
     with patch.object(worker, 'CLONE_ROOT', root), \
          patch.object(worker, 'verify_request_preflight', return_value={'request_verified': True}), \
-         patch.object(worker, 'create_pane', return_value='allocated-pane'), \
+         patch.object(worker, 'allocate_task_pane', return_value=('allocated-pane', 'dynamic')), \
          patch.object(worker, 'is_task_active_in_registry', return_value=False), \
          patch('herdr.task_resources.write_worker_launch_identity', side_effect=fail_after_pane), \
          patch.object(worker, 'start_agent') as start, patch.object(sys, 'argv', argv):

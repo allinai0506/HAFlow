@@ -954,13 +954,6 @@ def provision_project(root, template_name="software-development-v1", project_nam
         tab_result = created_tab["result"]
         tab_id = tab_result["tab"]["tab_id"]
         anchor_pane_id = tab_result["root_pane"]["pane_id"]
-        _run([
-            "herdr",
-            "pane",
-            "rename",
-            anchor_pane_id,
-            "Anchor",
-        ], check=False)
 
         n = dict(node)
         n["tab_id"] = tab_id
@@ -1133,12 +1126,12 @@ def adopt_workspace_as_project(
         if matched_tab:
             tab_id = matched_tab["tab_id"]
             tab_panes = [p for p in panes if p.get("tab_id") == tab_id]
-            anchor_pane = next((p for p in tab_panes if p.get("label") == "Anchor"), None) or (tab_panes[0] if tab_panes else None)
+            task_panes = [p for p in tab_panes if p.get("label") != "Anchor"]
+            anchor_pane = (task_panes or tab_panes or [None])[0]
             if not anchor_pane:
                 split_res = _run_json(["herdr", "pane", "split", tab_id, "--cwd", root])
                 anchor_pane = split_res.get("result", {}).get("pane", {})
             anchor_pane_id = anchor_pane["pane_id"]
-            _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
         else:
             created_tab = _run_json([
                 "herdr", "tab", "create",
@@ -1150,7 +1143,6 @@ def adopt_workspace_as_project(
             tab_result = created_tab["result"]
             tab_id = tab_result["tab"]["tab_id"]
             anchor_pane_id = tab_result["root_pane"]["pane_id"]
-            _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
 
         n = dict(node)
         n["tab_id"] = tab_id
@@ -1283,13 +1275,6 @@ def reprovision_project_template(record, template_name, context_bindings=None):
         tab_result = created_tab["result"]
         tab_id = tab_result["tab"]["tab_id"]
         anchor_pane_id = tab_result["root_pane"]["pane_id"]
-        _run([
-            "herdr",
-            "pane",
-            "rename",
-            anchor_pane_id,
-            "Anchor",
-        ], check=False)
 
         n = dict(node)
         n["tab_id"] = tab_id
@@ -1441,10 +1426,11 @@ def ensure_context_project(root, template_name, context_bindings=None):
 
 
 def ensure_node_runtime(workflow_id_or_root, node_id):
-    """Ensure that the Tab and Anchor Pane for a node exist and are healthy.
+    """Ensure the node's tab still has a pane that can host or split a task.
 
-    If the Tab was closed/deleted, recreate it.
-    If the Anchor Pane was closed/purged, detect or split a new Anchor Pane.
+    A closed tab is recreated. Its root pane is the first task pane.
+    A missing parent id is replaced by a pane already in the tab.
+    Idle project-root shells are not kept beside a real task pane.
     Persists workflow-owned repaired mappings in mutable StateStore metadata.
     """
     workflow_id = None
@@ -1504,41 +1490,24 @@ def ensure_node_runtime(workflow_id_or_root, node_id):
         tab_result = created_tab["result"]
         tab_id = tab_result["tab"]["tab_id"]
         anchor_pane_id = tab_result["root_pane"]["pane_id"]
-        _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
         node["tab_id"] = tab_id
         node["anchor_pane_id"] = anchor_pane_id
         repaired = True
     else:
-        # Tab is alive, check Anchor Pane
         anchor_alive = False
         if anchor_pane_id:
             res = _run(["herdr", "pane", "get", anchor_pane_id], check=False)
             anchor_alive = (res.returncode == 0)
 
         if not anchor_alive:
-            panes_data = _run_json(["herdr", "pane", "list", "--workspace", workspace_id])
-            panes_list = panes_data.get("result", {}).get("panes", [])
-            tab_panes = [p for p in panes_list if p.get("tab_id") == tab_id]
-
-            if tab_panes:
-                anchor_candidates = [p for p in tab_panes if p.get("label") == "Anchor"]
-                if anchor_candidates:
-                    anchor_pane_id = anchor_candidates[0]["pane_id"]
-                else:
-                    parent_pane = tab_panes[0]["pane_id"]
-                    split_res = _run_json([
-                        "herdr", "pane", "split",
-                        parent_pane,
-                        "--direction", "right",
-                        "--cwd", project_root,
-                        "--no-focus",
-                    ])
-                    anchor_pane_id = split_res["result"]["pane"]["pane_id"]
-                    _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
-
-                node["anchor_pane_id"] = anchor_pane_id
-                repaired = True
-            else:
+            from herdr.topology import _resolve_or_create_anchor
+            previous_tab = tab_id
+            previous_pane = anchor_pane_id
+            try:
+                anchor_pane_id, _changed = _resolve_or_create_anchor(
+                    workspace_id, tab_id, project_root, node,
+                )
+            except RuntimeError:
                 created_tab = _run_json([
                     "herdr", "tab", "create",
                     "--workspace", workspace_id,
@@ -1549,7 +1518,7 @@ def ensure_node_runtime(workflow_id_or_root, node_id):
                 tab_result = created_tab["result"]
                 tab_id = tab_result["tab"]["tab_id"]
                 anchor_pane_id = tab_result["root_pane"]["pane_id"]
-                _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
+            if tab_id != previous_tab or anchor_pane_id != previous_pane:
                 node["tab_id"] = tab_id
                 node["anchor_pane_id"] = anchor_pane_id
                 repaired = True

@@ -209,14 +209,16 @@ Evidence:
 
 ## 3. 核心领域不变量 (Invariants)
 
-1. `FACT` **Anchor Pane 永不执行业务**: 每个 Node Tab 内命名为 `"Anchor"` 的窗格专供 `herdr pane split` 分裂新工位使用，绝对不能被分配给 Task 作为工作窗格。
+1. `FACT` **阶段页签不留空闲 Anchor**: 页签自带的那个窗格交给本阶段第一个任务。同页已经有任务窗格时，停在项目根目录且没有 Agent 的空壳会被关掉。`anchor_pane_id` 只记录下一次 `pane split` 的父窗格，回收时保护这个编号，避免把页签拆空。
 2. `FACT` **一个 Task 一个隔离克隆**: 一个 Task 永远对应一个独立的 CoW 克隆目录，绝不允许两个并发 Task 共享同一个克隆目录。
 3. `FACT` **DAG 拓扑无环**: 工作流节点的 `depends_on` 依赖图谱必须严格为有向无环图（DAG），在模板加载与运行时校验阶段由 Kahn 算法强制保障。
 4. `FACT` **微内核业务中立性**: 通用调度与 Worker 进程管理器严禁直接硬编码特定代码工程或特定业务逻辑，必须通过 Domain Adapter SPI 解耦。
 5. `FACT` **门禁豁免可审计性**: 人工强制放行门禁必须签发全局唯一 bypass_id 凭证并写入轨迹账本与结论文件。
 
 Evidence:
-- `herdr/pane_pool.py#list_slots_for_project` (过滤 anchors)
+- `herdr/topology.py#_resolve_or_create_anchor`
+- `services/herdr-worker.py#allocate_task_pane`
+- `herdr/pane_pool.py#list_slots_for_project` (跳过当前父窗格编号)
 - `herdr/workflow.py#validate_workflow_dag`
 - `herdr/domain/registry.py`
 - `herdr/kernel.py#bypass_task_gate`

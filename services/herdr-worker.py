@@ -794,6 +794,66 @@ def prepare_existing_pane(pane_id, clone):
     time.sleep(0.5)
 
 
+def _agent_on_pane(pane_id):
+    result = subprocess.run(
+        ["herdr", "agent", "get", pane_id],
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        return json.loads(result.stdout).get("result", {}).get("agent") or None
+    except json.JSONDecodeError:
+        return None
+
+
+def _pane_label(pane_id):
+    data = run_json(["herdr", "pane", "get", pane_id], timeout=10)
+    pane = (data.get("result") or {}).get("pane") or {}
+    return pane.get("label") or ""
+
+
+def allocate_task_pane(parent_pane, clone, launch_identity=None, task_id=None):
+    """Use an idle parent for this task. Split only when that pane is taken."""
+    from herdr.task_resources import workflow_launch_lock
+    from herdr.state_store import get_state_store
+    with workflow_launch_lock(get_state_store().db_path, 'managed-dynamic-pane-lifecycle'):
+        label = _pane_label(parent_pane)
+        if _agent_on_pane(parent_pane) or label.startswith("task:"):
+            return _create_pane(parent_pane, clone, launch_identity), "dynamic"
+        claim = f"task:{task_id}" if task_id else "task"
+        renamed = subprocess.run(
+            ["herdr", "pane", "rename", parent_pane, claim],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        if renamed.returncode != 0:
+            return _create_pane(parent_pane, clone, launch_identity), "dynamic"
+        try:
+            prepare_existing_pane(parent_pane, clone)
+        except Exception:
+            if label:
+                subprocess.run(
+                    ["herdr", "pane", "rename", parent_pane, label],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+            raise
+        if launch_identity is not None:
+            launch_identity.update(
+                pane_id=parent_pane,
+                pane_source="prebuilt",
+                phase="pane_allocated",
+            )
+            from herdr.task_resources import write_worker_launch_identity
+            write_worker_launch_identity(clone, launch_identity)
+        return parent_pane, "prebuilt"
+
+
 
 
 def unique_agent_name(task_id, pane_id):
@@ -1212,8 +1272,9 @@ def main():
                 raise RuntimeError(
                     "--parent-pane is required when --pane-id is not provided"
                 )
-            pane_id = create_pane(args.parent_pane, clone, launch_identity)
-            pane_source = "dynamic"
+            pane_id, pane_source = allocate_task_pane(
+                args.parent_pane, clone, launch_identity, args.task_id,
+            )
 
         print(f"[PANE] {pane_id}")
         print(f"[PANE SOURCE] {pane_source}")

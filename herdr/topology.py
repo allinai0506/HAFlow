@@ -117,8 +117,17 @@ def _resolve_or_create_tab(workspace_id, project_root, stage):
     return created["result"]["tab"]["tab_id"], True
 
 
-def _anchor_label(stage_key):
-    return f"Herdr Anchor · {stage_key}"
+def _is_idle_root_shell(pane, project_root):
+    """A pane parked on the project root with no agent is not a task."""
+    if not project_root or project_root == "/" or pane.get("agent"):
+        return False
+    raw = pane.get("cwd") or pane.get("foreground_cwd") or ""
+    if not raw:
+        return False
+    return (
+        os.path.realpath(os.path.expanduser(raw))
+        == os.path.realpath(os.path.expanduser(project_root))
+    )
 
 
 def _resolve_or_create_anchor(
@@ -127,75 +136,58 @@ def _resolve_or_create_anchor(
     project_root,
     stage,
 ):
-    panes = _panes(workspace_id)
-    cached_anchor_id = stage.get("anchor_pane_id")
-    cached = next(
-        (x for x in panes if x.get("pane_id") == cached_anchor_id),
-        None,
-    )
+    """Pick a living pane in the tab. Do not add or label an idle shell.
 
-    def safe_anchor(pane):
-        return (
-            pane
-            and pane.get("tab_id") == tab_id
-            and (pane.get("cwd") or pane.get("foreground_cwd")) == project_root
-            and not pane.get("agent")
+    A tab cannot exist without a pane. The recorded id is only the parent
+    used for the next split. When a task pane already exists, project-root
+    shells are closed. The last remaining pane is kept.
+    """
+    panes = [
+        pane for pane in _panes(workspace_id)
+        if pane.get("tab_id") == tab_id and pane.get("pane_id")
+    ]
+    if not panes:
+        raise RuntimeError(f"Stage tab has no panes: {tab_id}")
+
+    idle = [pane for pane in panes if _is_idle_root_shell(pane, project_root)]
+    busy = [pane for pane in panes if pane not in idle]
+    cached_id = stage.get("anchor_pane_id")
+    if busy:
+        victims, pool = idle, list(busy)
+    elif len(idle) > 1:
+        kept = next(
+            (pane for pane in idle if pane.get("pane_id") == cached_id),
+            idle[0],
         )
+        victims = [
+            pane for pane in idle if pane.get("pane_id") != kept.get("pane_id")
+        ]
+        pool = [kept]
+    else:
+        victims, pool = [], list(panes)
 
-    if safe_anchor(cached):
-        return cached["pane_id"], False
-
-    stage_key = stage.get("key") or stage.get("id") or ""
-    label = _anchor_label(stage_key)
-
-    labeled = [
-        x for x in panes
-        if x.get("tab_id") == tab_id
-        and x.get("label") == label
-        and safe_anchor(x)
-    ]
-    if len(labeled) == 1:
-        return labeled[0]["pane_id"], True
-
-    plain = [
-        x for x in panes
-        if x.get("tab_id") == tab_id
-        and safe_anchor(x)
-    ]
-    if len(plain) == 1:
-        pane_id = plain[0]["pane_id"]
-        subprocess.run(
-            ["herdr", "pane", "rename", pane_id, label],
+    changed = False
+    for pane in victims:
+        result = subprocess.run(
+            ["herdr", "pane", "close", pane["pane_id"]],
             text=True,
             capture_output=True,
         )
-        return pane_id, True
+        if result.returncode == 0:
+            changed = True
+        else:
+            pool.append(pane)
 
-    parents = [x for x in panes if x.get("tab_id") == tab_id]
-    if not parents:
-        raise RuntimeError(f"Stage tab has no panes: {tab_id}")
-
-    parent = parents[0]["pane_id"]
-    created = _run_json([
-        "herdr", "pane", "split",
-        parent,
-        "--direction", "right",
-        "--ratio", "0.30",
-        "--cwd", project_root,
-        "--no-focus",
-    ])
-    result = created["result"]
-    pane = result.get("pane") or result.get("new_pane")
-    if not pane:
-        raise RuntimeError(f"Herdr pane split returned no pane: {result}")
-
-    pane_id = pane["pane_id"]
-    subprocess.run(
-        ["herdr", "pane", "rename", pane_id, label],
-        text=True,
-        capture_output=True,
+    chosen = next(
+        (pane for pane in pool if pane.get("pane_id") == cached_id),
+        None,
     )
-    return pane_id, True
+    if chosen is None:
+        if not pool:
+            raise RuntimeError(f"Stage tab has no panes: {tab_id}")
+        chosen = pool[0]
+        changed = True
+    return chosen["pane_id"], changed
 
 
 def ensure_stage_topology(workflow_id, stage_key):

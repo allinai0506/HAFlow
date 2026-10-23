@@ -83,7 +83,7 @@ herdr-task ops-center [--workflow-id <workflow_id>] [--include-tasks]
 ```
 
 ### 2.4 `herdr-task ensure-runtime`
-对目标节点执行 Tab / Anchor Pane 的探活与自动自愈。
+对目标节点执行页签探活。页签缺失时重建，并记下它自带的窗格。
 ```bash
 herdr-task ensure-runtime --workflow-id <workflow_id> --node <node_id>
 ```

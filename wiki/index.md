@@ -18,7 +18,7 @@
 1. **[[system-overview]] (系统全景)**: 明确系统定位（HAFlow Multi-Agent 编排与控制平台）、解决的核心业务痛点与技术边界。
 2. **[[architecture]] (运行架构与守护进程)**: 掌握常驻 LaunchAgent 守护进程、Unix Domain Socket、调度轮询机制与物理存储路径。
 3. **[[domain-model]] (领域实体与关系模型)**: 掌握 Project、Workflow、Node、Task、Slot、Anchor、Reservation 等核心概念。
-4. **[[tab-node-model]] (Tab=Node 空间现场与自愈模型)**: 理解为什么 Tab 是工作流节点、Anchor Pane 为什么是只读母体，以及系统如何在任务派发前自动检测并自愈现场。
+4. **[[tab-node-model]] (Tab=Node 空间现场与自愈模型)**: 理解为什么 Tab 是工作流节点、第一个任务为什么直接占用页签自带的窗格，以及系统如何在任务派发前补回被关掉的页签。
 5. **[[task-lifecycle]] (任务生命周期与基线验收)**: 掌握 15 状态机流转、CoW (Copy-on-Write) Git 克隆隔离、基线指纹快照，以及阶段内交接、原位 rework 与身份验证工位回收。
 6. **[[dag-workflow-engine]] (DAG 工作流引擎与 Kahn 算法)**: 理解声明式 YAML 模板解析、拓扑死锁检测与节点就绪（Ready Nodes）动态推进。
 7. **[[agent-routing-and-pools]] (异构 Agent 路由与并发锁)**: 掌握 Node 级策略解析、优先级评分、300s TTL 预占锁、节点并发/累计配额与负载均衡算法。

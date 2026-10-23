@@ -20,7 +20,7 @@ HAFlow 支持声明式 YAML 与 JSON 工作流模板。
 2. **仓库内置目录**: `workflow_templates/`（随代码仓库分发）。
 
 已内置的标准模板包括：
-- `software-development-v1.yaml`: 标准 6 阶段研发闭环（需求分析 ➔ 计划 ➔ 实现 ➔ 测试 ➔ 评审 ➔ 收尾）。
+- `software-development-v1.yaml`: 标准 6 阶段研发闭环（需求分析 ➔ 计划 ➔ 实现 ➔ 测试 ➔ 评审 ➔ 收尾）。HAFlow 是唯一主控，阶段按 unified-dev-flow 使用对应技能。需求单人起草；计划保留一次方案对抗。默认交付到工作区。
 - `bidding.yaml`: 7 阶段标书制作与审批流程。
 - `customer-service.yaml`: 客诉分流与处置流程。
 
