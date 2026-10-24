@@ -297,7 +297,17 @@ def _select_registry(entries, selector, port, listeners):
     if selector.db_path is not None:
         valid = [entry for entry in valid if lifecycle.paths_equal(entry.db_path, selector.db_path)]
     if selector.pid is not None:
-        valid = [entry for entry in valid if entry.pid == selector.pid]
+        pid_matched = [entry for entry in valid if entry.pid == selector.pid]
+        if pid_matched:
+            valid = pid_matched
+        elif valid:
+            # P1 (PR #338 round 2): db/port already selected an entry that the
+            # pid term rejects. That is a registry DISAGREEMENT, not registry
+            # absence -- filtering it away left registry=None and the identity
+            # check vacuously satisfied, so `stop --port P --db-path A.db
+            # --pid B` could signal hub B on the reused endpoint. Fail closed
+            # as ambiguous (refuse, no signal).
+            return None, True
 
     if not valid:
         return None, False

@@ -401,6 +401,67 @@ def test_foreign_listener_fail_closed(sandbox):
     assert holder.poll() is None
 
 
+def test_stop_pid_filter_cannot_drop_conflicting_registry(sandbox):
+    """P1 (PR #338 round 2): --pid 过滤不得把冲突登记项过滤成"无登记"。
+
+    A 库陈旧登记项 + B 复用同端口,`stop --port P --db-path A.db --pid B`
+    此前把 A 的登记项过滤为 None,registry 项被空值放行并信号 B。
+    必须判 ambiguous 拒绝。
+    """
+    hub_b = sandbox.spawn_hub(db_path=sandbox.tmp_path / "b.db")
+    try:
+        lifecycle.write_registry(
+            pid=999999,
+            host="127.0.0.1",
+            port=hub_b.port,
+            db_path=sandbox.tmp_path / "a.db",
+            root=sandbox.registry_root,
+        )
+        result = run_cli(
+            [
+                "stop",
+                "--port", str(hub_b.port),
+                "--db-path", str(sandbox.tmp_path / "a.db"),
+                "--pid", str(hub_b.proc.pid),
+                "--json",
+            ],
+            sandbox.env,
+        )
+        assert result.returncode == 4  # ambiguous, no signal
+        assert hub_b.proc.poll() is None
+    finally:
+        hub_b.proc.terminate()
+        hub_b.proc.wait(timeout=5)
+
+
+def test_status_stale_registry_metadata_not_attributed_to_reuser(sandbox):
+    """P2 (PR #338 round 2): 陈旧登记项的元数据不得报成端口复用者的。
+
+    A 残留登记项 + B 复用同端口:`status --port P --json` 报 B 的 pid
+    时,db_path 必须来自 B 的 argv 而不是 A 的登记文件。
+    """
+    hub_b = sandbox.spawn_hub(db_path=sandbox.tmp_path / "b.db")
+    try:
+        # 只留 A 的陈旧登记项:否则 B 的自登记会与 A 判 ambiguous,
+        # 绕开"陈旧项被选中"的路径。
+        hub_b.registry_path.unlink()
+        lifecycle.write_registry(
+            pid=999999,
+            host="127.0.0.1",
+            port=hub_b.port,
+            db_path=sandbox.tmp_path / "a.db",
+            root=sandbox.registry_root,
+        )
+        result = run_cli(["status", "--port", str(hub_b.port), "--json"], sandbox.env)
+        report = json.loads(result.stdout)
+        assert report["pid"] == hub_b.proc.pid
+        assert report["db_path"] != str(sandbox.tmp_path / "a.db")
+        assert str(sandbox.tmp_path / "b.db") in str(report["db_path"] or "")
+    finally:
+        hub_b.proc.terminate()
+        hub_b.proc.wait(timeout=5)
+
+
 def test_registry_points_to_live_non_hub(sandbox):
     sleeper = sandbox.popen([sys.executable, "-c", "import time; time.sleep(120)"])
     port = free_port()

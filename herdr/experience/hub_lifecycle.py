@@ -1394,18 +1394,6 @@ def build_status_report(
 ) -> dict:
     """Build the fixed ``--json`` schema (Q6); unknown values stay null."""
     listeners = tuple(listeners)
-    db_path: str | None = None
-    if registry is not None and not registry.corrupt:
-        db_path = registry.db_path
-    elif process is not None and process.status == "alive":
-        db_path = extract_db_path(process.argv)
-
-    started_at: float | None = None
-    if registry is not None and not registry.corrupt:
-        started_at = registry.started_at
-    elif process is not None:
-        started_at = process.started_at
-
     pid: int | None = None
     if classification.state == STATE_RUNNING:
         if classification.attribution == ATTRIBUTION_REGISTRY and registry is not None:
@@ -1417,10 +1405,37 @@ def build_status_report(
     elif len(listeners) == 1:
         pid = listeners[0].pid
 
+    # P2 (PR #338 round 2): a stale registry must not lend its metadata to
+    # the process actually being reported. Registry data is reported only
+    # when the entry is owned by the reported pid (hub A's leftover entry,
+    # hub B reusing the port); otherwise fall back to the live process's own
+    # argv (or the single listener's argv) and leave unknown fields null.
+    registry_owned = (
+        registry is not None
+        and not registry.corrupt
+        and pid is not None
+        and registry.pid == pid
+    )
+
+    db_path: str | None = None
+    if registry_owned:
+        db_path = registry.db_path
+    if db_path is None:
+        if process is not None and process.status == "alive" and (pid is None or process.pid == pid):
+            db_path = extract_db_path(process.argv)
+        elif len(listeners) == 1 and listeners[0].argv:
+            db_path = extract_db_path(listeners[0].argv)
+
+    started_at: float | None = None
+    if registry_owned:
+        started_at = registry.started_at
+    elif process is not None and (pid is None or process.pid == pid):
+        started_at = process.started_at
+
     host: str | None = selector.host
     if len(listeners) == 1:
         host = listeners[0].host
-    elif host is None and registry is not None and not registry.corrupt:
+    elif host is None and registry_owned:
         host = registry.host
 
     return {
