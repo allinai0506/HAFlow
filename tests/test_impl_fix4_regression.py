@@ -374,6 +374,15 @@ class H1CloseGate(unittest.TestCase):
             self.assertEqual(_ctrl.git_escalated_tasks("wf-h1"), ["t-h1"])
             self.assertEqual(_ctrl.git_finalize_pending_tasks("wf-h1"), [])
 
+    def test_controller_defers_auto_close_on_none_mode_escalated(self):
+        # wf-haflow-1022-01 wrapup-auto-r2: none 模式 preservation commit
+        # 被拒同样机器升级 cleaned 任务;git/状态双重过滤曾让自动 close
+        # 绕过 H-1 直接派发无 flag 的 close-workflow 按 delivered 收口。
+        t = {"task_id": "t-h1", "workflow_id": "wf-h1", "status": "cleaned",
+             "integration_mode": "none", "finalize_escalated": True}
+        with patch.object(_ctrl, "load_tasks", return_value=[t]):
+            self.assertEqual(_ctrl.git_escalated_tasks("wf-h1"), ["t-h1"])
+
     def test_clear_escalation_revokes(self):
         t = {"task_id": "t-h1", "workflow_id": "wf-h1", "status": "committed",
              "integration_mode": "git", "finalize_escalated": True,
