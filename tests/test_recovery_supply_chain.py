@@ -835,3 +835,286 @@ class BaselineStaleNotifyTest(unittest.TestCase):
         self.assertEqual(events, ["baseline_stale_refused"])
         self.assertEqual(len(notifications), 1)
         self.assertIn("rebase", notifications[0])
+
+
+# ---------------------------------------------------------------------------
+# Dead-row convergence batch (wf-haflow-1022-01 wrapup 段缺陷目录):
+# D1 half-written failure identity, D2 post-dispatch back-link containment,
+# D3 pinned-agent router recovery, G1 dangling obligation convergence,
+# G2 baseline_stale sink exemption.
+# ---------------------------------------------------------------------------
+
+class RecordRouterFailureIdentityTest(unittest.TestCase):
+    """D1/INV-REG-01: 失败登记行身份必须与意图同样完整。"""
+
+    def _record(self, tmp_path, *, with_intent=False):
+        import time
+
+        from herdr.state_store import SQLiteStateStore
+        from herdr.task_cli_launch import record_router_failure_task
+
+        store = SQLiteStateStore(tmp_path / "state.db")
+        args = SimpleNamespace(
+            task_id="t-fail", workflow_id="wf-d1", node="test", stage="test",
+            agent="qodercli", integration_mode="none", goal="g", acceptance=[],
+            execution_id="exec-d1", run_id=None,
+        )
+        if with_intent:
+            from herdr import task_resources as tr
+
+            key = tr.dispatch_identity("wf-d1", "test", "worker", "c" * 40, 3, "exec-d1")
+            args._launch_intent = {
+                "role": "worker", "dispatch_round": 3, "candidate_sha": "c" * 40,
+                "intent_id": "intent-1", "supersedes": None,
+                "execution_id": "exec-d1", "task_id": "t-fail",
+                "key": key, "workflow_id": "wf-d1", "node_id": "test",
+                "phase": "allocating", "lease_until": time.time() + 60,
+                "resources": {},
+            }
+            # 真实流程中 claim 先落 launch_intent 事件;补齐以还原现场。
+            from herdr.node_dispatch_store import record_intent
+
+            record_intent(store.db_path, args._launch_intent, time.time())
+        record_router_failure_task(
+            args, "test", "no eligible agent",
+            get_store=lambda: store, new_run_id=lambda: "run-d1",
+            now=time.time, release_agent_reservation=lambda *_: None,
+        )
+        return store
+
+    def test_failure_row_carries_execution_id(self):
+        import tempfile
+        from pathlib import Path as P
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = self._record(P(tmp.name))
+        row = store.get_task("t-fail")
+        self.assertEqual(row.get("execution_id"), "exec-d1")
+
+    def test_intent_execution_id_wins_and_supersede_then_succeeds(self):
+        """D1+D2 集成:身份完整的失败行可以被正规 supersede 回链。"""
+        import subprocess as sp
+        import tempfile
+        from pathlib import Path as P
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = P(tmp.name)
+        store = self._record(root, with_intent=True)
+        row = store.get_task("t-fail")
+        self.assertEqual(row.get("execution_id"), "exec-d1")
+        # 保存路径不再被登记身份护栏拒绝:update 后行仍可写。
+        store.save_task({**row, "blocker": "updated"})
+        self.assertEqual(store.get_task("t-fail")["blocker"], "updated")
+
+
+class RouterRecoveryAutoFallbackTest(unittest.TestCase):
+    """D3/INV-ROUTER-08: 原指定 agent 仍被隔离时回退 auto 再判池。"""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tmp_dir = Path(self.tmp.name)
+        self.store = SQLiteStateStore(self.tmp_dir / "state.db")
+        self.store.save_workflow({"workflow_id": "wf-d3", "status": "running"})
+        self.store.save_task({
+            "task_id": "t-r5", "workflow_id": "wf-d3", "node": "test",
+            "stage": "test", "agent": "qodercli", "status": "failed",
+            "failure_reason": "router_isolation_rejected", "task_type": "test",
+        })
+        self.controller = load_script("controller_d3_test", "services/herdr-controller.py")
+        self.commands = []
+
+        def fake_run(command, *a, **k):
+            self.commands.append(list(map(str, command)))
+            task = self.store.get_task("t-r5")
+            self.store.save_task({**task, "status": "superseded",
+                                  "superseded_by": "t-r6", "replacement_pending": False})
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        for name, value in {
+            "_get_store": lambda: self.store,
+            "load_tasks": self.store.list_tasks,
+            "get_task": self.store.get_task,
+            "workflow_closed": lambda _: False,
+            "subprocess": SimpleNamespace(run=fake_run),
+        }.items():
+            setattr(self.controller, name, value)
+
+    def test_falls_back_to_auto_and_supersedes(self):
+        import herdr.agent_router as router
+
+        calls = []
+
+        def fake_choose(workflow_id, stage, task_type, requested="auto", **kw):
+            calls.append(requested)
+            if requested == "qodercli":
+                raise router.RouterIsolationRejection("used in stage")
+            return "claude"
+
+        with patch.object(router, "choose_agent", fake_choose):
+            # infra_recovery imports choose_agent inside the function from
+            # herdr.agent_router, so patching the module attribute suffices.
+            recovered = self.controller.recover_router_isolation_tasks("wf-d3")
+        self.assertTrue(recovered)
+        self.assertEqual(calls, ["qodercli", "auto"])
+        self.assertEqual(self.store.get_task("t-r5")["status"], "superseded")
+
+    def test_no_fallback_when_auto_also_rejected(self):
+        import herdr.agent_router as router
+
+        def fake_choose(workflow_id, stage, task_type, requested="auto", **kw):
+            raise router.RouterIsolationRejection("pool exhausted")
+
+        with patch.object(router, "choose_agent", fake_choose):
+            recovered = self.controller.recover_router_isolation_tasks("wf-d3")
+        self.assertFalse(recovered)
+        self.assertEqual(self.commands, [])
+
+
+class DanglingObligationConvergenceTest(unittest.TestCase):
+    """G1/INV-RECOVERY-06: 悬空替换义务由当前候选上的 settled pass 收敛。"""
+
+    SHA = "e" * 40
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tmp_dir = Path(self.tmp.name)
+        self.store = SQLiteStateStore(self.tmp_dir / "state.db")
+        self.store.save_workflow({"workflow_id": "wf-g1", "status": "running"})
+        # r1: 悬空义务(superseded + pending + 无接替)
+        self.store.save_task({
+            "task_id": "t-r1", "workflow_id": "wf-g1", "node": "test",
+            "stage": "test", "agent": "agy", "status": "superseded",
+            "replacement_pending": True, "run_id": "r1-run",
+            "execution_id": "exec-g1",
+        })
+        # r6: 当前冻结候选上的 settled pass
+        self.store.save_task({
+            "task_id": "t-r6", "workflow_id": "wf-g1", "node": "test",
+            "stage": "test", "agent": "qodercli", "status": "cleaned",
+            "stage_verdict": "pass", "verified_candidate_sha": self.SHA,
+            "candidate_sha": self.SHA, "run_id": "r6-run", "execution_id": "exec-g1",
+        })
+        self.controller = load_script("controller_g1_test", "services/herdr-controller.py")
+        for name, value in {
+            "_get_store": lambda: self.store,
+            "load_tasks": self.store.list_tasks,
+            "workflow_closed": lambda _: False,
+            "_scheduler_current_frozen_candidate_sha": lambda _: self.SHA,
+        }.items():
+            setattr(self.controller, name, value)
+
+    def test_dangling_obligation_resolved_by_settled_pass(self):
+        self.assertTrue(
+            self.controller.converge_dangling_replacement_obligations("wf-g1")
+        )
+        row = self.store.get_task("t-r1")
+        self.assertNotEqual(row.get("replacement_pending"), True)
+        events = self.store.list_events(event_type="replacement_obligation_auto_resolved")
+        self.assertEqual(len(events), 1)
+        # 幂等:再次运行无事可做。
+        self.assertFalse(
+            self.controller.converge_dangling_replacement_obligations("wf-g1")
+        )
+
+    def test_no_settled_pass_no_convergence(self):
+        self.store.save_task({
+            "task_id": "t-r6", "workflow_id": "wf-g1", "node": "test",
+            "stage": "test", "agent": "qodercli", "status": "cleaned",
+            "stage_verdict": "pass", "verified_candidate_sha": "f" * 40,
+            "candidate_sha": "f" * 40, "run_id": "r6-run", "execution_id": "exec-g1",
+        })
+        self.assertFalse(
+            self.controller.converge_dangling_replacement_obligations("wf-g1")
+        )
+        self.assertTrue(self.store.get_task("t-r1").get("replacement_pending"))
+
+    def test_check_workflow_recovery_drives_convergence(self):
+        from herdr import workflow_recovery as wr
+
+        with patch.object(
+            wr, "drive_recovery", lambda store, workflow_id, execute, now=None: []
+        ):
+            self.controller.check_workflow_recovery("wf-g1")
+        self.assertNotEqual(self.store.get_task("t-r1").get("replacement_pending"), True)
+
+
+class BaselineStaleSinkExemptionTest(unittest.TestCase):
+    """G2/INV-BASELINE-02: 无下游消费者的非 git 汇点不做 stale 拒绝。"""
+
+    def _args(self, node="wrapup", integration="none"):
+        return SimpleNamespace(
+            workflow_id="wf-g2", node=node, stage=node,
+            candidate_sha="c" * 40, onto=None, integration_mode=integration,
+        )
+
+    def _probe(self):
+        return {
+            "status": "stale", "dev_tip": "d" * 40, "claim_sha": "c" * 40,
+            "behind_by": 3, "dev_ref": "origin/dev", "fetched": True, "detail": "",
+        }
+
+    def test_sink_node_is_exempt(self):
+        from herdr import launch_baseline, task_cli_launch_preflight as preflight
+        from herdr import projects
+
+        events = []
+
+        class Store:
+            def record_event(self, *a, **k):
+                events.append(a[0])
+                return {"id": 1}
+
+        cfg = {"nodes": [
+            {"id": "implementation"}, {"id": "test", "depends_on": ["implementation"]},
+            {"id": "review", "depends_on": ["implementation"]},
+            {"id": "wrapup", "depends_on": ["test", "review"]},
+        ]}
+        with patch.object(launch_baseline, "probe_claim_freshness", return_value=self._probe()), \
+             patch.object(projects, "workflow_config_for", return_value=cfg):
+            result = preflight.preflight_baseline_freshness(
+                self._args(), "/src", "dev",
+                get_store=lambda: Store(), record_router_failure=lambda *a, **k: None,
+            )
+        self.assertEqual(result["status"], "stale")  # 返回探测结果但不拒绝
+        self.assertEqual(events, [])
+
+    def test_depended_node_still_refused(self):
+        import importlib as _il
+
+        notifier_module = _il.import_module("services.herdr-notifier")
+        from herdr import launch_baseline, projects
+        from herdr import task_cli_launch_preflight as preflight
+
+        events = []
+
+        class Store:
+            def record_event(self, *a, **k):
+                events.append(a[0])
+                return {"id": 1}
+
+        cfg = {"nodes": [
+            {"id": "implementation"},
+            {"id": "test", "depends_on": ["implementation"]},
+            {"id": "wrapup", "depends_on": ["test"]},
+        ]}
+        with patch.object(launch_baseline, "probe_claim_freshness", return_value=self._probe()), \
+             patch.object(projects, "workflow_config_for", return_value=cfg), \
+             patch.object(notifier_module, "notify", lambda *a, **k: True), \
+             patch.object(notifier_module, "build_console_url", lambda **k: "u"):
+            import sys as _sys
+            _sys.modules.setdefault("services.herdr-notifier", notifier_module)
+            with self.assertRaises(SystemExit) as ctx:
+                preflight.preflight_baseline_freshness(
+                    self._args(node="test"), "/src", "dev",
+                    get_store=lambda: Store(), record_router_failure=lambda *a, **k: None,
+                )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(events, ["baseline_stale_refused"])

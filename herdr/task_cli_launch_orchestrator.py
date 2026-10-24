@@ -558,9 +558,28 @@ def launch_task_orchestrated(args, *, deps):
                 store, store.get_task(args.task_id), predecessor, args.supersede_reason
             )
         else:
-            supersede_task(
-                args.supersedes,
-                new_task_id=args.task_id,
-                reason=args.supersede_reason,
-                allow_new_run=True,
-            )
+            # 继任者已派发,此处崩溃只会在事后丢失谱系回链(wf-haflow-1022-01
+            # r6→r5:supersede_task 撞上半写身份行,CLI 在派发后死亡,
+            # superseded_by 永远为空,节点完成判定被悬空义务卡死)。回链
+            # 失败必须响亮可见,由恢复管线收敛,而不是拖垮已派发的执行。
+            try:
+                supersede_task(
+                    args.supersedes,
+                    new_task_id=args.task_id,
+                    reason=args.supersede_reason,
+                    allow_new_run=True,
+                )
+            except SystemExit as exc:
+                print(
+                    f"[SUPERSEDE LINK FAILED] task={args.task_id} "
+                    f"predecessor={args.supersedes}: supersede_task exited "
+                    f"code={exc.code}; lineage back-link missing, recovery "
+                    "will need to converge this obligation"
+                )
+            except Exception as exc:
+                print(
+                    f"[SUPERSEDE LINK FAILED] task={args.task_id} "
+                    f"predecessor={args.supersedes}: {type(exc).__name__}: {exc}; "
+                    "lineage back-link missing, recovery will need to converge "
+                    "this obligation"
+                )

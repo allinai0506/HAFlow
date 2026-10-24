@@ -3637,3 +3637,17 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `pytest -q tests/test_recovery_supply_chain.py tests/test_workflow_progress.py tests/test_recovery_entrypoints.py tests/test_workflow_repair_contracts.py tests/test_fix_loop_recovery.py tests/test_recovery_successor.py tests/test_delivery_rework.py tests/test_node_dispatch_contract.py tests/test_dispatch_fuse.py tests/test_impl_fix2_regression.py` → 324 passed；
   - `python3 -m compileall -q herdr services tests` clean；`git diff --check` clean。
 - 未覆盖（链E后续）：装配冲突(add/add)时的原子重冻结操作（operator refreeze CLI + 谱系等价证明）——设计已定案，待独立任务实施。
+
+## [2026-10-24] Recovery / Launch CLI | 死行收敛批次：失败登记身份补全、回链崩溃围堵、路由恢复 auto 回退、悬空义务自动收敛、基线拒绝汇点豁免（wf-haflow-1022-01 wrapup 段）
+- 触发：wrapup 段诊断定案五个缺陷：D1 失败登记行半写身份（run_id 有/execution_id 无，与持久化意图相反）→ save 护栏拒绝该行一切保存（含 launch 自带的 supersede 回链调用）→ r5/r8 两例"砖死行"永久阻塞 node_is_complete；D2 launch 末尾 supersede_task 在派发后崩溃会拖垮 CLI 且丢回链；D3 recover_router_isolation_tasks 永远沿用原指定 agent（被自身阶段裁决隔离）不回退 auto，test-auto-r5 因此躺死 2.5h；G1 悬空替换义务（superseded+pending+无接替，r1 类）无自动收敛 → node_is_complete 永假 × 规划器"有活跃任务"拒绝重派的双向死锁卡死 wrapup；G2 baseline_stale 拒绝对无下游消费者、非 git 集成的拓扑汇点（收尾报告节点）误拦（dev 前进正是本仓库自己的 PR 合并）。
+- 变更：
+  1. **INV-REG-01**（`herdr/task_cli_launch.py`）：失败登记行强制携带 execution_id（args 优先、意图权威覆盖），杜绝半写身份砖死行。
+  2. **D2 围堵**（`herdr/task_cli_launch_orchestrator.py`）：派发后的前驱 supersede 回链调用 try/except 包裹，失败响亮打印（`[SUPERSEDE LINK FAILED]`）交恢复管线收敛，不再拖垮已派发执行。
+  3. **INV-ROUTER-08**（`services/controller/infra_recovery.py`）：router 恢复先按原指定 agent 试、仍被隔离则回退 auto 再判池。
+  4. **INV-RECOVERY-06**（同文件 + `workflow_recovery.check_workflow_recovery` 接线）：悬空义务保守收敛——仅当同节点已有 settled PASS 验证当前冻结候选时清 replacement_pending，逐条落 `replacement_obligation_auto_resolved` 审计事件；由每工作流周期扫描驱动。
+  5. **INV-BASELINE-02**（`herdr/task_cli_launch_preflight.py`）：拓扑汇点（无任何节点依赖它）且非 git 集成的节点豁免 baseline_stale 拒绝——其裁决没有下游集成消费者，陈旧性分歧不成立；配置不可判定时保守保留拒绝。
+- 证据：
+  - `pytest -q tests/test_recovery_supply_chain.py` → 28 passed（新增 D1/D2/D3/G1/G2 五组回归，含反例：无 settled pass 不收敛、auto 也拒绝不动、有下游消费者仍拒绝、汇点豁免不影响验证者）；
+  - `pytest -q tests/test_launch_reconcile_cli.py tests/test_task_cli_launch_context.py tests/test_recovery_entrypoints.py tests/test_node_dispatch_contract.py tests/test_dispatch_fuse.py tests/test_impl_fix2_regression.py` → 172 passed；
+  - `pytest -q tests/test_dispatch_baseline_failfast.py tests/test_task_cli_launch.py tests/test_task_cli_launch_preflight.py tests/test_workflow_progress.py tests/test_fix_loop_recovery.py tests/test_workflow_repair_contracts.py tests/test_recovery_successor.py` → 180 passed；
+  - `python3 -m compileall -q herdr services tests` clean；`git diff --check` clean。

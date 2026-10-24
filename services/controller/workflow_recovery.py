@@ -235,13 +235,18 @@ def next_recovery_task_id(ports, task_id, tasks):
 
 def check_workflow_recovery(ports, workflow_id, now=None):
     ports.reconcile_node_dispatches(workflow_id, discover=False)
-    # 补派契约核验必须先于 drive_recovery:作废后的任务不再走 failed 分支,
-    # registry sweep 不会再触发 recover_infra_failed_tasks,只有这里能持续
-    # 核对"作废后继任者真的出现"(wf-haflow-1022-01 的 8 小时静默停滞)。
+    # 补派契约核验与悬空义务收敛必须先于 drive_recovery:作废后的任务不再走
+    # failed 分支,registry sweep 不会再触发 recover_infra_failed_tasks,只有
+    # 这里能持续核对"作废后继任者真的出现"并收敛永不满足的替换义务
+    # (wf-haflow-1022-01 的 8 小时静默停滞与 wrapup 双向死锁)。
     try:
         ports.verify_auto_recover_redispatch(workflow_id, ports.load_tasks())
     except (OSError, RuntimeError, ValueError, AttributeError) as exc:
         print(f"[AUTO RECOVER VERIFY ERROR] workflow={workflow_id}: {exc}")
+    try:
+        ports.converge_dangling_replacement_obligations(workflow_id)
+    except (OSError, RuntimeError, ValueError, AttributeError) as exc:
+        print(f"[OBLIGATION CONVERGE ERROR] workflow={workflow_id}: {exc}")
     from herdr.workflow_recovery import drive_recovery
     operations = drive_recovery(ports._get_store(), workflow_id, ports.execute_workflow_recovery, now=now)
     try:
@@ -306,8 +311,9 @@ DEPENDENCIES = {'execute_workflow_recovery': ('REWORKABLE_STATUSES', 'TASK_MANAG
                                'invalidate_for_fix_loop', 'next_recovery_task_id',
                                'resolve_gate_config', 'subprocess', 'time', 'uuid'),
  'next_recovery_task_id': (),
- 'check_workflow_recovery': ('_attention_store', '_get_store', 'execute_workflow_recovery',
-                             'load_tasks', 'notify_attention', 'reconcile_node_dispatches',
+ 'check_workflow_recovery': ('_attention_store', '_get_store', 'converge_dangling_replacement_obligations',
+                             'execute_workflow_recovery', 'load_tasks',
+                             'notify_attention', 'reconcile_node_dispatches',
                              'time', 'verify_auto_recover_redispatch')}
 
 __all__ = tuple(DEPENDENCIES)

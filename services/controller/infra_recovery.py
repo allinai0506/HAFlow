@@ -129,6 +129,92 @@ def verify_auto_recover_redispatch(ports, workflow_id, tasks=None):
     return bool(escalated)
 
 
+def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
+    """Resolve superseded rows whose replacement obligation can never be met.
+
+    wf-haflow-1022-01: a superseded row left ``replacement_pending=True`` with
+    no successor (its replacement was launched as a fresh root without
+    ``--supersedes``); the obligations walk then made ``node_is_complete``
+    permanently False while the planner simultaneously refused redispatch
+    ("node has active tasks") — a two-way deadlock that stalled wrapup.
+
+    Convergence rule (conservative): the dangling obligation resolves only
+    when its own node already carries a settled PASS verifying the CURRENT
+    frozen candidate — the node's verification duty is factually fulfilled;
+    waiting for a successor that will never come protects nothing. Every
+    resolution is audited via a ``replacement_obligation_auto_resolved`` event.
+    """
+    if not workflow_id or ports.workflow_closed(workflow_id):
+        return False
+    if tasks is None:
+        tasks = ports.load_tasks()
+    node_tasks = [t for t in (tasks or []) if t.get("workflow_id") == workflow_id]
+    if not node_tasks:
+        return False
+    try:
+        frozen = str(ports._scheduler_current_frozen_candidate_sha(workflow_id) or "")
+    except (OSError, RuntimeError, ValueError, AttributeError):
+        frozen = ""
+    import re as _re
+    if not _re.fullmatch(r"[0-9a-fA-F]{40}", frozen):
+        return False
+    settled_pass = {}
+    for task in node_tasks:
+        if (str(task.get("status") or "") in ("cleaned", "completed", "committed",
+                                              "integrated", "cleanup_ready")
+                and str(task.get("stage_verdict") or "") == "pass"):
+            node_id = task.get("node") or task.get("stage")
+            verified = str(task.get("verified_candidate_sha")
+                           or task.get("candidate_sha") or "")
+            if node_id and verified.lower() == frozen.lower():
+                settled_pass.setdefault(node_id, task.get("task_id"))
+    if not settled_pass:
+        return False
+    resolved = False
+    for task in node_tasks:
+        if (task.get("status") != "superseded"
+                or task.get("replacement_pending") is not True
+                or task.get("superseded_by")):
+            continue
+        node_id = task.get("node") or task.get("stage")
+        if node_id not in settled_pass:
+            continue
+        task_id = task.get("task_id")
+        try:
+            ports._get_store().update_task_metadata(
+                task_id, {"replacement_pending": False}
+            )
+        except (OSError, RuntimeError, ValueError, AttributeError) as exc:
+            print(f"[OBLIGATION CONVERGE ERROR] workflow={workflow_id} task={task_id}: {exc}")
+            continue
+        try:
+            ports._get_store().record_event(
+                "replacement_obligation_auto_resolved",
+                {
+                    "workflow_id": workflow_id,
+                    "task_id": task_id,
+                    "node": node_id,
+                    "resolved_by": settled_pass[node_id],
+                    "candidate_sha": frozen,
+                    "reason": "dangling replacement obligation (superseded, pending, "
+                              "no successor) converged by a settled PASS on the "
+                              "current frozen candidate",
+                },
+                workflow_id=workflow_id,
+                task_id=task_id,
+                source="herdr-controller",
+            )
+        except (OSError, RuntimeError, ValueError, AttributeError):
+            pass
+        resolved = True
+        print(
+            f"[OBLIGATION CONVERGED] workflow={workflow_id} node={node_id} "
+            f"task={task_id} -> fulfilled by {settled_pass[node_id]} "
+            f"on candidate {frozen[:8]}"
+        )
+    return resolved
+
+
 def recover_infra_failed_tasks(ports, workflow_id, tasks=None):
     """基础设施失败任务自动作废,交给 sweep 重新派发替代任务。
 
@@ -258,7 +344,15 @@ def process_crash_observations(ports):
     return processed
 
 def recover_router_isolation_tasks(ports, workflow_id, tasks=None):
-    """Retry a router-rejected task only after an eligible pool exists."""
+    """Retry a router-rejected task only after an eligible pool exists.
+
+    wf-haflow-1022-01 test-auto-r5: the refusal row pinned its originally
+    requested agent, and this retry re-asked for that same agent forever
+    (it stays isolation-rejected by its own stage verdicts) while eligible
+    alternatives existed. The requested agent is tried first for intent
+    fidelity; when it is still isolation-rejected, ``auto`` re-resolves the
+    pool before giving up.
+    """
     from herdr.agent_router import choose_agent
 
     if not workflow_id or ports.workflow_closed(workflow_id):
@@ -274,14 +368,30 @@ def recover_router_isolation_tasks(ports, workflow_id, tasks=None):
             or task.get("superseded_by")
         ):
             continue
+        requested = task.get("agent") or "auto"
+        eligible = False
         try:
             choose_agent(
                 workflow_id,
                 task.get("node") or task.get("stage"),
                 task.get("task_type") or "test",
-                requested=task.get("agent") or "auto",
+                requested=requested,
             )
+            eligible = True
         except (OSError, RuntimeError, ValueError, AttributeError):
+            eligible = False
+        if not eligible and requested != "auto":
+            try:
+                choose_agent(
+                    workflow_id,
+                    task.get("node") or task.get("stage"),
+                    task.get("task_type") or "test",
+                    requested="auto",
+                )
+                eligible = True
+            except (OSError, RuntimeError, ValueError, AttributeError):
+                eligible = False
+        if not eligible:
             continue
         result = ports.subprocess.run(
             [
@@ -323,6 +433,9 @@ DEPENDENCIES = {'should_retry_finalize': ('FINALIZE_RETRY_MAX',),
  'verify_auto_recover_redispatch': ('_attention_store', '_get_store', 'get_task',
                                     'liveness', 'notify_attention', 'time',
                                     'workflow_closed'),
+ 'converge_dangling_replacement_obligations': ('_get_store', 'load_tasks',
+                                               '_scheduler_current_frozen_candidate_sha',
+                                               'workflow_closed'),
  'recover_infra_failed_tasks': ('AUTO_RECOVER_MAX_ATTEMPTS', 'AUTO_RECOVER_REASONS', 'TASK_MANAGER',
                                 '_attention_store', '_get_store', '_workflow_entry',
                                 'attention_note', 'clear_stage_advance', 'get_task',
