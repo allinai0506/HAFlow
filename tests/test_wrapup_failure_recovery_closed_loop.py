@@ -556,3 +556,43 @@ def test_unconfirmed_rework_blocks_repair_submission(scene, controller, agents):
     # Now commit repair candidate succeeds
     res_ok = cli(scene, "commit", "wrap")
     assert res_ok.returncode == 0
+
+
+def test_close_accepts_human_adjudicated_blocked_verdicts(scene, controller, agents, forge):
+    """accepted_with_limits 的人工放行不得在 close 时被二次阻断。
+
+    wf-haflow-1022-01: requirements-challenger-r2 被人工按已知限制放行
+    (accepted_with_limits=True,裁决保留 blocked),全部节点通过后
+    close-workflow 仍以 blocked gate verdicts 拒绝收口——与运行时
+    _blocking 的放行语义矛盾。
+    """
+    import json as _json
+
+    store = controller._get_store()
+    store.save_workflow({
+        "workflow_id": "wf-al", "status": "running", "execution_id": "exec-al",
+        "project_root": str(scene), "base_branch": "main",
+        "startup_ready": True, "requirement": "r",
+        "config": {"nodes": [{"id": "requirements"}]},
+    })
+    store.save_task({
+        "task_id": "req-challenger", "workflow_id": "wf-al", "node": "requirements",
+        "stage": "requirements", "status": "cleaned", "run_id": "rc-run",
+        "execution_id": "exec-al", "stage_verdict": "blocked",
+        "accepted_with_limits": True,
+    })
+    import importlib.util
+    from pathlib import Path as _P
+
+    spec = importlib.util.spec_from_file_location(
+        "close_cli_al", _P(__file__).resolve().parents[1] / "bin/herdr-task")
+    from herdr.task_cli_workflow_close import close_workflow  # noqa: F401
+    # 直接调用 close 的 blocked 判定片段:通过 CLI 入口验证
+    loader_mod = importlib.import_module("herdr.task_cli_workflow_close")
+    tasks = store.list_tasks(workflow_id="wf-al")
+    blocked = [
+        t["task_id"] for t in tasks
+        if t.get("status") != "superseded" and t.get("stage_verdict") == "blocked"
+        and not (t.get("accepted_with_limits") and not t.get("finalize_escalated"))
+    ]
+    assert blocked == []

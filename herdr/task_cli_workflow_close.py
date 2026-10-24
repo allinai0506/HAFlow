@@ -163,6 +163,11 @@ def close_workflow_owned(
         t["task_id"]
         for t in tasks
         if t.get("status") != "superseded" and t.get("stage_verdict") == "blocked"
+        # accepted_with_limits 是人工裁决的终态放行:裁决文本按约定保留
+        # blocked,但运行时(_blocking)不再阻断;close 不应对同一事实给出
+        # 更严的二次裁决(wf-haflow-1022-01 requirements-challenger-r2 曾
+        # 因此在全部节点通过后仍无法收口)。
+        and not (t.get("accepted_with_limits") and not t.get("finalize_escalated"))
     ]
     if blocked_verdicts and not abandon:
         print(
