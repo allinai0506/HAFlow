@@ -225,7 +225,7 @@ def close_workflow_owned(
         sys.exit(2)
 
     # H-1: machine-set finalize_escalated no longer implies closable.
-    # Escalated git tasks stay unclosable until a human explicitly confirms
+    # Escalated tasks stay unclosable until a human explicitly confirms
     # via --accept-escalated/--force/--abandon or supersedes the task.
     # Five choices cost model (FR-5.3, shown in help + abort text):
     # --accept-escalated keeps deliverables, scoped to escalated only;
@@ -233,12 +233,15 @@ def close_workflow_owned(
     # --abandon discards the entire workflow deliverable;
     # supersede permanently discards that branch commits;
     # clear-escalation revokes the flag and re-drives integrate (may re-conflict).
-    escalated_git = [
+    # The gate is mode-agnostic: the none-mode finalize branch escalates too
+    # (preservation commit refused, delivery blocked), and its tasks are
+    # typically already cleaned by the time close runs — filtering by git
+    # mode or pre-teardown status silently waived the contract
+    # (wf-haflow-1022-01 wrapup-auto-r2 closed as delivered, unconfirmed).
+    escalated = [
         t["task_id"]
         for t in tasks
-        if t.get("status") in ("completed", "committed")
-        and (t.get("integration_mode") or "none") == "git"
-        and t.get("finalize_escalated")
+        if t.get("finalize_escalated") and t.get("status") != "superseded"
     ]
     # --force is the explicitly confirmed direct escape hatch.  It is the
     # historical command-line contract; no second confirmation flag is needed.
@@ -250,12 +253,12 @@ def close_workflow_owned(
     close_outcome = (
         "abandoned"
         if abandon
-        else "escalated_accepted" if escalated_git and accept_escalated else "delivered"
+        else "escalated_accepted" if escalated and accept_escalated else "delivered"
     )
-    if escalated_git and not (accept_escalated or force or abandon):
+    if escalated and not (accept_escalated or force or abandon):
         print(
-            "[CLOSE ABORT] workflow has escalated git tasks "
-            "requiring human confirmation: " + ", ".join(escalated_git)
+            "[CLOSE ABORT] workflow has escalated tasks "
+            "requiring human confirmation: " + ", ".join(escalated)
         )
         print(
             "  finalize_escalated is machine-set and revocable; "
@@ -296,7 +299,7 @@ def close_workflow_owned(
                     if abandon
                     else (
                         "accept-escalated"
-                        if accept_escalated and task_id in escalated_git
+                        if accept_escalated and task_id in escalated
                         else ""
                     )
                 )
@@ -427,7 +430,7 @@ def close_workflow_owned(
         "include_coordinator": include_coordinator,
         "escalated_accepted": [
             {"task_id": tid, "via": escalated_via}
-            for tid in escalated_git
+            for tid in escalated
             if escalated_via
         ],
     }

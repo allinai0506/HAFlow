@@ -26,11 +26,16 @@ def git_finalize_pending_tasks(ports, workflow_id):
     ]
 
 def git_escalated_tasks(ports, workflow_id):
-    """H-1: machine-escalated git tasks still holding undelivered commits.
+    """H-1: machine-escalated tasks still awaiting human confirmation.
 
     Escalation is observability + retry-stop, never a closability proof.
     Auto-close must defer on these; manual close requires explicit
     ``--accept-escalated``/``--force``/``--abandon`` or ``supersede``.
+    Mode-agnostic like the close CLI gate: the none-mode finalize branch
+    escalates too (preservation commit refused / delivery blocked) and its
+    tasks are typically already cleaned by close time — git/status filtering
+    let those workflows auto-close as silently delivered
+    (wf-haflow-1022-01 wrapup-auto-r2).
     """
     try:
         tasks = ports.load_tasks()
@@ -41,8 +46,7 @@ def git_escalated_tasks(ports, workflow_id):
         t.get("task_id")
         for t in (tasks or [])
         if t.get("workflow_id") == workflow_id
-        and t.get("status") in ("completed", "committed")
-        and (t.get("integration_mode") or "none") == "git"
+        and t.get("status") != "superseded"
         and t.get("finalize_escalated")
     ]
 

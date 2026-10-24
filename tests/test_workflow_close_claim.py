@@ -68,8 +68,9 @@ def test_actions_not_repeated_and_options_stable(tmp_path):
     with m.workflow_close_claim(store,'wf',options={'purge':False}) as c:
         c.action('pane:p',{'run':'r'},lambda i:True,lambda:calls.append(2))
     assert calls==[1]
-    with pytest.raises(ValueError,match='options differ'):
+    with pytest.raises(ValueError,match='options differ') as exc:
         with m.workflow_close_claim(store,'wf',options={'purge':True}):pass
+    assert '"purge": false' in str(exc.value) and '"purge": true' in str(exc.value)
 
 
 def test_reopen_preserves_old_action_identity_and_new_operation(tmp_path):

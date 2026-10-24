@@ -101,7 +101,13 @@ def workflow_close_claim(store, workflow_id, *, dry_run=False, options=None):
             if row:
                 if row[1] == 'completed':
                     yield CloseClaim(connection,workflow_id,'completed',row[0],json.loads(row[3])); return
-                if row[2] != encoded: raise ValueError('close recovery options differ from original operation')
+                if row[2] != encoded:
+                    raise ValueError(
+                        'close recovery options differ from original operation '
+                        f'(stored: {row[2]}; requested: {encoded}); resume '
+                        'with the original options to continue the same '
+                        'close operation'
+                    )
                 operation_id = row[0]
             else:
                 operation_id = uuid.uuid4().hex
