@@ -3651,3 +3651,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `pytest -q tests/test_launch_reconcile_cli.py tests/test_task_cli_launch_context.py tests/test_recovery_entrypoints.py tests/test_node_dispatch_contract.py tests/test_dispatch_fuse.py tests/test_impl_fix2_regression.py` → 172 passed；
   - `pytest -q tests/test_dispatch_baseline_failfast.py tests/test_task_cli_launch.py tests/test_task_cli_launch_preflight.py tests/test_workflow_progress.py tests/test_fix_loop_recovery.py tests/test_workflow_repair_contracts.py tests/test_recovery_successor.py` → 180 passed；
   - `python3 -m compileall -q herdr services tests` clean；`git diff --check` clean。
+
+## [2026-10-24] Close / Controller | H-1 升级门禁模式无关化：none 模式机器升级不再被静默按 delivered 收口（wf-haflow-1022-01 复盘，PR #341）
+- 触发：评审确认 close 的 H-1 升级门禁对 none 模式机器升级任务完全隐形——CLI `unsettled_git`/`escalated_git` 与控制器 `git_escalated_tasks` 都硬性过滤 `integration_mode=='git'` 且 `status in (completed, committed)`，而 none 模式 finalize 分支的 preservation commit 被拒同样机器升级，其任务到 close 时通常已是 cleaned。实测 `wf-haflow-1022-01-wrapup-auto-r2`（mode=none、finalize_escalated=1、commit_refused）在无任何确认 flag 下被按 delivered 收口。
+- 变更：
+  1. **CLI 门禁模式无关**（`herdr/task_cli_workflow_close.py`）：`finalize_escalated` 且非 superseded 即拦截；`--accept-escalated` 放行、`escalated_accepted` 报告、output override 同步覆盖；abort 文案去掉 git 限定。
+  2. **自动 close 同步**（`services/controller/workflow_close.py`）：`git_escalated_tasks` 同改模式无关，先于派发干净让路，不对 CLI 门禁空转重试。
+  3. **恢复报错可行动**（`herdr/workflow_close.py`）：options 不匹配报错补充 stored/requested 值与恢复指引（冻结语义不变）。
+- 证据：
+  - `pytest tests/test_task_cli_workflow_close.py tests/test_workflow_close_claim.py tests/test_impl_fix4_regression.py tests/test_wrapup_failure_recovery_closed_loop.py tests/test_fix_loop_gates.py tests/test_gate_metrics_handoff.py tests/test_close_workflow_receipt_cli.py tests/test_liveness_guard.py` → 200 passed（新增 4+1+1 用例，none 模式拦截先红复现后绿）；
+  - `python3 -m compileall -q herdr services bin tests` clean；`git diff --check` clean；
+  - `docs/lessons/lessons-learned.md` §196。
+- 未覆盖（建议单独立项）：in_progress close 操作缺 flag 变更逃生通道（建议显式 `--force` 重启通道，设计决策待拍板）；close 成功后打印的 `--include-coordinator` 收尾指令对 completed 行是空转。
