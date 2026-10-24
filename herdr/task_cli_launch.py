@@ -316,6 +316,11 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
         "stage": node_id,
         "agent": getattr(args, "agent", None) or "auto",
         "status": status,
+        # 半写身份是"砖死行"的根因(wf-haflow-1022-01 r5/r8):行带 run_id 不带
+        # execution_id,而持久化 launch_intent 正相反,身份护栏随后拒绝该行的
+        # 一切保存(含 supersede),节点完成判定被永久阻塞。失败登记行必须
+        # 与其意图同样身份完整。
+        "execution_id": getattr(args, "execution_id", None),
         "blocker": detail if not remediation or remediation in detail else f"{detail} {remediation}"[:2000],
         "pane_id": "",
         "clone_path": "",
@@ -349,6 +354,10 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
             artifact_mode=getattr(args, "artifact_mode", None),
             launch_intent_id=launch_intent["intent_id"],
         )
+        if launch_intent.get("execution_id"):
+            # 意图是身份权威:行必须与之一致,否则任何后续保存都会被
+            # 登记身份护栏拒绝(半写身份砖死行)。
+            task["execution_id"] = launch_intent["execution_id"]
     if launch_intent and launch_intent.get("supersedes"):
         task["supersedes"] = launch_intent["supersedes"]
     if launch_intent and launch_intent.get("dispatch_operation_id") is not None:

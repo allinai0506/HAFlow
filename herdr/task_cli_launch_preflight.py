@@ -166,6 +166,31 @@ def validate_supersedes_for_launch(args, node_id, store):
         )
 
 
+def _node_is_verifying_sink(args, node_id):
+    """True when nothing downstream consumes this node's verdict against dev.
+
+    baseline_stale 的理由是"门禁全绿后 t4 集成失败"的分歧:验证者的裁决
+    会被下游集成消费,候选落后 dev 才构成风险。拓扑汇点(没有任何节点
+    依赖它)且自身不做 git 集成的节点——如收尾报告节点——的裁决没有
+    下游集成消费者,陈旧性不构成该分歧(wf-haflow-1022-01 wrapup 曾被
+    此拒绝)。配置不可判定时保守返回 False(保留拒绝)。
+    """
+    if getattr(args, "integration_mode", "none") == "git":
+        return False
+    try:
+        from .projects import workflow_config_for
+
+        cfg = workflow_config_for(getattr(args, "workflow_id", "")) or {}
+        nodes = [n for n in (cfg.get("nodes") or []) if isinstance(n, dict)]
+        if not nodes:
+            return False
+        return not any(
+            node_id in (n.get("depends_on") or []) for n in nodes if n.get("id") != node_id
+        )
+    except Exception:
+        return False
+
+
 def preflight_baseline_freshness(
     args, source_repo, base_branch, *, get_store, record_router_failure
 ):
@@ -190,6 +215,13 @@ def preflight_baseline_freshness(
         print(
             "[BASELINE PREFLIGHT] baseline freshness unknown "
             f"({probe.get('detail')}); proceeding, FR-6.2 stays fail-closed."
+        )
+        return probe
+    if _node_is_verifying_sink(args, node_id):
+        print(
+            f"[BASELINE PREFLIGHT] node={node_id} is a non-git sink with no "
+            "downstream verdict consumer; stale-baseline divergence does not "
+            "apply, proceeding."
         )
         return probe
 
