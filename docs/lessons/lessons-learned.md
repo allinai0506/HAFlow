@@ -8179,3 +8179,30 @@ python3 -m compileall -q herdr services bin tests console
 git diff --check
 ```
 
+
+## 195. 恢复供给链的连锁缺陷：静默失效的契约与听不见的等待（2026-10-24）
+
+### 问题背景
+
+wf-haflow-1022-01 执行 34 小时未完成，此前一个月内多次单点修复未收敛。最终定案为六条互相喂养的缺陷链：auto-recover 作废后"sweep 会补派"的契约对已完成节点的修复谱系静默失效（8 小时零事件）；路由隔离预算被零工作行（路由拒绝/额度耗尽/熔断/看门狗击杀）耗尽后 fail-closed 拒绝一切重派；看门狗唯一活性信号是任务行 `updated_at`，静默长任务被误杀，而其"死于提交前"又制造了 fix-loop 的 `identity_unknown` 死路；launch 拒绝的零资源登记行（无 execution_id）毒化同组身份校验；waiting_human 与拒绝行全程零通知。单修任何一条都会被其他链再次触发。
+
+### 经验教训
+
+| 教训 | 依据 |
+| --- | --- |
+| "作废 ≠ 恢复"：任何以"后续会有人接手"结尾的自动动作都是一个未经核验的契约，必须有期限、核验方和超期升级 | auto-recover 打印 "pending redispatch by sweep" 后 sweep 对已完成节点不再派发，8h 零事件 |
+| fail-closed 策略要区分"威胁独立性的事实"与"从未发生的尝试"：零资源/零回执行的登记行不构成验证独立性威胁，却会耗尽预算把后续一切合法重派拦死 | 5 个 Agent 全部被零工作行烧完，每次重派都要人工豁免 |
+| 看门狗的活性信号不能只有"状态迁移时间"一种：进程活着但静默工作 ≠ 挂死，单信号判死制造的新故障（死于提交前）会沿恢复管线放大成 identity_unknown | r1/r7 两次误杀，r7 之死直接触发恢复死路 |
+| 每一个"等待人工"的分支都必须可听见（通知 + 可执行命令），否则它只是把故障从日志挪到了日历上 | waiting_human 整夜零通知，notifier 只跟踪状态转换映射 |
+| 修复必须先画出完整的因果链再动手：四条链的证据（事件流/日志/恢复操作表三源对齐）比任何单点推测都值钱；诊断数据本身就是交付物 | 单点修复一个月未收敛；链式定案后一批修复+回归 324 项全绿 |
+
+### 修复与防护
+
+首批四链（INV-RECOVERY-02/03、INV-ROUTER-07、INV-SENTINEL-04）与深层链 F/E（INV-RECOVERY-04/05）成批修复，回归见 `tests/test_recovery_supply_chain.py`（19 项，含反例锁定：普通失败行仍拦、committed 契约不弱化、kill-switch 可回退旧语义）。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_recovery_supply_chain.py
+pytest -q tests/test_workflow_progress.py tests/test_recovery_entrypoints.py tests/test_workflow_repair_contracts.py tests/test_fix_loop_recovery.py tests/test_recovery_successor.py
+```
