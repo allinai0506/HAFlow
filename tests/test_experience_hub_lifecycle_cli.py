@@ -591,13 +591,17 @@ def test_stop_cli_unverifiable_lsof_reprobe(sandbox, monkeypatch, capsys):
     assert hub.registry_path.exists()
 
     captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    assert "-1" not in combined
-    assert "pid -1" not in combined
     payload = json.loads(captured.out)
     assert payload["exit_code"] == lifecycle.EXIT_UNVERIFIABLE
     assert payload["state"] == lifecycle.STATE_UNVERIFIABLE
     assert payload["reoccupied"] is False
+    assert payload["pid"] == hub.proc.pid
+    assert payload["pid"] != -1
+    assert payload.get("reoccupied_pid") is None
+    assert "-1" not in payload["message"]
+    assert "pid -1" not in payload["message"]
+    assert "pid -1" not in captured.err
+    assert "pid=-1" not in captured.err
 
     hub.proc.terminate()
     hub.proc.wait(timeout=5)
@@ -627,13 +631,17 @@ def test_stop_cli_unverifiable_ps_reprobe(sandbox, monkeypatch, capsys):
     assert hub.registry_path.exists()
 
     captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    assert "-1" not in combined
-    assert "pid -1" not in combined
     payload = json.loads(captured.out)
     assert payload["exit_code"] == lifecycle.EXIT_UNVERIFIABLE
     assert payload["state"] == lifecycle.STATE_UNVERIFIABLE
     assert payload["reoccupied"] is False
+    assert payload["pid"] == hub.proc.pid
+    assert payload["pid"] != -1
+    assert payload.get("reoccupied_pid") is None
+    assert "-1" not in payload["message"]
+    assert "pid -1" not in payload["message"]
+    assert "pid -1" not in captured.err
+    assert "pid=-1" not in captured.err
 
     hub.proc.terminate()
     hub.proc.wait(timeout=5)
@@ -655,11 +663,17 @@ def test_stop_cli_unverifiable_launchctl_preserves_registry(sandbox, monkeypatch
     assert hub.proc.poll() is None
 
     captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    assert "-1" not in combined
-    assert "pid -1" not in combined
     payload = json.loads(captured.out)
     assert payload["exit_code"] == lifecycle.EXIT_UNVERIFIABLE
+    assert payload["state"] == lifecycle.STATE_RUNNING
+    assert payload["reoccupied"] is False
+    assert payload["pid"] == hub.proc.pid
+    assert payload["pid"] != -1
+    assert payload.get("reoccupied_pid") is None
+    assert "-1" not in payload["message"]
+    assert "pid -1" not in payload["message"]
+    assert "pid -1" not in captured.err
+    assert "pid=-1" not in captured.err
 
     hub.proc.terminate()
     hub.proc.wait(timeout=5)
