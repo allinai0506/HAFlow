@@ -64,6 +64,26 @@ def _gate(nodes, node_id):
     return _DEFAULT_GATES.get(node_id)
 
 
+# Launch-phase refusals never started an agent run; they are transport
+# bookkeeping, not execution facts.
+_LAUNCH_REFUSAL_REASONS = frozenset({
+    'router_isolation_rejected', 'router_policy_rejected', 'router_health_rejected',
+    'launch_preallocation_rejected', 'baseline_stale',
+})
+
+
+def _launch_refused(task):
+    """True for zero-resource launch-refusal rows (no agent ever started).
+
+    wf-haflow-1022-01: a router-refused registration row (no execution_id)
+    joined a watchdog-killed task in one fix_loop group and flipped the whole
+    group's identity to ``identity_unknown`` -> waiting_human. Launch refusals
+    are not quality facts and must not poison identity validation; they are
+    owned by the router-recovery / manual-relaunch paths.
+    """
+    return str(task.get('failure_reason') or '') in _LAUNCH_REFUSAL_REASONS
+
+
 def candidate_responsible_source(workflow, tasks, candidate_sha):
     """Identify the legitimate candidate producer node and task(s).
 
@@ -190,7 +210,8 @@ def assess_workflow(workflow, config, tasks):
                     and candidate and workflow.get('candidate_sha')
                     and re.fullmatch(r'[0-9a-fA-F]{40}', str(candidate))
                     and candidate != workflow['candidate_sha'])
-    blockers = [task for task in current if _blocking(task) and relevant(task)]
+    blockers = [task for task in current if _blocking(task) and relevant(task)
+                and not _launch_refused(task)]
     nodes = {node.get('id'): node for node in (config or {}).get('nodes', [])}
     groups = {}
     for task in blockers:

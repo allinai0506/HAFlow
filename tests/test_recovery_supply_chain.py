@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib
 import importlib.machinery
 import importlib.util
+import json
 import os
 import unittest
 from pathlib import Path
@@ -565,3 +566,272 @@ class RecoveryScanDrivesContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Chain F (wf-haflow-1022-01 深层链): launch-refused rows must not poison
+# fix-loop identity, and a failed predecessor roots its successor at the
+# frozen candidate instead of dead-ending in waiting_human.
+# ---------------------------------------------------------------------------
+
+class LaunchRefusalExclusionTest(unittest.TestCase):
+    """INV-RECOVERY-04: 零资源拒绝行不是执行事实,不入 fix_loop 身份校验。"""
+
+    SHA = "a" * 40
+
+    def _workflow(self):
+        return {
+            "workflow_id": "wf-f",
+            "execution_id": "exec-1",
+            "candidate_sha": self.SHA,
+            "status": "running",
+            "startup_ready": True,
+        }
+
+    def _config(self):
+        return {"nodes": [{"id": "implementation"}, {"id": "test", "gate": {"retry_node": "implementation"}}]}
+
+    def _tasks(self, refused_reason="router_isolation_rejected"):
+        killed = {
+            "task_id": "t-r7", "workflow_id": "wf-f", "node": "test", "stage": "test",
+            "status": "failed", "failure_reason": "hard_timeout_watchdog",
+            "blocker": "watchdog killed before commit", "run_id": "r7-run",
+            "execution_id": "exec-1", "candidate_sha": self.SHA,
+        }
+        refused = {
+            "task_id": "t-r8", "workflow_id": "wf-f", "node": "test", "stage": "test",
+            "status": "failed", "failure_reason": refused_reason,
+            "blocker": "No available Agent", "run_id": None,
+            "execution_id": None, "candidate_sha": self.SHA,
+        }
+        return [killed, refused]
+
+    def test_refused_row_excluded_from_identity_facts(self):
+        from herdr.workflow_progress import assess_workflow
+
+        result = assess_workflow(self._workflow(), self._config(), self._tasks())
+        obligations = result["obligations"]
+        self.assertTrue(obligations)
+        self.assertNotIn("t-r8", obligations[0]["task_ids"])
+        self.assertNotEqual(obligations[0]["reason"], "identity_unknown")
+
+    def test_non_refusal_zero_identity_row_still_poisons(self):
+        """反例:普通失败行缺 execution_id 仍判 identity_unknown(闸门仍在)。"""
+        from herdr.workflow_progress import assess_workflow
+
+        result = assess_workflow(
+            self._workflow(), self._config(), self._tasks(refused_reason="cli_set_status")
+        )
+        obligations = result["obligations"]
+        self.assertTrue(obligations)
+        self.assertEqual(obligations[0]["reason"], "identity_unknown")
+
+
+class SuccessorRootShaTest(unittest.TestCase):
+    """INV-RECOVERY-05: 无 commit 前驱的继任者扎根冻结候选。"""
+
+    SHA = "b" * 40
+
+    def test_root_sha_overrides_predecessor_commit(self):
+        from herdr.workflow_recovery import successor_launch_command
+
+        workflow = {"workflow_id": "wf-x", "execution_id": "exec"}
+        predecessor = {
+            "task_id": "old", "node": "implementation", "stage": "implementation",
+            "dispatch_role": "worker", "dispatch_round": 3,
+        }
+        argv = successor_launch_command(
+            "herdr-task", workflow, predecessor, "new", "/src/repo", "prompt",
+            root_sha=self.SHA,
+        )
+        self.assertIn("--candidate-sha", argv)
+        self.assertEqual(argv[argv.index("--candidate-sha") + 1], self.SHA)
+        self.assertEqual(argv[argv.index("--supersedes") + 1], "old")
+
+    def test_without_commit_or_root_still_fails_closed(self):
+        from herdr.workflow_recovery import successor_launch_command
+
+        with self.assertRaises(ValueError):
+            successor_launch_command(
+                "herdr-task", {"workflow_id": "wf", "execution_id": "e"},
+                {"task_id": "old", "node": "implementation"}, "new", "/src", "p",
+            )
+
+
+class FrozenCandidateSuccessorExecutionTest(unittest.TestCase):
+    """执行层:failed 前驱自动构造继任者而不是 target_requires_explicit_replacement。"""
+
+    def setUp(self):
+        import subprocess as sp
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self.tmp.name)
+        self.repo = self.tmp_dir / "repo"
+        self.repo.mkdir()
+        for argv in (["init", "-q", "-b", "main"], ["config", "user.name", "t"],
+                     ["config", "user.email", "t@e.invalid"]):
+            sp.run(["git", "-C", str(self.repo), *argv], check=True, capture_output=True)
+        (self.repo / "seed").write_text("x")
+        sp.run(["git", "-C", str(self.repo), "add", "."], check=True, capture_output=True)
+        sp.run(["git", "-C", str(self.repo), "commit", "-qm", "seed", "--no-gpg-sign"],
+               check=True, capture_output=True)
+        self.sha = sp.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        self.store = SQLiteStateStore(self.tmp_dir / "state.db")
+        config = {"nodes": [
+            {"id": "implementation"},
+            {"id": "test", "gate": {"retry_node": "implementation"}},
+        ]}
+        self.store.save_workflow({
+            "workflow_id": "wf-fc", "status": "running", "execution_id": "exec-fc",
+            "project_root": str(self.repo), "base_branch": "main", "config": config,
+            "candidate_sha": self.sha, "startup_ready": True,
+        })
+        self.store.record_event(
+            "candidate_frozen", {"candidate_sha": self.sha},
+            workflow_id="wf-fc", source="critical-path-scheduler",
+        )
+        self.store.save_task({
+            "task_id": "old", "workflow_id": "wf-fc", "node": "implementation",
+            "stage": "implementation", "status": "failed",
+            "failure_reason": "hard_timeout_watchdog", "blocker": "killed pre-commit",
+            "run_id": "old-run", "execution_id": "exec-fc", "candidate_sha": self.sha,
+            "dispatch_role": "worker", "dispatch_round": 3,
+        })
+        self.store.save_task({
+            "task_id": "gate", "workflow_id": "wf-fc", "node": "test",
+            "stage": "test", "status": "cleaned", "run_id": "gate-run",
+            "execution_id": "exec-fc", "candidate_sha": self.sha,
+            "stage_verdict": "blocked",
+            "stage_verdict_affected_task_ids": ["old"],
+        })
+
+        self.controller = load_script(
+            "controller_fc_test", "services/herdr-controller.py"
+        )
+        self.launch_commands = []
+
+        def fake_launch(command, *args, **kwargs):
+            argv = list(map(str, command))
+            self.launch_commands.append(argv)
+            successor_id = argv[argv.index("--task-id") + 1]
+            run_id = "new-run"
+            self.store.save_task({
+                "task_id": successor_id, "workflow_id": "wf-fc",
+                "node": "implementation", "stage": "implementation",
+                "status": "dispatched", "run_id": run_id,
+                "execution_id": "exec-fc", "candidate_sha": self.sha,
+                "dispatch_role": "worker", "dispatch_round": 4,
+                "completion_identity_path": f"/tmp/id-{successor_id}",
+                "completion_epoch": "epoch-1",
+                "supersedes": "old",
+            })
+            self.store.record_event(
+                "initial_dispatched",
+                {
+                    "task_id": successor_id, "delivery_phase": "dispatched",
+                    "completion_epoch": "epoch-1",
+                    "identity_path": f"/tmp/id-{successor_id}",
+                    "intervention_id": "initial:test",
+                },
+                workflow_id="wf-fc", task_id=successor_id, node_id="implementation",
+                source="herdr-task", run_id=run_id,
+            )
+            old = self.store.get_task("old")
+            self.store.save_task({**old, "superseded_by": successor_id})
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        for name, value in {
+            "_get_store": lambda: self.store,
+            "subprocess": SimpleNamespace(run=fake_launch),
+            "clear_stage_advance": lambda *a, **k: None,
+            "invalidate_for_fix_loop": self._invalidate,
+        }.items():
+            setattr(self.controller, name, value)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _invalidate(self, wid, gate, config, retry_node=None, preserve_task_ids=None, **kwargs):
+        """测试桩:模拟真实原语清理门禁裁决(被测的是继任者构造,不是作废机制)。"""
+        task = self.store.get_task("gate")
+        if task:
+            self.store.save_task({**task, "stage_verdict": "invalidated"})
+
+    def _claim_operation(self):
+        import time as _time
+
+        from herdr import recovery_store
+
+        now = _time.time() + 1
+        for op in recovery_store.list_operations(self.store.db_path, "wf-fc"):
+            payload = op.get("payload") or {}
+            if (payload.get("kind") == "fix_loop"
+                    and payload.get("affected_task_ids") == ["old"]):
+                assert op["status"] == "pending", f"assessed op not pending: {op['status']} {payload}"
+                claimed = recovery_store.claim_operation(
+                    self.store.db_path, op["id"], "owner", now, lease_seconds=600
+                )
+                assert claimed is not None, "claim failed"
+                return dict(claimed, detail={})
+        raise AssertionError("fix_loop obligation for 'old' was not registered")
+
+    def test_failed_predecessor_gets_frozen_rooted_successor(self):
+        operation = self._claim_operation()
+        status, detail = self.controller.execute_workflow_recovery(operation, "owner")
+        self.assertEqual(status, "awaiting_result")
+        self.assertEqual(detail["repair_map"]["old"]["root"], "frozen_candidate")
+        argv = self.launch_commands[0]
+        self.assertEqual(argv[argv.index("--candidate-sha") + 1], self.sha)
+        self.assertEqual(argv[argv.index("--supersedes") + 1], "old")
+        self.assertEqual(self.store.get_task("old")["superseded_by"], argv[argv.index("--task-id") + 1])
+
+class BaselineStaleNotifyTest(unittest.TestCase):
+    """链E最小切片:baseline_stale 拒绝必须立刻通知,不再静默躺死行。"""
+
+    def test_refusal_notifies_with_remediation(self):
+        from types import SimpleNamespace as NS
+
+        import importlib as _il
+        notifier_module = _il.import_module("services.herdr-notifier")
+        from herdr import launch_baseline, task_cli_launch_preflight as preflight
+
+        args = NS(
+            workflow_id="wf-e", task_id="wf-e-impl-r3", node="implementation",
+            stage="implementation", candidate_sha="c" * 40, onto=None,
+        )
+        events = []
+        notifications = []
+
+        class Store:
+            def record_event(self, event_type, payload, **kwargs):
+                events.append(event_type)
+                return {"id": 1}
+
+        probe = {
+            "status": "stale", "dev_tip": "d" * 40, "claim_sha": "c" * 40,
+            "behind_by": 7, "dev_ref": "origin/dev", "fetched": True, "detail": "",
+        }
+        with patch.object(
+            launch_baseline, "probe_claim_freshness", return_value=probe
+        ), patch.object(
+            notifier_module, "notify",
+            lambda title, subtitle, message, url=None: notifications.append(message) or True,
+        ), patch.object(
+            notifier_module, "build_console_url", lambda **k: "http://console"
+        ):
+            # importlib.import_module 在函数内解析 notifier;用 sys.modules 预置同一对象
+            import sys as _sys
+            _sys.modules.setdefault("services.herdr-notifier", notifier_module)
+            with self.assertRaises(SystemExit) as ctx:
+                preflight.preflight_baseline_freshness(
+                    args, "/src/repo", "dev",
+                    get_store=lambda: Store(), record_router_failure=lambda *a, **k: None,
+                )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(events, ["baseline_stale_refused"])
+        self.assertEqual(len(notifications), 1)
+        self.assertIn("rebase", notifications[0])

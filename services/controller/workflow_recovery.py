@@ -2,6 +2,7 @@
 
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
+import re
 
 def execute_workflow_recovery(ports, operation, owner):
     """Run existing Task primitives only after the durable recovery claim."""
@@ -159,7 +160,42 @@ def execute_workflow_recovery(ports, operation, owner):
                 'completion_identity_path':fresh.get('completion_identity_path')}
             step('rework_delivery_confirmed', validate=False)
         else:
-            return 'waiting_human', {'reason': 'target_requires_explicit_replacement', 'missing_task_ids':[tid], **details}
+            # 无 commit 的 failed 前驱(看门狗/熔断/崩溃死于提交前)不再死等
+            # 人工:以当前冻结候选为根构造继任者,与人工 relaunch
+            # --candidate-sha 同构(wf-haflow-1022-01 r7 的 identity_unknown 死路)。
+            frozen = payload.get('candidate_sha')
+            if (task.get('status') == 'failed'
+                    and isinstance(frozen, str)
+                    and re.fullmatch(r'[0-9a-fA-F]{40}', frozen)
+                    and workflow.get('execution_id')):
+                next_id = ports.next_recovery_task_id(tid, store.list_tasks(workflow_id=wid))
+                details['successor_ids'].append(next_id)
+                from herdr.supervisor.state import redact_text
+                prompt = ('仅修复当前授权范围内的验收阻断，不扩大范围；若需要修改约定范围外文件，'
+                          '持久报告 blocked 请求人工裁决。\n' + '\n'.join(
+                    redact_text(str(f.get('stage_verdict_note') or f.get('blocker') or ''))[:2000]
+                    for f in (payload.get('facts') or [])[:20]))
+                try:
+                    recovery_source = choose_recovery_source(
+                        {'commit': frozen, 'clone_path': task.get('clone_path')}, source)
+                except ValueError as exc:
+                    return 'waiting_human', {'reason': str(exc), **details}
+                command = successor_launch_command(ports.TASK_MANAGER, workflow, task, next_id,
+                                                   recovery_source, prompt, root_sha=frozen)
+                step('successor_launch_started')
+                result = ports.subprocess.run(command, text=True, capture_output=True, timeout=120)
+                successor = store.get_task(next_id)
+                if result.returncode or not successor or not has_confirmed_delivery(store, successor):
+                    return 'waiting_human', {'reason': 'successor_delivery_unconfirmed', **details}
+                if (store.get_task(tid) or {}).get('superseded_by') != next_id:
+                    return 'waiting_human', {'reason': 'successor_lineage_unconfirmed', **details}
+                details['target_runs'][next_id] = successor['run_id']
+                details['repair_map'][tid] = {'kind': 'successor', 'task_id': next_id,
+                    'run_id': successor['run_id'], 'source_run_id': task.get('run_id'),
+                    'root': 'frozen_candidate'}
+                step('successor_delivery_confirmed', validate=False)
+            else:
+                return 'waiting_human', {'reason': 'target_requires_explicit_replacement', 'missing_task_ids':[tid], **details}
     missing = repair_coverage(dict(operation, detail=details), store.list_tasks(workflow_id=wid))
     if missing:
         return 'waiting_human', {'reason': 'repair_coverage_incomplete', 'missing_task_ids': missing, **details}
