@@ -177,4 +177,39 @@ def test_console_requires_reason_for_dispatch_confirmation_ui():
     assert '派发确认必须填写人工核查依据' in source
     assert "needsReason?'（必填）'" in source
 
+# ---------------------------------------------------------------------------
+# Issue #315: deep-linked task actions resolve beyond the display cap.
+
+
+def test_deep_linked_task_actions_resolve_beyond_display_cap(store):
+    for i in range(40):
+        store.save_task(_escalated_task('wf-1', f'T{i:02d}'))
+    plain = _escalation_projection(store)
+    assert plain['actions_truncated']
+    assert not any(a['target'].get('task_id') == 'T39' for a in plain['actions'])
+
+    from services.controller import cockpit_automation as automation
+    focused = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'}, target_task_id='T39')
+    focused_ids = {a['action_id'] for a in focused['actions']}
+    assert {'T39:clear_escalation', 'T39:close_workflow_accept_escalated', 'T39:supersede'} <= focused_ids
+    assert all(a['target'].get('task_id') == 'T39' for a in focused['actions'])
+    # The exact resolution stays bounded by the same display cap.
+    assert len(focused['actions']) <= 100
+
+    # Stale and foreign targets resolve nothing and never borrow another task's cards.
+    store.save_task({**store.get_task('T00'), 'status': 'superseded', 'superseded_by': 'T00-r2'})
+    stale = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'}, target_task_id='T00')
+    assert stale['actions'] == []
+    foreign = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'},
+                                      target_task_id='other-workflow-task')
+    assert foreign['actions'] == []
+
+
+def test_console_cockpit_passes_target_task_lookup(store):
+    from console.controller_cockpit_api import get_controller_cockpit
+    for i in range(40):
+        store.save_task(_escalated_task('wf-1', f'T{i:02d}'))
+    payload = get_controller_cockpit('wf-1', target_task_id='T39')
+    assert {a['target'].get('task_id') for a in payload['actions']} == {'T39'}
+
 

@@ -340,8 +340,10 @@ function openControllerCockpit(target={}){
   state.workflowId='__ctl__';renderWorkflowTabs();paintControllerCockpit();
   const actionId=state.controllerTarget?.operationId!=null?wid+':confirm_dispatch:'+state.controllerTarget.operationId:'';
   const missingAction=actionId&&!state.controllerCockpit?.actions?.some(a=>a.action_id===actionId);
+  const lookup=typeof cockpitTargetLookup==='function'?cockpitTargetLookup(wid):{key:actionId};
+  const staleLookup=lookup.key?state.controllerCockpit?.action_lookup!==lookup.key:!!state.controllerCockpit?.action_lookup;
   if(state.controllerCockpit?.workflow?.workflow_id!==wid||(navigating&&(
-      missingAction||(state.controllerCockpit?.action_lookup&&!actionId))))return loadControllerCockpit(wid);
+      missingAction||staleLookup)))return loadControllerCockpit(wid);
 }
 function openControllerCockpitModal(){return openControllerCockpit();}
 async function returnFromControllerCockpit(){

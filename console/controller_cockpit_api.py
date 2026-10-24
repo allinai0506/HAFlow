@@ -5,12 +5,13 @@ from services.controller.cockpit_automation import default_handlers, execute_act
 from console import runtime
 
 
-def get_controller_cockpit(workflow_id: str, action_id=None) -> dict:
+def get_controller_cockpit(workflow_id: str, action_id=None, target_task_id=None) -> dict:
     workflow_id = str(workflow_id or '').strip()
     if not workflow_id:
         raise ValueError('workflow_id 不能为空')
     reconcile_pending_receipts(kernel._get_store(), workflow_id)
-    return read_cockpit(kernel._get_store(), workflow_id, action_id=action_id, controller=lambda: {
+    return read_cockpit(kernel._get_store(), workflow_id, action_id=action_id,
+                        target_task_id=str(target_task_id or '').strip() or None, controller=lambda: {
         'status': runtime.service_status().get('com.user.herdr-controller') or 'unknown'})
 
 

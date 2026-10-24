@@ -29,7 +29,7 @@ def _has_table(conn, name):
     return bool(conn.execute('SELECT 1 FROM sqlite_master WHERE type=? AND name=?', ('table', name)).fetchone())
 
 
-def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=None):
+def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=None, target_task_id=None):
     """Read graph/action/recovery/event facts from one bounded SQLite snapshot."""
     conn = state_db.get_readonly_db_connection(store.db_path)
     try:
@@ -91,7 +91,8 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
     graph = workflow_graph_projection({**config, **workflow}, tasks)
     result = build_cockpit_projection(workflow=workflow, config=config, tasks=tasks, graph=graph,
                                       actions=actions, recovery=operations, controller=controller,
-                                      events=events, errors=errors, action_id=action_id)
+                                      events=events, errors=errors, action_id=action_id,
+                                      target_task_id=target_task_id)
     for action in result['actions']:
         action['effect'] = action.get('effect') or action.get('description') or action.get('title') or action['action_id']
         automatic = (action['automation']['mode'] == 'automatic'
