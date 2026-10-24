@@ -57,3 +57,77 @@
   ```bash
   echo '{"reservations": {}}' > ~/.herdr-controller/agent-reservations.json
   ```
+
+---
+
+<a id="orphan-hub-probe"></a>
+## 4. 无主 experience-hub 探针
+
+> 适用：某端口被归属不明的 Experience Hub 实例占用——launchd 托管实例（`8780`）、父进程已退出的 ad-hoc 探针，或"进程存活但 db 文件已消失"的存量孤儿（issue #328 现场形态）。本小节是该场景的唯一权威处理手册（runbook）；服务的 launchd 登记见 [`service-management.md` §1](service-management.md)。
+> 下文 `herdr-experience-hub` 指本仓库 `bin/herdr-experience-hub`（线上实例跑在 launchd 钉住的 `releases/<sha>` 快照上）；路径一律用 `$HOME`/`~` 可移植写法，不写死本机绝对路径。
+
+### 4.1 先 `status` 归属，再决定动作路径
+- **原则**：端口 LISTEN 实测是实例存在性的权威，登记（registry）只做归属增强；归属不明一律 fail-closed，**不得**因"读不到登记"就报"实例不存在"或直接杀进程。
+- **第一步（只读）**：`status` 不建库、不建目录、不注册 token、不写登记、不发信号：
+  ```bash
+  herdr-experience-hub status --port <port> --json
+  ```
+- **按 `manager` 三态分流**：
+
+  | `manager` | 含义 | 动作 |
+  | :--- | :--- | :--- |
+  | `launchd` | 由 `com.user.herdr-experience-hub` 托管（KeepAlive=true、ThrottleInterval=5s） | `stop` 拒绝发信号并返回 exit 6；走 `launchctl bootout`/`kickstart`，见 4.4。直接 `kill` 它会被 5 秒复活。 |
+  | `ad_hoc` | 终端/脚本直接拉起的探针实例 | 可停：进程通过三重 AND 校验（持有选中 `(host,port)` 的 LISTEN ∧ cmdline 属 hub 特征 ∧ 登记与选择器一致）后发 SIGTERM，见 4.2。 |
+  | `unknown` | `launchctl` 查询失败/超时/输出无法解析 | `stop` 拒绝发信号并返回 exit 5；先修复探测环境（4.6），再重新 `status`；期间不做任何终止动作。 |
+
+- **退出码速查**（`status`/`stop` 共用）：`0` 成功或幂等收敛（`stop` 对 absent 同样返回 0）/ `2` 用法错误（缺选择器、`--port 0`、非法 `--host`/`--pid` 组合）/ `3` 不存在（absent / stale，仅 `status` 报告用）/ `4` ambiguous、foreign、degraded，或 `--db-path` 无匹配 / `5` 无法探测（`lsof`/`ps` 缺失或解析失败；`manager=unknown` 时的 `stop`）/ `6` launchd 托管拒绝 / `7` SIGTERM 已发但 5s 内未退出 / `1` 仅未预期异常。**禁止**把 foreign/ambiguous/launchd/unverifiable 吞成 `0`。
+
+### 4.2 停掉 ad-hoc 探针（`stop`）
+- 先用 `status`（或 4.6 只读组合）逐个 pid 确认归属与 `(host, port)`，再执行：
+  ```bash
+  herdr-experience-hub stop --port <port>
+  ```
+- 同端口多监听者时（macOS 上 `127.0.0.1:P` 与 `0.0.0.0:P` 可由两个进程同时 LISTEN），目标必须唯一：用 `--host <host>` 或 `--pid <pid>` 缩小范围，否则返回 exit 4，工具不替你猜。
+- `stop` 成功 = 返回前复探选中 `(host,port)` 已无任何 LISTEN；只发 SIGTERM、最多等 5 秒；超时返回 exit 7、保留登记、不升级信号。
+- **禁止按进程名批量终止**：`pkill -f herdr-experience-hub` 会连同 `8780` 生产实例一起杀（cmdline 完全匹配），随后被 launchd 复活，制造一次无谓的生产抖动。
+- **禁止 `kill -9`**：强杀绕过端口复探判定，结果不可归因。v1 的 hub 进程不安装 SIGTERM 处理器，`stop` 的成功判定完全依赖外部复探，不依赖被停进程自清理。
+- 仅当该代际快照尚未部署 `stop` 子命令时，才允许对已确认归属的单个 pid 人工 `kill <pid>`（默认 SIGTERM），且逐个确认后再动手。
+- SQLite 关闭竞态提示：SIGTERM 不走 SQLite 优雅关闭，`stop` 后立即用同一 DB 启动若失败（短暂锁竞态），**先重试一次**再排查其他原因。
+
+### 4.3 登记与 db 文件边界
+- 登记位置：`$HOME/.herdr-controller/run/experience-hub/<pid>.json`；只有 `start` 在 bind 成功后写登记，`status` 永不写。
+- `stop` 清理登记时**只删与选择器匹配的条目，不删 db 文件**，也不删他人条目；exit 7（超时）保留登记。
+- 登记根目录不存在 = 空登记，不是错误；解析失败的条目按 `corrupt` 处理，`stop` 不读取它、也不凭它杀进程。
+
+### 4.4 `launchctl` 的 bootout 与 kickstart 区别
+- `launchctl kickstart -k`：**重启**——杀掉当前进程并按已加载的 job 配置立即拉起新进程，**不重读 plist**；用它"停止"会得到杀了又复活的假象。
+- `launchctl bootout`：**停用并卸载**——job 从 launchd 移除，KeepAlive 不再复活；要再拉起须重新 `bootstrap`。
+  ```bash
+  launchctl print gui/$(id -u)/com.user.herdr-experience-hub        # 只读：确认 job 状态与当前 pid
+  launchctl bootout gui/$(id -u)/com.user.herdr-experience-hub      # 停用并卸载
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.herdr-experience-hub.plist
+  launchctl kickstart -k gui/$(id -u)/com.user.herdr-experience-hub # 原地重启，不重读 plist
+  ```
+- `8780` 被孤儿占用时，launchd 托管实例的 fail-fast 会以 ThrottleInterval=5s 节奏刷日志——这是期望的 fail-fast，不是新 bug；按本小节处置。
+
+### 4.5 `db_exists=false` + `state=running` 的读法
+- 该组合表示"进程仍在服务一个已消失的事实源"（issue #328 现场形态：存量孤儿进程、其 db 所在目录已被清理）。须人工判断，工具不自动干预。
+- 脚本**不得**把 `db_exists=false` 单独当"服务不可用"告警，也**不得**只看 `state=running` 就当"一切正常"——本通道不判定 hub 的业务健康度。
+- `db_path` 归属顺序：登记条目 → argv 中的 `--db-path` → `null`；为 `null` 时 `db_exists` 也是 `null`，不回退默认路径冒充事实。
+
+### 4.6 只读排查命令与输出安全
+- v1 不提供 `status --all` 全端口扫描；人工排查端口占用用下面的只读组合（`lsof` 的 `-p` 与 `-i` 必须加 `-a` 才是 AND 关系，陷阱详见 [`service-management.md`](service-management.md) §2.2.2 折叠块）：
+  ```bash
+  lsof -nP -iTCP:<port> -sTCP:LISTEN
+  ps -o pid=,command= -p "$(lsof -nP -iTCP:<port> -sTCP:LISTEN -t | head -1)" \
+    | sed -E 's/(--admin-token|--token)([= ])[^ ]+/\1\2<redacted>/g'
+  ```
+- 任何 cmdline 回显（文档示例、工具报错、工单与日志粘贴）必须把 `--admin-token`、`--admin-token=…`、`--token` 的值统一替换为 `<redacted>`；`--json` 输出的 `listeners[]` 只含 pid/host/port，不含 argv。argv 可见是既存暴露面（另 issue 评估），新输出不得放大泄漏。
+- `lsof`/`ps` 缺失或输出不可解析（Linux 常见）时，`status`/`stop` 报 unverifiable（exit 5）并停手，不得猜测归属；macOS 为第一支持平台。
+
+### 4.7 存量孤儿接管顺序（清理动作需现场授权）
+终止存量孤儿属宿主副作用操作，不在代码自动清理范围；本手册只给接管路径，且第 2 步起任何清理动作执行前须获得现场授权：
+1. 先 `status` 确认归属与 `manager`（4.1），多实例逐个核对；
+2. `manager=ad_hoc` 且目标唯一 → `herdr-experience-hub stop --port <port>`；`launchd` → 按 4.4 走 `launchctl`；`unknown` → 不动作，先修复探测；
+3. 仅当该代际尚未部署新工具时，对逐个确认过的 pid 人工 `kill <pid>`；禁止 `kill -9`、禁止 `pkill -f`；
+4. 禁止脚本越界批量清理未经确认的进程。

@@ -1023,6 +1023,11 @@ class HubHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not_found", "message": f"Endpoint {path} not found"})
 
 
+def _handler_storage(handler: HubHTTPHandler) -> HubStorage:
+    """Resolve storage at request time so bind() never constructs it."""
+    return handler._hub_server.storage  # type: ignore[attr-defined]
+
+
 class ExperienceHubServer:
     """Runnable Experience Hub Server instance."""
 
@@ -1041,11 +1046,39 @@ class ExperienceHubServer:
         self.cert_file = Path(cert_file) if cert_file else None
         self.key_file = Path(key_file) if key_file else None
         self.allow_insecure_http = allow_insecure_http or (os.environ.get("HERDR_HUB_ALLOW_INSECURE_HTTP") == "1")
-        self.storage = HubStorage(self.db_path)
+        self._storage = None
+        self._storage_lock = threading.Lock()
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
-    def start(self, block: bool = False) -> None:
+    @property
+    def storage(self) -> HubStorage:
+        """Lazily create storage on first access (B4/B21).
+
+        ``__init__`` must not create the database, but embedded callers that
+        access ``server.storage`` before ``start()`` keep the historical
+        behavior.  The same instance is reused for the whole server lifetime.
+        """
+        with self._storage_lock:
+            if self._storage is None:
+                self._storage = HubStorage(self.db_path)
+            return self._storage
+
+    @storage.setter
+    def storage(self, value: HubStorage) -> None:
+        with self._storage_lock:
+            self._storage = value
+
+    def bind(self) -> int:
+        """Bind the listening socket without serving or creating storage.
+
+        The CLI calls this first, then creates the database/registers the
+        token, writes the registry, and only then serves (P0-3).  A bind
+        failure therefore cannot leave a DB, token or registry behind.
+        """
+        if self._server is not None:
+            return int(self._server.server_address[1])
+
         is_loopback = self.host in ("127.0.0.1", "localhost", "::1")
         if not is_loopback and not (self.cert_file and self.key_file) and not self.allow_insecure_http:
             raise RuntimeError(
@@ -1056,29 +1089,65 @@ class ExperienceHubServer:
         handler_cls = type(
             "ConfiguredHubHandler",
             (HubHTTPHandler,),
-            {"storage": self.storage},
+            {"_hub_server": self, "storage": property(_handler_storage)},
         )
-        self._server = ThreadingHTTPServer((self.host, self.port), handler_cls)
-        self.port = self._server.server_address[1]
+        server = ThreadingHTTPServer((self.host, self.port), handler_cls)
+        try:
+            if self.cert_file and self.key_file:
+                ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+                ctx.load_cert_chain(certfile=str(self.cert_file), keyfile=str(self.key_file))
+                server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        except BaseException:
+            server.server_close()
+            raise
 
+        self._server = server
+        self.port = int(server.server_address[1])
         if self.cert_file and self.key_file:
-            ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            ctx.load_cert_chain(certfile=str(self.cert_file), keyfile=str(self.key_file))
-            self._server.socket = ctx.wrap_socket(self._server.socket, server_side=True)
             LOGGER.info("Experience Hub listening on https://%s:%d (TLS enabled)", self.host, self.port)
         else:
             LOGGER.info("Experience Hub listening on http://%s:%d", self.host, self.port)
+        return self.port
+
+    def start(
+        self,
+        block: bool = False,
+        on_bound: Any = None,
+    ) -> None:
+        """Bind, run ``on_bound`` and serve.
+
+        ``start(block=True)`` closes the socket in ``finally`` without calling
+        ``shutdown()``: ``serve_forever`` has already returned, and calling
+        ``shutdown()`` from that same thread deadlocks (P0-7).
+        """
+        self.bind()
+        if on_bound is not None:
+            try:
+                on_bound(self)
+            except BaseException:
+                self.close()
+                raise
 
         if block:
             try:
-                self._server.serve_forever()
+                self._server.serve_forever()  # type: ignore[union-attr]
             except KeyboardInterrupt:
                 pass
             finally:
-                self.stop()
+                self.close()
         else:
-            self._thread = threading.Thread(target=self._server.serve_forever, daemon=True, name="hub-server")
+            self._thread = threading.Thread(
+                target=self._server.serve_forever,  # type: ignore[union-attr]
+                daemon=True,
+                name="hub-server",
+            )
             self._thread.start()
+
+    def close(self) -> None:
+        """Close the listening socket without waiting for a serve loop."""
+        if self._server is not None:
+            self._server.server_close()
+            self._server = None
 
     def stop(self) -> None:
         if self._server:

@@ -21,6 +21,8 @@
 | `com.user.herdr-factory-console` | 仓库源：`console/herdr_factory_console.py`；部署副本：`/Users/user/.herdr-console/herdr_factory_console.py` | 可视化 Web 控制台服务（默认端口 `8765`）。 |
 | `com.user.herdr-experience-hub` | `bin/herdr-experience-hub`（`start --host 127.0.0.1 --port 8780 --db-path ~/.herdr-controller/experience_hub.db`） | 企业经验中心：内网审核发布业务规则，独立 SQLite + `http.server`，契约见 [`wiki/enterprise-experience-hub.md`](../../wiki/enterprise-experience-hub.md)。 |
 
+**Experience Hub 探针生命周期**：`stop` 对 launchd 托管实例拒绝发信号（exit 6）；托管实例的停用/重启用 `launchctl bootout` / `bootstrap` / `kickstart -k`（命令形态见 §2.3：`bootout` 停用并卸载，`kickstart -k` 仅原地重启且**不重读 plist**）。ad-hoc 探针与存量孤儿先 `status` 按 `manager` 三态分流再处置，禁止 `pkill -f` 与 `kill -9`。唯一权威手册：[故障排查 FAQ · 无主 experience-hub 探针](troubleshooting-faq.md#orphan-hub-probe)。
+
 新增服务只在 `SCRIPTS` 登记一次：部署脚本用 `python3 -m herdr.service_release --labels` 取清单，不再自备第二份。带启动参数的服务在登记时声明**参数词表**（如 `('start', '--host', '--port', '--db-path')`）——词表校验 flag，参数值属宿主状态，逐字保留。
 
 未登记而 plist 又钉在 `releases/<sha>` 上的服务会被部署脚本拒绝部署（见 §2.2.1），因为它会永久停在旧代际且不报错。
