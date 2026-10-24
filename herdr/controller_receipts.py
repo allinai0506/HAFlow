@@ -52,6 +52,14 @@ def classify_receipt(action, before, after, result):
             return _receipt(action, wid, 'applied', outcome='success', event_id=event['id'], effect='interrupted')
         if event.get('event_type') == 'steering.task_halt_failed':
             return _receipt(action, wid, 'rejected', outcome='failed', reason_code='interrupt_failed', refresh_required=True)
+    if kind == 'supersede' and task.get('status') == 'superseded':
+        return _receipt(action, wid, 'applied', outcome='success', task_id=tid,
+                        message='目标工位已按请求作废，替换责任已回读确认')
+    if kind == 'close_workflow' and after_workflow.get('status') in {'completed', 'cleaned', 'archived'}:
+        return _receipt(action, wid, 'applied', outcome='success', message='工作流终态已回读确认')
+    if kind == 'clear_escalation' and tid and task and not task.get('finalize_escalated'):
+        return _receipt(action, wid, 'applied', outcome='success', task_id=tid,
+                        message='升级标记撤销已回读确认')
     applied = ((kind == 'resume' and after_workflow.get('status') == 'running'
                 and before['workflow'].get('status') == 'paused')
                or (kind == 'pause' and after_workflow.get('status') == 'paused'
