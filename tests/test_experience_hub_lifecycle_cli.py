@@ -1014,6 +1014,30 @@ def test_stop_reoccupied_real_socket_not_zero(sandbox):
     assert binder.poll() is None
 
 
+def test_stop_db_path_stale_registry_does_not_signal_port_reuser(sandbox):
+    # PR #338 review P1: hub A exits leaving its registry entry; hub B with a
+    # different DB takes over the same (host, port).  ``stop --db-path A.db``
+    # must never signal B — the stale entry cannot vouch for another process.
+    hub_a = sandbox.spawn_hub(db_path=sandbox.tmp_path / "a.db")
+    port = hub_a.port
+    hub_a.proc.kill()
+    hub_a.proc.wait(timeout=5)
+    hub_b = sandbox.spawn_hub(port=port, db_path=sandbox.tmp_path / "b.db")
+
+    result = run_cli(
+        ["stop", "--port", str(port), "--db-path", str(hub_a.db_path), "--json"],
+        sandbox.env,
+        timeout=20,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["pid"] == hub_b.pid
+    assert payload["signaled"] is False
+    assert payload["exit_code"] != lifecycle.EXIT_OK
+    assert hub_b.proc.poll() is None
+    assert (sandbox.registry_root / f"{hub_b.pid}.json").exists()
+    assert (sandbox.registry_root / f"{hub_a.pid}.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # AC-23 / AC-24 / AC-25
 # ---------------------------------------------------------------------------

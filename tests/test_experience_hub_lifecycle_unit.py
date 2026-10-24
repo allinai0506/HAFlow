@@ -742,6 +742,21 @@ def test_identity_three_terms_independent():
     assert wrong_registry.holds_registry is False
 
 
+def test_identity_registry_pid_must_own_the_signaled_process():
+    # PR #338 review P1: a stale entry selected by --db-path whose pid belongs
+    # to an exited instance must fail closed against the live re-user.
+    stale = lifecycle.check_identity(
+        target_pid=200,
+        listeners=(listener(pid=200),),
+        process=process(pid=200),
+        registry=entry(pid=100),
+        selector=selector(),
+    )
+    assert stale.holds_registry is False
+    assert stale.ok is False
+    assert any("registry pid" in reason for reason in stale.reasons)
+
+
 def test_host_matching_and_wildcards():
     assert lifecycle.host_matches("127.0.0.1", "0.0.0.0") is True
     assert lifecycle.host_matches("localhost", "::1") is True
@@ -811,6 +826,45 @@ def test_registry_corrupt_entry_is_readable_but_never_trusted(tmp_path):
     )
     assert classification.exit_code == lifecycle.EXIT_AMBIGUOUS
     assert classification.action == lifecycle.ACTION_CLEANUP_REFUSE
+
+
+def test_registry_invalid_schema_version_is_never_fatal(tmp_path):
+    # PR #338 review P2: one bad schema_version value must not raise out of
+    # scan_registry and block status/stop for every other instance.
+    root = tmp_path / "registry"
+    root.mkdir(parents=True)
+    (root / "100.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "broken",
+                "pid": 100,
+                "host": "127.0.0.1",
+                "port": PORT,
+                "db_path": str(tmp_path / "hub.db"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "200.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 200,
+                "host": "127.0.0.1",
+                "port": 50099,
+                "db_path": str(tmp_path / "other.db"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries = lifecycle.scan_registry(root)
+    assert len(entries) == 2
+    bad = next(item for item in entries if item.pid == 100)
+    assert bad.corrupt is False
+    assert bad.schema_version == 0
+    good = next(item for item in entries if item.pid == 200)
+    assert good.corrupt is False
+    assert good.schema_version == 1
 
 
 def test_registry_remove_rechecks_content(tmp_path):

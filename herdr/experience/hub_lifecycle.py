@@ -297,6 +297,9 @@ def _parse_registry_file(path: Path) -> RegistryEntry:
 
     db_path = data.get("db_path")
     started_at = data.get("started_at")
+    schema_version = data.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        schema_version = 0
     return RegistryEntry(
         path=path,
         pid=pid,
@@ -306,7 +309,7 @@ def _parse_registry_file(path: Path) -> RegistryEntry:
         started_at=float(started_at) if isinstance(started_at, (int, float)) and not isinstance(started_at, bool) else None,
         script=data.get("script") if isinstance(data.get("script"), str) else None,
         manager=data.get("manager") if isinstance(data.get("manager"), str) else MANAGER_UNKNOWN,
-        schema_version=int(data.get("schema_version") or 0),
+        schema_version=schema_version,
     )
 
 
@@ -911,6 +914,12 @@ def check_identity(
 
     holds_registry = True
     if registry is not None and not registry.corrupt:
+        if registry.pid != target_pid:
+            # A stale entry must not vouch for a process that replaced it on
+            # the same (host, port); ownership is verified against the pid we
+            # are about to signal.
+            holds_registry = False
+            reasons.append("registry pid disagrees with the signaled process")
         if selector.port is not None and registry.port != selector.port:
             holds_registry = False
         if selector.db_path is not None and not paths_equal(registry.db_path, selector.db_path):
