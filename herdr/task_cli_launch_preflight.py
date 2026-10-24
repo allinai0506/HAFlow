@@ -233,6 +233,23 @@ def preflight_baseline_freshness(
         failure_code="baseline_stale",
         remediation=verdict["remediation"],
     )
+    # 拒绝必须可听见:wf-haflow-1022-01 的 baseline_stale 拒绝行静默躺了
+    # 1.5 小时才被人工发现。通知是旁路,best-effort,绝不改变拒绝语义。
+    try:
+        import importlib
+
+        notifier = importlib.import_module("services.herdr-notifier")
+        notifier.notify(
+            "Herdr Factory · 基线过期拒绝",
+            f"{getattr(args, 'workflow_id', 'unknown')} · baseline_stale",
+            f"{verdict['message']}\n{verdict['remediation']}",
+            url=notifier.build_console_url(
+                workflow_id=getattr(args, "workflow_id", ""),
+                task_id=getattr(args, "task_id", ""),
+            ),
+        )
+    except Exception as exc:
+        print(f"[BASELINE NOTIFY WARN] {exc}", file=sys.stderr)
     print(
         f"[BASELINE STALE] workflow={getattr(args, 'workflow_id', '')} "
         f"task={getattr(args, 'task_id', '')}; {detail}; "

@@ -63,6 +63,29 @@ def task_hard_timeout_seconds():
         return DEFAULT_TASK_HARD_TIMEOUT_SECONDS
 
 
+DEFAULT_TASK_HARD_TIMEOUT_ALIVE_MULTIPLIER = 2.0
+
+
+def task_hard_timeout_alive_multiplier():
+    """Idle-timeout extension for tasks whose agent process is still working.
+
+    wf-haflow-1022-01: the watchdog's only liveness signal was the task row's
+    ``updated_at`` (status transitions), so agents silently grinding through a
+    long internal test run were killed at 3600s mid-work ("watchdog 误杀").
+    While the pane's agent still reports ``working``, the first breach alerts
+    instead of failing, and the kill waits for ``hard_timeout * multiplier``.
+    A value <= 1.0 restores the immediate-kill behaviour.
+    """
+    raw = os.environ.get("HERDR_TASK_HARD_TIMEOUT_ALIVE_MULTIPLIER")
+    if raw is None or not raw.strip():
+        return DEFAULT_TASK_HARD_TIMEOUT_ALIVE_MULTIPLIER
+    try:
+        val = float(raw.strip())
+        return val if val > 0 and math.isfinite(val) else DEFAULT_TASK_HARD_TIMEOUT_ALIVE_MULTIPLIER
+    except (ValueError, TypeError):
+        return DEFAULT_TASK_HARD_TIMEOUT_ALIVE_MULTIPLIER
+
+
 DEFAULT_GATE_TASK_HARD_TIMEOUT_SECONDS = 7200.0
 
 
@@ -963,6 +986,53 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
             gate_timeout = task_gate_hard_timeout_seconds(hard_timeout)
             if idle_seconds < gate_timeout:
                 timeouts.pop(tid, None)
+                continue
+
+        # 存活宽限:Pane 的 Agent 仍在 working 时,静默 ≠ 挂死。第一次越限
+        # 只告警不判死,直到 idle 超过 hard_timeout * alive_multiplier 才允许
+        # 失败处置(wf-haflow-1022-01 r1/r7 的"watchdog 误杀")。
+        alive_multiplier = task_hard_timeout_alive_multiplier()
+        agent_alive = False
+        if (
+            hard_timeout_on
+            and alive_multiplier > 1.0
+            and idle_seconds < hard_timeout * alive_multiplier
+            and task.get("pane_id")
+        ):
+            try:
+                evidence = _pane_delivery_evidence(task.get("pane_id"), tid)
+            except Exception:
+                evidence = None
+            agent_alive = evidence.get("agent_status") == "working" if evidence else False
+            if agent_alive:
+                entry = timeouts.get(tid) or {}
+                if not entry.get("alive_alerted"):
+                    alive_alert = {
+                        "task_id": tid,
+                        "workflow_id": task.get("workflow_id"),
+                        "status": status,
+                        "idle_seconds": int(idle_seconds),
+                    }
+                    print(
+                        f"[SENTINEL TIMEOUT ALIVE] task={tid} status={status} "
+                        f"idle={int(idle_seconds)}s agent=working — grace "
+                        f"x{alive_multiplier:g}, alerting instead of failing",
+                        flush=True,
+                    )
+                    if notify_fn is not None:
+                        notify_fn(
+                            tid,
+                            task.get("workflow_id"),
+                            f"Agent 仍在 working 但已 {int(idle_seconds)}s 无状态推进，"
+                            f"看门狗宽限至 {int(hard_timeout * alive_multiplier)}s；"
+                            "若为静默长任务可忽略，进程停止后将按硬超时处置。",
+                        )
+                    else:
+                        notify_stall(alive_alert, task)
+                # 不写 updated_at:同快照跳过(existing_timeout.updated_at ==
+                # updated_at -> continue)会凭空免除最终的越限击杀;alive_alerted
+                # 本身已足够去重告警。
+                timeouts[tid] = dict(entry, alive_alerted=True)
                 continue
 
         existing_timeout = timeouts.get(tid)

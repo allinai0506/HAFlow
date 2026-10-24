@@ -3611,3 +3611,29 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `python3 -m compileall -q herdr services bin tests console` clean；
   - `git diff --check` clean；
   - `docs/lessons/lessons-learned.md` §194。
+
+## [2026-10-24] Controller / Sentinel / Router | 恢复供给链四连锁缺陷修复：补派契约闭环、隔离预算零工作豁免、看门狗存活宽限、waiting_human 可听化（wf-haflow-1022-01）
+- 触发：wf-haflow-1022-01 执行 34h 未完成。事件流/日志/恢复操作表四链定案：①auto-recover 作废 fuse 任务后"sweep 会补派"契约静默失效（调度器视节点已完成、fix-loop 恢复卡 waiting_human），23:42→08:00 零事件停滞；②阶段隔离预算被零工作行（路由拒绝/额度耗尽/熔断/看门狗）耗尽，fail-closed 拒绝一切重派；③硬超时唯一活性信号是任务行 updated_at，静默跑全量测试的 Agent 被误杀（r1/r7）；④waiting_human 与停滞整夜零通知。
+- 变更：
+  1. **INV-RECOVERY-02 补派契约闭环**（`services/controller/infra_recovery.py`、`services/controller/workflow_recovery.py`）：auto-supersede 登记 attention 期限（SLA 默认 300s，`HERDR_AUTO_RECOVER_REDISPATCH_SLA`）；`verify_auto_recover_redispatch` 由 `check_workflow_recovery` 每轮驱动（作废后任务不再走 failed 分支，registry 调用点不可靠）；超期无继任者 → 一次性人工通知 + `auto_recover_redispatch_stalled` 审计事件；"superseded -> superseded" 幂等短路。
+  2. **INV-ROUTER-07 零工作豁免**（`herdr/agent_router.py`）：终局（failed/superseded）且无 commit/无裁决的任务行不再消耗隔离预算——验证独立性属于被接受的工作；在途行与有产出终局行照旧占用。kill-switch `HERDR_ROUTER_ISOLATION_ZERO_WORK_EXEMPT=0` 恢复旧 fail-closed。
+  3. **INV-SENTINEL-04 存活宽限**（`services/herdr-sentinel.py`）：硬超时首越限时若 Pane Agent 仍 working → 告警不判死，直到 idle ≥ hard_timeout×multiplier（默认 2，`HERDR_TASK_HARD_TIMEOUT_ALIVE_MULTIPLIER`）才允许击杀；alive 条目不写 updated_at 以免同快照跳过逻辑永久免死。
+  4. **INV-RECOVERY-03 waiting_human 可听化**（`services/controller/workflow_recovery.py`）：`check_workflow_recovery` 对 waiting_human 操作按 operation id+version 去重通知一次（含 recovery-decide 指引），操作离开该状态清 episode。
+- 证据：
+  - `pytest -q tests/test_recovery_supply_chain.py` → 13 passed（新增四链回归）；
+  - `pytest -q tests/test_recovery_supply_chain.py tests/test_dispatch_fuse.py tests/test_impl_fix2_regression.py tests/test_node_dispatch_contract.py tests/test_fix_loop_recovery.py tests/test_recovery_entrypoints.py tests/test_issue_250_sentinel_gate_verdict_watchdog.py tests/test_agent_router_stage_exclusion.py` → 170 passed；
+  - `pytest -q tests/test_agent_router_soft_degrade.py tests/test_agent_router_loads.py tests/test_agent_router_preflight.py tests/test_router_health_and_defects_remedy.py tests/test_critical_reads_fail_closed.py` → 43 passed；
+  - `python3 -m compileall -q herdr services tests` clean；`git diff --check` clean。
+- 未覆盖（后续任务）：冻结候选与 dev 漂移引发的 baseline_stale/add-add 冲突链（r3/r5）；identity_unknown 时以冻结候选为根自动构造 successor；测试隔离修补（test_dispatch_fuse/test_impl_fix2 补临时 attention store）。
+
+## [2026-10-24] Recovery / Router | 深层链F/E 首批修复：fix-loop 身份去毒、无 commit 前驱扎根冻结候选、baseline_stale 拒绝可听化（wf-haflow-1022-01 续）
+- 触发：恢复供给链首批修复（afcf422）部署后，继续处理两条深层链。链F定案：①r8 路由拒绝的零资源登记行（无 execution_id）与 r7 同组进入 `_identity_reason`，把整组打成 identity_unknown → waiting_human；②执行层对 failed 前驱只有 `target_requires_explicit_replacement` 死路（op 252949 detail 原话）。链E定案：baseline_stale 拒绝本身 fail-closed 正确（防门禁全绿后 t4 失败），但拒绝行静默无通知（r3 躺了 1.5h）；正确出路 rebase→重派→实现完成→自动重冻结其实存在（r6 走通），烧时间的是可见性。
+- 变更：
+  1. **INV-RECOVERY-04 身份去毒**（`herdr/workflow_progress.py`）：launch 阶段拒绝行（router_*/launch_preallocation_rejected/baseline_stale）不是执行事实，不再进入 fix_loop 身份校验；普通失败行缺身份仍判 identity_unknown（闸门保留，反例测试锁定）。
+  2. **INV-RECOVERY-05 冻结候选扎根**（`services/controller/workflow_recovery.py`、`herdr/workflow_recovery.py`）：failed 前驱 + 有效冻结候选时自动构造继任者（`--candidate-sha <冻结> --supersedes <前驱>`，与人工 relaunch 同构）取代 waiting_human 死路；`successor_launch_command` 增加 root_sha；`repair_coverage` 对无 commit 前驱以行内链接+候选等价证明身份（committed 谱系契约逐字保留）。
+  3. **链E切片**（`herdr/task_cli_launch_preflight.py`）：baseline_stale 拒绝即时通知（含 remediation 命令），best-effort 旁路不改拒绝语义。
+- 证据：
+  - `pytest -q tests/test_recovery_supply_chain.py` → 19 passed（新增 LaunchRefusal/RootSha/FrozenSuccessor/BaselineStale 四组）；
+  - `pytest -q tests/test_recovery_supply_chain.py tests/test_workflow_progress.py tests/test_recovery_entrypoints.py tests/test_workflow_repair_contracts.py tests/test_fix_loop_recovery.py tests/test_recovery_successor.py tests/test_delivery_rework.py tests/test_node_dispatch_contract.py tests/test_dispatch_fuse.py tests/test_impl_fix2_regression.py` → 324 passed；
+  - `python3 -m compileall -q herdr services tests` clean；`git diff --check` clean。
+- 未覆盖（链E后续）：装配冲突(add/add)时的原子重冻结操作（operator refreeze CLI + 谱系等价证明）——设计已定案，待独立任务实施。

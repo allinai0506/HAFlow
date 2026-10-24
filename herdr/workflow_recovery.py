@@ -7,9 +7,16 @@ from . import recovery_store
 from .workflow_progress import active_tasks
 
 
-def successor_launch_command(cli, workflow, predecessor, successor_id, source, prompt):
-    """A new repair round owns a distinct branch rooted at the failed immutable commit."""
-    sha = predecessor.get('commit')
+def successor_launch_command(cli, workflow, predecessor, successor_id, source, prompt, root_sha=None):
+    """A new repair round owns a distinct branch rooted at the failed immutable commit.
+
+    ``root_sha`` overrides the root when the predecessor died before committing
+    (watchdog/fuse/crash kill): the repair then roots at the workflow's frozen
+    candidate — the same shape as a manual relaunch with ``--candidate-sha``.
+    wf-haflow-1022-01: such predecessors previously dead-ended the whole
+    fix-loop in ``target_requires_explicit_replacement`` waiting_human.
+    """
+    sha = root_sha or predecessor.get('commit')
     if not re.fullmatch(r'[0-9a-f]{40}', sha or '') or not workflow.get('execution_id'):
         raise ValueError('committed successor requires exact SHA and workflow execution identity')
     argv = [cli, 'launch', '--task-id', successor_id, '--workflow-id', workflow['workflow_id'],
@@ -65,10 +72,20 @@ def repair_coverage(operation, tasks):
             required = {'predecessor_id': original_id, 'successor_id': entry['task_id'],
                         'predecessor_run_id': entry['source_run_id'], 'successor_run_id': entry['run_id'],
                         'candidate_sha': payload.get('candidate_sha')}
-            valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
-                     and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id
-                     and bool(payload.get('candidate_sha')) and old.get('commit') == payload['candidate_sha']
-                     and all(lineage.get(key) == value for key, value in required.items()))
+            if not old.get('commit') and old.get('candidate_sha') == payload.get('candidate_sha'):
+                # 前驱死于提交前(看门狗/熔断/崩溃):继任者扎根同一冻结候选。
+                # committed 谱系字典由 link_committed_successor 写入,而该原语
+                # 要求前驱已提交;这里以行内链接 + 候选等价证明同一身份
+                # (wf-haflow-1022-01 的 frozen-root 继任路径)。
+                valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
+                         and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id
+                         and bool(payload.get('candidate_sha'))
+                         and target.get('candidate_sha') == payload.get('candidate_sha'))
+            else:
+                valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
+                         and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id
+                         and bool(payload.get('candidate_sha')) and old.get('commit') == payload['candidate_sha']
+                         and all(lineage.get(key) == value for key, value in required.items()))
         elif valid and kind == 'delivered_successor' and payload.get('kind') != 'finalize':
             parent = by_id.get(target.get('supersedes')) or {}
             lineage = target.get('recovery_lineage') or {}

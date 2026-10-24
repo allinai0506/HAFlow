@@ -2,6 +2,29 @@
 
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
+import os
+
+def _redispatch_sla_seconds():
+    """Deadline for "supersede -> successor dispatched" before escalation.
+
+    wf-haflow-1022-01 (2026-10-23): after the auto-supersede of a fuse-killed
+    fix task, no dispatch path picked the node up again (scheduler already
+    considered the node complete; fix-loop recovery sat in waiting_human) and
+    the workflow stalled ~8h with zero events. The supersede alone is not a
+    recovery; it is a promise that a successor appears. This SLA bounds how
+    long that promise may stay unverified before a human must be told.
+    """
+    raw = os.environ.get("HERDR_AUTO_RECOVER_REDISPATCH_SLA", "300")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 300.0
+    if value < 30.0:
+        return 30.0
+    if value > 3600.0:
+        return 3600.0
+    return value
+
 
 def should_retry_finalize(ports, status, episode, now, max_attempts=None):
     """(should_retry, reason, exhausted) — committed/completed 的终化重试决策。
@@ -23,6 +46,89 @@ def should_retry_finalize(ports, status, episode, now, max_attempts=None):
     reason = "integration_retry" if status == "committed" else "commit_retry"
     return True, reason, False
 
+def verify_auto_recover_redispatch(ports, workflow_id, tasks=None):
+    """Verify every armed auto-recover supersede actually produced a successor.
+
+    Resolution: the superseded task gained ``superseded_by``, or its node has a
+    live (non-terminal) task again. Past the SLA deadline without either, the
+    episode escalates exactly once to a human notification plus a durable
+    audit event. Notification and event writes happen outside the episode
+    transaction (locks stay short; notification is best-effort control-bypass).
+    """
+    if not workflow_id or ports.workflow_closed(workflow_id):
+        return False
+    prefix = f"{workflow_id}:auto_recover:"
+    now = ports.time.time()
+    escalated = []
+    with ports._attention_store.transaction() as episodes:
+        for key in list(episodes.keys()):
+            if not key.startswith(prefix):
+                continue
+            episode = episodes.get(key) or {}
+            if episode.get("reason") != "auto_recover_awaiting_redispatch":
+                continue
+            task_id = str(episode.get("task_id") or "")
+            task = None
+            if task_id:
+                try:
+                    task = ports.get_task(task_id)
+                except (OSError, RuntimeError, ValueError, AttributeError):
+                    task = None
+            node_id = (task or {}).get("node") or episode.get("node")
+            resolved = bool((task or {}).get("superseded_by")) or any(
+                t.get("workflow_id") == workflow_id
+                and (t.get("node") or t.get("stage")) == node_id
+                and t.get("task_id") != task_id
+                and t.get("status") not in ports.liveness.RECOVERY_TERMINAL_STATUSES
+                for t in (tasks or [])
+            )
+            if resolved:
+                episodes.pop(key, None)
+                print(
+                    f"[AUTO RECOVER VERIFIED] workflow={workflow_id} "
+                    f"task={task_id} successor present; contract closed"
+                )
+                continue
+            if episode.get("escalated"):
+                continue
+            if now < float(episode.get("next_retry_at") or 0):
+                continue
+            episodes[key] = dict(episode, escalated=True, last_attempt_at=now)
+            escalated.append((task_id, node_id, key))
+
+    for task_id, node_id, key in escalated:
+        detail = (
+            f"auto-supersede of {task_id} (node={node_id}) produced no successor "
+            f"within SLA; node has no live task. Manual recovery required: "
+            f"relaunch a replacement or resolve the fix-loop recovery operation."
+        )
+        try:
+            ports.notify_attention(
+                "Herdr Factory · 自动补派未落地",
+                {"task_id": task_id, "workflow_id": workflow_id},
+                detail,
+                "auto_recover_redispatch_stalled",
+            )
+        except (OSError, RuntimeError, ValueError, AttributeError):
+            print(f"[AUTO RECOVER NOTIFY ERROR] workflow={workflow_id} task={task_id}")
+        try:
+            ports._get_store().record_event(
+                "auto_recover_redispatch_stalled",
+                {
+                    "workflow_id": workflow_id,
+                    "task_id": task_id,
+                    "node": node_id,
+                    "attention_key": key,
+                },
+                workflow_id=workflow_id,
+                task_id=task_id or None,
+                source="herdr-controller",
+            )
+        except (OSError, RuntimeError, ValueError, AttributeError) as exc:
+            print(f"[AUTO RECOVER AUDIT ERROR] workflow={workflow_id}: {exc}")
+    return bool(escalated)
+
+
 def recover_infra_failed_tasks(ports, workflow_id, tasks=None):
     """基础设施失败任务自动作废,交给 sweep 重新派发替代任务。
 
@@ -31,6 +137,11 @@ def recover_infra_failed_tasks(ports, workflow_id, tasks=None):
     stage-advance 闩,下一轮 sweep 的 direct dispatch 会自动补派 -rN。
     谱系级次数上限由纯函数 select_infra_failures_for_recovery 保证,
     达到上限后不再自动处置(只留日志与告警)。
+
+    作废本身不是恢复:每次作废都登记 attention 期限,由
+    verify_auto_recover_redispatch 在 SLA 内核验继任者真的出现,否则升级
+    人工(wf-haflow-1022-01 实测:sweep 补派契约对已完成节点的修复谱系
+    不成立时,曾静默停滞 8 小时)。
     """
     if not workflow_id:
         return False
@@ -38,12 +149,14 @@ def recover_infra_failed_tasks(ports, workflow_id, tasks=None):
     if ports.workflow_closed(workflow_id):
         return False
 
+    if tasks is None:
+        tasks = ports.load_tasks()
+
+    verify_auto_recover_redispatch(ports, workflow_id, tasks)
+
     wf_st = ports._workflow_entry(workflow_id).get("status")
     if wf_st in ("completed", "paused"):
         return False
-
-    if tasks is None:
-        tasks = ports.load_tasks()
 
     candidates = ports.liveness.select_infra_failures_for_recovery(
         [t for t in tasks if t.get("workflow_id") == workflow_id],
@@ -66,19 +179,34 @@ def recover_infra_failed_tasks(ports, workflow_id, tasks=None):
             capture_output=True,
         )
 
-        if result.returncode != 0:
+        output = result.stderr.strip() or result.stdout.strip()
+        # 幂等短路:另一执行者(人工 relaunch/并行 sweep)已完成同一作废,
+        # "superseded -> superseded" 是终态已达成,不是需要重试的错误。
+        already_superseded = (
+            result.returncode != 0 and "-> superseded" in output
+        )
+        if result.returncode != 0 and not already_superseded:
             print(
-                f"[AUTO RECOVER ERROR] supersede {task_id}: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
+                f"[AUTO RECOVER ERROR] supersede {task_id}: {output}"
             )
             continue
 
         if node_id:
             ports.clear_stage_advance(workflow_id, node_id)
 
+        ports.attention_note(
+            f"{workflow_id}:auto_recover:{task_id}",
+            {"task_id": task_id, "workflow_id": workflow_id, "node": node_id},
+            "auto_recover",
+            reason="auto_recover_awaiting_redispatch",
+            attempts=1,
+            next_retry_at=ports.time.time() + _redispatch_sla_seconds(),
+            detail="superseded by auto-recover; successor dispatch expected",
+        )
+
         recovered = True
         print(
-            f"[AUTO RECOVER] workflow={workflow_id} "
+            f"[AUTO RECOVER{' IDEMPOTENT' if already_superseded else ''}] workflow={workflow_id} "
             f"node={node_id} task={task_id} "
             "superseded -> pending redispatch by sweep"
         )
@@ -192,9 +320,14 @@ def recover_router_isolation_tasks(ports, workflow_id, tasks=None):
 
 
 DEPENDENCIES = {'should_retry_finalize': ('FINALIZE_RETRY_MAX',),
+ 'verify_auto_recover_redispatch': ('_attention_store', '_get_store', 'get_task',
+                                    'liveness', 'notify_attention', 'time',
+                                    'workflow_closed'),
  'recover_infra_failed_tasks': ('AUTO_RECOVER_MAX_ATTEMPTS', 'AUTO_RECOVER_REASONS', 'TASK_MANAGER',
-                                '_workflow_entry', 'clear_stage_advance', 'liveness', 'load_tasks',
-                                'subprocess', 'workflow_closed'),
+                                '_attention_store', '_get_store', '_workflow_entry',
+                                'attention_note', 'clear_stage_advance', 'get_task',
+                                'liveness', 'load_tasks', 'notify_attention',
+                                'subprocess', 'time', 'workflow_closed'),
  'process_crash_observations': ('_get_store',),
  'recover_router_isolation_tasks': ('TASK_MANAGER', 'get_task', 'load_tasks', 'subprocess',
                                     'workflow_closed')}
