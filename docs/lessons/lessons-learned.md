@@ -8206,3 +8206,31 @@ wf-haflow-1022-01 执行 34 小时未完成，此前一个月内多次单点修�
 pytest -q tests/test_recovery_supply_chain.py
 pytest -q tests/test_workflow_progress.py tests/test_recovery_entrypoints.py tests/test_workflow_repair_contracts.py tests/test_fix_loop_recovery.py tests/test_recovery_successor.py
 ```
+
+---
+
+## 196. close 门禁的条件过滤静默绕过：H-1 升级契约对 none 模式失效（2026-10-24）
+
+### 问题背景
+
+close 的两道 H-1 收集——CLI 的 `unsettled_git`/`escalated_git`（`herdr/task_cli_workflow_close.py`）与控制器自动 close 的 `git_escalated_tasks`（`services/controller/workflow_close.py`）——都用 `integration_mode=='git'` 且 `status in (completed, committed)` 双重过滤升级任务。但 none 模式 finalize 分支在 worktree 有产出时跑 preservation commit，被拒（rc=4）同样机器升级（`commit_refused` / `delivery_incomplete`），且这类任务到 close 时通常已被管线推进到 `cleaned`——过滤条件把合法组合整体漏掉。实测 `wf-haflow-1022-01-wrapup-auto-r2`（mode=none、finalize_escalated=1、commit_refused）在无 `--accept-escalated`/`--force` 的情况下被 close 按 `delivered` 收口。与 §195 后的 accepted_with_limits 二次阻断（PR #340）同属一类漂移：close 侧判定集合偏离运行时语义，一次"比运行时更严"，一次"比运行时更松"——更松的那次静默放行了本应人工确认的交付。
+
+### 经验教训
+
+| 教训 | 依据 |
+| --- | --- |
+| 安全门禁的判定不要复制条件过滤，要复用单一事实源：凡按 mode/status 手写预筛"哪些任务算升级"的地方，都会在新的合法组合出现时静默失效 | 两道门禁多处各自手写过滤，none 模式升级任务对收口完全不可见 |
+| 机器设置的标记语义由写入方定义，不由读取方推测：写入方（finalize 升级路径）覆盖所有 integration_mode 时，读取方的门禁必须模式无关 | `git_finalize.py` none 分支同样 `_escalate_finalize`，而门禁只认 git |
+| "更严"与"更松"是同一类漂移的两面，都必须用真实入口的回归测试钉住；判定集合漂移类的守护就是"穿过真实编排层断言门禁行为"，不是重抄过滤器自证 | PR #340（严）与 PR #341（松）相隔两天先后出现；#340 的测试曾把过滤逻辑重抄进测试体，未走真实入口 |
+| 同一契约的 CLI 层与自动派发层必须同步修，否则自动 close 会对新门禁空转重试而非干净让路 | `git_escalated_tasks` 不修则 close-workflow 被拒后陷入退避循环 |
+
+### 修复与防护
+
+CLI 门禁改为模式无关（`finalize_escalated` 且非 superseded 即拦，`--accept-escalated` 放行、output override、`escalated_accepted` 报告同步覆盖，abort 文案去掉 git 限定）；控制器 `git_escalated_tasks` 同步改；close 恢复 options 不匹配的报错补充 stored/requested 值与恢复指引。守护测试走真实 `close_workflow` 编排（真 SQLiteStateStore + 真 close claim）覆盖 none 模式拦截、accept 放行、git 行为不回退、superseded 不误拦。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_task_cli_workflow_close.py tests/test_workflow_close_claim.py tests/test_impl_fix4_regression.py
+pytest -q tests/test_wrapup_failure_recovery_closed_loop.py tests/test_fix_loop_gates.py tests/test_gate_metrics_handoff.py tests/test_close_workflow_receipt_cli.py tests/test_liveness_guard.py
+```
