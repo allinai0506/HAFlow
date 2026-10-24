@@ -374,14 +374,16 @@ async function executeCockpitAction(actionId){
   const actionKey=cockpitActionKey(snapshot);
   const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk);
   const isSteer=action.api_payload?.type==='steer';
-  openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+(isSteer?'<label for="cockpitInstruction">指导内容</label><textarea id="cockpitInstruction" rows="3"></textarea>':'')+'<label for="cockpitReason">处理依据</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
+  const isDispatchConfirm=action.api_payload?.type==='confirm_dispatch';
+  const needsReason=highRisk||isDispatchConfirm;
+  openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+(isSteer?'<label for="cockpitInstruction">指导内容</label><textarea id="cockpitInstruction" rows="3"></textarea>':'')+'<label for="cockpitReason">处理依据'+(needsReason?'（必填）':'')+'</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
   const button=document.getElementById('cockpitActionConfirm');
   button.onclick=async()=>{
     if(!controllerActionMatches(action,state.controllerTarget||{})||state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes(cockpitExecutionMode((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)))||cockpitWorkflowId()!==wid||cockpitActionKey((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId))!==actionKey){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
     const reason=(document.getElementById('cockpitReason')?.value||'').trim();
     const instruction=isSteer?(document.getElementById('cockpitInstruction')?.value||'').trim():null;
     if(isSteer&&!instruction){document.getElementById('cockpitActionError').textContent='请输入指导内容';return;}
-    if((highRisk)&&!reason){document.getElementById('cockpitActionError').textContent='必须填写人工核验依据';return;}
+    if(needsReason&&!reason){document.getElementById('cockpitActionError').textContent=isDispatchConfirm?'派发确认必须填写人工核查依据':'必须填写人工核验依据';return;}
     button.disabled=true;
     try{
       const result=await api('/api/controller/execute-action',{method:'POST',body:JSON.stringify({workflow_id:wid,action_id:actionId,expected_identity:action.expected_identity,reason,...(isSteer?{instruction}:{}),confirmed:true,operator:'human_console'})});

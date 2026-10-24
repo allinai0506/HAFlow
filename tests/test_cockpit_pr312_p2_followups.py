@@ -129,3 +129,52 @@ def test_non_application_and_identity_mismatch_do_not_settle_as_applied(store):
     receipt = automation.classify_receipt(action, before, after, {'ok': True, 'task_id': 'T1'})
     assert receipt['status'] == 'rejected'
     assert receipt['reason_code'] == 'readback_identity_changed'
+
+# ---------------------------------------------------------------------------
+# Issue #319: the blank confirm_dispatch reason can never strand a claim.
+
+
+@pytest.fixture
+def supervised_store(store):
+    wf = store.get_workflow('wf-1')
+    wf['config']['control_policy'] = {'mode': 'supervised'}
+    store.save_workflow(wf)
+    return store
+
+
+def test_blank_reason_confirmed_dispatch_never_claims_and_retry_succeeds(supervised_store):
+    from herdr import node_dispatch_store as dispatch
+    from console.controller_cockpit_api import execute_controller_action, get_controller_cockpit
+    op = dispatch.reconcile_workflow(supervised_store.db_path, 'wf-1', now=100)[0]
+    assert op['status'] == 'waiting_human'
+    action = next(a for a in get_controller_cockpit('wf-1')['actions']
+                  if a['api_payload'].get('type') == 'confirm_dispatch')
+
+    blank = execute_controller_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity'], 'reason': '   ',
+        'confirmed': True, 'operator': 'human_console'})
+    assert blank['ok'] is False
+    assert blank['receipt']['status'] == 'rejected'
+    assert blank['receipt']['reason_code'] == 'reason_required'
+    # No durable claim exists and the operation is untouched.
+    assert not any(r['status'] == 'accepted_waiting'
+                   for r in get_controller_cockpit('wf-1')['receipts'])
+    fresh = dispatch.operation_for_node(supervised_store.db_path, 'wf-1', 'build')
+    assert fresh['version'] == op['version']
+    assert not fresh['detail'].get('dispatch_confirmation')
+
+    retry = execute_controller_action({'workflow_id': 'wf-1', 'action_id': action['action_id'],
+        'expected_identity': action['expected_identity'], 'reason': 'reviewed launch scope',
+        'confirmed': True, 'operator': 'human_console'})
+    assert retry['receipt']['status'] == 'applied'
+    assert retry['receipt']['operation_id'] == fresh['id']
+
+
+def test_console_requires_reason_for_dispatch_confirmation_ui():
+    root = Path(__file__).parents[1]
+    source = (root / 'console/static/console/scripts/controller-cockpit.js').read_text()
+    assert "isDispatchConfirm=action.api_payload?.type==='confirm_dispatch'" in source
+    assert '派发确认必须填写人工核查依据' in source
+    assert "needsReason?'（必填）'" in source
+
+

@@ -381,6 +381,11 @@ def execute_action(payload, *, deps, automatic=False):
     if action['automation']['mode'] == 'confirmation_required' and payload.get('confirmed') is not True:
         return reject('confirmation_required')
     kind = controller_action_type(action)
+    if kind == 'confirm_dispatch' and (not str(payload.get('reason') or '').strip()
+                                       or not str(payload.get('operator') or '').strip()):
+        # Mirror recovery_store.decide_operation's input contract before any
+        # durable claim exists, so a blank reason cannot strand the claim.
+        return reject('reason_required')
     if automatic and ((action.get('automation') or {}).get('mode') != 'automatic'
                       or action.get('is_destructive') or action.get('risk') in {'destructive', 'evidence_bypass'}
                       or action.get('category') == 'bypass'
