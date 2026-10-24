@@ -130,6 +130,7 @@ def test_non_application_and_identity_mismatch_do_not_settle_as_applied(store):
     assert receipt['status'] == 'rejected'
     assert receipt['reason_code'] == 'readback_identity_changed'
 
+
 # ---------------------------------------------------------------------------
 # Issue #319: the blank confirm_dispatch reason can never strand a claim.
 
@@ -177,6 +178,7 @@ def test_console_requires_reason_for_dispatch_confirmation_ui():
     assert '派发确认必须填写人工核查依据' in source
     assert "needsReason?'（必填）'" in source
 
+
 # ---------------------------------------------------------------------------
 # Issue #315: deep-linked task actions resolve beyond the display cap.
 
@@ -211,6 +213,7 @@ def test_console_cockpit_passes_target_task_lookup(store):
         store.save_task(_escalated_task('wf-1', f'T{i:02d}'))
     payload = get_controller_cockpit('wf-1', target_task_id='T39')
     assert {a['target'].get('task_id') for a in payload['actions']} == {'T39'}
+
 
 # ---------------------------------------------------------------------------
 # Issue #316: serialized budgets with explicit truncation markers.
@@ -278,3 +281,35 @@ def test_response_budget_sheds_optional_sections_then_fails_closed(store, monkey
     assert projection['errors'].get('response_budget') == 'exceeded'
 
 
+# ---------------------------------------------------------------------------
+# Issue #317: authoritative identity and policy in the projection header.
+
+
+def test_projection_exposes_resolved_policy_and_controller_version(store):
+    from services.controller import cockpit_automation as automation
+    wf = store.get_workflow('wf-1')
+    wf['config']['control_policy'] = {'mode': 'supervised'}
+    store.save_workflow(wf)
+    projection = automation.read_cockpit(store, 'wf-1', controller={'status': 'running', 'version': 'sha-abc'})
+    assert projection['control_policy'] == {'mode': 'confirmation_required', 'source': 'workflow'}
+    assert projection['controller']['version'] == 'sha-abc'
+    assert projection['workflow']['execution_id'] == 'exec-1'
+
+
+def test_projection_policy_stays_unknown_without_authoritative_config(store):
+    from herdr.controller_cockpit import build_cockpit_projection
+    projection = build_cockpit_projection(workflow={'workflow_id': 'wf-1'}, config=None, tasks=None,
+                                          graph=None, actions=None, recovery=None, controller=None,
+                                          events=None)
+    assert projection['control_policy'] is None
+    assert projection['read_state'] == 'unknown'
+
+
+def test_console_scripts_wire_target_lookup_header_facts_and_reason():
+    root = Path(__file__).parents[1]
+    cockpit = (root / 'console/static/console/scripts/controller-cockpit.js').read_text()
+    reader = (root / 'console/static/console/scripts/workflow-reader.js').read_text()
+    assert "cockpitTargetLookup" in reader and "target_task_id='+encodeURIComponent" in reader
+    assert "cockpitTargetLookup(wid)" in cockpit
+    assert '执行身份' in cockpit and '控制策略' in cockpit and '候选 / 回合' in cockpit
+    assert "c.version||'未确认'" in cockpit and "wf.execution_id||'未确认'" in cockpit

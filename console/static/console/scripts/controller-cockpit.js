@@ -239,7 +239,12 @@ function isRejectedCockpitAction(action){
 function renderControllerHeader(data){
   const c=data.controller||{};
   const labels={running:'运行中',stopped:'已停止',unknown:'未确认'};
-  return '<header class="controller-cockpit-header"><div><div class="controller-cockpit-eyebrow">工作流驾驶舱</div><h2>'+esc(data.workflow?.title||data.workflow?.workflow_id||cockpitWorkflowId())+'</h2>'+(state.controllerReturnContext?'<button class="mini" onclick="returnFromControllerCockpit()">返回原位置</button>':'')+'</div><div>调度服务 · '+esc(labels[c.status]||c.status||'未确认')+'<div class="muted">最后检查：'+esc(c.last_check_at||c.checked_at||'未提供')+'</div><button class="mini" onclick="loadControllerCockpit('+cockpitArg(cockpitWorkflowId())+')">刷新状态</button></div></header>';
+  const wf=data.workflow||{};
+  const policy=data.control_policy||null;
+  const policyLabels={automatic:'自动推进',confirmation_required:'需人工确认'};
+  const candidate=wf.candidate_sha?esc(String(wf.candidate_sha).slice(0,12))+(wf.candidate_episode_id?' · 事件 #'+esc(wf.candidate_episode_id):''):'未确认';
+  const identity=[['Controller 版本',c.version||'未确认'],['执行身份',wf.execution_id||'未确认'],['候选 / 回合',candidate],['控制策略',policy?esc(policyLabels[policy.mode]||policy.mode||'未确认')+'（'+esc(policy.source||'来源未确认')+'）':'未确认']];
+  return '<header class="controller-cockpit-header"><div><div class="controller-cockpit-eyebrow">工作流驾驶舱</div><h2>'+esc(data.workflow?.title||data.workflow?.workflow_id||cockpitWorkflowId())+'</h2>'+(state.controllerReturnContext?'<button class="mini" onclick="returnFromControllerCockpit()">返回原位置</button>':'')+'</div><div>调度服务 · '+esc(labels[c.status]||c.status||'未确认')+'<div class="muted">最后检查：'+esc(c.last_check_at||c.checked_at||'未提供')+'</div><div class="muted controller-cockpit-identity">'+identity.map(([label,value])=>'<div>'+esc(label)+'：<strong>'+esc(value)+'</strong></div>').join('')+'</div><button class="mini" onclick="loadControllerCockpit('+cockpitArg(cockpitWorkflowId())+')">刷新状态</button></div></header>';
 }
 function renderControllerJudgment(data){
   const j=data.judgment||{};

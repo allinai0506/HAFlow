@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from heapq import nlargest
 
 from .controller_actions import action_automation, controller_action_type, resolve_workflow_blockers
+from .workflow import resolve_control_policy
 
 MAX_TASKS = 200
 MAX_ACTIONS = 100
@@ -239,6 +240,9 @@ def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recover
                                       ("controller", controller), ("events", events)) if value is None]
     workflow = workflow or {}
     config = config or {}
+    # Resolved before any display truncation: policy facts never come from a
+    # bounded copy, and an unavailable config stays explicitly unknown.
+    control_policy = resolve_control_policy(config, "", "advance") if config.get("nodes") else None
     graph = graph or {}
     runtime = deepcopy(controller or {})
     runtime["status"] = runtime.get("status") or "unknown"
@@ -276,6 +280,7 @@ def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recover
         "schema": "controller-cockpit/v1",
         "workflow": _bounded_copy(workflow, WORKFLOW_IDENTITY_FIELDS, MAX_FIELD_BYTES, MAX_WORKFLOW_BYTES),
         "controller": runtime,
+        "control_policy": control_policy,
         "judgment": _judgment(workflow, nodes, current, ready, unresolved, projected_actions, read_unknown),
         "read_state": "unknown" if read_unknown else "confirmed", "errors": deepcopy(errors or {}),
         "missing_sources": missing, "nodes": nodes, "current_nodes": current, "ready_nodes": ready,

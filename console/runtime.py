@@ -81,6 +81,23 @@ def slots(p, p_panes=None, claimed=None):
         out.append({'pane_id':pid,'tab_id':tid,'stage':s.get('key'),'stage_label':s.get('label'),'bound_agent':binds.get(pid,{}).get('agent','auto'),'claimed_by':claimed.get(pid),'live_agent':rt.get('agent') if rt else None,'agent_status':rt.get('agent_status') if rt else None})
     return out
 
+_controller_version=None
+
+def controller_version():
+    """Attested release sha of the running code; unknown stays explicitly unknown.
+
+    Memoized per process: the running code does not change under a live
+    interpreter, and an attested snapshot re-hash is too costly per request.
+    """
+    global _controller_version
+    if _controller_version is None:
+        try:
+            from herdr import service_release
+            _controller_version=service_release.runtime_fingerprint()['running_sha'] or ''
+        except Exception:
+            _controller_version=''
+    return _controller_version or None
+
 def service_status():
     names=['com.user.herdr-controller','com.user.herdr-notifier','com.user.herdr-sentinel','com.user.herdr-factory-console']
     out={n:'stopped' for n in names}

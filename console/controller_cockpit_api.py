@@ -12,7 +12,8 @@ def get_controller_cockpit(workflow_id: str, action_id=None, target_task_id=None
     reconcile_pending_receipts(kernel._get_store(), workflow_id)
     return read_cockpit(kernel._get_store(), workflow_id, action_id=action_id,
                         target_task_id=str(target_task_id or '').strip() or None, controller=lambda: {
-        'status': runtime.service_status().get('com.user.herdr-controller') or 'unknown'})
+        'status': runtime.service_status().get('com.user.herdr-controller') or 'unknown',
+        'version': runtime.controller_version()})
 
 
 def execute_controller_action(payload: dict) -> dict:
