@@ -199,8 +199,69 @@ def next_recovery_task_id(ports, task_id, tasks):
 
 def check_workflow_recovery(ports, workflow_id, now=None):
     ports.reconcile_node_dispatches(workflow_id, discover=False)
+    # 补派契约核验必须先于 drive_recovery:作废后的任务不再走 failed 分支,
+    # registry sweep 不会再触发 recover_infra_failed_tasks,只有这里能持续
+    # 核对"作废后继任者真的出现"(wf-haflow-1022-01 的 8 小时静默停滞)。
+    try:
+        ports.verify_auto_recover_redispatch(workflow_id, ports.load_tasks())
+    except (OSError, RuntimeError, ValueError, AttributeError) as exc:
+        print(f"[AUTO RECOVER VERIFY ERROR] workflow={workflow_id}: {exc}")
     from herdr.workflow_recovery import drive_recovery
-    return drive_recovery(ports._get_store(), workflow_id, ports.execute_workflow_recovery, now=now)
+    operations = drive_recovery(ports._get_store(), workflow_id, ports.execute_workflow_recovery, now=now)
+    try:
+        _notify_waiting_human(ports, workflow_id, operations or [])
+    except (OSError, RuntimeError, ValueError, AttributeError) as exc:
+        # 旁路通知失败绝不改变恢复语义,只留日志。
+        print(f"[RECOVERY NOTIFY ERROR] workflow={workflow_id}: {exc}")
+    return operations
+
+
+def _notify_waiting_human(ports, workflow_id, operations):
+    """waiting_human 必须可听见:每个操作每个版本只通知一次。
+
+    wf-haflow-1022-01:fix-loop 恢复操作从 17:19 起整夜停在 waiting_human,
+    通知数为 0,整条工作流都在等这个裁决却没有人被叫。去重键是操作
+    id+version(人工裁决后 version 递增,再次等待会重新通知);操作离开
+    waiting_human 时清理对应 episode。
+    """
+    for op in operations:
+        op_id = op.get("id")
+        if not op_id:
+            continue
+        key = f"{workflow_id}:recovery_waiting:{op_id}"
+        episode = ports._attention_store.get(key) or {}
+        if op.get("status") != "waiting_human":
+            if episode:
+                ports._attention_store.clear(key)
+            continue
+        if episode.get("op_version") == op.get("version"):
+            continue
+        detail = op.get("detail") or {}
+        payload = op.get("payload") or {}
+        task_ids = payload.get("task_ids") or payload.get("affected_task_ids") or []
+        task_ref = str(task_ids[0]) if task_ids else ""
+        message = (
+            f"恢复操作等待人工裁决: kind={payload.get('kind')} "
+            f"reason={detail.get('reason') or ''}\n"
+            f"operation id={op_id} version={op.get('version')} "
+            f"tasks={','.join(str(t) for t in list(task_ids or [])[:3])}\n"
+            f"{str(detail.get('decision_needed') or '')[:400]}"
+        )
+        ports._attention_store.upsert(key, {
+            "task_id": task_ref or f"recovery:{op_id}",
+            "workflow_id": workflow_id,
+            "event_type": "workflow_recovery",
+            "reason": "recovery_waiting_human",
+            "op_version": op.get("version"),
+            "last_attempt_at": ports.time.time(),
+            "detail": message[:500],
+        })
+        ports.notify_attention(
+            "Herdr Factory · 恢复等待人工",
+            {"task_id": task_ref, "workflow_id": workflow_id},
+            message,
+            "recovery_waiting_human",
+        )
 
 
 DEPENDENCIES = {'execute_workflow_recovery': ('REWORKABLE_STATUSES', 'TASK_MANAGER', '_get_store',
@@ -209,7 +270,8 @@ DEPENDENCIES = {'execute_workflow_recovery': ('REWORKABLE_STATUSES', 'TASK_MANAG
                                'invalidate_for_fix_loop', 'next_recovery_task_id',
                                'resolve_gate_config', 'subprocess', 'time', 'uuid'),
  'next_recovery_task_id': (),
- 'check_workflow_recovery': ('_get_store', 'execute_workflow_recovery',
-                             'reconcile_node_dispatches')}
+ 'check_workflow_recovery': ('_attention_store', '_get_store', 'execute_workflow_recovery',
+                             'load_tasks', 'notify_attention', 'reconcile_node_dispatches',
+                             'time', 'verify_auto_recover_redispatch')}
 
 __all__ = tuple(DEPENDENCIES)

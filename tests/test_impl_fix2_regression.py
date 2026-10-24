@@ -335,6 +335,10 @@ def test_sentinel_crash_reaches_state_store_and_controller_auto_recover(tmp_path
          patch.object(controller, "workflow_closed", return_value=False), \
          patch.object(controller, "_workflow_entry", return_value={"status": "running"}), \
          patch.object(controller, "load_tasks", side_effect=store.list_tasks), \
+         patch.object(controller, "get_task", side_effect=store.get_task), \
+         patch.object(controller, "_attention_store",
+                      controller.liveness.EpisodeStore(tmp_path / "attention.json")), \
+         patch.object(controller, "notify_attention", return_value=True), \
          patch.object(controller, "clear_stage_advance"), \
          patch.object(controller.subprocess, "run", side_effect=fake_run):
         assert controller.recover_infra_failed_tasks("wf-crash", store.list_tasks())

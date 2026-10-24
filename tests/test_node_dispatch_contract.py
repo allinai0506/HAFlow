@@ -42,6 +42,9 @@ def scene(tmp_path, monkeypatch):
         '_scheduler_frozen_candidate_identity': lambda *a: (None, None),
         '_scheduler_resolve_candidate_and_plan': lambda *a: (None, False),
         '_scheduler_join_gate_allows': lambda *a: True,
+        # 恢复管线的 waiting_human 通知是旁路告警;transport 断言只关心
+        # 发给总指挥的 prompt,通知在 scene 中保持惰性。
+        'notify_attention': lambda *a, **kw: True,
     }.items():
         monkeypatch.setattr(ctrl, name, function)
     ctrl.STAGE_STATE_FILE = str(tmp_path / 'stage-state.json')

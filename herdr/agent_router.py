@@ -439,6 +439,30 @@ def _record_router_opt_out(
             f"agent reuse ({type(exc).__name__}: {exc})"
         ) from exc
 
+def _zero_work_exemption_enabled():
+    """Kill-switch for the zero-work isolation exemption (default on)."""
+    raw = os.environ.get("HERDR_ROUTER_ISOLATION_ZERO_WORK_EXEMPT", "1")
+    return raw.strip().lower() not in ("0", "false", "off", "no")
+
+
+def _consumes_isolation_budget(task):
+    """Whether a task row spends the stage's cross-agent isolation budget.
+
+    Isolation protects verdict independence, which is a property of accepted
+    work: a row that died before any accepted deliverable (router refusal,
+    delivery fuse, process crash, quota-blocked agent, watchdog kill of a
+    pre-completion worker) never voted on the artifact, so reusing its agent
+    cannot bias a later verdict. wf-haflow-1022-01 burned its whole stage pool
+    on such rows and every later redispatch failed fail-closed. Terminal rows
+    that DID leave accepted work (a commit or a recorded verdict) still spend
+    the budget; in-flight rows always do.
+    """
+    status = str(task.get("status") or "")
+    if status in ("failed", "superseded"):
+        return bool(task.get("commit") or task.get("stage_verdict"))
+    return True
+
+
 def _choose_agent_impl(workflow_id, stage, task_type, requested="auto", reservation_key=None,
                        run_id=None, decided_at=None, dispatch_role="worker", _refresh_budget=1):
     ROUTER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -551,11 +575,14 @@ def _choose_agent_locked(
     if workflow_id and exclude_stages:
         store = _get_store()
         tasks = store.list_tasks()
+        exemption = _zero_work_exemption_enabled()
         target_stages = set(exclude_stages)
         for t in tasks:
             if t.get("workflow_id") == workflow_id:
                 t_stage = t.get("node") or t.get("stage")
                 if t_stage in target_stages and t.get("agent"):
+                    if exemption and not _consumes_isolation_budget(t):
+                        continue
                     stage_used_agents.add(t.get("agent"))
 
     pool = ensure_pool_for_project(project_id)

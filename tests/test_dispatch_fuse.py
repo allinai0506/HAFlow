@@ -226,10 +226,19 @@ class ControllerAutoRecoverTest(unittest.TestCase):
         fake_run = unittest.mock.MagicMock(
             return_value=subprocess.CompletedProcess([], 0, "ok", "")
         )
+        import tempfile
+        from pathlib import Path as _Path
+
+        from herdr.liveness import EpisodeStore as _EpisodeStore
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         with patch.object(controller, "load_tasks", return_value=self._tasks()), \
              patch.object(controller, "workflow_closed", return_value=False), \
              patch.object(controller, "_workflow_entry", return_value={"status": "running"}), \
              patch.object(controller, "clear_stage_advance") as clear_lock, \
+             patch.object(controller, "_attention_store", _EpisodeStore(_Path(tmp.name) / "attention.json")), \
+             patch.object(controller, "notify_attention", return_value=True), \
              patch.object(controller.subprocess, "run", fake_run):
             recovered = controller.recover_infra_failed_tasks("wf-x")
 
