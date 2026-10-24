@@ -212,4 +212,69 @@ def test_console_cockpit_passes_target_task_lookup(store):
     payload = get_controller_cockpit('wf-1', target_task_id='T39')
     assert {a['target'].get('task_id') for a in payload['actions']} == {'T39'}
 
+# ---------------------------------------------------------------------------
+# Issue #316: serialized budgets with explicit truncation markers.
+
+
+def test_single_oversized_field_is_truncated_with_explicit_marker(store):
+    from herdr.controller_cockpit import MAX_FIELD_BYTES
+    store.save_task(_escalated_task('wf-1', 'T1', goal='x' * 100_000,
+                                    diagnostics={'log': 'y' * 50_000}))
+    projection = _escalation_projection(store)
+    task = next(t for t in projection['tasks'] if t['task_id'] == 'T1')
+    assert _utf8_len(task['goal']) == MAX_FIELD_BYTES
+    assert {'field': 'goal', 'omitted_bytes': 100_000 - MAX_FIELD_BYTES} in task['_truncated_fields']
+    assert task['diagnostics']['truncated'] is True
+    assert task['diagnostics']['omitted_bytes'] >= 50_000
+    # Identity and safety facts stay complete.
+    assert task['status'] == 'integrated'
+    assert task['run_id'] == 'T1-run'
+    assert task['execution_id'] == 'exec-1'
+    assert task['finalize_escalated'] is True
+
+
+def test_aggregate_oversized_task_rows_stay_bounded(store):
+    from herdr.controller_cockpit import MAX_TASK_BYTES
+    payload = {f'note_{i:02d}': 'n' * 1500 for i in range(40)}
+    store.save_task(_escalated_task('wf-1', 'T1', **payload))
+    projection = _escalation_projection(store)
+    task = next(t for t in projection['tasks'] if t['task_id'] == 'T1')
+    assert _utf8_len(json.dumps(task, ensure_ascii=False, default=str)) <= MAX_TASK_BYTES
+    truncated_fields = {entry['field'] for entry in task['_truncated_fields']}
+    assert truncated_fields
+    assert task['task_id'] == 'T1' and task['status'] == 'integrated'
+
+
+def test_oversized_workflow_metadata_stays_bounded_with_identity_intact(store):
+    from herdr.controller_cockpit import MAX_FIELD_BYTES, MAX_WORKFLOW_BYTES
+    wf = store.get_workflow('wf-1')
+    wf['notes'] = 'w' * 100_000
+    store.save_workflow(wf)
+    projection = _escalation_projection(store)
+    assert _utf8_len(projection['workflow']['notes']) == MAX_FIELD_BYTES
+    assert projection['workflow']['workflow_id'] == 'wf-1'
+    assert projection['workflow']['status'] == 'running'
+    assert projection['workflow']['execution_id'] == 'exec-1'
+    assert projection['workflow']['candidate_sha'] == 'c' * 40
+    assert _utf8_len(json.dumps(projection['workflow'], ensure_ascii=False, default=str)) <= MAX_WORKFLOW_BYTES
+
+
+def test_response_budget_sheds_optional_sections_then_fails_closed(store, monkeypatch):
+    import herdr.controller_cockpit as cockpit_module
+    from services.controller import cockpit_automation as automation
+    store.save_task(_escalated_task('wf-1', 'T1'))
+    for _ in range(150):
+        store.record_event(event_type='test.fact', workflow_id='wf-1', task_id='T1',
+                           payload={'blob': 'z' * 2000})
+    monkeypatch.setattr(cockpit_module, 'MAX_RESPONSE_BYTES', 120_000)
+    projection = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})
+    assert projection.get('response_shed') == ['timeline_payloads']
+    assert all('payload' not in event for event in projection['timeline'])
+    assert projection['read_state'] == 'confirmed'
+
+    monkeypatch.setattr(cockpit_module, 'MAX_RESPONSE_BYTES', 1_000)
+    projection = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})
+    assert projection['read_state'] == 'unknown'
+    assert projection['errors'].get('response_budget') == 'exceeded'
+
 
