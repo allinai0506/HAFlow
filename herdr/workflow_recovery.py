@@ -199,7 +199,7 @@ def drive_recovery(store, workflow_id, execute, now=None):
         try:
             status, detail = execute(claimed, owner)
         except Exception as exc:
-            from .recovery_policy import PreflightTemporaryFailure
+            from .recovery_policy import PreflightTemporaryFailure, RecoveryBudgetExhausted
             if isinstance(exc, PreflightTemporaryFailure):
                 recovery_store.retry_preflight(store.db_path, op['id'], owner, now,
                                                type(exc.__cause__).__name__)
@@ -208,11 +208,14 @@ def drive_recovery(store, workflow_id, execute, now=None):
             from .supervisor_delivery import DeliveryUnknown
             unknown = isinstance(exc, (OSError, subprocess.TimeoutExpired, DeliveryUnknown))
             status, detail = 'waiting_human', {
-                'reason': 'recovery_execution_unknown' if unknown else 'recovery_execution_failed',
+                'reason': 'recovery_total_budget_exhausted' if isinstance(exc, RecoveryBudgetExhausted) else 'recovery_execution_unknown' if unknown else 'recovery_execution_failed',
                 'error_type': type(exc).__name__, 'side_effects': 'unknown'}
         if status == 'awaiting_result':
-            detail = {**detail, 'result_deadline_at': claimed.get('detail', {}).get('result_deadline_at', detail.get('result_deadline_at', now + 3600)),
-                      'next_due_at': now + 30}
+            deadline = claimed.get('detail', {}).get('result_deadline_at')
+            if deadline is None:
+                status, detail = 'waiting_human', {**detail, 'reason': 'recovery_legacy_budget_unknown'}
+            else:
+                detail = {**detail, 'result_deadline_at': deadline, 'next_due_at': now + 30}
         recovery_store.finish_operation(store.db_path, op['id'], owner, status, detail,
                                         time.time() if now > 1_000_000_000 else now)
     return recovery_store.list_operations(store.db_path, workflow_id)
@@ -254,7 +257,8 @@ def existing_delivery_details(operation, workflow, tasks, store):
                 result['successor_ids'].append(tid)
                 result['source_runs'][tid] = result['target_runs'][tid] = task['run_id']
                 result['repair_map'][tid] = {'kind': 'delivered_successor', 'task_id': tid,
-                    'run_id': task['run_id'], 'source_run_id': task['run_id']}
+                    'run_id': task['run_id'], 'source_run_id': task['run_id'], 'completion_epoch': task.get('completion_epoch'),
+                    'completion_identity_path': task.get('completion_identity_path')}
                 continue
             successor = by_id.get(task.get('superseded_by')) or {}
             if (successor.get('supersedes') == tid and successor.get('execution_id') == workflow.get('execution_id')
@@ -264,7 +268,8 @@ def existing_delivery_details(operation, workflow, tasks, store):
                 result['source_runs'][tid] = task['run_id']
                 result['target_runs'][successor['task_id']] = successor['run_id']
                 result['repair_map'][tid] = {'kind': 'successor', 'task_id': successor['task_id'],
-                    'run_id': successor['run_id'], 'source_run_id': task['run_id']}
+                    'run_id': successor['run_id'], 'source_run_id': task['run_id'], 'completion_epoch': task.get('completion_epoch'),
+                    'completion_identity_path': task.get('completion_identity_path')}
                 continue
             request = task.get('rework_request_id')
             if request and task.get('rework_delivery') in ('pending', 'delivered'):

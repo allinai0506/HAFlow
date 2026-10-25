@@ -187,3 +187,7 @@ Evidence:
 - `tests/test_recovery_autonomy.py#test_restart_after_delivery_before_operation_receipt_uses_same_target`
 
 UNKNOWN：GitHub HEAD、配置 release 与实际运行 SHA 是三个事实。本轮无明确用户现场目标，未验证后两者，未修改生产数据库、重启或部署。隔离集成验证不等于全部工作流自主或用户业务 UAT 通过。
+
+首轮独立反证补强：全局按发表顺序限量读取当前目标记录，扫描游标与消费游标分别持久化；积压未读完不会被当成“无进展”，总预算仍到点停止。继任映射固定已确认送达的 epoch/path，重复 phase/content 不因 epoch 轮换变新。内容校验前后与写事务 CAS 使用 inode/device/size/mtime_ns/ctime_ns 稳定性比较；这些字段只保护已校验内容不变，不能独立续期。总期限同时守卫 owner renewal / effect barrier。旧空 detail 人工状态不因事实刷新变 pending，旧 manual verify 不补造一小时。
+
+Evidence：`tests/test_recovery_autonomy.py#test_progress_backlog_after_restart_does_not_false_timeout`、`#test_byte_budget_backlog_resumes_without_false_timeout`、`#test_total_deadline_blocks_subsequent_effects`、`#test_successor_epoch_rotation_cannot_reconsume_phase`、`#test_legacy_manual_verify_does_not_invent_result_window`、`#test_legacy_empty_human_detail_stays_human_on_fact_refresh`、`#test_artifact_mutation_between_preparation_and_writer_rejects_cas`。

@@ -585,3 +585,175 @@ def test_legacy_reset_attempt_field_cannot_hide_prior_claim(scene):
     assert s.op()['status'] == 'waiting_human'
     assert s.op()['detail']['reason'] == 'recovery_legacy_budget_unknown'
     assert not s.dispatches
+
+
+def test_progress_backlog_after_restart_does_not_false_timeout(scene):
+    s = scene
+    s.tick()
+    start = s.clock[0]
+    for step in range(1, 65):
+        s.clock[0] = start + step * 10
+        checkpoint(s, step)
+    for step, at in [(65, 3500), (66, 6500)]:
+        s.clock[0] = start + at
+        checkpoint(s, step)
+    s.clock[0] = start + 6600
+    for _ in range(3):
+        s.tick()
+        assert s.op()['status'] == 'awaiting_result', s.op()['detail']
+        s.clock[0] += 31
+    assert s.op()['detail']['result_deadline_at'] == start + 10100
+    assert len(s.dispatches) == 1
+
+
+def test_total_deadline_blocks_subsequent_effects(scene, monkeypatch):
+    s = scene
+    wf = s.store.get_workflow('wf')
+    s.store.save_workflow(dict(wf, config=dict(wf['config'], recovery_budget={'idle_seconds': 60, 'total_seconds': 60})))
+    original = s.ctl._rework_retry_task
+    def elapsed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        s.clock[0] += 70
+        return result
+    monkeypatch.setattr(s.ctl, '_rework_retry_task', elapsed)
+    s.tick()
+    assert s.store.get_task('test-old')['status'] == 'cleaned'  # no gate invalidation after cutoff
+    assert s.op()['status'] == 'waiting_human'
+    assert s.op()['detail']['reason'] == 'recovery_total_budget_exhausted'
+    assert len(s.dispatches) == 1
+
+
+def test_legacy_manual_verify_does_not_invent_result_window(scene):
+    s = scene
+    s.tick()
+    op = s.op()
+    detail = {k: v for k, v in op['detail'].items() if k not in {
+        'first_started_at', 'total_deadline_at', 'result_deadline_at', 'idle_seconds',
+        'progress_cursors', 'progress_event_floor', 'effect_phase'}}
+    detail['reason'] = 'legacy_delivery_unknown'
+    with rs._transaction(s.store.db_path) as conn:
+        conn.execute("UPDATE workflow_recovery_operations SET status='waiting_human',detail_json=? WHERE id=?",
+            (json.dumps(detail), op['id']))
+    rs.reconcile(s.store.db_path, 'wf', s.clock[0])
+    rs.decide_operation(s.store.db_path, op['id'], s.op()['version'], 'human', 'verify', 'inspect receipt only', s.clock[0])
+    s.tick()
+    assert s.op()['status'] == 'waiting_human'
+    assert s.op()['detail']['reason'] == 'recovery_legacy_budget_unknown'
+    assert not s.op()['detail'].get('result_deadline_at')
+    assert len(s.dispatches) == 1
+
+
+def test_legacy_empty_human_detail_stays_human_on_fact_refresh(scene):
+    s = scene
+    rs.reconcile(s.store.db_path, 'wf', s.clock[0])
+    op = s.op()
+    with rs._transaction(s.store.db_path) as conn:
+        conn.execute("UPDATE workflow_recovery_operations SET status='waiting_human',detail_json='{}' WHERE id=?", (op['id'],))
+    s.store.update_task_metadata('test-old', {'stage_verdict_note': 'refreshed diagnosis'})
+    s.tick()
+    assert s.op()['status'] == 'waiting_human'
+    assert 'first_started_at' not in s.op()['detail'] and not s.dispatches
+
+
+def test_artifact_mutation_after_hash_cannot_renew(scene, monkeypatch):
+    from herdr import task_checkpoint
+    s = scene
+    s.tick()
+    deadline = s.op()['detail']['result_deadline_at']
+    s.clock[0] += 3500
+    checkpoint(s, 1)
+    original = task_checkpoint._verify_receipt
+    def mutate(*args, **kwargs):
+        observation = original(*args, **kwargs)
+        path = Path(observation.content_ref)
+        path.chmod(0o600)
+        path.write_text('corrupted after hash')
+        return observation
+    monkeypatch.setattr(task_checkpoint, '_verify_receipt', mutate)
+    s.tick()
+    assert s.op()['detail']['result_deadline_at'] == deadline
+    assert not s.op()['detail']['progress_cursors']
+
+
+@pytest.mark.parametrize('kind', ['successor', 'delivered_successor'])
+def test_successor_epoch_rotation_cannot_reconsume_phase(scene, kind):
+    from copy import deepcopy
+    from herdr.recovery_policy import verified_progress, consume_progress
+    from herdr.observation import ObservationStore
+    from tests.test_workflow_recovery import OP, facts
+    s = scene
+    op = deepcopy(OP)
+    op['detail'].update(first_started_at=s.clock[0], total_deadline_at=s.clock[0] + 10800,
+        result_deadline_at=s.clock[0] + 3600, idle_seconds=3600, progress_event_floor=0, progress_cursors={})
+    op['detail']['repair_map']['impl'].update(completion_epoch='epoch1', completion_identity_path='/epoch1')
+    tasks = facts()
+    task = tasks[0]
+    task.update(candidate_sha='b' * 40, completion_protocol='receipt-v1', completion_epoch='epoch1',
+        completion_identity_path='/epoch1')
+    if kind == 'delivered_successor':
+        op['payload']['affected_task_ids'] = ['impl-r2']
+        op['detail']['source_runs'] = {'impl-r2': 'new'}
+        op['detail']['repair_map'] = {'impl-r2': dict(kind=kind, task_id='impl-r2', run_id='new',
+            source_run_id='new', completion_epoch='epoch1', completion_identity_path='/epoch1')}
+    s.store.save_task(task)
+    s.clock[0] += 3500
+    publish_task_checkpoint('impl-r2', 'new', 'epoch1', 'same output', 1, store=s.store, completed_steps=['phase1'])
+    wf = dict(workflow_id='wf', execution_id='gen', candidate_sha='b' * 40)
+    def read():
+        from herdr import state_db
+        conn = state_db.get_readonly_db_connection(s.store.db_path)
+        try:
+            return verified_progress(conn, op, wf, tasks, ObservationStore(s.store.db_path))
+        finally:
+            conn.close()
+    batch = read()
+    progress = batch['progress']
+    op['detail'] = consume_progress(op['detail'], progress, s.clock[0])
+    deadline = op['detail']['result_deadline_at']
+    task.update(completion_epoch='epoch2', completion_identity_path='/epoch2')
+    s.store.save_task(task)
+    s.clock[0] += 100
+    publish_task_checkpoint('impl-r2', 'new', 'epoch2', 'same output', 1, store=s.store, completed_steps=['phase1'])
+    batch = read()
+    progress = batch['progress']
+    assert consume_progress(op['detail'], progress, s.clock[0])['result_deadline_at'] == deadline
+
+
+def test_artifact_mutation_between_preparation_and_writer_rejects_cas(scene, monkeypatch):
+    from herdr import recovery_policy
+    from herdr.observation import ObservationStore
+    s = scene
+    s.tick()
+    deadline = s.op()['detail']['result_deadline_at']
+    s.clock[0] += 3500
+    receipt = checkpoint(s, 1)
+    original = recovery_policy.verified_progress
+    def mutate(*args, **kwargs):
+        batch = original(*args, **kwargs)
+        path = Path(ObservationStore(s.store.db_path).get(receipt['observation_id']).content_ref)
+        path.chmod(0o600)
+        path.write_text('mutated between prepare and write')
+        return batch
+    monkeypatch.setattr(recovery_policy, 'verified_progress', mutate)
+    with pytest.raises(ValueError, match='artifact changed'):
+        s.tick()
+    assert s.op()['detail']['result_deadline_at'] == deadline
+    assert not s.op()['detail']['progress_cursors']
+
+
+def test_byte_budget_backlog_resumes_without_false_timeout(scene):
+    s = scene
+    s.tick()
+    start = s.clock[0]
+    task = s.store.get_task('impl')
+    for step in range(1, 11):
+        s.clock[0] = start + (step * 10 if step <= 8 else 3500 if step == 9 else 6500)
+        publish_task_checkpoint('impl', 'run', task['completion_epoch'],
+            str(step) + 'x' * (1024 * 1024 - len(str(step))), step, store=s.store,
+            completed_steps=[f'phase-{step}'])
+    s.clock[0] = start + 6600
+    for _ in range(2):
+        s.tick()
+        assert s.op()['status'] == 'awaiting_result', s.op()['detail']
+        s.clock[0] += 31
+    assert s.op()['detail']['result_deadline_at'] == start + 10100

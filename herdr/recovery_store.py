@@ -127,7 +127,7 @@ def ensure_obligations(conn, workflow, config, tasks, now=None):
         if not cur.rowcount and row['payload_json'] != payload:
             if row['status'] == 'running' and row['started']:
                 continue
-            changed_status = status if (row['status'] == 'running' or (row['status'] == 'waiting_human' and not row['started'] and row['detail_json'] == '{}')) else row['status']
+            changed_status = status if row['status'] == 'running' else row['status']
             conn.execute('UPDATE workflow_recovery_operations SET payload_json=?,status=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?', (payload, changed_status, now, row['id']))
             _event(conn, _get(conn, row['id']), 'facts_changed', now)
         op = _get(conn, row['id'])
@@ -209,7 +209,10 @@ def _expire(conn, workflow_id, now):
         unknown = row['status'] == 'running' and row['started']
         status = 'waiting_human' if unknown or row['status'] == 'waiting' or row['attempts'] >= 3 else 'pending'
         detail = {**json.loads(row['detail_json']), 'reason': 'delivery_unknown' if unknown else 'lease_expired' if row['status'] == 'running' else 'hold_expired'}
-        if unknown and 'first_started_at' in detail and now < detail['total_deadline_at']:
+        if 'total_deadline_at' in detail and now >= detail['total_deadline_at']:
+            status = 'waiting_human'
+            detail['reason'] = 'recovery_total_budget_exhausted'
+        elif unknown and 'first_started_at' in detail:
             from .recovery_policy import VERIFY_SECONDS
             detail.update(action='verify', verify_deadline_at=detail.get('verify_deadline_at',
                 min(now + VERIFY_SECONDS, detail['total_deadline_at'])))
@@ -306,6 +309,9 @@ def _validate_step(conn, operation, now, step=None, detail=None):
     from herdr.workflow_progress import assess_workflow, recovery_identity
     workflow, config, tasks = _snapshot(conn, operation['workflow_id'])
     payload = operation['payload']
+    from .recovery_policy import RecoveryBudgetExhausted
+    if operation['detail'].get('total_deadline_at', float('inf')) <= now:
+        raise RecoveryBudgetExhausted('recovery_total_budget_exhausted')
     receipt = {**operation['detail'], **(detail or {})}
     if workflow.get('status') != 'running' or workflow.get('startup_ready') is False or workflow.get('startup_not_ready'):
         raise ValueError('recovery workflow became inactive')

@@ -21,7 +21,7 @@ def settle_result(db_path, operation_id, expected_version, now):
         prepared_workflow, _, prepared_tasks = _snapshot(reader, prepared_op['workflow_id'])
         prepared_scope = {t['task_id']: t.get('version') for t in prepared_tasks}
         from .recovery_policy import verified_progress
-        progress = verified_progress(reader, prepared_op, prepared_workflow, prepared_tasks, observations)
+        batch = verified_progress(reader, prepared_op, prepared_workflow, prepared_tasks, observations)
         progress_watermark = reader.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE workflow_id=? AND event_type='task_artifact_checkpoint'", (prepared_op['workflow_id'],)).fetchone()[0]
         acceptance = {}
         evidence_ids = {}
@@ -55,9 +55,13 @@ def settle_result(db_path, operation_id, expected_version, now):
         watermark = conn.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE workflow_id=? AND event_type='task_artifact_checkpoint'", (op['workflow_id'],)).fetchone()[0]
         if watermark != progress_watermark:
             raise ValueError('recovery progress snapshot changed')
-        from .recovery_policy import consume_progress
+        from .recovery_policy import consume_progress, artifact_stamp
+        for path, stamp in batch['artifact_stamps'].items():
+            if artifact_stamp(path) != stamp:
+                raise ValueError('recovery checkpoint artifact changed after verification')
         if 'first_started_at' in op['detail']:
-            op['detail'] = consume_progress(op['detail'], progress, now)
+            op['detail'] = consume_progress(op['detail'], batch['progress'], now)
+            op['detail']['progress_scan_cursors'] = batch['scan_cursors']
         outcome = result_status(op, workflow, tasks, acceptance=acceptance)
         if outcome and outcome[0] == 'resolved':
             from herdr.recovery_successor import confirmed_rework
@@ -72,7 +76,7 @@ def settle_result(db_path, operation_id, expected_version, now):
                 outcome = ('waiting_human', {'reason': 'recovery_total_budget_exhausted'})
             elif detail.get('result_deadline_at') is None:
                 outcome = ('waiting_human', {'reason': 'recovery_legacy_budget_unknown'})
-            elif detail['result_deadline_at'] <= now:
+            elif detail['result_deadline_at'] <= now and not batch['incomplete']:
                 outcome = ('waiting_human', {'reason': 'recovery_no_progress_timeout' if 'first_started_at' in detail else 'recovery_result_timeout'})
         if outcome is None:
             if op['detail'] != prepared_op['detail']:

@@ -85,7 +85,9 @@ def execute_workflow_recovery(ports, operation, owner):
                 continue
             details.setdefault('repair_map', {})[predecessor['task_id']] = {
                 'kind': 'successor', 'task_id': successor_id, 'run_id': details['target_runs'][successor_id],
-                'source_run_id': details.get('source_runs', {}).get(predecessor['task_id'])}
+                'source_run_id': details.get('source_runs', {}).get(predecessor['task_id']),
+                'completion_epoch': successor.get('completion_epoch'),
+                'completion_identity_path': successor.get('completion_identity_path')}
         for task_id in reworked:
             task = store.get_task(task_id) or {}
             expected_request = details.get('rework_requests', {}).get(task_id)
@@ -153,7 +155,9 @@ def execute_workflow_recovery(ports, operation, owner):
                 return 'waiting_human', {'reason': 'successor_lineage_unconfirmed', **details}
             details['target_runs'][next_id] = successor['run_id']
             details['repair_map'][tid] = {'kind':'successor', 'task_id':next_id,
-                'run_id':successor['run_id'], 'source_run_id':task.get('run_id')}
+                'run_id':successor['run_id'], 'source_run_id':task.get('run_id'),
+                'completion_epoch': successor.get('completion_epoch'),
+                'completion_identity_path': successor.get('completion_identity_path')}
             step('successor_delivery_confirmed', validate=False)
         elif task.get('status') in ports.REWORKABLE_STATUSES:
             details['rework_ids'].append(tid)
@@ -203,7 +207,8 @@ def execute_workflow_recovery(ports, operation, owner):
                 details['target_runs'][next_id] = successor['run_id']
                 details['repair_map'][tid] = {'kind': 'successor', 'task_id': next_id,
                     'run_id': successor['run_id'], 'source_run_id': task.get('run_id'),
-                    'root': 'frozen_candidate'}
+                    'root': 'frozen_candidate', 'completion_epoch': successor.get('completion_epoch'),
+                    'completion_identity_path': successor.get('completion_identity_path')}
                 step('successor_delivery_confirmed', validate=False)
             else:
                 return 'waiting_human', {'reason': 'target_requires_explicit_replacement', 'missing_task_ids':[tid], **details}
