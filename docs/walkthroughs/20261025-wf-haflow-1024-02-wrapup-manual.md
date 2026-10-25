@@ -92,3 +92,10 @@ worker clone 另有显式 `pre-push` 守卫（`[GIT GUARD REJECT] … Direct git
 ## 八、结论
 
 双门禁（cleanroom_test-manual3 / cleanroom_review-manual2）在同一冻结候选 `183fbf9` 上收敛 pass，`join_gate_verdict` 三点一致独立核验通过；issue #326 的验收口径（折叠抽屉不再遮挡"在 Controller 中处理"按钮）有候选上的真实浏览器证据。知识沉淀（lessons §201/§202、`wiki/task-lifecycle.md`、`wiki/log.md`）先于交付 PR 完成并提交，与代码同 PR 交付。平台交付入口结构性不可用已留证并按先例降级，交付 PR #349 保持 OPEN，head 移动与 CI/审核状态均已披露；Codex P2 经实测确认为修复引入的次生遮挡，处置权交作者/控制方。工作流以「双门禁汇聚 + 交付 PR + §二 状态表」划界收尾完成；步骤 3-5 记 ⛔/DEFERRED 属未合并的正确形态。
+
+## 九、完成声明回执（规则 6 / 声明边界）
+
+- 报告与归档索引随交付分支 fast-forward 追加（`183fbf9` → `e54e6f1` → `0a76d4b` → `999778e` → `40b487d` → 本报告回执提交）；追加本报告回执的提交即 PR 最终 head，以 `gh pr view 349 --json headRefOid` 为准。代码内容自 `183fbf9` 起未变（compare API：`183fbf9...40b487d` 仅命中 `docs/**`、`wiki/**`）。
+- Checkpoint 留证：seg1 `obs_a307ce75d3e94b4c826240c014a0565e` / seg2 `obs_a2d0c427b8e64d799cfa580496d0c6a5` / seg3 `obs_bbc2ad24affc468ea5b70be289716e8c` / seg4 `obs_fc431b56ffb1492da31a23488b48d858` / seg5 `obs_7a9bf70eab6d4a1f9156cd0e9af54397` / aggregate `obs_ceb3ebe1b5594f01ae701f0be5d18e76`。
+- 结构化完成声明：`report-completion` receipt_id `047e3992a53368553c7c17010d0a7dae`（run `run_940fbe3ac46e4e43ae3afdfe62d71e29` / epoch `3ff4c866d87bc42a4498fa962a48eb09`，随附上述 6 个 artifact）。**该声明不证明验收、合并或部署。**
+- 共享文档：PR 记录 note `n-1792918103605-da0b`、收尾完成 note `n-1792919103071-116a`（kind `wrapup`）。
