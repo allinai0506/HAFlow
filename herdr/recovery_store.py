@@ -560,3 +560,33 @@ def reconcile_rework_delivery(db_path, operation_id, owner, task_id, request_id,
 
 # Preserve the public storage API while isolating content verification from claims.
 from .recovery_result import settle_result as settle_result
+
+
+def guard_effect(db_path, operation_id, owner, now):
+    """Authorize each discrete mutation after expected earlier effects changed facts."""
+    from .recovery_policy import RecoveryBudgetExhausted, generation_matches
+    with _transaction(db_path) as conn:
+        op = _owned(conn, operation_id, owner, now)
+        if op['detail'].get('total_deadline_at', float('inf')) <= now:
+            raise RecoveryBudgetExhausted('recovery_total_budget_exhausted')
+        workflow, _, tasks = _snapshot(conn, op['workflow_id'])
+        if (workflow.get('status') != 'running' or workflow.get('startup_ready') is False
+                or workflow.get('startup_not_ready') or not generation_matches(op, workflow)
+                or (op['payload'].get('kind') != 'delivery'
+                    and workflow.get('candidate_sha') != op['payload'].get('candidate_sha'))):
+            raise ValueError('recovery generation changed before effect')
+        if op['payload'].get('kind') != 'finalize':
+            _validate_step(conn, op, now, 'renew_owner')
+        else:
+            # Clearing our escalation removes the assessed obligation. Its
+            # original immutable task facts still authorize only this finalize.
+            by_id = {task['task_id']: task for task in tasks}
+            for fact in op['payload'].get('facts') or []:
+                task = by_id.get(fact.get('task_id')) or {}
+                if (not fact.get('run_id') or task.get('execution_id') != workflow.get('execution_id')
+                        or any(task.get(key) != fact.get(key) for key in
+                               ('run_id', 'execution_id', 'candidate_sha', 'commit', 'stage_verdict', 'stage_verdict_note'))):
+                    raise ValueError('recovery source facts changed before finalize')
+        conn.execute('UPDATE workflow_recovery_operations SET lease_until=?,version=version+1,updated_at=? WHERE id=?',
+                     (now + 180, now, operation_id))
+        _event(conn, _get(conn, operation_id), 'effect_authorized', now)

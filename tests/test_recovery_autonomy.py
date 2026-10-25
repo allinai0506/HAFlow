@@ -757,3 +757,118 @@ def test_byte_budget_backlog_resumes_without_false_timeout(scene):
         assert s.op()['status'] == 'awaiting_result', s.op()['detail']
         s.clock[0] += 31
     assert s.op()['detail']['result_deadline_at'] == start + 10100
+
+
+def test_exact_scene_b_first_fresh_checkpoint_after_old_deadline(scene):
+    from herdr.task_checkpoint import read_task_checkpoints
+    s = scene
+    s.tick()
+    s.clock[0] += 3700
+    checkpoint(s, 1)
+    task = s.store.get_task('impl')
+    assert len(read_task_checkpoints('impl', 'run', task['completion_epoch'], store=s.store)['segments']) == 1
+    s.tick()
+    assert s.op()['status'] == 'awaiting_result'
+    assert s.op()['detail']['result_deadline_at'] == s.clock[0] + 3600
+    assert len(s.dispatches) == 1
+
+
+def short_budget(s):
+    wf = s.store.get_workflow('wf')
+    s.store.save_workflow(dict(wf, config=dict(wf['config'], recovery_budget={'idle_seconds': 60, 'total_seconds': 60})))
+
+
+def test_each_gate_invalidation_rechecks_total_budget(scene, monkeypatch):
+    s = scene
+    wf = s.store.get_workflow('wf')
+    s.store.save_workflow(dict(wf, config=dict(wf['config'], nodes=wf['config']['nodes'] + [{'id': 'review'}])))
+    s.store.save_task(dict(task_id='review-old', workflow_id='wf', node='review', status='cleaned',
+        run_id='review-old', execution_id='execution', candidate_sha=A, stage_verdict='blocked'))
+    short_budget(s)
+    original = s.ctl.invalidate_for_fix_loop
+    calls = []
+    def elapsed(*args, **kwargs):
+        calls.append(args[1])
+        result = original(*args, **kwargs)
+        s.clock[0] += 70
+        return result
+    monkeypatch.setattr(s.ctl, 'invalidate_for_fix_loop', elapsed)
+    s.tick()
+    assert len(calls) == 1
+    assert s.op()['status'] == 'waiting_human'
+    assert s.op()['detail']['reason'] == 'recovery_total_budget_exhausted'
+
+
+def test_nested_gate_commands_recheck_total_budget(scene, monkeypatch):
+    s = scene
+    short_budget(s)
+    s.store.save_task(dict(task_id='test-old2', workflow_id='wf', node='test', status='cleaned',
+        run_id='test-old2', execution_id='execution', candidate_sha=A, stage_verdict='blocked'))
+    original = s.ctl.subprocess.run
+    calls = []
+    def elapsed(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if len(argv) > 1 and argv[1] == 'supersede':
+            calls.append(argv[2])
+            s.clock[0] += 70
+        return result
+    monkeypatch.setattr(s.ctl.subprocess, 'run', elapsed)
+    s.tick()
+    assert len(calls) == 1
+    assert s.op()['detail']['reason'] == 'recovery_total_budget_exhausted'
+
+
+def test_stage_advance_clear_rechecks_budget_after_last_gate(scene, monkeypatch):
+    s = scene
+    short_budget(s)
+    original = s.ctl.invalidate_for_fix_loop
+    cleared = []
+    def elapsed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        s.clock[0] += 70
+        return result
+    monkeypatch.setattr(s.ctl, 'invalidate_for_fix_loop', elapsed)
+    monkeypatch.setattr(s.ctl, 'clear_stage_advance', lambda *a: cleared.append(a))
+    s.tick()
+    assert not cleared
+    assert s.op()['detail']['reason'] == 'recovery_total_budget_exhausted'
+
+
+def test_finalize_transition_rechecks_budget_after_escalation_clear(scene, monkeypatch):
+    s = scene
+    s.store.save_task(dict(s.store.get_task('test-old'), status='superseded'))
+    s.store.save_task(dict(s.store.get_task('impl'), status='committed', finalize_escalated=True))
+    short_budget(s)
+    rs.reconcile(s.store.db_path, 'wf', s.clock[0])
+    op = next(o for o in rs.list_operations(s.store.db_path, 'wf') if o['payload']['kind'] == 'finalize')
+    rs.decide_operation(s.store.db_path, op['id'], op['version'], 'human', 'retry', 'integration prerequisites resolved', s.clock[0])
+    finalizes = []
+    def clear(task_id):
+        s.store.update_task_metadata(task_id, {'finalize_escalated': False})
+        s.clock[0] += 70
+        return True
+    monkeypatch.setattr(s.ctl, 'clear_finalize_escalation', clear)
+    monkeypatch.setattr(s.ctl, 'finalize_completed_task', lambda *a: finalizes.append(a))
+    s.tick()
+    actual = next(o for o in rs.list_operations(s.store.db_path, 'wf') if o['id'] == op['id'])
+    assert not finalizes
+    assert actual['detail']['reason'] == 'recovery_total_budget_exhausted'
+
+
+def test_changed_gate_facts_between_effects_require_replanning(scene, monkeypatch):
+    s = scene
+    wf = s.store.get_workflow('wf')
+    s.store.save_workflow(dict(wf, config=dict(wf['config'], nodes=wf['config']['nodes'] + [{'id': 'review'}])))
+    s.store.save_task(dict(task_id='review-old', workflow_id='wf', node='review', status='cleaned',
+        run_id='review-old', execution_id='execution', candidate_sha=A, stage_verdict='blocked'))
+    original = s.ctl.invalidate_for_fix_loop
+    calls = []
+    def change(*args, **kwargs):
+        calls.append(args[1])
+        result = original(*args, **kwargs)
+        s.store.update_task_metadata('test-old', {'stage_verdict_note': 'new business blocker scope'})
+        return result
+    monkeypatch.setattr(s.ctl, 'invalidate_for_fix_loop', change)
+    s.tick()
+    assert calls == ['review']
+    assert s.op()['status'] == 'waiting_human'

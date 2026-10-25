@@ -291,7 +291,7 @@ def test_migrated_started_receipt_is_consumed_without_resending(store, monkeypat
     monkeypatch.setattr(ctl.subprocess, 'run', forbid)
     cleared = []
     monkeypatch.setattr(ctl, 'clear_stage_advance', lambda *args: cleared.append(args))
-    def invalidate(wid, gate, config, retry_node):
+    def invalidate(wid, gate, config, retry_node, **kwargs):
         assert retry_node is None
         t = store.get_task(gate)
         if t:

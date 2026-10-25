@@ -63,6 +63,8 @@ def execute_workflow_recovery(ports, operation, owner):
         if validate:
             recovery_store.renew_owner(store.db_path, operation['id'], owner, ports.time.time(), lease_seconds=180)
         recovery_store.record_step(store.db_path, operation['id'], owner, name, details, ports.time.time(), validate=validate)
+    def before_effect():
+        recovery_store.guard_effect(store.db_path, operation['id'], owner, ports.time.time())
     if verifying:
         from herdr.recovery_successor import link_committed_successor
         confirmed = details.get('successor_ids') or []
@@ -122,6 +124,7 @@ def execute_workflow_recovery(ports, operation, owner):
             step('finalize_started')
             if not ports.clear_finalize_escalation(task['task_id']):
                 return 'waiting_human', {'reason': 'escalation_clear_failed', **details}
+            before_effect()
             ports.finalize_completed_task(task['task_id'])
             fresh = store.get_task(task['task_id']) or {}
             if fresh.get('finalize_escalated'):
@@ -227,10 +230,9 @@ def execute_workflow_recovery(ports, operation, owner):
     for gate in payload['gate_nodes']:
         if gate in details.get('invalidated_gate_nodes', []):
             continue
-        try:
-            ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None, preserve_task_ids=confirmed_targets)
-        except TypeError:
-            ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None)
+        before_effect()
+        ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None,
+            preserve_task_ids=confirmed_targets, before_effect=before_effect)
         details.setdefault('invalidated_gate_nodes', []).append(gate)
         step('gate_invalidated', validate=False)
     remaining = [t for t in store.list_tasks(workflow_id=wid) if t.get('status') != 'superseded'
@@ -238,6 +240,7 @@ def execute_workflow_recovery(ports, operation, owner):
                  and (t.get('node') or t.get('stage')) in payload['gate_nodes']]
     if remaining:
         return 'waiting_human', {'reason': 'gate_invalidation_incomplete', **details}
+    before_effect()
     ports.clear_stage_advance(wid, payload['retry_node'])
     return 'awaiting_result', {'step': 'awaiting_new_candidate', **details}
 

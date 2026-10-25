@@ -139,13 +139,13 @@ def verified_progress(conn, operation, workflow, tasks, observations):
 
 
 def consume_progress(detail, progress, now):
-    """Consume each completed step/content once; publication cannot revive an expired gap."""
+    """Consume verified new work before settling an unresolved wait; total stays fixed."""
     detail = dict(detail)
     cursors = {k: dict(v) for k, v in detail.get('progress_cursors', {}).items()}
     deadline = detail['result_deadline_at']
     for _, published_at, key, step, sha, tokens in progress:
         cursor = cursors.get(key, {'step': 0, 'hashes': [], 'completed': []})
-        if (published_at < detail['first_started_at'] or published_at > min(now, deadline)
+        if (published_at < detail['first_started_at'] or published_at > now
                 or step <= cursor['step'] or sha in cursor['hashes']
                 or not set(tokens) - set(cursor['completed'])):
             continue

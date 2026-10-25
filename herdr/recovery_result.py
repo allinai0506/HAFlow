@@ -95,4 +95,3 @@ def settle_result(db_path, operation_id, expected_version, now):
         result = _get(conn, operation_id)
         _event(conn, result, 'result', now, receipt)
         return result
-
