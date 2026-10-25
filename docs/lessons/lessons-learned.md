@@ -8330,3 +8330,71 @@ pytest -q tests/test_console_module_boundaries.py::test_composed_page_preserves_
 - `tests/fixtures/console-ui-baseline.json` — 合成页 CSS 冻结元数据
 
 ---
+
+## 201. wrapup 交付 PR 平台入口的结构性不可用与降级边界（2026-10-25）
+
+### 问题背景
+
+wf-haflow-1024-02（issue #326）收尾要求"步骤 1-2 之后、步骤 3 之前用 `herdr-task create-pr` 建立交付 PR"。实测平台入口对同一条交付链给出两次 REFUSED：对 wrapup 任务返回 `task must be integrated before PR publication`；改对已集成的上游 craft 任务返回 `PR publication requires an identified GitHub or Gitee origin`。这不是新缺陷——`20261016-experience-hub-postmerge-hardening-wrapup`、`20261017-wf-haflow-1016-02-wrapup`、`20261018-wf-haflow-1018-01/02-wrapup` 四次收尾都在第一道拒绝处降级，本轮首次在第二道拒绝处也复现。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 把 `create-pr` 当成任意收尾任务都能用的入口 | `wrapup_delivery.enabled()` 只对 `software-development-v1` / `spec-development-v1` 且 `review_closure_required=true` 的 wrapup 开放 Git 交付；`code-craft-v1` 模板的 wrapup 没有 commit→integrate 通道，`_publication` 必然拒绝 | 判断平台入口可用性以 `wrapup_delivery#enabled` 与任务 `integrated_commit` 为准，不以 CLI 是否提供子命令为准 |
+| origin 使用 SSH host 别名（如 `git@github-allinai:`） | `pr_delivery#repository_identity` 只接受字面 `github.com` / `gitee.com`，别名 remote 使已集成任务也无法发布；这不是凭据问题，重试或换 token 都无效 | 报 REFUSED 后先打印 `git remote get-url origin` 判定是哪一类前置失败，再决定降级路径 |
+| 降级路径被当成"自行 push/建 PR"的违规动作 | 先例已把"源仓 fetch+push 候选分支 → `gh pr create`"固化为降级通道，且平台拒绝输出留证 | 降级前必须留平台拒绝原文，PR 的 head/base/candidate_sha 与门禁认证值逐字一致，不改写历史 |
+| 交付身份先于 PR 假设可省 | `record-delivery` 未登记时 `check-delivery` 报 `no effective delivery note; refusing ambiguous PR` | 无论走平台还是降级，交付身份（delivery-branch/candidate_sha/review-task/test-gate/base）先落 shared note |
+
+### 操作规范
+
+1. 依次实测并留证：`check-delivery` → `record-delivery` → `create-pr <wrapup>` → `create-pr <已集成上游任务>`；两份拒绝输出进 checkpoint 分段。
+2. 降级建 PR 使用门禁认证的 `candidate_sha` 对应的 task-owned 集成 ref（`herdr/integration-<task>`）推送，禁止用 wrapup 文档分支替代候选。
+3. PR 审核闭环（CI/评审 findings）与 `record-review-closure` 在降级路径下同样必做；forge 实证不可用时按平台规则记录原因，不虚构 PASS。
+4. 平台侧待办（第 5 次复现，按本文件纪律应升格为门禁）：允许 wrapup 文档提交后走 `create-pr`，或把降级路径正式化为受管入口；识别 SSH 别名 remote 的仓库身份。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 - <<'PY'
+import sys; sys.path.insert(0,'/Users/user/HAFlow')
+from herdr.wrapup_delivery import enabled, TEMPLATES
+from herdr.pr_delivery import repository_identity
+print(TEMPLATES)
+try: repository_identity('git@github-allinai:allinai0506/HAFlow.git')
+except ValueError as e: print('REFUSED:', e)
+PY
+```
+
+Evidence：本工位 `/tmp/wf326-wrapup/create-pr-wrapup.txt`、`create-pr-craft.txt` 保存两条 REFUSED 原文；交付身份 `n-1792915144325-9bef`；先例见 `docs/walkthroughs/20261018-wf-haflow-1018-02-wrapup.md` L-4。
+
+---
+
+## 202. 追加式文档尾部是合并面：候选冻结后主干前进会让收尾 PR 必冲突（2026-10-25）
+
+### 问题背景
+
+候选 `183fbf9` 基于 `origin/main=127970a` 冻结并通过双门禁；冻结期间主干合入 PR #347（`8092ed6`），该 PR 与候选同时在 `docs/lessons/lessons-learned.md` 和 `wiki/log.md` 尾部追加章节（双方都写 `## 199`）。`git merge-tree --write-tree 8092ed6 183fbf9` 预演结果为这两个文件 CONFLICT，代码与测试面自动合并干净。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 只看代码是否冲突 | 追加式文档（lessons / wiki log / walkthrough）尾部是同一物理位置，两个已认证候选并行必然相撞 | 收尾前用 `git merge-tree --write-tree <base> <candidate>` 预演，把冲突面写进合并指引 |
+| 想让候选 rebase 到最新主干消除冲突 | rebase 会改变 `candidate_sha`，使双门禁结论、join 事件与交付身份全部失效 | 冻结后不改写交付分支历史；冲突在合并时解决，两个 `## 199` 都保留并重编号后到者 |
+| 把冲突当成候选缺陷 | 冲突由主干前进引起，与候选实现无关 | 收尾报告区分"候选缺陷"与"合并面冲突"，后者只给指引不返工 |
+
+### 操作规范
+
+1. 收尾步骤 0 增加主干漂移检查：`git rev-parse origin/main` 与门禁记录的基线比较，不等即预演合并并记录冲突文件。
+2. 合并指引必须给出解决口径：追加式文档保留双方内容、章节编号按合并后顺序重排；代码面按候选原样合入。
+3. 需要 rebase 消除冲突时走平台正常 wrapup 交付路径（重新冻结 → 双门禁重跑），不得手工改写已认证分支。
+
+### 验证命令 / 守护测试
+
+```bash
+git merge-tree --write-tree origin/main <candidate_sha>   # 只读预演，不写工作树
+```
+
+Evidence：`git merge-tree --write-tree 8092ed6 183fbf9` 输出 `docs/lessons/lessons-learned.md`、`wiki/log.md` 两处 CONFLICT；候选侧 §199 见 `183fbf9`，主干侧 §199 见 `8092ed6`。
+---
