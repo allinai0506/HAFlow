@@ -209,6 +209,12 @@ def _expire(conn, workflow_id, now):
         unknown = row['status'] == 'running' and row['started']
         status = 'waiting_human' if unknown or row['status'] == 'waiting' or row['attempts'] >= 3 else 'pending'
         detail = {**json.loads(row['detail_json']), 'reason': 'delivery_unknown' if unknown else 'lease_expired' if row['status'] == 'running' else 'hold_expired'}
+        if unknown and 'first_started_at' in detail and now < detail['total_deadline_at']:
+            from .recovery_policy import VERIFY_SECONDS
+            detail.update(action='verify', verify_deadline_at=detail.get('verify_deadline_at',
+                min(now + VERIFY_SECONDS, detail['total_deadline_at'])))
+            if now < detail['verify_deadline_at']:
+                status = 'pending'
         conn.execute('UPDATE workflow_recovery_operations SET status=?,detail_json=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?', (status, json.dumps(detail), now, row['id']))
         _event(conn, _get(conn, row['id']), 'expired', now, detail)
 
@@ -231,10 +237,43 @@ def claim_operation(db_path, operation_id, owner, now, lease_seconds=60):
         op = _get(conn, operation_id)
         ensure_for_workflow(conn, op['workflow_id'], now)
         _expire(conn, op['workflow_id'], now)
-        workflow, _, _ = _snapshot(conn, op['workflow_id'])
+        op = _get(conn, operation_id)
+        workflow, config, _ = _snapshot(conn, op['workflow_id'])
         if workflow['status'] != 'running' or workflow.get('startup_not_ready') or workflow.get('startup_ready') is False:
             return None
-        cur = conn.execute("UPDATE workflow_recovery_operations SET status='running',owner=?,lease_until=?,attempts=attempts+1,version=version+1,updated_at=? WHERE id=? AND status='pending' AND next_due_at<=? AND attempts<3", (owner, now + lease_seconds, now, operation_id, now))
+        from .recovery_policy import initial_budget
+        managed = op['payload'].get('kind') in {'fix_loop', 'finalize', 'delivery'}
+        detail = dict(op['detail'])
+        verifying = detail.get('action') == 'verify' and bool(op['started'])
+        if op['status'] != 'pending' or op['next_due_at'] > now:
+            return None
+        if managed:
+            reason = None
+            if 'first_started_at' not in detail and not verifying:
+                prior_claim = conn.execute("SELECT 1 FROM events WHERE workflow_id=? AND event_type='recovery.claimed' AND source='recovery_store' AND json_extract(payload_json,'$.operation_id')=? LIMIT 1",
+                    (op['workflow_id'], op['id'])).fetchone()
+                if op['attempts'] or op['started'] or prior_claim:
+                    reason = 'recovery_legacy_budget_unknown'
+                else:
+                    floor = conn.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
+                    try:
+                        detail.update(initial_budget(config, now, floor))
+                    except ValueError:
+                        reason = 'recovery_budget_invalid'
+            if detail.get('total_deadline_at', float('inf')) <= now:
+                reason = 'recovery_total_budget_exhausted'
+            elif verifying and detail.get('verify_deadline_at', float('inf')) <= now:
+                reason = 'recovery_delivery_unknown'
+            elif reason is None and not verifying and op['attempts'] >= 3:
+                reason = 'recovery_retry_budget_exhausted'
+            if reason:
+                detail = _human_wait_detail(op['payload'], 'waiting_human', {**detail, 'reason': reason})
+                conn.execute("UPDATE workflow_recovery_operations SET status='waiting_human',detail_json=?,version=version+1,updated_at=? WHERE id=?",
+                             (json.dumps(detail), now, operation_id))
+                _event(conn, _get(conn, operation_id), 'budget_stopped', now, detail)
+                return None
+        cur = conn.execute("UPDATE workflow_recovery_operations SET status='running',owner=?,lease_until=?,attempts=attempts+?,detail_json=?,version=version+1,updated_at=? WHERE id=? AND status='pending' AND next_due_at<=? AND (attempts<3 OR ?)",
+            (owner, now + lease_seconds, 0 if verifying else 1, json.dumps(detail), now, operation_id, now, verifying))
         if not cur.rowcount:
             return None
         result = _get(conn, operation_id)
@@ -257,7 +296,7 @@ def mark_started(db_path, operation_id, owner, step, now):
         ensure_for_workflow(conn, current['workflow_id'], now)
     with _transaction(db_path) as conn:
         _owned(conn, operation_id, owner, now)
-        conn.execute('UPDATE workflow_recovery_operations SET started=1,detail_json=?,version=version+1,updated_at=? WHERE id=?', (json.dumps({'step': step}), now, operation_id))
+        conn.execute('UPDATE workflow_recovery_operations SET started=1,detail_json=?,version=version+1,updated_at=? WHERE id=?', (json.dumps({**current['detail'], 'step': step, 'effect_phase': 'possible'}), now, operation_id))
         op = _get(conn, operation_id)
         _event(conn, op, 'started', now, {'step': step})
         return op
@@ -378,7 +417,7 @@ def record_step(db_path, operation_id, owner, step, detail, now, validate=True):
         current = _owned(conn, operation_id, owner, now)
         if validate:
             _validate_step(conn, current, now, step, detail)
-        receipt = {**current['detail'], **detail, 'step': step}
+        receipt = {**current['detail'], **detail, 'step': step, 'effect_phase': 'possible'}
         if step == 'gates_invalidating':
             receipt['gate_invalidation_started'] = True
         conn.execute('UPDATE workflow_recovery_operations SET started=1,detail_json=?,version=version+1,updated_at=? WHERE id=?', (json.dumps(receipt), now, operation_id))
@@ -392,7 +431,21 @@ def finish_operation(db_path, operation_id, owner, status, detail, now):
         raise ValueError('invalid recovery status')
     with _transaction(db_path) as conn:
         current = _owned(conn, operation_id, owner, now)
-        detail = _human_wait_detail(current['payload'], status, {**current['detail'], **detail})
+        detail = {**current['detail'], **detail}
+        if ('first_started_at' in current['detail'] and current['started']
+                and status == 'waiting_human' and detail.get('reason') in {
+                    'recovery_execution_unknown', 'successor_delivery_unconfirmed',
+                    'rework_delivery_unconfirmed', 'delivery_unknown'}):
+            from .recovery_policy import VERIFY_SECONDS
+            deadline = current['detail'].get('verify_deadline_at',
+                min(now + VERIFY_SECONDS, current['detail']['total_deadline_at']))
+            detail.update(action='verify', verify_deadline_at=deadline,
+                          next_due_at=min(now + 30, deadline), side_effects='unknown')
+            if now < deadline:
+                status = 'pending'
+            else:
+                detail['reason'] = 'recovery_delivery_unknown'
+        detail = _human_wait_detail(current['payload'], status, detail)
         conn.execute('UPDATE workflow_recovery_operations SET status=?,detail_json=?,next_due_at=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?', (status, json.dumps(detail), detail.get('next_due_at', now), now, operation_id))
         op = _get(conn, operation_id)
         _event(conn, op, 'finished', now, detail)
@@ -429,7 +482,7 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
                 raise ValueError('stale dispatch generation or configuration')
         if action == 'verify':
             from herdr.workflow_progress import recovery_identity
-            if op['status'] not in ('waiting_human', 'awaiting_result') or not op['started']:
+            if op['status'] not in ('waiting_human', 'awaiting_result', 'pending') or not op['started']:
                 raise ValueError('verify requires an unresolved started receipt')
             facts = op['payload']
             if facts.get('identity') and recovery_identity(dict(workflow, candidate_sha=facts.get('candidate_sha')), facts.get('facts') or []) != facts['identity']:
@@ -446,76 +499,58 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
             detail['dispatch_confirmation'] = {'identity_key': op['identity_key'],
                 'operator': operator, 'reason': reason, 'confirmed_at': now}
         pending = action in ('retry', 'verify', 'confirm_dispatch')
-        conn.execute('UPDATE workflow_recovery_operations SET status=?,next_due_at=?,detail_json=?,attempts=0,version=version+1,updated_at=? WHERE id=? AND version=?', ('pending' if pending else 'waiting', now if pending else until, json.dumps(detail), now, operation_id, expected_version))
+        conn.execute('UPDATE workflow_recovery_operations SET status=?,next_due_at=?,detail_json=?,attempts=?,version=version+1,updated_at=? WHERE id=? AND version=?', ('pending' if pending else 'waiting', now if pending else until, json.dumps(detail), op['attempts'] if 'first_started_at' in detail else 0, now, operation_id, expected_version))
         result = _get(conn, operation_id)
         _event(conn, result, 'decided', now, detail)
         return result
 
 
-def settle_result(db_path, operation_id, expected_version, now):
-    """Settle only from fresh same-transaction task facts and the core proof."""
-    from types import SimpleNamespace
-
-    from herdr.workflow_recovery import result_status
-
-    from .observation import ObservationStore
-    from .task_checkpoint import business_acceptance_receipt, has_business_acceptance
-    observations = ObservationStore(db_path)
-    evidence_store = SimpleNamespace(db_path=db_path)
-    from .state_db import get_readonly_db_connection
-    reader = get_readonly_db_connection(db_path)
-    try:
-        reader.execute('BEGIN')
-        prepared_op = _get(reader, operation_id)
-        prepared_workflow, _, prepared_tasks = _snapshot(reader, prepared_op['workflow_id'])
-        prepared_scope = {t['task_id']: t.get('version') for t in prepared_tasks}
-        acceptance = {}
-        evidence_ids = {}
-        for task in prepared_tasks:
-            if task.get('completion_protocol') == 'receipt-v1' and (task.get('node') or task.get('stage')) in (prepared_op['detail'].get('gate_nodes') or []):
-                acceptance[task['task_id']] = has_business_acceptance(evidence_store, task,
-                    prepared_workflow.get('candidate_sha'), conn=reader, observations=observations)
-                receipt = business_acceptance_receipt(reader, task, prepared_workflow.get('candidate_sha'))
-                evidence_ids[task['task_id']] = receipt['id'] if receipt else None
-    finally:
-        reader.close()
-    # No Git/content hashing occurs under BEGIN IMMEDIATE. Recheck the exact
-    # episode, Task versions and latest business-receipt IDs before settling.
+def retry_preflight(db_path, operation_id, owner, now, error_type):
+    """Called only for a typed read-only Controller probe failure, before any barrier."""
     with _transaction(db_path) as conn:
-        op = _get(conn, operation_id)
-        if op['version'] != expected_version or op['status'] != 'awaiting_result':
-            raise ValueError('stale recovery result version or status')
-        workflow, _, tasks = _snapshot(conn, op['workflow_id'])
-        if workflow['status'] != 'running' or workflow.get('startup_ready') is False:
-            return op
-        if (prepared_op['version'] != op['version']
-                or prepared_workflow.get('candidate_episode_id') != workflow.get('candidate_episode_id')
-                or prepared_workflow.get('execution_id') != workflow.get('execution_id')
-                or {t['task_id']: t.get('version') for t in tasks} != prepared_scope):
-            raise ValueError('recovery acceptance snapshot changed')
-        for task in tasks:
-            if task['task_id'] in evidence_ids:
-                receipt = business_acceptance_receipt(conn, task, workflow.get('candidate_sha'))
-                if (receipt['id'] if receipt else None) != evidence_ids[task['task_id']]:
-                    raise ValueError('recovery acceptance receipt changed')
-        outcome = result_status(op, workflow, tasks, acceptance=acceptance)
-        if outcome and outcome[0] == 'resolved':
-            from herdr.recovery_successor import confirmed_rework
-            by_id = {task['task_id']:task for task in tasks}
-            for original_id, mapping in (op['detail'].get('repair_map') or {}).items():
-                if mapping.get('kind') == 'rework' and not confirmed_rework(conn, by_id.get(original_id, {}), mapping.get('request_id')):
-                    outcome = ('waiting_human', {'reason':'rework_delivery_unconfirmed'})
-                    break
-        if outcome is None and op['detail'].get('result_deadline_at', op['updated_at'] + 3600) <= now:
-            outcome = ('waiting_human', {'reason': 'recovery_result_timeout'})
-        if outcome is None:
-            conn.execute('UPDATE workflow_recovery_operations SET next_due_at=? WHERE id=?', (now + 30, operation_id))
-            return op
-        status, detail = outcome if isinstance(outcome, tuple) else (outcome, {})
-        if status not in ('resolved', 'waiting_human'):
-            raise ValueError('invalid recovery result status')
-        receipt = _human_wait_detail(op['payload'], status, {**op['detail'], **detail})
-        conn.execute('UPDATE workflow_recovery_operations SET status=?,detail_json=?,version=version+1,updated_at=? WHERE id=? AND version=?', (status, json.dumps(receipt), now, operation_id, expected_version))
+        op = _owned(conn, operation_id, owner, now)
+        detail = dict(op['detail'])
+        safe = (not op['started'] and detail.get('effect_phase') == 'preflight'
+                and 'first_started_at' in detail)
+        if safe:
+            _validate_step(conn, op, now, 'preflight_retry')
+        due = now + 30 * 2 ** max(0, op['attempts'] - 1)
+        reason = 'recovery_preflight_temporary_failure'
+        status = 'pending'
+        if not safe:
+            status, reason = 'waiting_human', 'recovery_delivery_unknown'
+        elif op['attempts'] >= 3:
+            status, reason = 'waiting_human', 'recovery_retry_budget_exhausted'
+        elif due >= detail['total_deadline_at']:
+            status, reason = 'waiting_human', 'recovery_total_budget_exhausted'
+        detail.update(reason=reason, error_type=error_type, failure_point='source_cleanliness_probe',
+                      next_due_at=due, retry_deadline_at=detail.get('total_deadline_at'))
+        detail = _human_wait_detail(op['payload'], status, detail)
+        conn.execute('UPDATE workflow_recovery_operations SET status=?,detail_json=?,next_due_at=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?',
+                     (status, json.dumps(detail), due, now, operation_id))
         result = _get(conn, operation_id)
-        _event(conn, result, 'result', now, receipt)
+        _event(conn, result, 'preflight_failed', now, detail)
         return result
+
+
+def reconcile_rework_delivery(db_path, operation_id, owner, task_id, request_id, now):
+    """Repair only the Task projection of an already durable same-epoch dispatch."""
+    from . import state_db
+    from .recovery_successor import confirmed_rework_receipt
+    with _transaction(db_path) as conn:
+        op = _owned(conn, operation_id, owner, now)
+        _validate_step(conn, op, now, 'verify_receipts')
+        workflow, _, tasks = _snapshot(conn, op['workflow_id'])
+        task = next((t for t in tasks if t['task_id'] == task_id), {})
+        if (task.get('rework_delivery') == 'pending'
+                and task.get('execution_id') == workflow.get('execution_id')
+                and op['detail'].get('target_runs', {}).get(task_id) == task.get('run_id')
+                and op['detail'].get('rework_requests', {}).get(task_id) == request_id
+                and confirmed_rework_receipt(conn, task, request_id)):
+            state_db.update_task_metadata(task_id, {'rework_delivery': 'delivered'}, conn=conn)
+            task = state_db._decode_task_row(conn.execute('SELECT * FROM tasks WHERE task_id=?', (task_id,)).fetchone())
+        return task
+
+
+# Preserve the public storage API while isolating content verification from claims.
+from .recovery_result import settle_result as settle_result

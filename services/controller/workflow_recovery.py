@@ -28,7 +28,15 @@ def execute_workflow_recovery(ports, operation, owner):
     if not workflow.get('execution_id') or not config.get('nodes'):
         return 'waiting_human', {'reason': 'workflow_identity_or_config_unknown'}
     if not verifying:
-        clean, paths = check_source_cleanliness(source)
+        import errno
+        import subprocess
+        from herdr.recovery_policy import PreflightTemporaryFailure
+        try:
+            clean, paths = check_source_cleanliness(source, raise_transient=True)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            if isinstance(exc, subprocess.TimeoutExpired) or exc.errno in (errno.EAGAIN, errno.EINTR, errno.ETIMEDOUT):
+                raise PreflightTemporaryFailure('source_cleanliness_probe') from exc
+            raise
         if not clean:
             return 'waiting_human', {'reason': 'source_wip_requires_decision', 'dirty_paths': paths[:50]}
     target_ids = payload.get('task_ids') if payload['kind'] == 'finalize' else payload.get('affected_task_ids')
@@ -81,6 +89,9 @@ def execute_workflow_recovery(ports, operation, owner):
         for task_id in reworked:
             task = store.get_task(task_id) or {}
             expected_request = details.get('rework_requests', {}).get(task_id)
+            if task.get('rework_delivery') == 'pending':
+                task = recovery_store.reconcile_rework_delivery(store.db_path, operation['id'], owner,
+                    task_id, expected_request, ports.time.time())
             if payload['kind'] != 'finalize' and not has_confirmed_rework(store, task, expected_request):
                 return 'waiting_human', {'reason': 'rework_delivery_unconfirmed'}
             details.setdefault('repair_map', {}).setdefault(task_id, {

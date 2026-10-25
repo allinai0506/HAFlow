@@ -165,3 +165,25 @@ FACT：attempt 由实际启动命令贯穿 begin_launch_intent，不得在存储
 Evidence: `tests/test_control_convergence.py#test_replayed_prior_attempt_cannot_write_launch_intent`、`#test_actual_cli_threads_attempt_before_router`、`#test_old_attempt_cannot_register_or_update_resources`、参数化完成状态接管回归。此修订结果须绑定新提交，不能沿用 e645a90 的验收回执。
 
 FACT：协调器的 list/launch 命令使用 Controller 既有 TASK_MANAGER，同不可变 release 的 CLI 对齐，避免原工作区旧解析器拒绝 attempt 参数。
+
+## FACT：恢复链路有界自主继续 V1（隔离实现）
+
+恢复操作沿用原 SQLite 行保存首次认领时间、总期限、无进展截止、进展消费游标、执行次数与下次到期。默认无进展窗口沿用 3600 秒；总预算默认三段原窗口 10800 秒，依据既有三次执行上限给出有限工程预算，业务 SLA 未提供。固定 config 的 `recovery_budget.idle_seconds` 合法范围 60..3600，`total_seconds` 为 idle..86400（整数，拒绝 bool），仅首次认领读取；配置变化、人工 verify 和重启均不补额度。
+
+可信进展来自当前恢复映射或新候选的相关门禁：校验 workflow/execution、当前 Task/Run/epoch、适用候选以及 Observation 内容；只消费新步骤、新内容和新增完成阶段。单扫描最多校验 64 段、8 MiB。发表时间只能位于尚有效的窗口内；迟到证据不能复活已断开的等待。新进展将无进展截止推进到发表时间加窗口，但裁剪于固定总期限。无进展与总预算耗尽分别为 `recovery_no_progress_timeout`、`recovery_total_budget_exhausted`。
+
+安全自动重试仅接在 Controller 的只读 Git cleanliness 探测：`TimeoutExpired` 或 EAGAIN/EINTR/ETIMEDOUT，且原操作仍是持久 preflight、未越 effect barrier、身份重新校验通过。执行最多三次，重试退避 30/60 秒；`next_due_at` 和最晚期限持久化。普通 TimeoutError 和 started=0 不构成重试许可。永久错误保持明确人工阻断。
+
+派发步骤已记录后的超时/失联只按原 inventory 核验，最多 600 秒并受总期限裁剪；复用同 successor、request、真实送达回执和谱系，不再造 UUID 或替代任务。真实 `rework_dispatched` 已持久但 Task delivered 投影未落盘时，仅在同 epoch/request/owner 事务内补投影；没有确证仍等待，期限到后为 `recovery_delivery_unknown`。原门禁证明与业务验收要求保持。
+
+旧数据：未尝试的新 pending 首次认领时固定预算；已有 awaiting_result 沿用明确的原 result_deadline_at，不获得新窗口，缺可靠时间为 `recovery_legacy_budget_unknown`。已尝试但无新预算的 pending 也需人工核验。已有 waiting_human 不自动回 pending，不批量迁移。人工按 operation/version 核对源与目标 Run、epoch/request、INITIAL/rework_dispatched、launch_intent 和双向谱系后才使用既有 verify/hold；不得依据 started=0 直接重发。未确认的时间事实不能用 updated_at 补造。
+
+Evidence:
+- `herdr/recovery_policy.py#initial_budget/verified_progress/consume_progress`
+- `herdr/recovery_store.py#claim_operation/retry_preflight/reconcile_rework_delivery`
+- `herdr/recovery_result.py#settle_result`
+- `services/controller/workflow_recovery.py#execute_workflow_recovery`
+- `tests/test_recovery_autonomy.py#test_same_operation_end_to_end`
+- `tests/test_recovery_autonomy.py#test_restart_after_delivery_before_operation_receipt_uses_same_target`
+
+UNKNOWN：GitHub HEAD、配置 release 与实际运行 SHA 是三个事实。本轮无明确用户现场目标，未验证后两者，未修改生产数据库、重启或部署。隔离集成验证不等于全部工作流自主或用户业务 UAT 通过。

@@ -165,7 +165,7 @@ def teardown_output_diagnosis(porcelain: str, *, task_id: str) -> dict:
             'remediation_cmd': f'git -C <clone> status; herdr-task commit {task_id}; herdr-task integrate {task_id}'}
 
 
-def check_source_cleanliness(source_path: str | os.PathLike) -> tuple[bool, list[str]]:
+def check_source_cleanliness(source_path: str | os.PathLike, *, raise_transient=False) -> tuple[bool, list[str]]:
     """Check if source repo has uncommitted tracked modifications/deletions before worker clone (§2.12).
 
     Returns (is_clean, dirty_paths). Non-git sources return (True, []).
@@ -184,4 +184,8 @@ def check_source_cleanliness(source_path: str | os.PathLike) -> tuple[bool, list
         filtered = [p for p in paths if not is_internal_untracked(p)]
         return len(filtered) == 0, filtered
     except Exception as exc:
+        import errno
+        if raise_transient and (isinstance(exc, subprocess.TimeoutExpired)
+                or isinstance(exc, OSError) and exc.errno in (errno.EAGAIN, errno.EINTR, errno.ETIMEDOUT)):
+            raise
         return False, [f"cleanliness_check_error:{exc}"]

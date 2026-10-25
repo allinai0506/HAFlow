@@ -122,7 +122,8 @@ def result_status(operation, workflow, tasks, acceptance=None):
     if workflow.get('status') != 'running' or workflow.get('startup_ready') is False:
         return None
     detail, payload = operation['detail'], operation['payload']
-    if detail.get('execution_id') != workflow.get('execution_id'):
+    from .recovery_policy import generation_matches
+    if detail.get('execution_id') != workflow.get('execution_id') or not generation_matches(operation, workflow):
         return 'waiting_human', {'reason': 'recovery_generation_changed'}
     missing = repair_coverage(operation, tasks)
     if missing:
@@ -198,10 +199,19 @@ def drive_recovery(store, workflow_id, execute, now=None):
         try:
             status, detail = execute(claimed, owner)
         except Exception as exc:
-            status, detail = 'waiting_human', {'reason': 'recovery_execution_failed',
-                                              'error_type': type(exc).__name__}
+            from .recovery_policy import PreflightTemporaryFailure
+            if isinstance(exc, PreflightTemporaryFailure):
+                recovery_store.retry_preflight(store.db_path, op['id'], owner, now,
+                                               type(exc.__cause__).__name__)
+                continue
+            import subprocess
+            from .supervisor_delivery import DeliveryUnknown
+            unknown = isinstance(exc, (OSError, subprocess.TimeoutExpired, DeliveryUnknown))
+            status, detail = 'waiting_human', {
+                'reason': 'recovery_execution_unknown' if unknown else 'recovery_execution_failed',
+                'error_type': type(exc).__name__, 'side_effects': 'unknown'}
         if status == 'awaiting_result':
-            detail = {**detail, 'result_deadline_at': detail.get('result_deadline_at', now + 3600),
+            detail = {**detail, 'result_deadline_at': claimed.get('detail', {}).get('result_deadline_at', detail.get('result_deadline_at', now + 3600)),
                       'next_due_at': now + 30}
         recovery_store.finish_operation(store.db_path, op['id'], owner, status, detail,
                                         time.time() if now > 1_000_000_000 else now)
