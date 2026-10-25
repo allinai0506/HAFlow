@@ -63,8 +63,17 @@ def execute_workflow_recovery(ports, operation, owner):
         if validate:
             recovery_store.renew_owner(store.db_path, operation['id'], owner, ports.time.time(), lease_seconds=180)
         recovery_store.record_step(store.db_path, operation['id'], owner, name, details, ports.time.time(), validate=validate)
-    def before_effect():
-        recovery_store.guard_effect(store.db_path, operation['id'], owner, ports.time.time())
+    def before_effect(own_commits=None):
+        recovery_store.guard_effect(store.db_path, operation['id'], owner, ports.time.time(), own_commits=own_commits)
+    # Each in-finalize action re-checks budget, owner/lease and task identity
+    # through before_action; commit SHAs produced by this operation's own
+    # commit step are the only drift it may accept (§3.2 of the finalize
+    # boundary), and they persist so later passes can recognize them.
+    own_commits = dict((operation.get('detail') or {}).get('finalize_commits') or {})
+    def finalize_guard(action, task_id=None, commit_head=None):
+        if task_id and commit_head:
+            own_commits[task_id] = commit_head
+        before_effect(dict(own_commits))
     if verifying:
         from herdr.recovery_successor import link_committed_successor
         confirmed = details.get('successor_ids') or []
@@ -125,7 +134,7 @@ def execute_workflow_recovery(ports, operation, owner):
             if not ports.clear_finalize_escalation(task['task_id']):
                 return 'waiting_human', {'reason': 'escalation_clear_failed', **details}
             before_effect()
-            ports.finalize_completed_task(task['task_id'])
+            ports.finalize_completed_task(task['task_id'], before_action=finalize_guard)
             fresh = store.get_task(task['task_id']) or {}
             if fresh.get('finalize_escalated'):
                 return 'waiting_human', {'reason': fresh.get('finalize_escalate_reason') or 'finalize_refused', **details}

@@ -33,7 +33,7 @@ def test_legacy_function_signatures_survive_assembly():
         "_handle_coordinator_item": "(item)",
         "try_direct_stage_advance": "(item)",
         "process_completion_observation": "(task, now=None)",
-        "finalize_completed_task": "(task_id)",
+        "finalize_completed_task": "(task_id, before_action=None)",
         "wait_for_coordinator_decision": "(task_id, timeout=None)",
     }.items():
         assert inspect.isfunction(getattr(controller, name))

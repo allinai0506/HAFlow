@@ -872,3 +872,274 @@ def test_changed_gate_facts_between_effects_require_replanning(scene, monkeypatc
     s.tick()
     assert calls == ['review']
     assert s.op()['status'] == 'waiting_human'
+
+
+@pytest.fixture
+def finalize_scene(tmp_path, monkeypatch):
+    """Real finalize recovery over a real Git repository and clone.
+
+    The controlled clock, claim, budget, guard and ownership machinery stay
+    real; only the top-level ``herdr-task`` command transport is wrapped so
+    each step really executes, is recorded, and may spend controlled time.
+    """
+    monkeypatch.setenv('HERDR_STATE_DB', str(tmp_path / 'state.db'))
+    monkeypatch.setenv('HERDR_CONTROLLER_DIR', str(tmp_path / 'controller'))
+    monkeypatch.setenv('HERDR_WORKFLOW_DOCS_DIR', str(tmp_path / 'docs'))
+    store = SQLiteStateStore(tmp_path / 'state.db')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q', '-b', 'main', str(repo)], check=True)
+    for key, value in [('user.name', 'Recovery test'), ('user.email', 'recovery@example.invalid')]:
+        subprocess.run(['git', '-C', str(repo), 'config', key, value], check=True)
+    (repo / 'seed.txt').write_text('original candidate\n')
+    subprocess.run(['git', '-C', str(repo), 'add', '.'], check=True)
+    subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'seed', '--no-gpg-sign'], check=True)
+    baseline = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+    clone = tmp_path / 'worker'
+    subprocess.run(['git', 'clone', '-q', str(repo), str(clone)], check=True)
+    subprocess.run(['git', '-C', str(clone), 'switch', '-qc', 'agent/test/fix-impl'], check=True)
+    for key, value in [('user.name', 'Recovery test'), ('user.email', 'recovery@example.invalid')]:
+        subprocess.run(['git', '-C', str(clone), 'config', key, value], check=True)
+    (clone / 'seed.txt').write_text('agent deliverable awaiting commit\n')
+    clock = [time.time()]
+    monkeypatch.setattr(time, 'time', lambda: clock[0])
+    config = {'nodes': [{'id': 'implementation'}, {'id': 'test', 'gate': {'retry_node': 'implementation'}}]}
+    store.save_workflow(dict(workflow_id='wf', status='running', startup_ready=True,
+        execution_id='execution', project_root=str(repo), base_branch='main', created_at=1, config=config))
+    store.record_event('candidate_frozen', {'candidate_sha': baseline}, workflow_id='wf',
+        source='critical-path-scheduler', timestamp=2)
+    store.save_task(dict(task_id='impl', workflow_id='wf', node='implementation', status='completed',
+        run_id='run', execution_id='execution', candidate_sha=baseline,
+        completion_protocol='receipt-v1', completion_epoch='initial', completion_identity_path='/initial'))
+    wf, _, _ = rs.read_snapshot(store.db_path, 'wf')
+    store.update_task_metadata('impl', dict(clone_path=str(clone), branch='agent/test/fix-impl',
+        source_repo=str(repo), base_branch='main', integration_mode='git', baseline_commit=baseline,
+        baseline_fingerprint={'tracked': {}, 'untracked': {}}, candidate_episode_id=wf['candidate_episode_id']))
+    ctl = importlib.import_module('services.herdr-controller')
+    monkeypatch.setattr(ctl, '_get_store', lambda: store)
+    monkeypatch.setattr(ctl, 'time', SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(ctl, 'load_tasks', store.list_tasks)
+    monkeypatch.setattr(ctl, 'TASK_MANAGER', str(Path(__file__).resolve().parents[1] / 'bin/herdr-task'))
+    from herdr import task_resources
+    monkeypatch.setattr(task_resources, 'owned_live_pane', lambda _: (True, 'controlled native instance'))
+    monkeypatch.setattr(ctl, 'reconcile_node_dispatches', lambda *a, **k: None)
+    monkeypatch.setattr(ctl, 'verify_auto_recover_redispatch', lambda *a: None)
+    monkeypatch.setattr(ctl, 'converge_dangling_replacement_obligations', lambda *a: None)
+    monkeypatch.setattr(ctl, 'notify_attention', lambda *a, **k: True)
+    advances = []
+    monkeypatch.setattr(ctl, 'enqueue_stage_advance', lambda task: advances.append(task['task_id']))
+    real_run = subprocess.run
+    calls, faults, delays, after = [], {'preflight': 0}, {}, {}
+    def run(argv, **kwargs):
+        entry = [str(item) for item in argv]
+        calls.append(entry)
+        if entry[0] in ('git', 'ps'):
+            if entry[0] == 'git' and 'status' in entry and faults['preflight']:
+                faults['preflight'] -= 1
+                raise subprocess.TimeoutExpired(argv, 10)
+            return real_run(argv, **kwargs)
+        if Path(entry[0]).name == 'herdr-task':
+            result = real_run(argv, **kwargs)
+            hook = after.get(entry[1])
+            if hook:
+                hook(result)
+            clock[0] += delays.get(entry[1], 0)
+            return result
+        raise AssertionError(f'unexpected native command {argv}')
+    monkeypatch.setattr(subprocess, 'run', run)
+    def finalize_op():
+        return next(o for o in rs.list_operations(store.db_path, 'wf')
+                    if o['payload']['kind'] == 'finalize')
+    return SimpleNamespace(store=store, ctl=ctl, clock=clock, faults=faults, delays=delays,
+        after=after, calls=calls, advances=advances, real_run=real_run, clone=clone, repo=repo,
+        baseline=baseline, finalize_op=finalize_op,
+        tick=lambda: ctl.check_workflow_recovery('wf', now=clock[0]))
+
+
+def authorize_finalize_recovery(s):
+    """Register the finalize obligation for the escalated task, then retry it."""
+    s.store.save_task(dict(s.store.get_task('impl'), finalize_escalated=True))
+    rs.reconcile(s.store.db_path, 'wf', s.clock[0])
+    op = s.finalize_op()
+    rs.decide_operation(s.store.db_path, op['id'], op['version'], 'human',
+                        'retry', 'integration prerequisites resolved', s.clock[0])
+    return op
+
+
+def retry_after_preflight_failure(s, expected_total=None):
+    """First claim dies on a typed transient preflight fault, exactly as in production."""
+    s.faults['preflight'] = 1
+    s.tick()
+    op = s.finalize_op()
+    assert op['status'] == 'pending', json.dumps(op['detail'])
+    assert op['attempts'] == 1 and op['started'] == 0
+    if expected_total is not None:
+        assert op['detail']['total_deadline_at'] == expected_total
+    return op
+
+
+def integrate_calls(s):
+    return [c for c in s.calls if Path(c[0]).name == 'herdr-task' and len(c) > 1 and c[1] == 'integrate']
+
+
+def test_finalize_commit_crossing_total_deadline_never_starts_integrate(finalize_scene):
+    """Default budget: preflight retry lands 60s before the total deadline, the
+    real commit then runs 70s and crosses it. The already-produced commit is
+    kept, and integrate must not start past the deadline."""
+    s = finalize_scene
+    start = s.clock[0]
+    authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    s.delays['commit'] = 70
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+    assert integrate_calls(s) == [], s.calls
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit'], s.calls
+    final = s.finalize_op()
+    assert final['status'] == 'waiting_human', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'recovery_total_budget_exhausted'
+    assert final['detail']['total_deadline_at'] == start + 10800
+    assert final['detail']['first_started_at'] == start
+    task = s.store.get_task('impl')
+    head = subprocess.check_output(['git', '-C', str(s.clone), 'rev-parse', 'HEAD'], text=True).strip()
+    assert task['status'] == 'committed' and task['commit'] == head and head != s.baseline
+    # A rescan neither resets the budget nor repeats the confirmed commit.
+    s.clock[0] += 30
+    s.tick()
+    final = s.finalize_op()
+    assert final['status'] == 'waiting_human'
+    assert final['detail']['reason'] == 'recovery_total_budget_exhausted'
+    assert final['detail']['total_deadline_at'] == start + 10800
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit'], s.calls
+
+
+def test_finalize_next_action_refused_once_total_deadline_passed(finalize_scene):
+    """Short budget: integrate starts inside the authorization window and ends
+    past the total deadline; its real result is kept and every later new action
+    (cleanup_ready transition, cleanup, business advance) is refused."""
+    s = finalize_scene
+    start = s.clock[0]
+    authorize_finalize_recovery(s)
+    wf = s.store.get_workflow('wf')
+    s.store.save_workflow(dict(wf, config=dict(wf['config'],
+        recovery_budget={'idle_seconds': 60, 'total_seconds': 120})))
+    retry_after_preflight_failure(s, expected_total=start + 120)
+    s.delays['commit'] = 30
+    s.delays['integrate'] = 70
+    s.clock[0] = start + 30
+    s.tick()
+    assert len(integrate_calls(s)) == 1, s.calls
+    final = s.finalize_op()
+    assert final['status'] == 'waiting_human', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'recovery_total_budget_exhausted'
+    assert final['detail']['total_deadline_at'] == start + 120
+    task = s.store.get_task('impl')
+    integrated = task['integrated_commit']
+    assert task['status'] == 'integrated' and integrated and integrated != s.baseline
+    subprocess.run(['git', '-C', str(s.repo), 'rev-parse', '--quiet', '--verify',
+                    integrated + '^{commit}'], check=True)
+    assert not s.advances
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'integrate'], s.calls
+    s.clock[0] += 30
+    s.tick()
+    assert s.finalize_op()['detail']['reason'] == 'recovery_total_budget_exhausted'
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'integrate'], s.calls
+
+
+def test_finalize_lease_expiry_during_commit_hands_over_without_integrate(finalize_scene):
+    """When the lease lapses while the commit subprocess runs, the old owner
+    must neither start integrate nor overwrite the operation state; the lease
+    machinery owns recovery from there."""
+    s = finalize_scene
+    op = authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    owner = op['owner']
+    s.delays['commit'] = 200
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+    assert integrate_calls(s) == [], s.calls
+    task = s.store.get_task('impl')
+    head = subprocess.check_output(['git', '-C', str(s.clone), 'rev-parse', 'HEAD'], text=True).strip()
+    assert task['status'] == 'committed' and task['commit'] == head
+    with pytest.raises(ValueError, match='stale'):
+        rs.finish_operation(s.store.db_path, op['id'], owner, 'waiting_human',
+                            {'reason': 'late'}, s.clock[0])
+    s.clock[0] += 30
+    s.tick()
+    handed = s.finalize_op()
+    assert handed['owner'] != owner or handed['status'] != 'running'
+    assert handed['status'] in ('pending', 'awaiting_result', 'waiting_human')
+    assert integrate_calls(s) == [], s.calls
+
+
+@pytest.mark.parametrize('drift', ['execution', 'commit', 'run'])
+def test_finalize_foreign_drift_after_own_commit_refuses_integrate(finalize_scene, drift):
+    """A change the operation cannot explain (other execution, foreign SHA, or
+    foreign run) blocks the next action even though our own commit succeeded."""
+    s = finalize_scene
+    op = authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    def inject_foreign(result):
+        if drift == 'execution':
+            s.store.update_task_metadata('impl', {'execution_id': 'foreign-execution'})
+        elif drift == 'commit':
+            s.store.update_task_metadata('impl', {'commit': 'c' * 40})
+        else:
+            s.store.update_task_metadata('impl', {'run_id': 'foreign-run'})
+    s.after['commit'] = inject_foreign
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+    assert integrate_calls(s) == [], s.calls
+    final = s.finalize_op()
+    assert final['status'] == 'waiting_human', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'recovery_execution_failed'
+    task = s.store.get_task('impl')
+    assert task['status'] == 'committed'
+
+
+def test_finalize_own_commit_is_accepted_and_chain_completes(finalize_scene):
+    """Happy path: the operation's own real commit produces a brand-new SHA and
+    the guard accepts it; integrate, cleanup and business advance all run."""
+    s = finalize_scene
+    authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+    assert len(integrate_calls(s)) == 1, s.calls
+    task = s.store.get_task('impl')
+    head = subprocess.check_output(['git', '-C', str(s.clone), 'rev-parse', 'HEAD'], text=True).strip()
+    assert task['commit'] == head and head != s.baseline
+    op = s.finalize_op()
+    assert op['status'] == 'awaiting_result', json.dumps(op['detail'])
+    assert op['detail']['finalize_commits'] == {'impl': head}
+    s.clock[0] += 30
+    s.tick()
+    final = s.finalize_op()
+    assert final['status'] == 'resolved', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'delivery_finalized'
+    assert s.advances == ['impl']
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'integrate', 'set', 'cleanup'], s.calls
+
+
+def test_finalize_none_mode_preservation_commit_keeps_chain(finalize_scene):
+    """None-integration recovery finalize adopts its own preservation commit
+    SHA and still reaches the normal cleaned terminal state."""
+    s = finalize_scene
+    s.store.update_task_metadata('impl', {'integration_mode': 'none'})
+    (s.clone / 'seed.txt').write_text('worktree output to preserve\n')
+    authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+    task = s.store.get_task('impl')
+    head = subprocess.check_output(['git', '-C', str(s.clone), 'rev-parse', 'HEAD'], text=True).strip()
+    assert task['commit'] == head and head != s.baseline
+    op = s.finalize_op()
+    assert op['status'] == 'awaiting_result', json.dumps(op['detail'])
+    assert op['detail']['finalize_commits'] == {'impl': head}
+    s.clock[0] += 30
+    s.tick()
+    final = s.finalize_op()
+    assert final['status'] == 'resolved', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'delivery_finalized'
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'set', 'cleanup'], s.calls

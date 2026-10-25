@@ -562,8 +562,14 @@ def reconcile_rework_delivery(db_path, operation_id, owner, task_id, request_id,
 from .recovery_result import settle_result as settle_result
 
 
-def guard_effect(db_path, operation_id, owner, now):
-    """Authorize each discrete mutation after expected earlier effects changed facts."""
+def guard_effect(db_path, operation_id, owner, now, own_commits=None):
+    """Authorize each discrete mutation after expected earlier effects changed facts.
+
+    ``own_commits`` maps task ids to commit SHAs that THIS operation's own
+    finalize actions just produced (verified against the persistent task
+    record). They are the only commit drift a finalize may accept; every other
+    identity fact must still match the original payload exactly.
+    """
     from .recovery_policy import RecoveryBudgetExhausted, generation_matches
     with _transaction(db_path) as conn:
         op = _owned(conn, operation_id, owner, now)
@@ -577,16 +583,29 @@ def guard_effect(db_path, operation_id, owner, now):
             raise ValueError('recovery generation changed before effect')
         if op['payload'].get('kind') != 'finalize':
             _validate_step(conn, op, now, 'renew_owner')
+            conn.execute('UPDATE workflow_recovery_operations SET lease_until=?,version=version+1,updated_at=? WHERE id=?',
+                         (now + 180, now, operation_id))
         else:
             # Clearing our escalation removes the assessed obligation. Its
             # original immutable task facts still authorize only this finalize.
             by_id = {task['task_id']: task for task in tasks}
+            attributed = dict(op['detail'].get('finalize_commits') or {})
+            for task_id, sha in (own_commits or {}).items():
+                if sha:
+                    attributed[task_id] = sha
             for fact in op['payload'].get('facts') or []:
                 task = by_id.get(fact.get('task_id')) or {}
+                commits = {fact.get('commit'), attributed.get(fact.get('task_id'))}
                 if (not fact.get('run_id') or task.get('execution_id') != workflow.get('execution_id')
                         or any(task.get(key) != fact.get(key) for key in
-                               ('run_id', 'execution_id', 'candidate_sha', 'commit', 'stage_verdict', 'stage_verdict_note'))):
+                               ('run_id', 'execution_id', 'candidate_sha', 'stage_verdict', 'stage_verdict_note'))
+                        or task.get('commit') not in commits):
                     raise ValueError('recovery source facts changed before finalize')
-        conn.execute('UPDATE workflow_recovery_operations SET lease_until=?,version=version+1,updated_at=? WHERE id=?',
-                     (now + 180, now, operation_id))
+            detail = op['detail']
+            fresh = {task_id: sha for task_id, sha in attributed.items()
+                     if (detail.get('finalize_commits') or {}).get(task_id) != sha}
+            if fresh:
+                detail = {**detail, 'finalize_commits': {**(detail.get('finalize_commits') or {}), **fresh}}
+            conn.execute('UPDATE workflow_recovery_operations SET detail_json=?,lease_until=?,version=version+1,updated_at=? WHERE id=?',
+                         (json.dumps(detail), now + 180, now, operation_id))
         _event(conn, _get(conn, operation_id), 'effect_authorized', now)

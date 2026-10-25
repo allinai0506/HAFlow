@@ -3,6 +3,24 @@
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
 
+def _should_allow_rebase(task):
+    if not task or not isinstance(task, dict):
+        return False
+    if task.get("allow_rebase") is not None:
+        return bool(task.get("allow_rebase"))
+    if bool(task.get("onto")) or bool(task.get("onto_branch")):
+        return True
+    if bool(task.get("supersedes")):
+        return True
+    if bool(task.get("is_replay")) or bool(task.get("replay")):
+        return True
+    try:
+        if int(task.get("dispatch_round") or 1) > 1:
+            return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
 def maybe_complete_on_task_done(ports, task_id, db_path=None):
     """Complete acknowledged handoffs whose target reached terminal done.
 
