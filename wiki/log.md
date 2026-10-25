@@ -3705,3 +3705,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - P2——agent_status 瞬态失败返回 None 被当成不活跃，episode 连带中断时间戳被删，下次 working 重新中断并重置关闭宽限（working→None→working 六秒内两次中断，有界性被破坏）。
 - 变更（`services/herdr-sentinel.py` check_orphan_panes）：强制判定序——确认 working → 归属预检（`_orphan_probe` 身份证明或 pane 缺失才动手，其余 retained 一次定案不重试）→ 一次 ctrl-c → 关闭宽限（从原始中断时间起算，None 不清 episode）→ reap 全守卫链；缺失 pane 快捷仅在无 episode 时建卡，与共享回收计时兼容。
 - 证据：新增 2 项先红后绿（归属未证明零动作+中断陷阱、working→None→working 单次中断+宽限不重置）；`tests/test_sentinel_orphan_pane_janitor.py` 12 项全绿；受影响 18 文件批次 257 passed；真实链双路径（proven 完整看护 / unproven 零动作）。
+
+## [2026-10-25] Console | Issue #326 底部折叠抽屉真实几何返工
+- 门禁证伪上一候选后，沿实际 CSS 层叠链确认 `.drawer-head` 折叠可见高度为 48px，而 `shell-inspector.css` 的两条 `.deep-drawer bottom: 28px` 把抽屉头推入工作区；正确几何不是 `bottom: 48px`，而是 48px 底栏 + `bottom: 0px`，让抽屉头占用底栏带。
+- 新护栏按选择器规则块解析 `.light-bottom-bar` / `.drawer-head`，同时锁住桌面与窄屏抽屉锚点；撤销实现时两条测试必红。合成页 fixture 更新 `styles[0]` SHA，模块边界测试改为消费两个 style 哈希。
+- 真实 ego-browser 证据：1440x900 下目标按钮 bbox `1170,832.52,125.36,26.40`、中心 `(1232.68,845.71)`，抽屉头从 `y=853` 开始；`elementFromPoint` 命中“在 Controller 中处理”按钮，真实点击进入 Controller，抽屉保持折叠。详见 `docs/lessons/lessons-learned.md` §199。

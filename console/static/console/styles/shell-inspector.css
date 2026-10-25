@@ -193,7 +193,7 @@
   overflow: hidden;
 }
 .light-bottom-bar {
-  height: 28px;
+  height: 48px;
   background: #ffffff;
   border-top: 1px solid #e6e8ee;
   display: flex;
@@ -265,14 +265,14 @@
   background: #f0f2ff;
   border-color: #5e6ad2;
 }
-.deep-drawer { left: 268px; right: 0; bottom: 28px; border-radius: 0; }
+.deep-drawer { left: 268px; right: 0; bottom: 0px; border-radius: 0; }
 .deep-drawer.collapsed { clip-path: inset(0 0 calc(100% - 38px) 0); }
 @media (max-width: 1000px) {
   body { padding: 0; }
   .shell { height: 100vh; min-height: 0; border-radius: 0; grid-template-columns: 1fr; }
   .left-rail { display: none; }
   .sidebar { width: 100%; border-right: 0; border-bottom: 1px solid #e6e8ee; max-height: 220px; }
-  .deep-drawer { left: 0; right: 0; bottom: 28px; border-radius: 0; }
+  .deep-drawer { left: 0; right: 0; bottom: 0px; border-radius: 0; }
   .deep-drawer.collapsed { clip-path: inset(0 0 calc(100% - 38px) 0); }
   .shell[data-workspace="flow"] #canvasToolbar {
     left: 16px;

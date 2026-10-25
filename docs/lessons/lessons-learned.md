@@ -8290,3 +8290,43 @@ INV-EVAL-04（`herdr/evaluator.py` + `herdr/task_cli_launch.py`）：auto-init �
 pytest -q tests/test_loop_suite_smoke_default.py tests/test_sentinel_orphan_pane_janitor.py
 pytest -q tests/test_c05b_test_command_selection.py tests/test_evaluator_step_budgets.py tests/test_liveness_guard.py tests/test_recovery_supply_chain.py
 ```
+
+---
+
+## 199. 固定折叠层的几何修复必须验证最终命中对象（2026-10-25）
+
+### 问题背景
+
+HAFlow issue #326 中，Console 底部折叠抽屉遮挡工作区“在 Controller 中处理”动作。上一候选只把底栏提升为 48px，并用整文件子串断言护航；真实浏览器仍在按钮中心 `(1232.68, 845.71)` 命中遮挡层而非按钮，且合成 CSS 冻结护栏失败。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 把 `bottom` 当成抽屉头高度补偿 | fixed 元素的 `bottom` 是整个元素离视口底部的距离；折叠头已由 transform 留出 48px 时，再设 `bottom: 48px` 会把头整体推到工作区上方 | 折叠头要占用底栏带时，先写出视口、底栏、折叠头三者的几何关系；本布局必须满足 bar height = head height 且 drawer bottom = 0 |
+| 用整文件 `height: 48px` 子串当护栏 | 同文件其他规则已有相同字面量，撤掉目标修复仍会假绿 | CSS 回归必须按选择器提取规则块，再比较相关属性；必须执行一次撤销实现的反向验证 |
+| 静态 CSS 断言替代真实点击 | 声明值相等不能证明层叠、transform、z-index 和实际命中结果 | UI 遮挡修复必须启动本地服务，记录目标/遮挡层包围盒与 `elementFromPoint(目标中心)`，再执行真实 pointer click 并验证业务状态变化 |
+| 修改合成 CSS 后只改断言或漏更新冻结面 | 裸改断言会把兼容性变化藏起来；只冻结部分 style 块又会让权威源变化逃逸 | 更新 `tests/fixtures/console-ui-baseline.json` 的实际 SHA，并让模块边界测试从 fixture 校验所有合成 style 块 |
+
+### 操作规范（已固化到 `tests/test_console_cockpit_e2e_harness.py` 与 `tests/test_console_controller_cockpit_e2e.py`）
+
+1. **锁住静态几何契约**：分别解析 `.light-bottom-bar`、`.drawer-head` 和桌面/窄屏 `.deep-drawer` 规则，断言 48px 同轴与 `bottom: 0px`。
+2. **保留反向证明**：临时还原旧的 28px 值时，DEF-1/DEF-3 两条护栏必须失败；恢复实现后再转绿。
+3. **用浏览器验证最终命中**：1440x900 视口采集按钮、抽屉头、底栏包围盒，要求 `elementFromPoint` 命中按钮，真实点击进入 Controller 且抽屉仍折叠。
+4. **同步合成页冻结基线**：CSS 变更后用实际 `HTML_TEMPLATE` 计算 SHA，更新 fixture，不把新哈希写入测试断言。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_console_cockpit_e2e_harness.py
+pytest -q -s tests/test_console_controller_cockpit_e2e.py::test_collapsed_drawer_does_not_intercept_controller_button
+pytest -q tests/test_console_module_boundaries.py::test_composed_page_preserves_pre_split_dom_css_and_branding
+```
+
+### 相关文档 / 关联证据
+
+- `docs/bug-reports/2026-10-25-wf-haflow-1024-02-craft-rework-manual.md` — 本次返工的 RED/GREEN、几何、全量和基线记录
+- `console/static/console/styles/shell-inspector.css` — 底栏与抽屉最终几何权威源
+- `tests/fixtures/console-ui-baseline.json` — 合成页 CSS 冻结元数据
+
+---
