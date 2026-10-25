@@ -8290,3 +8290,35 @@ INV-EVAL-04（`herdr/evaluator.py` + `herdr/task_cli_launch.py`）：auto-init �
 pytest -q tests/test_loop_suite_smoke_default.py tests/test_sentinel_orphan_pane_janitor.py
 pytest -q tests/test_c05b_test_command_selection.py tests/test_evaluator_step_budgets.py tests/test_liveness_guard.py tests/test_recovery_supply_chain.py
 ```
+
+---
+
+## 199. 恢复等待必须区分无进展、总预算与副作用未知（2026-10-25）
+
+### 问题背景
+
+基线 `127970a3` 的恢复执行器异常统一结算为 `recovery_execution_failed`；结果轮询使用第一次执行写入的一小时绝对截止，即使同目标有校验通过的新检查点仍 `recovery_result_timeout`。隔离 SQLite/Controller 回归复现了两个断点；未据此断言每个用户现场卡住都由它们造成。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 固定结果截止不识别可信进展 | 无进展窗口可由新证据有界推进，总执行预算不能重置 | 时间预算和已消费步骤保存在原恢复操作，不借 updated_at 或文件时间续期 |
+| started=0 的异常统一裁决 | 零标志不能证明未发请求；只有已定位的只读失败点和持久 preflight 阶段共同证明可重试 | 精确列举临时故障，重查原身份，原操作退避最多三次 |
+| 送达后、投影写入前崩溃 | 重试投影不等于重发动作；真实回执比调用返回值更可靠 | 同请求、Run、epoch 真实送达回执可补投影；未知仅限时核验原目标 |
+| 旧字段缺失和重启 | 升级不能凭空补齐历史预算、时间和授权 | 旧人工决定不自动恢复；旧等待保留明确截止，缺失时间事实单操作核验 |
+
+### 操作规范（已固化到恢复调用链与回归）
+
+1. `recovery_store` 在首次认领保存预算，effect barrier 在调用外部派发之前落盘；旧 owner 无权结算。
+2. `recovery_policy` 复用 checkpoint 内容/归属验证，只消费新的 step、内容和 completed phase；同候选代次、Task/Run/epoch 之外的记录不续期。
+3. `recovery_result` 在写事务外校验内容，写事务内重查 Task version、execution、candidate episode 与证据水位；门禁不匹配仍未完成。
+4. 当前工程默认总预算为三段既有一小时窗口；这不是已提供的业务 SLA。持续检查点也不能超过总期限。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 -m pytest -q tests/test_recovery_autonomy.py tests/test_recovery_store.py tests/test_workflow_recovery.py
+```
+
+Evidence：`tests/test_recovery_autonomy.py#test_same_operation_end_to_end` 使用真实 Controller、返工派发协议、SQLite、checkpoint 和 business acceptance；只替换原生 Agent/终端边界。隔离验证不证明生产部署或用户业务验收。

@@ -154,7 +154,7 @@ def _invalidate_single_task(ports, task_id, gate_node_id, reuse=False):
         return False, f"supersede:{err}"
     return True, ""
 
-def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retry_node=None, selective_target_task_ids=None, preserve_task_ids=None):
+def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retry_node=None, selective_target_task_ids=None, preserve_task_ids=None, before_effect=None):
     """作废 gate 节点及其全部下游、以及 retry_node 到 gate 间全部中间节点的非 superseded 任务(fix-loop 回流前提)。
 
     completed/cleanup_ready 中间态先 finalize 规范化到 cleaned——
@@ -314,6 +314,8 @@ def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retr
             continue
 
         if status in ("completed", "cleanup_ready"):
+            if before_effect:
+                before_effect()
             result = ports.subprocess.run(
                 [ports.TASK_MANAGER, "finalize", task_id],
                 text=True,
@@ -334,6 +336,8 @@ def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retr
             )
             continue
 
+        if before_effect:
+            before_effect()
         result = ports.subprocess.run(
             [
                 ports.TASK_MANAGER, "supersede", task_id,

@@ -83,7 +83,8 @@ def test_missing_or_changed_target_run_waits_for_human():
 
 def test_execution_receipt_has_bounded_result_polling(monkeypatch):
     from herdr import workflow_recovery as recovery
-    operation = {'id': 1, 'version': 1, 'status': 'pending'}
+    operation = {'id': 1, 'version': 1, 'status': 'pending',
+                 'detail': {'first_started_at': 100, 'result_deadline_at': 3700, 'total_deadline_at': 10900}}
     class Store:
         db_path = 'unused'
     calls = []

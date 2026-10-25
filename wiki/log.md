@@ -3705,3 +3705,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - P2——agent_status 瞬态失败返回 None 被当成不活跃，episode 连带中断时间戳被删，下次 working 重新中断并重置关闭宽限（working→None→working 六秒内两次中断，有界性被破坏）。
 - 变更（`services/herdr-sentinel.py` check_orphan_panes）：强制判定序——确认 working → 归属预检（`_orphan_probe` 身份证明或 pane 缺失才动手，其余 retained 一次定案不重试）→ 一次 ctrl-c → 关闭宽限（从原始中断时间起算，None 不清 episode）→ reap 全守卫链；缺失 pane 快捷仅在无 episode 时建卡，与共享回收计时兼容。
 - 证据：新增 2 项先红后绿（归属未证明零动作+中断陷阱、working→None→working 单次中断+宽限不重置）；`tests/test_sentinel_orphan_pane_janitor.py` 12 项全绿；受影响 18 文件批次 257 passed；真实链双路径（proven 完整看护 / unproven 零动作）。
+
+## [2026-10-25] update | 恢复链路自主继续 V1
+- Updated [[workflow-progress-recovery]]：原恢复操作的可信进展窗口、固定总预算、安全前置重试与未知交付核验；补充旧数据、单操作人工核验和未部署边界。Evidence: `tests/test_recovery_autonomy.py`。

@@ -28,7 +28,15 @@ def execute_workflow_recovery(ports, operation, owner):
     if not workflow.get('execution_id') or not config.get('nodes'):
         return 'waiting_human', {'reason': 'workflow_identity_or_config_unknown'}
     if not verifying:
-        clean, paths = check_source_cleanliness(source)
+        import errno
+        import subprocess
+        from herdr.recovery_policy import PreflightTemporaryFailure
+        try:
+            clean, paths = check_source_cleanliness(source, raise_transient=True)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            if isinstance(exc, subprocess.TimeoutExpired) or exc.errno in (errno.EAGAIN, errno.EINTR, errno.ETIMEDOUT):
+                raise PreflightTemporaryFailure('source_cleanliness_probe') from exc
+            raise
         if not clean:
             return 'waiting_human', {'reason': 'source_wip_requires_decision', 'dirty_paths': paths[:50]}
     target_ids = payload.get('task_ids') if payload['kind'] == 'finalize' else payload.get('affected_task_ids')
@@ -55,6 +63,8 @@ def execute_workflow_recovery(ports, operation, owner):
         if validate:
             recovery_store.renew_owner(store.db_path, operation['id'], owner, ports.time.time(), lease_seconds=180)
         recovery_store.record_step(store.db_path, operation['id'], owner, name, details, ports.time.time(), validate=validate)
+    def before_effect():
+        recovery_store.guard_effect(store.db_path, operation['id'], owner, ports.time.time())
     if verifying:
         from herdr.recovery_successor import link_committed_successor
         confirmed = details.get('successor_ids') or []
@@ -77,10 +87,15 @@ def execute_workflow_recovery(ports, operation, owner):
                 continue
             details.setdefault('repair_map', {})[predecessor['task_id']] = {
                 'kind': 'successor', 'task_id': successor_id, 'run_id': details['target_runs'][successor_id],
-                'source_run_id': details.get('source_runs', {}).get(predecessor['task_id'])}
+                'source_run_id': details.get('source_runs', {}).get(predecessor['task_id']),
+                'completion_epoch': successor.get('completion_epoch'),
+                'completion_identity_path': successor.get('completion_identity_path')}
         for task_id in reworked:
             task = store.get_task(task_id) or {}
             expected_request = details.get('rework_requests', {}).get(task_id)
+            if task.get('rework_delivery') == 'pending':
+                task = recovery_store.reconcile_rework_delivery(store.db_path, operation['id'], owner,
+                    task_id, expected_request, ports.time.time())
             if payload['kind'] != 'finalize' and not has_confirmed_rework(store, task, expected_request):
                 return 'waiting_human', {'reason': 'rework_delivery_unconfirmed'}
             details.setdefault('repair_map', {}).setdefault(task_id, {
@@ -109,6 +124,7 @@ def execute_workflow_recovery(ports, operation, owner):
             step('finalize_started')
             if not ports.clear_finalize_escalation(task['task_id']):
                 return 'waiting_human', {'reason': 'escalation_clear_failed', **details}
+            before_effect()
             ports.finalize_completed_task(task['task_id'])
             fresh = store.get_task(task['task_id']) or {}
             if fresh.get('finalize_escalated'):
@@ -142,7 +158,9 @@ def execute_workflow_recovery(ports, operation, owner):
                 return 'waiting_human', {'reason': 'successor_lineage_unconfirmed', **details}
             details['target_runs'][next_id] = successor['run_id']
             details['repair_map'][tid] = {'kind':'successor', 'task_id':next_id,
-                'run_id':successor['run_id'], 'source_run_id':task.get('run_id')}
+                'run_id':successor['run_id'], 'source_run_id':task.get('run_id'),
+                'completion_epoch': successor.get('completion_epoch'),
+                'completion_identity_path': successor.get('completion_identity_path')}
             step('successor_delivery_confirmed', validate=False)
         elif task.get('status') in ports.REWORKABLE_STATUSES:
             details['rework_ids'].append(tid)
@@ -192,7 +210,8 @@ def execute_workflow_recovery(ports, operation, owner):
                 details['target_runs'][next_id] = successor['run_id']
                 details['repair_map'][tid] = {'kind': 'successor', 'task_id': next_id,
                     'run_id': successor['run_id'], 'source_run_id': task.get('run_id'),
-                    'root': 'frozen_candidate'}
+                    'root': 'frozen_candidate', 'completion_epoch': successor.get('completion_epoch'),
+                    'completion_identity_path': successor.get('completion_identity_path')}
                 step('successor_delivery_confirmed', validate=False)
             else:
                 return 'waiting_human', {'reason': 'target_requires_explicit_replacement', 'missing_task_ids':[tid], **details}
@@ -211,10 +230,9 @@ def execute_workflow_recovery(ports, operation, owner):
     for gate in payload['gate_nodes']:
         if gate in details.get('invalidated_gate_nodes', []):
             continue
-        try:
-            ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None, preserve_task_ids=confirmed_targets)
-        except TypeError:
-            ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None)
+        before_effect()
+        ports.invalidate_for_fix_loop(wid, gate, config, retry_node=None,
+            preserve_task_ids=confirmed_targets, before_effect=before_effect)
         details.setdefault('invalidated_gate_nodes', []).append(gate)
         step('gate_invalidated', validate=False)
     remaining = [t for t in store.list_tasks(workflow_id=wid) if t.get('status') != 'superseded'
@@ -222,6 +240,7 @@ def execute_workflow_recovery(ports, operation, owner):
                  and (t.get('node') or t.get('stage')) in payload['gate_nodes']]
     if remaining:
         return 'waiting_human', {'reason': 'gate_invalidation_incomplete', **details}
+    before_effect()
     ports.clear_stage_advance(wid, payload['retry_node'])
     return 'awaiting_result', {'step': 'awaiting_new_candidate', **details}
 
