@@ -3698,3 +3698,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 真实调用链：①临时仓 auto-init（阈值=1）→ EVALUATOR.sh/GOAL 含冒烟契约 → `bin/herdr-loop eval` 收敛 score=100、total=0（零伪造证据）；坏 import 仓 TEST_EXIT=2 诚实红。②临时 sqlite store + 真实 reap_task_pane：事件 orphan_pane_interrupted → orphan_pane_unclaimed_commits → task_transition(pane_reaped) → orphan_pane_reap 全落库，pane_id 释放；
   - `python3 -m compileall -q herdr services bin tests` clean；`git diff --check` clean；`docs/lessons/lessons-learned.md` §198。
 - 已知边界：冒烟阈值为启发式（5000 项），介于其间的重套件仍可能超预算（TEST_EXIT=124 诚实红）；提交收割的候选旋转仍是产品决策（本 PR 只落证据事件）。
+
+## [2026-10-25] PR #346 评审修复 | Codex P1/P2：孤儿看护中断前验证 pane 归属、探测失败不重置看护周期
+- 触发：PR #346 Codex 评审两条（均确认有效）：
+  - P1——中断仅凭 agent_status=working，未验证 pane 归属；pane 被复用/共享/认领时会误中断无关 agent（守卫链只在回收时跑，晚于中断）。
+  - P2——agent_status 瞬态失败返回 None 被当成不活跃，episode 连带中断时间戳被删，下次 working 重新中断并重置关闭宽限（working→None→working 六秒内两次中断，有界性被破坏）。
+- 变更（`services/herdr-sentinel.py` check_orphan_panes）：强制判定序——确认 working → 归属预检（`_orphan_probe` 身份证明或 pane 缺失才动手，其余 retained 一次定案不重试）→ 一次 ctrl-c → 关闭宽限（从原始中断时间起算，None 不清 episode）→ reap 全守卫链；缺失 pane 快捷仅在无 episode 时建卡，与共享回收计时兼容。
+- 证据：新增 2 项先红后绿（归属未证明零动作+中断陷阱、working→None→working 单次中断+宽限不重置）；`tests/test_sentinel_orphan_pane_janitor.py` 12 项全绿；受影响 18 文件批次 257 passed；真实链双路径（proven 完整看护 / unproven 零动作）。
