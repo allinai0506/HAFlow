@@ -23,14 +23,12 @@ from __future__ import annotations
 import importlib
 import importlib.machinery
 import importlib.util
-import json
 import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 
 from herdr.liveness import EpisodeStore
 from herdr.state_store import SQLiteStateStore
@@ -756,10 +754,17 @@ class FrozenCandidateSuccessorExecutionTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def _invalidate(self, wid, gate, config, retry_node=None, preserve_task_ids=None, **kwargs):
-        """测试桩:模拟真实原语清理门禁裁决(被测的是继任者构造,不是作废机制)。"""
+        """Match the real invalidator's guarded supersede; assertions test successor construction."""
         task = self.store.get_task("gate")
         if task:
-            self.store.save_task({**task, "stage_verdict": "invalidated"})
+            if kwargs.get("before_effect"):
+                kwargs["before_effect"]()
+            result = self.store.compare_and_set_task_transition(
+                task_id=task["task_id"], to_status="superseded",
+                expected_status=task["status"], expected_version=task["version"],
+                reason="fix-loop gate invalidation", source="test",
+            )
+            assert result["accepted"]
 
     def _claim_operation(self):
         import time as _time
@@ -894,7 +899,6 @@ class RecordRouterFailureIdentityTest(unittest.TestCase):
 
     def test_intent_execution_id_wins_and_supersede_then_succeeds(self):
         """D1+D2 集成:身份完整的失败行可以被正规 supersede 回链。"""
-        import subprocess as sp
         import tempfile
         from pathlib import Path as P
 

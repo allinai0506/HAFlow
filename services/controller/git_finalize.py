@@ -2,27 +2,10 @@
 
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
-
-def _should_allow_rebase(task):
-    if not task or not isinstance(task, dict):
-        return False
-    if task.get("allow_rebase") is not None:
-        return bool(task.get("allow_rebase"))
-    if bool(task.get("onto")) or bool(task.get("onto_branch")):
-        return True
-    if bool(task.get("supersedes")):
-        return True
-    if bool(task.get("is_replay")) or bool(task.get("replay")):
-        return True
-    try:
-        if int(task.get("dispatch_round") or 1) > 1:
-            return True
-    except (ValueError, TypeError):
-        pass
-    return False
+from services.controller.finalize_support import _should_allow_rebase
 
 
-def finalize_completed_task(ports, task_id):
+def finalize_completed_task(ports, task_id, before_action=None):
     """Drive one git-finalize step; returns ``{"retryable": bool, ...}``.
 
     M-2: deterministic outcomes (rc=3 EMPTY, rc=4 REFUSED, rc=5
@@ -33,8 +16,17 @@ def finalize_completed_task(ports, task_id):
     H-1: rc=5 (main repo tracked changes) is persistent, never self-heals,
     so it escalates immediately instead of retrying 5x into
     ``finalize_escalated`` + silent ``delivered``.
+    ``before_action(action, task_id=None, commit_head=None)`` optionally
+    re-checks recovery budget/ownership before each new independent action;
+    raising stops the chain in place, keeping results already produced.
     """
     task = ports.get_task(task_id)
+
+    def guard(action, commit_head=None):
+        if before_action is not None:
+            before_action(action, task_id=task_id, commit_head=commit_head)
+
+    own_head = None
 
     if not task:
         print(f"[FINALIZE SKIP] task={task_id} missing")
@@ -107,6 +99,7 @@ def finalize_completed_task(ports, task_id):
             if check_rebase(task):
                 commit_args.append("--allow-rebase")
 
+            guard("commit")
             result = ports.subprocess.run(
                 commit_args,
                 text=True,
@@ -137,6 +130,7 @@ def finalize_completed_task(ports, task_id):
                         commit_payload,
                     )
                     return {"retryable": False, "kind": "empty", "rc": 3}
+                guard("cleanup_ready")
                 if not ports.set_task_status(task_id, "cleanup_ready"):
                     print(
                         f"[FINALIZE ERROR] "
@@ -196,14 +190,12 @@ def finalize_completed_task(ports, task_id):
                 )
                 return {"retryable": True, "kind": "error", "rc": result.returncode}
             else:
+                if commit_payload.get("task_id") == task_id and commit_payload.get("result") in ("created", "adopted"):
+                    own_head = commit_payload.get("commit") or None
                 task = ports.get_task(task_id)
 
                 if not task or task.get("status") != "committed":
-                    print(
-                        f"[FINALIZE ERROR] "
-                        f"task={task_id} "
-                        f"did not reach committed"
-                    )
+                    print(f"[FINALIZE ERROR] task={task_id} did not reach committed")
                     return {"retryable": True, "kind": "error"}
 
         if skip_integrate:
@@ -214,6 +206,7 @@ def finalize_completed_task(ports, task_id):
             )
         else:
             # 2. Rebase + 导入主仓库 + Integration Branch
+            guard("integrate", commit_head=own_head)
             result = ports.subprocess.run(
                 [
                     ports.TASK_MANAGER,
@@ -310,6 +303,7 @@ def finalize_completed_task(ports, task_id):
                 return {"retryable": True, "kind": "error"}
 
             # 3. 允许清理
+            guard("cleanup_ready", commit_head=own_head)
             if not ports.set_task_status(
                 task_id,
                 "cleanup_ready"
@@ -359,6 +353,7 @@ def finalize_completed_task(ports, task_id):
             if diag.get("reason") or unadopted_head:
                 commit_env = dict(ports.os.environ)
                 commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
+                guard("commit")
                 commit_proc = ports.subprocess.run(
                     [
                         ports.TASK_MANAGER,
@@ -425,11 +420,14 @@ def finalize_completed_task(ports, task_id):
                     )
                     return {"retryable": True, "kind": "error", "rc": commit_proc.returncode}
                 else:
+                    if commit_payload.get("task_id") == task_id and commit_payload.get("result") in ("created", "adopted"):
+                        own_head = commit_payload.get("commit") or None
                     task = ports.get_task(task_id) or task
 
             if head_sha and head_sha != baseline:
                 refreshed_commit = (ports.get_task(task_id) or task).get("commit")
                 if not refreshed_commit:
+                    guard("commit", commit_head=head_sha)
                     from herdr import kernel
                     kernel.update_task_metadata(
                         task_id,
@@ -437,6 +435,7 @@ def finalize_completed_task(ports, task_id):
                         store=ports._get_store(),
                     )
                     task = ports.get_task(task_id) or task
+        guard("cleanup_ready", commit_head=own_head)
         if not ports.set_task_status(
             task_id,
             "cleanup_ready"
@@ -454,6 +453,7 @@ def finalize_completed_task(ports, task_id):
     # --------------------------------
     # 自动 Cleanup
     # --------------------------------
+    guard("cleanup", commit_head=own_head)
     result = ports.subprocess.run(
         [
             ports.TASK_MANAGER,
@@ -483,6 +483,7 @@ def finalize_completed_task(ports, task_id):
     task = ports.get_task(task_id)
 
     if task:
+        guard("stage_advance", commit_head=own_head)
         ports.enqueue_stage_advance(
             task
         )
