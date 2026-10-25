@@ -29,7 +29,7 @@ def _has_table(conn, name):
     return bool(conn.execute('SELECT 1 FROM sqlite_master WHERE type=? AND name=?', ('table', name)).fetchone())
 
 
-def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=None):
+def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=None, target_task_id=None):
     """Read graph/action/recovery/event facts from one bounded SQLite snapshot."""
     conn = state_db.get_readonly_db_connection(store.db_path)
     try:
@@ -89,9 +89,8 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
         if not action.target.get('task_id'):
             action.expected_identity['workflow_fingerprint'] = control_fingerprint
     graph = workflow_graph_projection({**config, **workflow}, tasks)
-    result = build_cockpit_projection(workflow=workflow, config=config, tasks=tasks, graph=graph,
-                                      actions=actions, recovery=operations, controller=controller,
-                                      events=events, errors=errors, action_id=action_id)
+    result = build_cockpit_projection(workflow=workflow, config=config, tasks=tasks, graph=graph, actions=actions, recovery=operations,
+                                      controller=controller, events=events, errors=errors, action_id=action_id, target_task_id=target_task_id)
     for action in result['actions']:
         action['effect'] = action.get('effect') or action.get('description') or action.get('title') or action['action_id']
         automatic = (action['automation']['mode'] == 'automatic'
@@ -381,9 +380,10 @@ def execute_action(payload, *, deps, automatic=False):
     if action['automation']['mode'] == 'confirmation_required' and payload.get('confirmed') is not True:
         return reject('confirmation_required')
     kind = controller_action_type(action)
+    if kind == 'confirm_dispatch' and not (str(payload.get('reason') or '').strip() and str(payload.get('operator') or '').strip()):
+        return reject('reason_required')  # decide_operation input contract, enforced before any durable claim
     if automatic and ((action.get('automation') or {}).get('mode') != 'automatic'
-                      or action.get('is_destructive') or action.get('risk') in {'destructive', 'evidence_bypass'}
-                      or action.get('category') == 'bypass'
+                      or action.get('is_destructive') or action.get('risk') in {'destructive', 'evidence_bypass'} or action.get('category') == 'bypass'
                       or kind in {'halt', 'supersede', 'force_pass', 'force_pass_advance', 'accept_and_commit', 'close_workflow'}):
         return reject('automatic_action_unsafe')
     if automatic and any(op.get('status') not in {'resolved', 'superseded'} for op in before.get('recovery', [])):

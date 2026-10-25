@@ -231,7 +231,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/controller-cockpit':
                 from console import controller_cockpit_api
                 return self.send_json(200,controller_cockpit_api.get_controller_cockpit(
-                    self.query().get('workflow_id',[''])[0], action_id=self.query().get('action_id',[None])[0]))
+                    self.query().get('workflow_id',[''])[0], action_id=self.query().get('action_id',[None])[0],
+                    target_task_id=self.query().get('target_task_id',[None])[0]))
             if p=='/api/workflow/recovery':
                 return self.send_json(200,workflow_api.api_workflow_recovery(self.query().get('workflow_id',[''])[0]))
             if p=='/api/workflow/decisions':

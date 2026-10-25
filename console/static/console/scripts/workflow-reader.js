@@ -166,16 +166,25 @@ function workflowExtraRequest(path,sequence){
   workflowExtraRequests.set(key,entry);
   return entry.promise;
 }
+function cockpitTargetLookup(workflowId){
+  const target=state.controllerTarget;
+  if(target?.workflowId!==workflowId)return {key:'',actionId:'',targetTaskId:''};
+  if(target.operationId!=null)return {key:'op:'+target.operationId,actionId:workflowId+':confirm_dispatch:'+target.operationId,targetTaskId:''};
+  const tasks=(state.workflow&&state.workflow.tasks)||[];
+  const tid=target.taskId||((target.runId||target.paneId)?((tasks.find(t=>(target.runId&&t.run_id===target.runId)||(target.paneId&&(t.pane_id===target.paneId||(t.runtime&&t.runtime.pane_id===target.paneId))))||{}).task_id||''):'');
+  return tid?{key:'task:'+tid,actionId:'',targetTaskId:tid}:{key:'',actionId:'',targetTaskId:''};
+}
 async function loadControllerCockpit(workflowId){
   const sequence=state.controllerCockpitSeq=(state.controllerCockpitSeq||0)+1;
-  const target=state.controllerTarget;
-  const actionId=target?.workflowId===workflowId&&target.operationId!=null?workflowId+':confirm_dispatch:'+target.operationId:'';
+  const lookup=cockpitTargetLookup(workflowId);
   const current=()=>sequence===state.controllerCockpitSeq&&(state.workflowId===workflowId||(state.workflowId==='__ctl__'&&(state.controllerTarget?.workflowId||state.workflow?.workflow?.workflow_id)===workflowId));
   try{
-    const data=await api('/api/workflow/controller-cockpit?workflow_id='+encodeURIComponent(workflowId)+(actionId?'&action_id='+encodeURIComponent(actionId):''));
+    const data=await api('/api/workflow/controller-cockpit?workflow_id='+encodeURIComponent(workflowId)
+      +(lookup.actionId?'&action_id='+encodeURIComponent(lookup.actionId):'')
+      +(lookup.targetTaskId?'&target_task_id='+encodeURIComponent(lookup.targetTaskId):''));
     if(!current())return;
     if(data.workflow?.workflow_id!==workflowId)throw new Error('工作流身份不匹配');
-    state.controllerCockpit={...data,action_lookup:actionId};
+    state.controllerCockpit={...data,action_lookup:lookup.key};
     const receipt=state.controllerReceipt;
     if(receipt?.workflow_id===workflowId&&receipt.status==='accepted_waiting'){
       const updated=receipt.operation_id!=null&&(data.receipts||[]).find(r=>r.action_id===receipt.action_id&&r.operation_id===receipt.operation_id);
@@ -235,7 +244,7 @@ function clearWorkflow(){
 }
 return {
   workflowSubject, workflowDisplayName, copyWorkflowId, editWorkflowTitle,
-  renderWorkflowSwitcher, loadWorkflow, loadControllerCockpit, clearWorkflow
+  renderWorkflowSwitcher, loadWorkflow, loadControllerCockpit, cockpitTargetLookup, clearWorkflow
 };
 })({
   state, toast, showPromptModal,

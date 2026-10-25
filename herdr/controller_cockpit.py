@@ -4,17 +4,117 @@ The shell owns coherent, bounded reads. This module performs no I/O and neither
 dispatches work nor treats a recommendation as an execution receipt.
 """
 
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from heapq import nlargest
 
 from .controller_actions import action_automation, controller_action_type, resolve_workflow_blockers
+from .workflow import resolve_control_policy
 
 MAX_TASKS = 200
 MAX_ACTIONS = 100
 MAX_TIMELINE = 100
 MAX_NODES = 200
 MAX_RECOVERY = 100
+# Row counts do not bound bytes: agent-produced text needs explicit budgets so
+# one oversized field cannot dominate a Cockpit response.
+MAX_FIELD_BYTES = 4096
+MAX_TASK_BYTES = 8192
+MAX_WORKFLOW_BYTES = 32768
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+# Identity, policy and safety facts stay complete; only display text is bounded.
+TASK_IDENTITY_FIELDS = frozenset({
+    "task_id", "workflow_id", "parent_task_id", "superseded_by", "node", "stage",
+    "status", "stage_verdict", "stage_verdict_note", "agent", "run_id", "execution_id",
+    "candidate_sha", "pane_id", "version", "created_at", "updated_at",
+})
+WORKFLOW_IDENTITY_FIELDS = frozenset({
+    "workflow_id", "title", "template_name", "current_stage", "status", "outcome",
+    "created_at", "updated_at", "execution_id", "run_id", "candidate_sha",
+    "candidate_episode_id", "candidate_source_node", "agent_override",
+})
+
+
+def _utf8_len(value):
+    return len(value.encode("utf-8", "ignore"))
+
+
+def _bounded_copy(record, protected, field_limit, row_limit):
+    """Display copy with explicit truncation markers; identity fields stay complete.
+
+    Truncation is recorded per field under ``_truncated_fields`` so a shortened
+    value is distinguishable from an absent or unknown one. The marker list
+    lives on the row while budgeting, so its own bytes count against the limit.
+    """
+    row = deepcopy(record)
+    truncated = {}
+    sizes = {}
+    for key, value in row.items():
+        if key in protected:
+            continue
+        if isinstance(value, str):
+            sizes[key] = _utf8_len(value)
+        elif isinstance(value, (dict, list)):
+            sizes[key] = _utf8_len(json.dumps(value, ensure_ascii=False, default=str))
+
+    def shrink(key, keep):
+        original = row[key]
+        if isinstance(original, str):
+            row[key] = original.encode("utf-8")[:keep].decode("utf-8", "ignore")
+            omitted = sizes[key] - keep
+        else:
+            row[key] = {"truncated": True, "omitted_bytes": sizes[key]}
+            omitted = sizes[key]
+        entry = truncated.get(key)
+        if entry is None:
+            entry = {"field": key, "omitted_bytes": 0}
+            truncated[key] = entry
+            row["_truncated_fields"] = sorted(truncated.values(), key=lambda item: item["field"])
+        entry["omitted_bytes"] += omitted
+        sizes[key] = 0
+
+    for key in sorted(sizes, key=sizes.get, reverse=True):
+        if sizes[key] <= field_limit:
+            break
+        shrink(key, field_limit)
+
+    def row_bytes():
+        return _utf8_len(json.dumps(row, ensure_ascii=False, default=str))
+
+    while sizes:
+        excess = row_bytes() - row_limit
+        if excess <= 0:
+            break
+        key = max(sizes, key=sizes.get)
+        if sizes[key] <= 128:
+            break
+        # Cut enough for this field to absorb the whole overflow, including
+        # the marker entry it may add, so the loop converges immediately.
+        marker_growth = 0 if key in truncated else 96
+        shrink(key, max(0, sizes[key] - excess - marker_growth))
+    if not truncated:
+        row.pop("_truncated_fields", None)
+    return row
+
+
+def _bounded_response(result):
+    """Shed optional display sections before the whole read fails closed."""
+    sheds = []
+
+    def size():
+        return _utf8_len(json.dumps(result, ensure_ascii=False, default=str))
+
+    if size() <= MAX_RESPONSE_BYTES:
+        return sheds
+    for event in result.get("timeline") or []:
+        event.pop("payload", None)
+    sheds.append("timeline_payloads")
+    if size() > MAX_RESPONSE_BYTES:
+        for node in result.get("nodes") or []:
+            node["tasks"] = []
+        sheds.append("node_task_rows")
+    return sheds
 
 
 def _owned(record, workflow_id):
@@ -56,7 +156,8 @@ def _event_order(event):
     return timestamp, event.get("id") if isinstance(event.get("id"), int) else 0
 
 
-def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unknown, graph_node_ids, action_id=None):
+def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unknown, graph_node_ids,
+                     action_id=None, target_task_id=None):
     wid = workflow.get("workflow_id")
     by_id = {task.get("task_id"): task for task in all_tasks if isinstance(task, dict) and task.get("task_id")}
     projected = []
@@ -65,8 +166,15 @@ def _project_actions(actions, workflow, config, all_tasks, unresolved, read_unkn
     # Tasks can otherwise consume the entire window before resume is visited.
     ordered = sorted(actions, key=lambda a: bool((a.target if hasattr(a, 'target') else a.get('target', {})).get('task_id')))
     for raw in ordered:
-        if action_id is not None and (raw.action_id if hasattr(raw, 'action_id') else raw.get('action_id')) != action_id:
+        raw_id = raw.action_id if hasattr(raw, 'action_id') else raw.get('action_id')
+        if action_id is not None and raw_id != action_id:
             continue
+        if target_task_id is not None:
+            # Deep links resolve the exact target independently of the display cap.
+            raw_target = (raw.target if hasattr(raw, 'target') else raw.get('target', {})) or {}
+            raw_blocker = raw.blocker_task_id if hasattr(raw, 'blocker_task_id') else (raw.get('blocker_task_id') or '')
+            if raw_target.get('task_id') != target_task_id and raw_blocker != target_task_id:
+                continue
         action = raw.to_dict() if hasattr(raw, "to_dict") else deepcopy(raw)
         target = action.get("target") or {}
         payload = action.get("api_payload") or {}
@@ -119,7 +227,8 @@ def _judgment(workflow, nodes, current, ready, unresolved, actions, read_unknown
     return {"now": now, "blocked_reason": blocked_reason, "next": next_step, "requires_user": requires_user}
 
 
-def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recovery, controller, events, errors=None, action_id=None):
+def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recovery, controller, events,
+                             errors=None, action_id=None, target_task_id=None):
     """Assemble a bounded read model; absent snapshots always remain unknown.
 
     Recovery, events and Tasks must be Workflow-scoped by the shell. Explicit
@@ -131,6 +240,9 @@ def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recover
                                       ("controller", controller), ("events", events)) if value is None]
     workflow = workflow or {}
     config = config or {}
+    # Resolved before any display truncation: policy facts never come from a
+    # bounded copy, and an unavailable config stays explicitly unknown.
+    control_policy = resolve_control_policy(config, "", "advance") if config.get("nodes") else None
     graph = graph or {}
     runtime = deepcopy(controller or {})
     runtime["status"] = runtime.get("status") or "unknown"
@@ -143,7 +255,8 @@ def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recover
     visible_tasks = owned_tasks[:MAX_TASKS]
     by_node = {}
     for task in visible_tasks:
-        by_node.setdefault(task.get("node") or task.get("stage"), []).append(deepcopy(task))
+        by_node.setdefault(task.get("node") or task.get("stage"), []).append(
+            _bounded_copy(task, TASK_IDENTITY_FIELDS, MAX_FIELD_BYTES, MAX_TASK_BYTES))
     nodes = []
     for node in (graph.get("nodes") or [])[:MAX_NODES]:
         row = deepcopy(node)
@@ -156,21 +269,36 @@ def build_cockpit_projection(*, workflow, config, tasks, graph, actions, recover
     unresolved = [op for op in scoped_recovery if op.get("status") not in {"resolved", "superseded"}]
     projected_actions, actions_truncated = _project_actions(actions or [], workflow, config, all_tasks,
                                                            unresolved, read_unknown,
-                                                           {node.get("id") for node in graph.get("nodes") or []}, action_id)
+                                                           {node.get("id") for node in graph.get("nodes") or []},
+                                                           action_id, target_task_id)
     timeline = nlargest(MAX_TIMELINE + 1, (event for event in events or [] if _owned(event, wid)), key=_event_order)
     todos = [{"kind": "recovery", **deepcopy(op)} for op in unresolved[:MAX_RECOVERY]]
     todos.extend({"kind": "action", "action_id": a.get("action_id"), "title": a.get("title"),
                   "target": deepcopy(a.get("target") or {}), "automation": deepcopy(a["automation"])}
                  for a in projected_actions if a.get("recommended") and a["automation"]["mode"] != "automatic")
-    return {
-        "schema": "controller-cockpit/v1", "workflow": deepcopy(workflow), "controller": runtime,
+    result = {
+        "schema": "controller-cockpit/v1",
+        "workflow": _bounded_copy(workflow, WORKFLOW_IDENTITY_FIELDS, MAX_FIELD_BYTES, MAX_WORKFLOW_BYTES),
+        "controller": runtime,
+        "control_policy": control_policy,
         "judgment": _judgment(workflow, nodes, current, ready, unresolved, projected_actions, read_unknown),
         "read_state": "unknown" if read_unknown else "confirmed", "errors": deepcopy(errors or {}),
         "missing_sources": missing, "nodes": nodes, "current_nodes": current, "ready_nodes": ready,
-        "tasks": deepcopy(visible_tasks), "todos": todos, "actions": projected_actions,
+        "tasks": [_bounded_copy(task, TASK_IDENTITY_FIELDS, MAX_FIELD_BYTES, MAX_TASK_BYTES)
+                  for task in visible_tasks],
+        "todos": todos, "actions": projected_actions,
         "recovery": deepcopy(scoped_recovery[:MAX_RECOVERY]), "timeline": deepcopy(timeline[:MAX_TIMELINE]),
         "tasks_truncated": len(owned_tasks) > MAX_TASKS, "actions_truncated": actions_truncated,
         "timeline_truncated": len(timeline) > MAX_TIMELINE,
         "nodes_truncated": len(graph.get("nodes") or []) > MAX_NODES,
         "recovery_truncated": len(scoped_recovery) > MAX_RECOVERY,
     }
+    sheds = _bounded_response(result)
+    if sheds:
+        result["response_shed"] = sheds
+    if _utf8_len(json.dumps(result, ensure_ascii=False, default=str)) > MAX_RESPONSE_BYTES:
+        # Budgets failed even after shedding optional sections: fail closed
+        # instead of serving a read that cannot be trusted for execution.
+        result["read_state"] = "unknown"
+        result["errors"] = {**result["errors"], "response_budget": "exceeded"}
+    return result
