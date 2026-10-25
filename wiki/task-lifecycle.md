@@ -858,3 +858,13 @@ FACT：本次承接基线为 `a56739e`，单体 8169 行、167 绑定（153 def/
 `register_workflow` 的唯一宿主为 `herdr/state/transition_gate.py`，门面显式 import 与 `__all__` 再导出；删除内联相对导入后复用顶层绝对导入，事务与 fallback 契约保持上游行为。300-500 行目标 + 登记例外：第 9 条 `above=ARCH-4.7-transition-gate-port`，实际 546 行。G-5 静态图为 25 模块 / 74 边，与历史动态调用边口径分开。
 
 Evidence：`scripts/check_state_db_split.py --report --symbols` 为 symbol→line 权威；`--snapshot-baseline` 为 live 167 绑定且拒绝缺失绑定与未知 owner。`tests/test_state_db_split_source_equivalence.py` 验证搬迁 AST 与 35 个 time 表达式；`tests/test_state_db_real_patch_paths.py` 验证注册事务边界；`tests/test_state_db_ddl_sequence.py` 五路径运行 trace 与 schema 93 对象等价分证。共享台账 wf-haflow-1020-02 / implementation 保存本次命令原文，独立洁净室验收待 test 节点执行。
+
+### 交付 PR 入口边界与主干漂移合并面（2026-10-25）
+
+FACT：`herdr-task create-pr` 的平台可用性由两处准入共同决定，不以子命令存在为准。其一，`herdr/wrapup_delivery.py#enabled` 只对 `software-development-v1` / `spec-development-v1` 且 wrapup 节点 `review_closure_required=true`、`integration_mode=none` 的任务开放收尾侧 Git 交付；其余模板（含 `code-craft-v1`）的 wrapup 没有 commit→integrate 通道，`herdr/pr_delivery.py#_publication` 必然返回 `task must be integrated before PR publication`。其二，`herdr/pr_delivery.py#repository_identity` 只识别字面 `github.com` / `gitee.com` host，SSH host 别名 remote（如 `git@github-allinai:`）使已集成任务也返回 `PR publication requires an identified GitHub or Gitee origin`，与凭据无关。
+
+FACT：两条前置失败均为结构性而非瞬态，先例降级通道是：留平台拒绝原文 → `record-delivery` 登记交付身份（`check-delivery` 在无有效 delivery note 时拒绝）→ 以门禁认证的 task-owned 集成 ref 为 head 推送候选专属分支 → forge CLI 创建待审查 PR。降级路径不改变交付身份四要素（delivery_branch/candidate_sha/review_task/test_gate）与 head 必须等于已认证 `candidate_sha` 的约束，也不放宽 PR 审核闭环。
+
+FACT：候选冻结后主干前进会把追加式文档变成合并面。`docs/lessons/lessons-learned.md` 与 `wiki/log.md` 的尾部追加位置在并行候选间必然冲突（wf-haflow-1024-02 的 `183fbf9` 与主干 PR #347 同时写 `## 199`），而代码与测试面可自动合并。收尾以 `git merge-tree --write-tree <base> <candidate>` 只读预演并把冲突文件与"保留双方内容、按合并后顺序重编号"的口径写进合并指引；不得靠改写已认证分支历史（rebase 会使 `candidate_sha`、join 结论与交付身份同时失效）消除冲突。
+
+Evidence：`/tmp/wf326-wrapup/create-pr-wrapup.txt`、`create-pr-craft.txt`（两条 REFUSED 原文）、交付身份 note `n-1792915144325-9bef`、`git merge-tree --write-tree 8092ed6 183fbf9`；`herdr/wrapup_delivery.py#TEMPLATES/enabled`、`herdr/pr_delivery.py#repository_identity/_publication`；先例 `docs/walkthroughs/20261016-experience-hub-postmerge-hardening-wrapup.md`、`20261017-wf-haflow-1016-02-wrapup.md`、`20261018-wf-haflow-1018-01-wrapup.md`、`20261018-wf-haflow-1018-02-wrapup.md`。

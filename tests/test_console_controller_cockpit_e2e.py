@@ -363,6 +363,45 @@ def test_canvas_deeplink_and_responsive_cockpit(cockpit):
         assert "FIT=true" in out
 
 
+def test_collapsed_drawer_does_not_intercept_controller_button(cockpit):
+    """Issue #326: a real pointer click reaches the workspace action above the drawer."""
+    open_cockpit(cockpit)
+    out = cockpit.browser("""
+        await page.cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
+        await page.evaluate(()=>returnFromControllerCockpit());
+        await page.waitForFunction(()=>state.workflowId!=='__ctl__'&&document.getElementById('flowWrap')?.style.display==='flex');
+        await page.click('loc=css:.x6-node[data-cell-id="gate"]');
+        await page.waitForFunction(()=>state.flowSelectedNodeId==='gate'&&state.selectedTaskId==='blocked');
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(()=>!document.getElementById('taskDrawer').classList.contains('open'));
+        const geometry=await page.evaluate(()=>{
+            const button=document.querySelector('#flowInspectorBody .flow-act-group > button');
+            const drawer=document.getElementById('deepDrawer');
+            const head=drawer.querySelector('.drawer-head');
+            const bar=document.getElementById('consoleBottomBar');
+            const rect=node=>{const r=node.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,top:r.top,right:r.right,bottom:r.bottom,left:r.left};};
+            const buttonRect=rect(button);
+            const center={x:buttonRect.left+buttonRect.width/2,y:buttonRect.top+buttonRect.height/2};
+            const hit=document.elementFromPoint(center.x,center.y);
+            return {button:buttonRect,drawerHead:rect(head),bottomBar:rect(bar),center,
+                hitTag:hit?.tagName,hitText:hit?.textContent?.trim(),hitIsButton:hit===button||button.contains(hit),
+                drawerCollapsed:drawer.classList.contains('collapsed')};
+        });
+        console.log('ISSUE326_GEOMETRY='+JSON.stringify(geometry));
+        if(!geometry.drawerCollapsed||!geometry.hitIsButton||geometry.drawerHead.top<geometry.bottomBar.top){
+            throw new Error('collapsed drawer geometry still intercepts the workspace');
+        }
+        await page.click('loc=css:#flowInspectorBody .flow-act-group > button',{label:'open Controller action'});
+        await page.waitForFunction(()=>state.workflowId==='__ctl__'&&state.controllerTarget.nodeId==='gate');
+        console.log('ISSUE326_CLICK='+JSON.stringify(await page.evaluate(()=>({
+            workflowId:state.workflowId,nodeId:state.controllerTarget.nodeId,
+            drawerCollapsed:document.getElementById('deepDrawer').classList.contains('collapsed')
+        }))));
+    """)
+    assert '"hitIsButton":true' in out
+    assert 'ISSUE326_CLICK={"workflowId":"__ctl__","nodeId":"gate","drawerCollapsed":true}' in out
+
+
 def test_recovery_read_failure_shows_unknown(cockpit, monkeypatch):
     from herdr import state_db
     open_cockpit(cockpit)

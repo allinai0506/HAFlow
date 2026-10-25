@@ -24,8 +24,7 @@ def test_composed_page_preserves_pre_split_dom_css_and_branding():
     import re
     baseline = json.loads((ROOT / 'tests/fixtures/console-ui-baseline.json').read_text())['metadata']
     styles = re.findall(r'<style>(.*?)</style>', console.HTML_TEMPLATE, re.S)
-    # Cockpit styles intentionally changed; the unrelated enhancement is frozen.
-    assert hashlib.sha256(styles[1].encode()).hexdigest() == baseline['styles'][1]
+    assert [hashlib.sha256(style.encode()).hexdigest() for style in styles] == baseline['styles']
     assert styles[0].count('.controller-cockpit-wrap {') == 2  # base + responsive
     skeleton = re.sub(r'(<style>|<script>).*?(</style>|</script>)', r'\1\2', console.HTML_TEMPLATE, flags=re.S)
     assert hashlib.sha256(skeleton.rstrip('\n').encode()).hexdigest() == baseline['dom_sha256']

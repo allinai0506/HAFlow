@@ -247,9 +247,9 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
         self.assertIn('data-rail-nav="workbench"', self.html)
         self.assertIn('data-rail-nav="dashboard"', self.html)
 
-        # 2. Bottom Bar (28px, pure light, status & deep drawer hook)
+        # 2. Bottom Bar (48px, pure light, status & deep drawer hook)
         self.assertIn('<footer class="light-bottom-bar" id="consoleBottomBar">', self.html)
-        self.assertIn('.light-bottom-bar {\n  height: 28px;', self.html)
+        self.assertIn('.light-bottom-bar {\n  height: 48px;', self.html)
         self.assertIn('toggleDeepDrawer()', self.html)
         self.assertIn('Controller 正常调度', self.html)
 

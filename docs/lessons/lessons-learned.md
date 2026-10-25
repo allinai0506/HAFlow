@@ -8352,3 +8352,108 @@ python3 -m pytest -q tests/test_recovery_autonomy.py -k finalize
 ```
 
 Evidence：`tests/test_recovery_autonomy.py#test_finalize_commit_crossing_total_deadline_never_starts_integrate` 使用真实 Controller 恢复入口、真实 SQLite、生产 finalize 实现与真实 guard，临时 Git 仓真实提交并核对新 SHA；仅原生子进程传输被包装且真实执行。隔离集成验证通过，用户现场未验证。
+## 201. 固定折叠层的几何修复必须验证最终命中对象（2026-10-25）
+
+### 问题背景
+
+HAFlow issue #326 中，Console 底部折叠抽屉遮挡工作区“在 Controller 中处理”动作。上一候选只把底栏提升为 48px，并用整文件子串断言护航；真实浏览器仍在按钮中心 `(1232.68, 845.71)` 命中遮挡层而非按钮，且合成 CSS 冻结护栏失败。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 把 `bottom` 当成抽屉头高度补偿 | fixed 元素的 `bottom` 是整个元素离视口底部的距离；折叠头已由 transform 留出 48px 时，再设 `bottom: 48px` 会把头整体推到工作区上方 | 折叠头要占用底栏带时，先写出视口、底栏、折叠头三者的几何关系；本布局必须满足 bar height = head height 且 drawer bottom = 0 |
+| 用整文件 `height: 48px` 子串当护栏 | 同文件其他规则已有相同字面量，撤掉目标修复仍会假绿 | CSS 回归必须按选择器提取规则块，再比较相关属性；必须执行一次撤销实现的反向验证 |
+| 静态 CSS 断言替代真实点击 | 声明值相等不能证明层叠、transform、z-index 和实际命中结果 | UI 遮挡修复必须启动本地服务，记录目标/遮挡层包围盒与 `elementFromPoint(目标中心)`，再执行真实 pointer click 并验证业务状态变化 |
+| 修改合成 CSS 后只改断言或漏更新冻结面 | 裸改断言会把兼容性变化藏起来；只冻结部分 style 块又会让权威源变化逃逸 | 更新 `tests/fixtures/console-ui-baseline.json` 的实际 SHA，并让模块边界测试从 fixture 校验所有合成 style 块 |
+
+### 操作规范（已固化到 `tests/test_console_cockpit_e2e_harness.py` 与 `tests/test_console_controller_cockpit_e2e.py`）
+
+1. **锁住静态几何契约**：分别解析 `.light-bottom-bar`、`.drawer-head` 和桌面/窄屏 `.deep-drawer` 规则，断言 48px 同轴与 `bottom: 0px`。
+2. **保留反向证明**：临时还原旧的 28px 值时，DEF-1/DEF-3 两条护栏必须失败；恢复实现后再转绿。
+3. **用浏览器验证最终命中**：1440x900 视口采集按钮、抽屉头、底栏包围盒，要求 `elementFromPoint` 命中按钮，真实点击进入 Controller 且抽屉仍折叠。
+4. **同步合成页冻结基线**：CSS 变更后用实际 `HTML_TEMPLATE` 计算 SHA，更新 fixture，不把新哈希写入测试断言。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_console_cockpit_e2e_harness.py
+pytest -q -s tests/test_console_controller_cockpit_e2e.py::test_collapsed_drawer_does_not_intercept_controller_button
+pytest -q tests/test_console_module_boundaries.py::test_composed_page_preserves_pre_split_dom_css_and_branding
+```
+
+### 相关文档 / 关联证据
+
+- `docs/bug-reports/2026-10-25-wf-haflow-1024-02-craft-rework-manual.md` — 本次返工的 RED/GREEN、几何、全量和基线记录
+- `console/static/console/styles/shell-inspector.css` — 底栏与抽屉最终几何权威源
+- `tests/fixtures/console-ui-baseline.json` — 合成页 CSS 冻结元数据
+
+---
+
+## 202. wrapup 交付 PR 平台入口的结构性不可用与降级边界（2026-10-25）
+
+### 问题背景
+
+wf-haflow-1024-02（issue #326）收尾要求"步骤 1-2 之后、步骤 3 之前用 `herdr-task create-pr` 建立交付 PR"。实测平台入口对同一条交付链给出两次 REFUSED：对 wrapup 任务返回 `task must be integrated before PR publication`；改对已集成的上游 craft 任务返回 `PR publication requires an identified GitHub or Gitee origin`。这不是新缺陷——`20261016-experience-hub-postmerge-hardening-wrapup`、`20261017-wf-haflow-1016-02-wrapup`、`20261018-wf-haflow-1018-01/02-wrapup` 四次收尾都在第一道拒绝处降级，本轮首次在第二道拒绝处也复现。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 把 `create-pr` 当成任意收尾任务都能用的入口 | `wrapup_delivery.enabled()` 只对 `software-development-v1` / `spec-development-v1` 且 `review_closure_required=true` 的 wrapup 开放 Git 交付；`code-craft-v1` 模板的 wrapup 没有 commit→integrate 通道，`_publication` 必然拒绝 | 判断平台入口可用性以 `wrapup_delivery#enabled` 与任务 `integrated_commit` 为准，不以 CLI 是否提供子命令为准 |
+| origin 使用 SSH host 别名（如 `git@github-allinai:`） | `pr_delivery#repository_identity` 只接受字面 `github.com` / `gitee.com`，别名 remote 使已集成任务也无法发布；这不是凭据问题，重试或换 token 都无效 | 报 REFUSED 后先打印 `git remote get-url origin` 判定是哪一类前置失败，再决定降级路径 |
+| 降级路径被当成"自行 push/建 PR"的违规动作 | 先例已把"源仓 fetch+push 候选分支 → `gh pr create`"固化为降级通道，且平台拒绝输出留证 | 降级前必须留平台拒绝原文，PR 的 head/base/candidate_sha 与门禁认证值逐字一致，不改写历史 |
+| 交付身份先于 PR 假设可省 | `record-delivery` 未登记时 `check-delivery` 报 `no effective delivery note; refusing ambiguous PR` | 无论走平台还是降级，交付身份（delivery-branch/candidate_sha/review-task/test-gate/base）先落 shared note |
+
+### 操作规范
+
+1. 依次实测并留证：`check-delivery` → `record-delivery` → `create-pr <wrapup>` → `create-pr <已集成上游任务>`；两份拒绝输出进 checkpoint 分段。
+2. 降级建 PR 使用门禁认证的 `candidate_sha` 对应的 task-owned 集成 ref（`herdr/integration-<task>`）推送，禁止用 wrapup 文档分支替代候选。
+3. PR 审核闭环（CI/评审 findings）与 `record-review-closure` 在降级路径下同样必做；forge 实证不可用时按平台规则记录原因，不虚构 PASS。
+4. 平台侧待办（第 5 次复现，按本文件纪律应升格为门禁）：允许 wrapup 文档提交后走 `create-pr`，或把降级路径正式化为受管入口；识别 SSH 别名 remote 的仓库身份。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 - <<'PY'
+import sys; sys.path.insert(0,'/Users/user/HAFlow')
+from herdr.wrapup_delivery import enabled, TEMPLATES
+from herdr.pr_delivery import repository_identity
+print(TEMPLATES)
+try: repository_identity('git@github-allinai:allinai0506/HAFlow.git')
+except ValueError as e: print('REFUSED:', e)
+PY
+```
+
+Evidence：本工位 `/tmp/wf326-wrapup/create-pr-wrapup.txt`、`create-pr-craft.txt` 保存两条 REFUSED 原文；交付身份 `n-1792915144325-9bef`；先例见 `docs/walkthroughs/20261018-wf-haflow-1018-02-wrapup.md` L-4。
+
+---
+
+## 203. 追加式文档尾部是合并面：候选冻结后主干前进会让收尾 PR 必冲突（2026-10-25）
+
+### 问题背景
+
+候选 `183fbf9` 基于 `origin/main=127970a` 冻结并通过双门禁；冻结期间主干合入 PR #347（`8092ed6`），该 PR 与候选同时在 `docs/lessons/lessons-learned.md` 和 `wiki/log.md` 尾部追加章节（双方都写 `## 199`）。`git merge-tree --write-tree 8092ed6 183fbf9` 预演结果为这两个文件 CONFLICT，代码与测试面自动合并干净。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 只看代码是否冲突 | 追加式文档（lessons / wiki log / walkthrough）尾部是同一物理位置，两个已认证候选并行必然相撞 | 收尾前用 `git merge-tree --write-tree <base> <candidate>` 预演，把冲突面写进合并指引 |
+| 想让候选 rebase 到最新主干消除冲突 | rebase 会改变 `candidate_sha`，使双门禁结论、join 事件与交付身份全部失效 | 冻结后不改写交付分支历史；冲突在合并时解决，两个 `## 199` 都保留并重编号后到者 |
+| 把冲突当成候选缺陷 | 冲突由主干前进引起，与候选实现无关 | 收尾报告区分"候选缺陷"与"合并面冲突"，后者只给指引不返工 |
+
+### 操作规范
+
+1. 收尾步骤 0 增加主干漂移检查：`git rev-parse origin/main` 与门禁记录的基线比较，不等即预演合并并记录冲突文件。
+2. 合并指引必须给出解决口径：追加式文档保留双方内容、章节编号按合并后顺序重排；代码面按候选原样合入。
+3. 需要 rebase 消除冲突时走平台正常 wrapup 交付路径（重新冻结 → 双门禁重跑），不得手工改写已认证分支。
+
+### 验证命令 / 守护测试
+
+```bash
+git merge-tree --write-tree origin/main <candidate_sha>   # 只读预演，不写工作树
+```
+
+Evidence：`git merge-tree --write-tree 8092ed6 183fbf9` 输出 `docs/lessons/lessons-learned.md`、`wiki/log.md` 两处 CONFLICT；候选侧原 §199 见 `183fbf9`，主干侧 §199/§200 见 `8092ed6`/`4ba150f`；本 PR 合并时经 `scripts/replay-append-only.py` 导出映射 `{199:201, 201:202, 202:203}` 保留双方全文并重编号后到条目，主干前缀逐字节不变。
+---

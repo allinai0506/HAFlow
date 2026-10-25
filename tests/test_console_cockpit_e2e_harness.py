@@ -19,6 +19,9 @@ import re
 from pathlib import Path
 
 JOURNEY = Path(__file__).resolve().parent / "test_console_controller_cockpit_e2e.py"
+ROOT = Path(__file__).resolve().parent.parent
+SHELL_INSPECTOR_CSS = ROOT / "console/static/console/styles/shell-inspector.css"
+POLISH_SHELL_CSS = ROOT / "console/static/console/styles/polish-shell.css"
 
 MODAL_OPEN = "waitForFunction(()=>document.getElementById('modal').classList.contains('open'))"
 MODAL_CLOSE = "waitForFunction(()=>!document.getElementById('modal').classList.contains('open'))"
@@ -26,6 +29,18 @@ MODAL_CLOSE = "waitForFunction(()=>!document.getElementById('modal').classList.c
 
 def source():
     return JOURNEY.read_text(encoding="utf-8")
+
+
+def css_rule(source_text, selector):
+    match = re.search(rf"(?:^|\n){re.escape(selector)}\s*\{{([^}}]+)\}}", source_text)
+    assert match, f"missing CSS rule for {selector}"
+    return match.group(1)
+
+
+def css_pixels(rule, property_name):
+    match = re.search(rf"(?:^|;)\s*{re.escape(property_name)}:\s*(\d+)px(?:\s*!important)?\s*;", rule)
+    assert match, f"missing {property_name} pixel declaration in {{{rule}}}"
+    return int(match.group(1))
 
 
 def test_every_modal_is_opened_before_its_reason_field_is_filled():
@@ -84,3 +99,22 @@ def test_collect_cockpit_failure_diagnostics_handles_missing_page_or_binary():
     from tests.test_console_controller_cockpit_e2e import collect_cockpit_failure_diagnostics
     assert collect_cockpit_failure_diagnostics(None, "p1", "await page.click('x')", None) == ""
     assert collect_cockpit_failure_diagnostics("ego-browser", None, "await page.click('x')", None) == ""
+
+
+def test_collapsed_deep_drawer_is_anchored_below_the_workspace():
+    """DEF-1: both responsive drawer anchors must clear the full visible head."""
+    shell_css = SHELL_INSPECTOR_CSS.read_text(encoding="utf-8")
+    drawer_bottoms = [
+        int(value)
+        for value in re.findall(r"\.deep-drawer\s*\{[^}]*\bbottom:\s*(\d+)px\s*;", shell_css)
+    ]
+    assert drawer_bottoms == [0, 0]
+
+
+def test_light_bottom_bar_rule_matches_drawer_head_height():
+    """DEF-3: scope the assertion to the two rules instead of the whole file."""
+    shell_css = SHELL_INSPECTOR_CSS.read_text(encoding="utf-8")
+    polish_css = POLISH_SHELL_CSS.read_text(encoding="utf-8")
+    bottom_bar_height = css_pixels(css_rule(shell_css, ".light-bottom-bar"), "height")
+    drawer_head_height = css_pixels(css_rule(polish_css, ".drawer-head"), "height")
+    assert bottom_bar_height == drawer_head_height
