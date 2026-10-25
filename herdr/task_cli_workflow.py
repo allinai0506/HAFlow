@@ -89,6 +89,7 @@ def supersede_task(
     sync_tasks_projection,
     autosave_clone_wip,
     tasks_file=None,
+    attention_file=None,
 ):
     """Mark a task as superseded (replaced by another task or abandoned).
 
@@ -112,6 +113,10 @@ def supersede_task(
         sys.exit(1)
     old_status = task["status"]
     relinking = old_status == "superseded"
+    # An escalated task's output is quarantined from candidate assembly, so an
+    # explicit human abandon may discard it from any lifecycle status. The
+    # privileged intent is validated again at the write boundary.
+    escalation_abandon = bool(abandon and task.get("finalize_escalated"))
     if relinking and (not new_task_id) and (not abandon):
         print(f"Illegal transition: {task_id}: {old_status} -> superseded")
         sys.exit(2)
@@ -125,7 +130,7 @@ def supersede_task(
                 f"[SUPERSEDE REJECTED] {task_id} already superseded by {existing}; refusing to repoint to {new_task_id}"
             )
             sys.exit(2)
-    elif "superseded" not in transitions.get(old_status, set()):
+    elif not escalation_abandon and "superseded" not in transitions.get(old_status, set()):
         print(f"Illegal transition: {task_id}: {old_status} -> superseded")
         sys.exit(2)
     if abandon and task.get("superseded_by"):
@@ -179,6 +184,7 @@ def supersede_task(
             store=store,
             expected_status=old_status,
             expected_version=task.get("version"),
+            intent="escalation-abandon" if escalation_abandon else None,
         )
         if not result.get("accepted", True):
             print(
@@ -189,6 +195,30 @@ def supersede_task(
     except (OSError, RuntimeError, ValueError, AttributeError) as exc:
         print(f"Error superseding task {task_id}: {exc}", file=sys.stderr)
         sys.exit(2)
+    if escalation_abandon:
+        # Discard resolves the escalation: retire the attention episode and
+        # flag so no sweep or blocker view keeps budgeting a dead task.
+        # Failures never undo the completed abandonment.
+        try:
+            from herdr import liveness
+
+            if attention_file:
+                liveness.EpisodeStore(attention_file).clear(f"{task_id}:finalize")
+        except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+            print(f"[SUPERSEDE WARN] attention cleanup failed for {task_id}: {exc}", file=sys.stderr)
+        try:
+            from herdr import kernel
+
+            fresh = store.get_task(task_id)
+            if fresh:
+                kernel.update_task_metadata(
+                    task_id,
+                    {"finalize_escalated": False, "finalize_escalate_reason": None},
+                    store=store,
+                    expected_version=fresh.get("version"),
+                )
+        except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+            print(f"[SUPERSEDE WARN] escalation flag cleanup failed for {task_id}: {exc}", file=sys.stderr)
     t_file = tasks_file or os.environ.get("TASKS_FILE")
     sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
     if relinking:

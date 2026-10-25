@@ -76,6 +76,13 @@ PRIVILEGED_TASK_TRANSITIONS: Dict[str, Set[tuple[str, str]]] = {
         ("failed", "completed"),
         ("paused", "working"),
     },
+    # Discarding a finalize_escalated task's quarantined output. The CLI owns
+    # the precondition (explicit --abandon, reason, finalize_escalated flag);
+    # candidate assembly excludes escalated tasks, so no published candidate
+    # can reference the discarded content.
+    "escalation-abandon": {
+        *((s, "superseded") for s in TASK_TRANSITIONS if s != "superseded"),
+    },
     "rollback": {
         *((s, "superseded") for s in TASK_TRANSITIONS if s != "superseded"),
         ("active", "superseded"),
