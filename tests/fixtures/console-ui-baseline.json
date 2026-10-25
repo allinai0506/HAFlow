@@ -1,5 +1,5 @@
 {
-"metadata":{"base": "207e60802c170d2d41c06d51d11676c5df6b6543", "styles": ["05c3892ac33b4f1cc6b399440607df038f440f4a0be7c473ea553026f1ba7feb", "4de788fbe8c56f9bef06cc1e381468629f14d7e062ebe55b69e4cd8ec74c5fb7"], "dom_sha256": "297dc1110c94aed58297759e7cac2f0f891c760cdb67561f19392bdd6318916f"},
+"metadata":{"base": "207e60802c170d2d41c06d51d11676c5df6b6543", "styles": ["bccccb800e12a0d7e04f832b03b173a3271221ce38983fc47180cfea3fca6de1", "4de788fbe8c56f9bef06cc1e381468629f14d7e062ebe55b69e4cd8ec74c5fb7"], "dom_sha256": "297dc1110c94aed58297759e7cac2f0f891c760cdb67561f19392bdd6318916f"},
 "functions":{
 "closeMoreMenu": {"owner": "dialogs", "sha256": "6d919465a3f52eda7efe5286e9d018a3c7952b63df6f5b81a81b2e91731e0c2f"},
 "toggleMoreMenu": {"owner": "dialogs", "sha256": "b2cb73c19bc531342e4743aedebe5bbcef3720ed2f4e4e713a2c133e1a4f4b6f"},

@@ -8457,3 +8457,38 @@ git merge-tree --write-tree origin/main <candidate_sha>   # 只读预演，不�
 
 Evidence：`git merge-tree --write-tree 8092ed6 183fbf9` 输出 `docs/lessons/lessons-learned.md`、`wiki/log.md` 两处 CONFLICT；候选侧原 §199 见 `183fbf9`，主干侧 §199/§200 见 `8092ed6`/`4ba150f`；本 PR 合并时经 `scripts/replay-append-only.py` 导出映射 `{199:201, 201:202, 202:203}` 保留双方全文并重编号后到条目，主干前缀逐字节不变。
 ---
+
+## 204. 同带层叠修复必须断言带内所有共存方的命中（2026-10-25）
+
+### 问题背景
+
+HAFlow issue #326 的修复（PR #349）把折叠抽屉头与 48px 底栏对齐为同带（drawer `bottom: 0`），消除了抽屉头对工作区的遮挡；但 z-40 的 `.drawer-head` 随即完全盖住同带 z-30 底栏的 4 项状态与切换按钮（1440x900 下 `elementFromPoint` 全部命中 drawer-head）。护栏只断言了 `drawerHead.top >= bottomBar.top`（主动要求同带）与工作区按钮可点，未断言底栏内容自身可见可点——修复把遮挡从工作区转移到了带内共存方。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 护栏只护最初的受害者 | 同带 z 叠放下方内容被盖不会触发任何既有断言 | 遮挡修复必须枚举共享带内全部共存内容方，逐一断言 `elementFromPoint` 命中自身 |
+| "命中目标"断言写成几何代理 | `head.top >= bar.top` 只证明头不高于栏，不证明栏内 anything 可点 | 代理断言可以保留，但内容命中断言不可省略；两者失效语义不同 |
+| pointer-events 修不了视觉遮挡 | 降低命中范围只恢复可点性，文本仍不可见 | 折叠态冗余入口直接 `visibility: hidden` 整体让位（保留几何与动画），命中范围归零 |
+
+### 操作规范（已固化到 `tests/test_console_controller_cockpit_e2e.py`）
+
+1. 折叠态断言底栏 `bottomStatusText` / `bottomTicker` / `bottomActiveWorkers` / `bottomPollLatency` / `.btn-bottom-action` 五项中心点命中自身，不得命中 drawer-head。
+2. 保留 #326 工作区按钮命中断言，双向不回退；往返验证折叠 ↔ 展开切换仍可用。
+3. 修复实现：折叠态 `.deep-drawer` 整体 `visibility: hidden`，`transition` 追加 `visibility 0s linear .2s` 延迟翻转以保留下滑动画；展开态几何不变。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_console_controller_cockpit_e2e.py::test_collapsed_drawer_leaves_bottom_bar_visible_and_clickable
+pytest -q tests/test_console_controller_cockpit_e2e.py::test_collapsed_drawer_does_not_intercept_controller_button
+pytest -q tests/test_console_cockpit_e2e_harness.py tests/test_console_module_boundaries.py
+```
+
+### 相关文档 / 关联证据
+
+- `console/static/console/styles/shell-inspector.css` — 折叠态隐藏实现与注释
+- `tests/fixtures/console-ui-baseline.json` — styles[0] SHA 随本次 CSS 变更更新
+
+---

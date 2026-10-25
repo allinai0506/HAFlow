@@ -3721,3 +3721,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 触发：wf-haflow-1024-02（issue #326）收尾实测 `herdr-task create-pr` 两次 REFUSED——wrapup 任务受 `wrapup_delivery#TEMPLATES` 白名单限制（`code-craft-v1` 无收尾 Git 通道），已集成的上游 craft 任务又因 origin 为 SSH host 别名不被 `repository_identity` 识别。
 - 变更：`wiki/task-lifecycle.md` 新增「交付 PR 入口边界与主干漂移合并面（2026-10-25）」，固化平台可用性判据、先例降级通道（留拒绝原文 → record-delivery → 以认证 candidate_sha 建 PR → 不放宽审核闭环），以及候选冻结后主干前进使 `docs/lessons/lessons-learned.md` / `wiki/log.md` 尾部必冲突的合并面口径（`git merge-tree` 只读预演，不改写已认证分支）。
 - 证据：`/tmp/wf326-wrapup/create-pr-wrapup.txt`、`create-pr-craft.txt`；交付身份 `n-1792915144325-9bef`；`git merge-tree --write-tree 8092ed6 183fbf9` 两文件 CONFLICT；`docs/lessons/lessons-learned.md` §202/§203（候选 §199 与收尾两条按 `scripts/replay-append-only.py` 口径重编号为 §201/§202/§203，主干 §199/§200 保留）。
+
+## [2026-10-25] Console | Issue #350 折叠抽屉头不再遮挡底栏，底栏恢复为唯一折叠入口
+- PR #349（#326）把折叠抽屉头锚进底栏同一条 48px 带后，z-40 `.drawer-head` 完全盖住 z-30 `.light-bottom-bar`：底栏 4 项状态与切换按钮折叠态不可见不可点（1440x900 `elementFromPoint` 全部命中 drawer-head，head 853..901 覆盖 bar 852..900）。
+- 修复：`shell-inspector.css` 折叠态 `.deep-drawer` 整体 `visibility: hidden`（几何保留、命中范围归零），`transition` 追加 `visibility 0s linear .2s` 延迟翻转保留下滑动画；展开态不变，底栏按钮成为折叠态唯一切换入口。
+- 新回归 `test_collapsed_drawer_leaves_bottom_bar_visible_and_clickable`：断言底栏五项折叠态命中自身、底栏按钮可展开、展开头可点回折；#326 原 e2e 与两条护栏（`bottom: [0,0]`、48px 同高）不变通过；合成页 fixture `styles[0]` SHA 同步更新。教训见 lessons §204。Evidence: 71 项受影响 console 测试全绿。
