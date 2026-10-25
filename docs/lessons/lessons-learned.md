@@ -8492,3 +8492,38 @@ pytest -q tests/test_console_cockpit_e2e_harness.py tests/test_console_module_bo
 - `tests/fixtures/console-ui-baseline.json` — styles[0] SHA 随本次 CSS 变更更新
 
 ---
+
+## 205. 收尾守卫的归属凭据必须跟随集成的真实结果（2026-10-25）
+
+### 问题背景
+
+PR #348 给 finalize 每个新动作前加了恢复守卫：`guard_effect` 只接受"原始 fact commit 或本操作自己产出的 SHA"（`finalize_commits`）。但 `git_finalize.py` 的 `own_head` 只在 commit 步骤成功时赋值：主分支前移后 integrate 合法 rebase 把 A 改写为 B，随后 cleanup_ready/cleanup/stage_advance 仍拿着旧 A（committed 入口则一直为 None），`guard_effect` 把本操作刚产生的 B 判成外来漂移，误转 `waiting_human / recovery_execution_failed`——Git 集成已成功，清理和流程推进全部停摆。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| own receipt 是"动作快照"不是"结果事实" | commit 收据在 rebase 后即过期，守卫凭据必须跟随最终结果 | integrate 成功后先以证据链确认结果 SHA，再把它传给全部后续 guard 与回调 |
+| "最新 task.commit"不等于归属 | 快照可被任意写方更新，单独拿来放行等于随最新快照漂移 | 归属 = `integration_head_before_rebase==授权输入A` + `commit==integrated_commit==B` + 任务专属 integration_ref/integration_branch 与 clone HEAD 的真实 Git 对象指向 B + B 位于记录的 integration_base_sha 之上 + 入口身份未变 |
+| committed 入口的授权前提不同 | 无本轮 commit 收据时，A 只能来自已授权事实（fact.commit==A，要求 A 即冻结候选） | 无收据入口禁止把"碰巧最新"的 SHA 当授权输入；授权链断开时明确升级人工，不重试不伪造 |
+
+### 操作规范（已固化到 `services/controller/git_finalize.py` + `finalize_support.py`）
+
+1. integrate 前 pin 授权输入 A（本轮 commit 收据优先，否则已授权 task.commit）与入口身份（workflow/run/execution/clone/branch）。
+2. integrate 成功后 `_settle_integration_result` 做只读 Git 证据链校验；通过则 `own_head = B` 流入 cleanup_ready/cleanup/stage_advance 并经 guard 持久化进 `finalize_commits`；无法归属则 escalate `integrate_result_unverified`（retryable=False，集成事实保留，人工裁决）。
+3. Git 内容校验放在 SQLite 写事务之外；写操作仍全部走 owned guard，过期 owner 无法借校验结果覆盖接管者状态。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_recovery_autonomy.py -k "legal_rebase or unattributable"
+pytest -q tests/test_recovery_autonomy.py tests/test_task_cli_integration.py tests/test_workflow_finalize.py
+```
+
+### 相关文档 / 关联证据
+
+- `services/controller/finalize_support.py` — `_confirm_integration_result` / `_settle_integration_result`
+- `tests/test_recovery_autonomy.py` — completed/committed 两条真实 rebase（A≠B）正向回归 + commit/ref/execution 三类篡改拒绝
+- PR #348 审查意见：收尾继续使用旧 own_head 的路径（`git_finalize.py` L193-L306 @ 8a5d4c9）
+
+---

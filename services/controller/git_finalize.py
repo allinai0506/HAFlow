@@ -2,7 +2,10 @@
 
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
-from services.controller.finalize_support import _should_allow_rebase
+from services.controller.finalize_support import (_INTEGRATION_IDENTITY_KEYS,
+                                                  _preserve_none_mode_output,
+                                                  _settle_integration_result,
+                                                  _should_allow_rebase)
 
 
 def finalize_completed_task(ports, task_id, before_action=None):
@@ -19,6 +22,9 @@ def finalize_completed_task(ports, task_id, before_action=None):
     ``before_action(action, task_id=None, commit_head=None)`` optionally
     re-checks recovery budget/ownership before each new independent action;
     raising stops the chain in place, keeping results already produced.
+    A legal rebase's new HEAD is accepted only after the integration
+    evidence attributes it to this call; the confirmed SHA feeds every
+    later guard, and an unattributable result escalates to a human.
     """
     task = ports.get_task(task_id)
 
@@ -207,6 +213,11 @@ def finalize_completed_task(ports, task_id, before_action=None):
         else:
             # 2. Rebase + 导入主仓库 + Integration Branch
             guard("integrate", commit_head=own_head)
+            # Authorized integrate input (own commit receipt this round, or
+            # the already authorized task commit) and entry identity, so the
+            # post-rebase result can be attributed to this call.
+            authorized_input = own_head or task.get("commit") or None
+            entry_identity = {key: task.get(key) for key in _INTEGRATION_IDENTITY_KEYS}
             result = ports.subprocess.run(
                 [
                     ports.TASK_MANAGER,
@@ -302,6 +313,15 @@ def finalize_completed_task(ports, task_id, before_action=None):
                 )
                 return {"retryable": True, "kind": "error"}
 
+            # Later guards follow the confirmed result of this integrate, not
+            # a stale receipt: a legal rebase's new HEAD must be attributable.
+            confirmed_head = _settle_integration_result(
+                ports, task, authorized_input, entry_identity)
+            if not confirmed_head:
+                return {"retryable": False, "kind": "refused",
+                        "reason": "integrate_result_unverified"}
+            own_head = confirmed_head
+
             # 3. 允许清理
             guard("cleanup_ready", commit_head=own_head)
             if not ports.set_task_status(
@@ -314,127 +334,11 @@ def finalize_completed_task(ports, task_id, before_action=None):
     # 不需要 Git 集成
     # --------------------------------
     elif mode == "none":
-        clone_path = task.get("clone_path")
-        is_context_task = task.get("execution_mode") == "context"
-        if clone_path and ports.os.path.exists(clone_path) and not is_context_task:
-            status_res = ports.subprocess.run(
-                ["git", "-C", clone_path, "status", "--porcelain", "--untracked-files=normal"],
-                capture_output=True, text=True
-            )
-            if status_res.returncode != 0:
-                from herdr.task_delivery import diagnostic_tail
-                print(
-                    f"[FINALIZE ERROR] "
-                    f"task={task_id} "
-                    f"worktree status failed rc={status_res.returncode}: "
-                    f"{status_res.stderr.strip() or status_res.stdout.strip()}"
-                )
-                ports._record_finalize_event(
-                    task,
-                    "finalize_status_error",
-                    {
-                        "rc": status_res.returncode,
-                        "detail": diagnostic_tail(status_res.stdout, status_res.stderr),
-                    },
-                )
-                return {"retryable": True, "kind": "error", "rc": status_res.returncode}
-            from herdr.repo_hygiene import teardown_output_diagnosis
-            diag = teardown_output_diagnosis(status_res.stdout, task_id=task_id)
-
-            head_res = ports.subprocess.run(
-                ["git", "-C", clone_path, "rev-parse", "HEAD"],
-                capture_output=True, text=True
-            )
-            head_sha = head_res.stdout.strip() if head_res.returncode == 0 else ""
-            task_commit = task.get("commit")
-            baseline = task.get("baseline_commit")
-            unadopted_head = bool(head_sha and head_sha != task_commit and head_sha != baseline)
-
-            if diag.get("reason") or unadopted_head:
-                commit_env = dict(ports.os.environ)
-                commit_env["HERDR_DEFER_HEAVY_TESTS"] = "1"
-                guard("commit")
-                commit_proc = ports.subprocess.run(
-                    [
-                        ports.TASK_MANAGER,
-                        "commit",
-                        task_id,
-                        "--message",
-                        f"chore(closure): preserve worktree output ({task_id})"
-                    ],
-                    text=True,
-                    capture_output=True,
-                    env=commit_env
-                )
-                commit_payload = ports._parse_commit_result(commit_proc.stdout)
-                if commit_proc.returncode == 3:
-                    # Empty commit: no changes to adopt
-                    pass
-                elif (commit_proc.returncode == 7 and commit_payload.get("task_id") == task_id
-                      and commit_payload.get("result") == "delivery_blocked"):
-                    delivery = commit_payload.get("delivery") or {}
-                    from herdr.task_delivery import record_delivery_failure
-                    if record_delivery_failure(task, delivery, store=ports._get_store()):
-                        print(f"[DELIVERY BLOCKED] task={task_id} waiting for scoped repair")
-                        return {"retryable": False, "kind": "delivery", "rc": 7}
-                    return {"retryable": False, "kind": "stale_delivery_result", "rc": 7}
-                elif commit_proc.returncode == 4:
-                    print(
-                        f"[FINALIZE REFUSED] "
-                        f"task={task_id} "
-                        f"reason={commit_payload.get('reason')}"
-                    )
-                    ports._escalate_finalize(
-                        ports.get_task(task_id) or task,
-                        "commit_refused",
-                        commit_payload,
-                    )
-                    return {"retryable": False, "kind": "refused", "rc": 4}
-                elif commit_proc.returncode == 75:
-                    print(
-                        f"[FINALIZE WAIT] "
-                        f"task={task_id} "
-                        f"reason=git_busy retry later"
-                    )
-                    if (commit_payload.get("task_id") == task_id
-                            and commit_payload.get("result") == "wait"
-                            and commit_payload.get("reason") == "git_index_lock"):
-                        return {"retryable": True, "kind": "wait", "rc": 75,
-                                "reason": "git_index_lock", "budgeted": False}
-                    return {"retryable": True, "kind": "wait", "rc": 75}
-                elif commit_proc.returncode != 0:
-                    from herdr.task_delivery import diagnostic_tail
-                    print(
-                        f"[FINALIZE ERROR] "
-                        f"task={task_id} "
-                        f"preservation commit failed rc={commit_proc.returncode}: "
-                        f"{commit_proc.stderr.strip() or commit_proc.stdout.strip()}"
-                    )
-                    ports._record_finalize_event(
-                        task,
-                        "finalize_commit_error",
-                        {
-                            "rc": commit_proc.returncode,
-                            "detail": diagnostic_tail(commit_proc.stdout, commit_proc.stderr),
-                        },
-                    )
-                    return {"retryable": True, "kind": "error", "rc": commit_proc.returncode}
-                else:
-                    if commit_payload.get("task_id") == task_id and commit_payload.get("result") in ("created", "adopted"):
-                        own_head = commit_payload.get("commit") or None
-                    task = ports.get_task(task_id) or task
-
-            if head_sha and head_sha != baseline:
-                refreshed_commit = (ports.get_task(task_id) or task).get("commit")
-                if not refreshed_commit:
-                    guard("commit", commit_head=head_sha)
-                    from herdr import kernel
-                    kernel.update_task_metadata(
-                        task_id,
-                        {"commit": head_sha, "commit_result": "reconciled"},
-                        store=ports._get_store(),
-                    )
-                    task = ports.get_task(task_id) or task
+        own_head, refusal = _preserve_none_mode_output(
+            ports, task_id, task, own_head, guard
+        )
+        if refusal:
+            return refusal
         guard("cleanup_ready", commit_head=own_head)
         if not ports.set_task_status(
             task_id,
