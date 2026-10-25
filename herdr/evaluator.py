@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -31,6 +32,89 @@ BASELINE_TEST_FILENAME = "BASELINE_TEST.json"
 
 DEFAULT_EVALUATION_TIMEOUT = 300.0
 MAX_ADAPTIVE_EVALUATION_TIMEOUT = 1800.0
+
+DEFAULT_LINT_STEP_BUDGET = 120.0
+DEFAULT_REPRO_STEP_BUDGET = 600.0
+EVALUATION_WRAPPER_MARGIN_SECONDS = 120.0
+STEP_BUDGET_BOUNDS = (1.0, 7200.0)
+
+
+def _count_test_files(target_dir: Path) -> int:
+    test_dirs = [target_dir / "tests", target_dir / "test", target_dir / "src"]
+    test_files_count = 0
+    js_ts_suffixes = (
+        ".test.js", ".test.jsx", ".test.ts", ".test.tsx",
+        ".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx",
+    )
+    for td in test_dirs:
+        if td.is_dir():
+            for f in td.rglob("*"):
+                if not f.is_file():
+                    continue
+                fname = f.name.lower()
+                if fname.endswith(".py") and (fname.startswith("test_") or fname.endswith("_test.py")):
+                    test_files_count += 1
+                elif any(fname.endswith(sfx) for sfx in js_ts_suffixes):
+                    test_files_count += 1
+    return test_files_count
+
+
+def _adaptive_suite_budget(target_dir: Path) -> float:
+    """Suite-scale budget shared by the wrapper timeout and the test step.
+
+    Large repos (>50 test files) scale up to MAX_ADAPTIVE_EVALUATION_TIMEOUT;
+    both belts must derive from the same number so the inner step budget can
+    never exceed the wrapper timeout it runs under.
+    """
+    try:
+        test_files_count = _count_test_files(Path(target_dir))
+        if test_files_count > 50:
+            adaptive = test_files_count * 4.0
+            return max(DEFAULT_EVALUATION_TIMEOUT, min(MAX_ADAPTIVE_EVALUATION_TIMEOUT, adaptive))
+    except Exception:
+        pass
+    return DEFAULT_EVALUATION_TIMEOUT
+
+
+def _env_budget(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw:
+        try:
+            val = float(raw.strip())
+            if val > 0 and math.isfinite(val):
+                return max(STEP_BUDGET_BOUNDS[0], min(STEP_BUDGET_BOUNDS[1], val))
+        except (ValueError, TypeError):
+            pass
+    return default
+
+
+def resolve_step_budgets(target_dir: Path, repro_cmd: str = "") -> Dict[str, float]:
+    """Inner per-step budgets plus the wrapper timeout that must exceed them.
+
+    wf-haflow-1024-02: a full-suite pytest outran the evaluation wrapper's own
+    timeout; the wrapper killed EVALUATOR.sh mid-step and the missing
+    TEST_EXIT/LINT_EXIT receipts became permanent blockers no agent behaviour
+    could clear. Every generated script now bounds each step itself, and the
+    GOAL contract pins a wrapper timeout with a strict margin over the inner
+    sum, keeping the wrapper the outer belt rather than the only belt.
+    """
+    test_budget = _env_budget(
+        "HERDR_LOOP_TEST_BUDGET", _adaptive_suite_budget(target_dir)
+    )
+    lint_budget = _env_budget("HERDR_LOOP_LINT_BUDGET", DEFAULT_LINT_STEP_BUDGET)
+    repro_budget = (
+        _env_budget("HERDR_LOOP_REPRO_BUDGET", DEFAULT_REPRO_STEP_BUDGET)
+        if repro_cmd else 0.0
+    )
+    wrapper = (
+        test_budget + lint_budget + repro_budget + EVALUATION_WRAPPER_MARGIN_SECONDS
+    )
+    return {
+        "test": test_budget,
+        "lint": lint_budget,
+        "repro": repro_budget,
+        "wrapper": wrapper,
+    }
 
 
 def resolve_evaluation_timeout(target_dir: Path, explicit_timeout: Optional[float] = None) -> float:
@@ -79,30 +163,7 @@ def resolve_evaluation_timeout(target_dir: Path, explicit_timeout: Optional[floa
             pass
 
     # Adaptive scale based on test suite files (Python, Jest, Vitest, etc.)
-    try:
-        test_dirs = [target_dir / "tests", target_dir / "test", target_dir / "src"]
-        test_files_count = 0
-        js_ts_suffixes = (
-            ".test.js", ".test.jsx", ".test.ts", ".test.tsx",
-            ".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx",
-        )
-        for td in test_dirs:
-            if td.is_dir():
-                for f in td.rglob("*"):
-                    if not f.is_file():
-                        continue
-                    fname = f.name.lower()
-                    if fname.endswith(".py") and (fname.startswith("test_") or fname.endswith("_test.py")):
-                        test_files_count += 1
-                    elif any(fname.endswith(sfx) for sfx in js_ts_suffixes):
-                        test_files_count += 1
-        if test_files_count > 50:
-            adaptive = test_files_count * 4.0
-            return max(DEFAULT_EVALUATION_TIMEOUT, min(MAX_ADAPTIVE_EVALUATION_TIMEOUT, adaptive))
-    except Exception:
-        pass
-
-    return DEFAULT_EVALUATION_TIMEOUT
+    return _adaptive_suite_budget(target_dir)
 
 
 
@@ -531,6 +592,8 @@ def _init_loop_unlocked(
     (loop_dir / BASELINE_LINT_FILENAME).unlink(missing_ok=True)
 
     # 1. Write GOAL.md
+    budgets = resolve_step_budgets(target_dir, repro_cmd)
+    wrapper_timeout = budgets["wrapper"]
     goal_md = loop_dir / "GOAL.md"
     goal_content = f"""# 任务目标契约 (Node Goal Contract)
 
@@ -549,19 +612,23 @@ def _init_loop_unlocked(
 """
     if repro_cmd:
         goal_content += f"- **靶向复现用例**: `{repro_cmd}`\n"
+    # Pin the wrapper timeout above the script's inner step budgets so the
+    # wrapper never becomes the belt that swallows step receipts. This marker
+    # must stay above the typed repro marker, which owns the last line.
+    goal_content += f"<!-- HERDR_EVAL_TIMEOUT: {wrapper_timeout:g} -->\n"
     goal_content += f"<!-- HERDR_REPRO_REQUIRED: {str(bool(repro_cmd)).lower()} -->\n"
     goal_md.write_text(goal_content, encoding="utf-8")
 
-    # 2. Write EVALUATOR.sh
+    # 2. Write EVALUATOR.sh — every step runs under its own wall-clock budget
+    # and always emits its exit receipt, so a step that never ends yields
+    # TEST_EXIT=124 instead of a wrapper kill that erases all receipts
+    # (wf-haflow-1024-02's structurally non-convergent loop).
     repro_block = ""
     if repro_cmd:
         repro_block = f"""
 echo "=== [3/3] RUNNING REPRO CASE ==="
-(
-{repro_cmd}
-) > "$LOG_DIR/repro.log" 2>&1
-REPRO_EXIT=$?
-echo "REPRO_EXIT=$REPRO_EXIT"
+run_bounded "$REPRO_BUDGET" "$LOG_DIR/repro.log" {shlex.quote(repro_cmd)}
+echo "REPRO_EXIT=$STEP_EXIT"
 """
 
     evaluator_sh = loop_dir / "EVALUATOR.sh"
@@ -577,19 +644,43 @@ cd "$ROOT_DIR" || exit 1
 LOG_DIR="$ROOT_DIR/{LOOP_DIR_NAME}/logs"
 mkdir -p "$LOG_DIR"
 
+TEST_BUDGET={int(round(budgets['test']))}
+LINT_BUDGET={int(round(budgets['lint']))}
+REPRO_BUDGET={int(round(budgets['repro']))}
+
+# Steps stay in the script's process group: the evaluation wrapper's group
+# kill on wrapper timeout must keep reaching the whole step tree. This inner
+# bound only TERMs the step shell itself (grandchildren are reaped by that
+# outer belt within the wrapper margin), and always emits the step receipt.
+STEP_EXIT=0
+run_bounded() {{
+    local budget="$1" log="$2" command_text="$3" step_pid waited
+    sh -c "$command_text" > "$log" 2>&1 &
+    step_pid=$!
+    waited=0
+    while kill -0 "$step_pid" 2>/dev/null && [ "$waited" -lt "$budget" ]; do
+        sleep 2; waited=$((waited + 2))
+    done
+    if kill -0 "$step_pid" 2>/dev/null; then
+        kill -TERM "$step_pid" 2>/dev/null
+        sleep 3
+        kill -KILL "$step_pid" 2>/dev/null
+        wait "$step_pid" 2>/dev/null
+        STEP_EXIT=124
+    else
+        wait "$step_pid"
+        STEP_EXIT=$?
+    fi
+    return 0
+}}
+
 echo "=== [1/3] RUNNING TESTS ==="
-(
-{test_cmd or 'pytest'}
-) > "$LOG_DIR/test.log" 2>&1
-TEST_EXIT=$?
-echo "TEST_EXIT=$TEST_EXIT"
+run_bounded "$TEST_BUDGET" "$LOG_DIR/test.log" {shlex.quote(test_cmd or 'pytest')}
+echo "TEST_EXIT=$STEP_EXIT"
 
 echo "=== [2/3] RUNNING LINT / QUALITY ==="
-(
-{lint_cmd or 'true'}
-) > "$LOG_DIR/lint.log" 2>&1
-LINT_EXIT=$?
-echo "LINT_EXIT=$LINT_EXIT"
+run_bounded "$LINT_BUDGET" "$LOG_DIR/lint.log" {shlex.quote(lint_cmd or 'true')}
+echo "LINT_EXIT=$STEP_EXIT"
 {repro_block}
 exit 0
 """

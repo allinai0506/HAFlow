@@ -88,6 +88,56 @@ def task_hard_timeout_alive_multiplier():
 
 DEFAULT_GATE_TASK_HARD_TIMEOUT_SECONDS = 7200.0
 
+LOOP_PROGRESS_ARTIFACTS = (
+    "GOAL.md",
+    "STATE.md",
+    "EVALUATION.md",
+    "METRICS.json",
+    "METRICS.md",
+    "EVAL_DONE.json",
+)
+
+
+def _loop_progress_at(task):
+    """Latest loop-artifact mtime under the task clone; None when unavailable.
+
+    wf-haflow-1024-02: a silently-grinding loop writes test logs and
+    evaluation receipts but never transitions task status, so ``updated_at``
+    alone starved the watchdog's idle basis while real progress accumulated.
+    Fresh artifacts are activity evidence; a missing clone or loop directory
+    changes nothing (legacy idle basis). Read-only: never writes the task row,
+    so completion epochs stay untouched.
+    """
+    clone = str(task.get("clone_path") or "").strip()
+    if not clone:
+        return None
+    loop_dir = Path(clone) / ".herdr-loop"
+    latest = None
+
+    def consider(mtime):
+        nonlocal latest
+        if latest is None or mtime > latest:
+            latest = mtime
+
+    try:
+        for name in LOOP_PROGRESS_ARTIFACTS:
+            consider((loop_dir / name).stat().st_mtime)
+    except OSError:
+        pass
+    try:
+        with os.scandir(loop_dir / "logs") as entries:
+            for index, entry in enumerate(entries):
+                if index >= 32:
+                    break
+                try:
+                    if entry.is_file():
+                        consider(entry.stat().st_mtime)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return latest
+
 
 def task_gate_hard_timeout_seconds(base_timeout=None):
     base = base_timeout or task_hard_timeout_seconds()
@@ -947,6 +997,12 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
             continue
         if not updated_at:
             continue
+
+        # 循环工件是任务活动证据(wf-haflow-1024-02):静默推进的循环只写
+        # .herdr-loop 工件、不做状态迁移,idle 基准取两者较新者。
+        progress_at = _loop_progress_at(task)
+        if progress_at is not None and progress_at > updated_at:
+            updated_at = progress_at
 
         idle_seconds = now - updated_at
         if idle_seconds < hard_timeout:

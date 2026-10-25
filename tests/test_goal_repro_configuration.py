@@ -7,13 +7,13 @@ import pytest
 from herdr.evaluator import init_loop
 from tests.test_task_loop_noninteractive import ROOT, load_cli
 
-MARKER = '<!-- HERDR_REPRO_REQUIRED:'
-
-
 def remove_marker(loop):
+    # Simulate a legacy contract: strip every typed producer marker, not just
+    # the repro one — a stray non-repro marker left behind would legitimately
+    # read as an ambiguous legacy section.
     p = loop / 'GOAL.md'
     p.write_text('\n'.join(line for line in p.read_text().splitlines()
-                            if not line.startswith(MARKER)) + '\n')
+                            if not line.startswith('<!-- HERDR_')) + '\n')
 
 
 @pytest.mark.parametrize('field', ['goal', 'acceptance'])
