@@ -8455,5 +8455,5 @@ Evidence：本工位 `/tmp/wf326-wrapup/create-pr-wrapup.txt`、`create-pr-craft
 git merge-tree --write-tree origin/main <candidate_sha>   # 只读预演，不写工作树
 ```
 
-Evidence：`git merge-tree --write-tree 8092ed6 183fbf9` 输出 `docs/lessons/lessons-learned.md`、`wiki/log.md` 两处 CONFLICT；候选侧 §199 见 `183fbf9`，主干侧 §199 见 `8092ed6`。
+Evidence：`git merge-tree --write-tree 8092ed6 183fbf9` 输出 `docs/lessons/lessons-learned.md`、`wiki/log.md` 两处 CONFLICT；候选侧原 §199 见 `183fbf9`，主干侧 §199/§200 见 `8092ed6`/`4ba150f`；本 PR 合并时经 `scripts/replay-append-only.py` 导出映射 `{199:201, 201:202, 202:203}` 保留双方全文并重编号后到条目，主干前缀逐字节不变。
 ---

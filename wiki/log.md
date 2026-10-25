@@ -3715,9 +3715,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 ## [2026-10-25] Console | Issue #326 底部折叠抽屉真实几何返工
 - 门禁证伪上一候选后，沿实际 CSS 层叠链确认 `.drawer-head` 折叠可见高度为 48px，而 `shell-inspector.css` 的两条 `.deep-drawer bottom: 28px` 把抽屉头推入工作区；正确几何不是 `bottom: 48px`，而是 48px 底栏 + `bottom: 0px`，让抽屉头占用底栏带。
 - 新护栏按选择器规则块解析 `.light-bottom-bar` / `.drawer-head`，同时锁住桌面与窄屏抽屉锚点；撤销实现时两条测试必红。合成页 fixture 更新 `styles[0]` SHA，模块边界测试改为消费两个 style 哈希。
-- 真实 ego-browser 证据：1440x900 下目标按钮 bbox `1170,832.52,125.36,26.40`、中心 `(1232.68,845.71)`，抽屉头从 `y=853` 开始；`elementFromPoint` 命中“在 Controller 中处理”按钮，真实点击进入 Controller，抽屉保持折叠。详见 `docs/lessons/lessons-learned.md` §199。
+- 真实 ego-browser 证据：1440x900 下目标按钮 bbox `1170,832.52,125.36,26.40`、中心 `(1232.68,845.71)`，抽屉头从 `y=853` 开始；`elementFromPoint` 命中“在 Controller 中处理”按钮，真实点击进入 Controller，抽屉保持折叠。详见 `docs/lessons/lessons-learned.md` §201（合入主干时按 `scripts/replay-append-only.py` 口径由候选 §199 重编号）。
 
 ## [2026-10-25] update | 交付 PR 入口边界与主干漂移合并面
 - 触发：wf-haflow-1024-02（issue #326）收尾实测 `herdr-task create-pr` 两次 REFUSED——wrapup 任务受 `wrapup_delivery#TEMPLATES` 白名单限制（`code-craft-v1` 无收尾 Git 通道），已集成的上游 craft 任务又因 origin 为 SSH host 别名不被 `repository_identity` 识别。
 - 变更：`wiki/task-lifecycle.md` 新增「交付 PR 入口边界与主干漂移合并面（2026-10-25）」，固化平台可用性判据、先例降级通道（留拒绝原文 → record-delivery → 以认证 candidate_sha 建 PR → 不放宽审核闭环），以及候选冻结后主干前进使 `docs/lessons/lessons-learned.md` / `wiki/log.md` 尾部必冲突的合并面口径（`git merge-tree` 只读预演，不改写已认证分支）。
-- 证据：`/tmp/wf326-wrapup/create-pr-wrapup.txt`、`create-pr-craft.txt`；交付身份 `n-1792915144325-9bef`；`git merge-tree --write-tree 8092ed6 183fbf9` 两文件 CONFLICT；`docs/lessons/lessons-learned.md` §201/§202（候选 §199 按 `scripts/replay-append-only.py` 口径让位为 §200）。
+- 证据：`/tmp/wf326-wrapup/create-pr-wrapup.txt`、`create-pr-craft.txt`；交付身份 `n-1792915144325-9bef`；`git merge-tree --write-tree 8092ed6 183fbf9` 两文件 CONFLICT；`docs/lessons/lessons-learned.md` §202/§203（候选 §199 与收尾两条按 `scripts/replay-append-only.py` 口径重编号为 §201/§202/§203，主干 §199/§200 保留）。
