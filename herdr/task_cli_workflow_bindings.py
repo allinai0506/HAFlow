@@ -181,6 +181,7 @@ def build_workflow_bindings(namespace):
             sync_tasks_projection=namespace["sync_tasks_projection"],
             autosave_clone_wip=namespace["_autosave_clone_wip"],
             tasks_file=namespace.get("TASKS_FILE"),
+            attention_file=namespace.get("ATTENTION_FILE"),
         )
 
     def clear_finalize_escalation(task_id):

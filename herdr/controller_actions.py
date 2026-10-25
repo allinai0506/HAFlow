@@ -634,7 +634,7 @@ def _escalation_actions(task, wid):
             category="bypass",
             command_line=build_cli_command(
                 "supersede", positionals=[tid],
-                flags={"reason": "human superseded from console"},
+                flags={"abandon": True, "reason": "human superseded from console"},
             ),
             api_endpoint="/api/controller/execute-action",
             api_payload={
@@ -649,7 +649,7 @@ def _escalation_actions(task, wid):
             old_task_id=tid,
             stage=task.get("stage") or task.get("node") or "",
             group="pipeline",
-            commands=[["supersede", tid, "--reason", "human superseded from console"]],
+            commands=[["supersede", tid, "--abandon", "--reason", "human superseded from console"]],
         ),
     ]
 
