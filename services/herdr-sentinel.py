@@ -139,6 +139,187 @@ def _loop_progress_at(task):
     return latest
 
 
+DEFAULT_ORPHAN_PANE_GRACE_SECONDS = 1800.0
+DEFAULT_ORPHAN_PANE_CLOSE_GRACE_SECONDS = 600.0
+
+
+def orphan_pane_janitor_enabled():
+    value = os.environ.get("HERDR_ORPHAN_PANE_JANITOR", "1")
+    return value.strip().lower() not in ("0", "false", "off", "no")
+
+
+def orphan_pane_grace_seconds():
+    """Quiet window after the orphan transition before the janitor touches anything.
+
+    The kill/supersede that orphaned the pane may have cut an agent mid-turn;
+    the grace gives it a last chance to land work before the janitor interferes.
+    """
+    raw = os.environ.get("HERDR_ORPHAN_PANE_GRACE")
+    if raw:
+        try:
+            val = float(raw.strip())
+            if val > 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_ORPHAN_PANE_GRACE_SECONDS
+
+
+def orphan_pane_close_grace_seconds():
+    raw = os.environ.get("HERDR_ORPHAN_PANE_CLOSE_GRACE")
+    if raw:
+        try:
+            val = float(raw.strip())
+            if val > 0 and math.isfinite(val):
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_ORPHAN_PANE_CLOSE_GRACE_SECONDS
+
+
+def _orphan_interrupt(pane_id):
+    """Cooperative stop: one ctrl-c to the orphaned agent (never a hard kill)."""
+    try:
+        return run(["herdr", "pane", "send-keys", pane_id, "ctrl-c"], timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
+def _orphan_probe(scope):
+    from herdr.task_resources import probe_live_runtime
+
+    return probe_live_runtime(scope)
+
+
+def _orphan_close(pane_id):
+    try:
+        return run(["herdr", "pane", "close", pane_id], timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
+def _unclaimed_commit_evidence(task):
+    """Tip commits on the orphan's clone branch; None when unreadable.
+
+    Read-only discovery aid: the coordinator (or a human) decides what to
+    harvest; the janitor only makes the work visible in the event stream.
+    """
+    clone = str(task.get("clone_path") or "").strip()
+    if not clone:
+        return None
+    try:
+        branch = subprocess.run(
+            ["git", "-C", clone, "rev-parse", "--abbrev-ref", "HEAD"],
+            text=True, capture_output=True, timeout=10,
+        )
+        log = subprocess.run(
+            ["git", "-C", clone, "log", "--format=%h %s", "-5"],
+            text=True, capture_output=True, timeout=10,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if branch.returncode != 0 or log.returncode != 0:
+        return None
+    commits = [line.strip() for line in (log.stdout or "").splitlines() if line.strip()]
+    return {"branch": (branch.stdout or "").strip(), "commits": commits[:5]}
+
+
+def check_orphan_panes(tasks, state, now=None):
+    """INV-SENTINEL-06: bounded janitor for orphaned panes of archived tasks.
+
+    Per orphaned task, at most one cooperative interrupt and one guarded reap
+    attempt (via the existing ``reap_task_pane`` identity checks — anything
+    unproven is retained, never force-closed). Before a reap, the clone's tip
+    commits are recorded as durable evidence so unclaimed work stays
+    discoverable. Never writes task status; kill-switch
+    ``HERDR_ORPHAN_PANE_JANITOR=0`` restores the do-nothing behaviour.
+    """
+    if not orphan_pane_janitor_enabled():
+        return False
+    now = time.time() if now is None else float(now)
+    episodes = state.setdefault("orphan_panes", {})
+    by_id = {t.get("task_id"): t for t in tasks or [] if t.get("task_id")}
+    changed = False
+
+    for task in liveness.select_orphaned_pane_tasks(
+        tasks or [], now, orphan_pane_grace_seconds()
+    ):
+        tid = task.get("task_id")
+        pane = task.get("pane_id")
+        episode = episodes.get(tid) or {}
+        if episode.get("done"):
+            continue
+        if agent_status(pane) != "working":
+            if episode:
+                episodes.pop(tid, None)
+                changed = True
+            continue
+
+        if not episode:
+            episodes[tid] = {"interrupted_at": now}
+            changed = True
+            if _orphan_interrupt(pane):
+                print(
+                    f"[SENTINEL ORPHAN] task={tid} pane={pane} agent still working "
+                    "after archive — ctrl-c sent",
+                    flush=True,
+                )
+            else:
+                episode["interrupt_failed"] = True
+                print(
+                    f"[SENTINEL ORPHAN] task={tid} pane={pane} interrupt send failed; "
+                    "close grace continues regardless",
+                    flush=True,
+                )
+            _record_sentinel_event(
+                _get_store(), task, "orphan_pane_interrupted",
+                {"pane_id": pane, "grace_seconds": orphan_pane_grace_seconds()},
+            )
+            continue
+
+        if now - float(episode.get("interrupted_at") or 0) < orphan_pane_close_grace_seconds():
+            continue
+
+        evidence = _unclaimed_commit_evidence(task)
+        if evidence:
+            _record_sentinel_event(
+                _get_store(), task, "orphan_pane_unclaimed_commits", evidence
+            )
+            print(
+                f"[SENTINEL ORPHAN] task={tid} unclaimed commits on {evidence.get('branch')}: "
+                f"{len(evidence.get('commits') or [])} recorded",
+                flush=True,
+            )
+        from herdr.task_resources import reap_task_pane
+
+        result = reap_task_pane(
+            _get_store(), tid, apply=True,
+            probe=_orphan_probe, close=_orphan_close,
+        )
+        episode.update({
+            "done": True,
+            "reap_action": result.get("action"),
+            "reap_reason": result.get("reason"),
+        })
+        episodes[tid] = episode
+        changed = True
+        _record_sentinel_event(
+            _get_store(), task, "orphan_pane_reap",
+            {"pane_id": pane, "action": result.get("action"), "reason": result.get("reason")},
+        )
+        print(
+            f"[SENTINEL ORPHAN] task={tid} reap action={result.get('action')} "
+            f"reason={result.get('reason')}",
+            flush=True,
+        )
+
+    for tid in list(episodes.keys()):
+        if tid not in by_id:
+            episodes.pop(tid, None)
+            changed = True
+    return changed
+
+
 def task_gate_hard_timeout_seconds(base_timeout=None):
     base = base_timeout or task_hard_timeout_seconds()
     raw = os.environ.get("HERDR_GATE_TASK_HARD_TIMEOUT")
@@ -1288,6 +1469,7 @@ def main():
                 pass
 
         fuse_changed = check_dispatch_fuse(tasks, state)
+        orphan_changed = check_orphan_panes(tasks, state)
 
         expected = state.get("completion_expected") or {}
         epochs = state.get("completion_epochs") or {}
@@ -1354,7 +1536,7 @@ def main():
                 f"[SENTINEL REAP] removed {reaped} stale completion samples",
                 flush=True,
             )
-        if wrote or fuse_changed:
+        if wrote or fuse_changed or orphan_changed:
             check_task_stalls(tasks, state)
             save_json_atomic(STATE_FILE, state)
             print("[SENTINEL] State updated, controller will auto-sync via registry watcher", flush=True)

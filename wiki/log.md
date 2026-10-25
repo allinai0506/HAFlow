@@ -3686,3 +3686,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   1. 步骤执行改为 `bash -o pipefail -c "$command_text"`，恢复预算化之前 bash 子壳 + pipefail 的既有契约；
   2. 新增 `kill_tree`（`ps -axo pid=,ppid=` 递归枚举后代），违限时 TERM 全树 → 3s → KILL 全树 再回执 124；步骤仍留在脚本进程组，包装层组击杀契约不变，两道清理带的先后与覆盖互补。
 - 证据：`pytest -q tests/test_evaluator_step_budgets.py` → 7 passed（新增 P1/P2 两项先红后绿）；受影响 17 文件批次复跑 → 243 passed；`compileall`/`git diff --check` clean。
+
+## [2026-10-25] Evaluator / Sentinel | 超大套件冒烟默认与孤儿 Pane 有界看护（§197 遗留两项，INV-EVAL-04 / INV-SENTINEL-06）
+- 触发：§197 复盘遗留。①本仓库全量串行单轮 ≈16h、xdist CI 间歇崩、派发不传 --test-cmd → 裸 pytest 默认对超大仓库结构性不可收敛；②判死/作废仅标记 pane_lifecycle=orphaned 无人收口，孤儿 agent 无限运行（1024-02 判死后 26 分钟仍在提交，总指挥人肉收割 679f501）。
+- 变更：
+  1. **INV-EVAL-04**（`herdr/evaluator.py`、`herdr/task_cli_launch.py`）：auto-init 默认 pytest 先跑 `pytest --collect-only -q` 探测（≤120s，失败/超时回退原默认），收集项数 ≥ `HERDR_LOOP_SMOKE_MIN_TESTS`（默认 5000）切换 `pytest -q --collect-only` 并以 `test_mode="collect_smoke"` 在 GOAL 显式标注"收集冒烟非验收，正确性以靶向自测与 test 门禁为准"；`parse_test_output` 新增收集摘要分支（exit 0 → (0,0,[])，零执行证据不伪造通过数；收集错误仍由既有 pytest error 摘要分支诚实红）；显式 --test-cmd 与 <阈值 仓库行为不变；修复 auto-init 显式命令路径 test_mode 未绑定的 NameError（被 init_loop 异常处理吞掉，C05b 契约测试拦住）。
+  2. **INV-SENTINEL-06**（`herdr/liveness.py`、`services/herdr-sentinel.py`）：`select_orphaned_pane_tasks` 纯选择器（归档态 + orphaned + 有 pane + 过宽限）；sentinel 主循环新增 `check_orphan_panes` 有界看护——宽限 1800s（`HERDR_ORPHAN_PANE_GRACE`）后 agent 仍 working 发一次 ctrl-c，关闭宽限 600s（`HERDR_ORPHAN_PANE_CLOSE_GRACE`）后先落未认领提交证据事件（clone tip 5 条有界）再走既有 `reap_task_pane` 身份守卫回收（身份不证明一律保留，不重试）；每任务至多 1 中断 + 1 回收尝试；kill-switch `HERDR_ORPHAN_PANE_JANITOR=0`；不写任务状态、不强杀进程。
+- 证据：
+  - 新增回归先红后绿：`pytest -q tests/test_loop_suite_smoke_default.py tests/test_sentinel_orphan_pane_janitor.py` → 28 passed；
+  - 受影响专项（含 C05b/评估器家族/liveness/供应链/fuse/GOAL 契约/launch reconcile）复跑 → 256 passed；
+  - 真实调用链：①临时仓 auto-init（阈值=1）→ EVALUATOR.sh/GOAL 含冒烟契约 → `bin/herdr-loop eval` 收敛 score=100、total=0（零伪造证据）；坏 import 仓 TEST_EXIT=2 诚实红。②临时 sqlite store + 真实 reap_task_pane：事件 orphan_pane_interrupted → orphan_pane_unclaimed_commits → task_transition(pane_reaped) → orphan_pane_reap 全落库，pane_id 释放；
+  - `python3 -m compileall -q herdr services bin tests` clean；`git diff --check` clean；`docs/lessons/lessons-learned.md` §198。
+- 已知边界：冒烟阈值为启发式（5000 项），介于其间的重套件仍可能超预算（TEST_EXIT=124 诚实红）；提交收割的候选旋转仍是产品决策（本 PR 只落证据事件）。

@@ -117,6 +117,68 @@ def resolve_step_budgets(target_dir: Path, repro_cmd: str = "") -> Dict[str, flo
     }
 
 
+DEFAULT_SUITE_SMOKE_MIN_TESTS = 5000
+
+
+def suite_smoke_min_tests() -> int:
+    """Collected-test count above which the auto default becomes smoke."""
+    raw = os.environ.get("HERDR_LOOP_SMOKE_MIN_TESTS")
+    if raw:
+        try:
+            val = int(raw.strip())
+            if val > 0:
+                return val
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_SUITE_SMOKE_MIN_TESTS
+
+
+def probe_suite_size(target_dir: Path, timeout: float = 120.0, runner=None) -> Optional[int]:
+    """Count collectable tests cheaply; None when the probe is inconclusive.
+
+    Runs ``pytest --collect-only -q`` (no test execution; HAFlow's 6449-test
+    suite collects in ~2s). Any failure, timeout, or unparseable output keeps
+    the caller on the plain default — the probe is advisory, never a gate.
+    """
+    run = runner
+    if run is None:
+        def run(cmd, timeout):
+            result = subprocess.run(
+                cmd, cwd=str(target_dir), text=True,
+                capture_output=True, timeout=timeout,
+            )
+            return result.stdout or ""
+    try:
+        stdout = run(["pytest", "--collect-only", "-q"], timeout)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return None
+    matches = re.findall(r"(\d+) tests? collected", stdout or "")
+    if not matches:
+        return None
+    try:
+        return int(matches[-1])
+    except (TypeError, ValueError):
+        return None
+
+
+def apply_suite_scale_policy(command: str, collected_tests: Optional[int]) -> Dict[str, Any]:
+    """INV-EVAL-04: the auto default must fit its own evaluation budget.
+
+    wf-haflow-1024-02 measured ~16h for one full serial suite pass on a
+    CI-scale repo (and xdist is known-flaky in its CI), so a bare ``pytest``
+    default can never converge there. When the cheap collection probe shows
+    an oversized suite, the default becomes a collection smoke that is
+    explicitly labelled non-authoritative (see ``init_loop`` test_mode).
+    Explicit ``--test-cmd`` contracts and sized suites keep the full run.
+    """
+    command = str(command or "")
+    if command != "pytest":
+        return {"command": command, "mode": "run"}
+    if collected_tests is None or int(collected_tests) < suite_smoke_min_tests():
+        return {"command": command, "mode": "run"}
+    return {"command": "pytest -q --collect-only", "mode": "collect_smoke"}
+
+
 def resolve_evaluation_timeout(target_dir: Path, explicit_timeout: Optional[float] = None) -> float:
     """Resolve timeout for running EVALUATOR.sh in agentic evaluation loops.
 
@@ -531,13 +593,14 @@ def init_loop(
     max_iterations: int = 5,
     repro_cmd: str = "",
     capture_baseline: bool = False,
+    test_mode: str = "run",
 ) -> Path:
     """Own contract replacement and optional baseline capture as one lifecycle."""
     with evaluation_lock(get_loop_dir(target_dir)):
         loop_dir = _init_loop_unlocked(
             target_dir=target_dir, goal=goal, acceptance=acceptance,
             test_cmd=test_cmd, lint_cmd=lint_cmd, max_iterations=max_iterations,
-            repro_cmd=repro_cmd,
+            repro_cmd=repro_cmd, test_mode=test_mode,
         )
         command = (lint_cmd or "").strip()
         if capture_baseline and command and command != "true":
@@ -553,6 +616,7 @@ def _init_loop_unlocked(
     lint_cmd: str = "",
     max_iterations: int = 5,
     repro_cmd: str = "",
+    test_mode: str = "run",
 ) -> Path:
     """Initialize .herdr-loop directory structure and contracts."""
     loop_dir = get_loop_dir(target_dir)
@@ -610,6 +674,12 @@ def _init_loop_unlocked(
 - **测试命令**: `{test_cmd or 'pytest'}`
 - **代码质量**: `{lint_cmd or 'true'}`
 """
+    if test_mode == "collect_smoke":
+        goal_content += (
+            "- **测试步模式**: 收集冒烟（collection smoke，非验收）：全量测试套件超出内循环"
+            "评估预算，测试步只验证套件可完整收集（import/语法健康）；正确性以工位内"
+            "靶向自测与 test 门禁为准\n"
+        )
     if repro_cmd:
         goal_content += f"- **靶向复现用例**: `{repro_cmd}`\n"
     # Pin the wrapper timeout above the script's inner step budgets so the
@@ -850,6 +920,14 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
                     if target not in failing:
                         failing.append(target)
 
+
+    # 1b. pytest collect-only (INV-EVAL-04 smoke default): "6449 tests
+    # collected in 2.09s" with exit 0 is a healthy receipt, but nothing
+    # ran — record zero evidence instead of fabricating passes. Collection
+    # errors carry a pytest error summary ("no tests collected, N error")
+    # and are already handled by branch 1 above.
+    if not matched and exit_code == 0 and re.search(r"\d+\s+tests?\s+collected\b", output):
+        return 0, 0, []
 
     # 2. vitest summaries: "Tests  1 failed | 11 passed (12)"
     vitest_matched = False

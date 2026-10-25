@@ -8262,3 +8262,31 @@ wf-haflow-1024-02（issue #326，2026-10-24）复现并放大了 §195 的 watch
 pytest -q tests/test_evaluator_step_budgets.py tests/test_sentinel_loop_progress_liveness.py tests/test_watchdog_timeout_auto_recover.py
 pytest -q tests/test_recovery_supply_chain.py tests/test_evaluator_process_cleanup.py tests/test_goal_repro_configuration.py tests/test_inner_loop_convergence.py
 ```
+
+---
+
+## 198. 超大套件的内循环默认命令与孤儿 Pane 的有界看护（2026-10-25）
+
+### 问题背景
+
+§197 落地后复盘确认的两项遗留：(1) CI 级测试套件的循环默认命令——实测本仓库全量串行单轮 ≈16h（旧包装 1800s 只跑到 3%），xdist 在自托管 CI 已知间歇崩，而 controller 派发不传 `--test-cmd`，于是自动选中的裸 `pytest` 让超大仓库的每个内循环都结构性不可收敛（回执再诚实也到不了及格线）；(2) 判死/作废只把 Pane 标记为 `pane_lifecycle=orphaned`，无人收口——数据库终态不终止进程，孤儿 agent 可以无限烧 token 且产出无人认领（1024-02 现场判死后 26 分钟仍在提交）。
+
+### 经验教训
+
+| 教训 | 依据 |
+| --- | --- |
+| 默认命令必须匹配自己的评估预算：选不出能跑完的默认时，诚实的出路是把语义降级并显式标注（收集冒烟非验收），而不是让循环带着注定失败的契约空转 | 全量 16h vs 预算上限 1800s；冒烟默认 + GOAL 标注后真实链路可收敛 |
+| 语义降级必须同步改解析器：collect-only 输出没有 passed/failed 摘要，落进"无法识别"兜底会变成 0/1 假失败——新的健康形态要有自己的回执语义（干净收集 = 零执行证据，而非伪造通过数） | 冒烟默认首跑即 50 分不收敛；解析分支落地后 100 分收敛且 total=0 不虚报 |
+| 探测驱动优于猜测：`pytest --collect-only -q` 2 秒数清 6449 项（不执行任何测试），失败即回退原默认——便宜的探针换确定性的策略分支 | 文件数启发式无法区分"383 个轻测试"和"383 个浏览器 e2e" |
+| 孤儿生命周期要有界且协作式：宽限（给垂死回合最后落盘机会）→ 一次 ctrl-c → 关闭宽限 → 走既有身份守卫回收（身份不证明就保留）→ 回收前先把未认领提交记成证据事件。每一步都可关（kill-switch），每任务至多一轮 | 1024-02 判死后进程存活 26 分钟；总指挥靠人肉发现并收割 679f501 |
+
+### 修复与防护
+
+INV-EVAL-04（`herdr/evaluator.py` + `herdr/task_cli_launch.py`）：auto-init 对默认 `pytest` 先跑收集探测，收集项数 ≥ `HERDR_LOOP_SMOKE_MIN_TESTS`（默认 5000）改用 `pytest -q --collect-only` 并以 `test_mode="collect_smoke"` 在 GOAL 显式标注非验收；`parse_test_output` 新增收集摘要分支（exit 0 → (0,0,[]) 零执行证据）。INV-SENTINEL-06（`herdr/liveness.py` + `services/herdr-sentinel.py`）：`select_orphaned_pane_tasks` 纯选择器 + `check_orphan_panes` 有界看护（宽限 1800s → ctrl-c 一次 → 关闭宽限 600s → 未认领提交证据 → `reap_task_pane` 守卫回收），kill-switch `HERDR_ORPHAN_PANE_JANITOR=0`。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_loop_suite_smoke_default.py tests/test_sentinel_orphan_pane_janitor.py
+pytest -q tests/test_c05b_test_command_selection.py tests/test_evaluator_step_budgets.py tests/test_liveness_guard.py tests/test_recovery_supply_chain.py
+```
