@@ -4,7 +4,7 @@
   - run `run_940fbe3ac46e4e43ae3afdfe62d71e29` / epoch `3ff4c866d87bc42a4498fa962a48eb09`
 - 收尾程序: six-step-finish 技能（仓库无项目专属收尾脚本 → 用技能 `scripts/finish-task.sh`；禁止自创流程）
 - 冻结候选: `183fbf9f6440425020ef98579591fed6670541f6`（分支 `agent/codex/fix-wf-haflow-1024-02-craft-rework-manual`，基线 `origin/main`=`127970a`，无 offset）
-- 交付 PR: **https://github.com/allinai0506/HAFlow/pull/349**（base=`main`，state=**OPEN**，head=`e54e6f145dd5551155ba4c2ebe2361745879e3d6`，mergeable=**CONFLICTING**；head 移动与内容披露见 §五）
+- 交付 PR: **https://github.com/allinai0506/HAFlow/pull/349**（base=`main`，state=**OPEN**，head=见 §五 head 移动链末位（以 `gh pr view 349 --json headRefOid` 为准），mergeable=**CONFLICTING**；head 移动与内容披露见 §五）
 - 边界: 未合并、未部署、未重启服务、未删除任何 Pane/Clone/Tab；`--force`/`--yes` 均未使用；交付分支历史未改写。本记录描述本地沙盒源码与 GitHub 上真实 PR 状态。
 
 ## 一、六步收尾 0→6 状态表
@@ -26,11 +26,11 @@
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| **PR URL** | https://github.com/allinai0506/HAFlow/pull/349 | base=`main`，head=`herdr/delivery-wf-haflow-1024-02-326`@`e54e6f1`，OPEN |
+| **PR URL** | https://github.com/allinai0506/HAFlow/pull/349 | base=`main`，head=`herdr/delivery-wf-haflow-1024-02-326`（当前为本报告提交，见 §五 移动链），state=OPEN |
 | **CI 状态** | Codex P1 Gate **pass**；pytest **fail**；tests-required **fail** | 两个 fail 均非代码失败：PR `mergeable=CONFLICTING`，GitHub 无法生成 `refs/pull/349/merge` 合并树，job 在 checkout 前即失败（run 40178009949）。冲突面仅追加式文档尾部，见 §六 L-1 |
 | **审核 findings 状态** | Codex P2 **已独立复现确认，未在本工位修复**；P1 无 | 实测证据见 §四；处置需作者/控制方决策（合并后跟进 vs `gate.retry_node=craft` 返工），文档型 wrapup 工位不修代码 |
 | 双门禁汇聚 | pass×2 同候选 | `join_gate_verdict` 事件 102137 |
-| 知识沉淀 | 已提交并随 PR 交付 | `bafba87`（cherry-pick 进 head 为 `e54e6f1`） |
+| 知识沉淀 | 已提交并随 PR 交付 | `bafba87`（教训/wiki）+ 本报告提交，均 fast-forward 追加进交付 head |
 
 ## 三、issue #326 修复内容（候选相对 `127970a`，9 files，+171）
 
@@ -55,7 +55,7 @@
 | 双门禁 verdict 与 candidate_sha 三点一致 | pass×2，均为 `183fbf9…`；`join_gate_verdict` `expected=observed=candidate` | `gate-verdicts/*.json`、`state.db` 事件 102137、note `n-1792906026669-37dd`/`n-1792908132775-5742` |
 | 祖先关系 | `origin/main 127970a` 是候选祖先，无 offset；`git merge-base --is-ancestor` 通过 | seg1 |
 | `check-delivery`（认证候选） | `equivalent=True reason=exact_sha_match` | `/tmp/wf326-wrapup/record-delivery.txt` |
-| `check-delivery`（PR head `e54e6f1`） | `equivalent=False reason=not_equivalent`（warn-only）：head = 认证候选 + docs-only 提交，未改写历史；披露见 PR body | PR 评论与 §五 |
+| `check-delivery`（PR docs head） | `equivalent=False reason=not_equivalent`（warn-only）：head = 认证候选 + docs-only 提交，未改写历史；披露见 PR body | PR 评论与 §五 |
 | Codex P2 独立复现（候选 vs 未修基线双实测） | **确认**：候选上 drawerHead 853..901（z-index 40）覆盖 bottomBar 852..900（z-index 30），底栏 4 项 `visibleToUser=false`；基线上底栏 872..900 全部可见 → 修复引入的次生遮挡，但 issue #326 自身验收仍成立 | `/tmp/wf326-wrapup/footer-geometry-evidence.md`；PR 评论 6395652605 |
 | 回归专项 / 全量测试 | 候选上由双门禁各自独立重跑通过；本工位不重复 CI 全量 | cleanroom_test-manual3 / cleanroom_review-manual2 报告 |
 | finish-task.sh 只读演练 | `⛔ 尚未合入`，未触发任何破坏性步骤 | `/tmp/wf326-wrapup/step3-dryrun.txt` |
@@ -71,6 +71,7 @@ worker clone 另有显式 `pre-push` 守卫（`[GIT GUARD REJECT] … Direct git
 
 - delivery 身份 note：`n-1792915144325-9bef`（kind `delivery`，绑定 `herdr/integration-wf-haflow-1024-02-craft-rework-manual@183fbf9f6440`）
 - PR 记录 note：`n-1792918103605-da0b`（`--kind delivery` 对 wrapup 任务被 CLI 拒绝，故记为 `note`）
+- head 移动链：`183fbf9`（双门禁认证候选，代码）→ `e54e6f1`（+ 教训/wiki 沉淀，docs-only 83 行）→ 本报告及其归档索引提交（docs-only）。全部为 fast-forward 追加，无历史改写、无 force-push；代码内容自 `183fbf9` 起未变（`git diff 183fbf9..HEAD` 仅文档）。当前 head sha 以 `gh pr view 349 --json headRefOid` 与 PR 评论 / 共享 note 记录为准。
 
 ## 六、遗留问题与风险
 
