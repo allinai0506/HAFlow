@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -125,6 +127,52 @@ class EvaluatorStepBudgetTest(unittest.TestCase):
         )
         self.assertEqual(exit_code, 0)
         self.assertIn("TEST_EXIT=3", stdout)
+
+    def test_pipeline_failure_preserves_pipefail_receipt(self):
+        """Codex P1 (PR #344): the bounded step must keep bash pipefail.
+
+        The pre-budget subshell inherited ``set -o pipefail``; a plain
+        ``sh -c`` would let ``false | cat`` report success and converge on a
+        failed upstream check.
+        """
+        loop_dir = self._init(
+            test_cmd="false | cat",
+            HERDR_LOOP_TEST_BUDGET="30",
+            HERDR_LOOP_LINT_BUDGET="30",
+        )
+        script = loop_dir / "EVALUATOR.sh"
+        exit_code, stdout, _stderr = run_evaluation_command(
+            [str(script)], self.target, timeout=120
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("TEST_EXIT=1", stdout)
+        self.assertNotIn("TEST_EXIT=0", stdout)
+
+    def test_breached_step_kills_descendants_before_next_step(self):
+        """Codex P2 (PR #344): a budget breach must not leak a live tree.
+
+        Terminating only the step shell orphaned its children, which kept
+        running through the lint/repro steps and mutated files mid-evaluation.
+        """
+        child = self.target / "child.py"
+        child.write_text(
+            "import time\ntime.sleep(4)\nopen('late-write', 'w').close()\n",
+            encoding="utf-8",
+        )
+        loop_dir = self._init(
+            test_cmd=f"python3 {shlex.quote(str(child))}; true",
+            HERDR_LOOP_TEST_BUDGET="2",
+            HERDR_LOOP_LINT_BUDGET="10",
+        )
+        script = loop_dir / "EVALUATOR.sh"
+        exit_code, stdout, _stderr = run_evaluation_command(
+            [str(script)], self.target, timeout=120
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("TEST_EXIT=124", stdout)
+        self.assertFalse((self.target / "late-write").exists())
+        time.sleep(3)
+        self.assertFalse((self.target / "late-write").exists())
 
 
 if __name__ == "__main__":

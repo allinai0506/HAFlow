@@ -3677,3 +3677,12 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `python3 -m compileall -q herdr services bin tests` clean；`bin/herdr-loop`/`bin/herdr-task` AST 语法检查通过；`git diff --check` clean；
   - `docs/lessons/lessons-learned.md` §197。
 - 已知边界（另行立项）：CI 级测试套件的循环默认命令策略（全量 pytest 对内循环天然不收敛，需任务级 --test-cmd 或选择策略）；看门狗判死后旧 pane/进程缺统一终止与成果收割路径（本次 679f501 险些丢失即此缺口）。
+
+## [2026-10-25] PR #344 评审修复 | Codex P1/P2：有界步骤恢复 bash pipefail 语义、违限时击杀步骤进程树
+- 触发：PR #344 Codex 评审两条（均已本地复现实锤）：
+  - P1——`sh -c` 丢失评估器的 `set -o pipefail`：`false | cat` 类管道命令上游失败也回执 0，可致假收敛（实测 test_exit_code=0）。
+  - P2——违限只 TERM 步骤壳本身：`python3 child.py; true` 场景下孤儿子进程存活并跨入 lint/repro 步骤继续写文件（实测 late-write 在后续步骤窗口出现）。
+- 变更（`herdr/evaluator.py` 生成模板）：
+  1. 步骤执行改为 `bash -o pipefail -c "$command_text"`，恢复预算化之前 bash 子壳 + pipefail 的既有契约；
+  2. 新增 `kill_tree`（`ps -axo pid=,ppid=` 递归枚举后代），违限时 TERM 全树 → 3s → KILL 全树 再回执 124；步骤仍留在脚本进程组，包装层组击杀契约不变，两道清理带的先后与覆盖互补。
+- 证据：`pytest -q tests/test_evaluator_step_budgets.py` → 7 passed（新增 P1/P2 两项先红后绿）；受影响 17 文件批次复跑 → 243 passed；`compileall`/`git diff --check` clean。

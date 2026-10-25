@@ -649,22 +649,31 @@ LINT_BUDGET={int(round(budgets['lint']))}
 REPRO_BUDGET={int(round(budgets['repro']))}
 
 # Steps stay in the script's process group: the evaluation wrapper's group
-# kill on wrapper timeout must keep reaching the whole step tree. This inner
-# bound only TERMs the step shell itself (grandchildren are reaped by that
-# outer belt within the wrapper margin), and always emits the step receipt.
+# kill on wrapper timeout must keep reaching the whole step tree. A budget
+# breach TERMs the step's owned descendant tree (an orphaned child must not
+# run on into the lint/repro steps), always emits the step receipt, and keeps
+# bash pipefail semantics for pipeline commands (PR #344 Codex P1/P2).
 STEP_EXIT=0
+kill_tree() {{
+    local pid="$1" sig="$2" children child
+    children=$(ps -axo pid=,ppid= 2>/dev/null | awk -v p="$pid" '$2==p {{print $1}}')
+    for child in $children; do
+        kill_tree "$child" "$sig"
+    done
+    kill -"$sig" "$pid" 2>/dev/null
+}}
 run_bounded() {{
     local budget="$1" log="$2" command_text="$3" step_pid waited
-    sh -c "$command_text" > "$log" 2>&1 &
+    bash -o pipefail -c "$command_text" > "$log" 2>&1 &
     step_pid=$!
     waited=0
     while kill -0 "$step_pid" 2>/dev/null && [ "$waited" -lt "$budget" ]; do
         sleep 2; waited=$((waited + 2))
     done
     if kill -0 "$step_pid" 2>/dev/null; then
-        kill -TERM "$step_pid" 2>/dev/null
+        kill_tree "$step_pid" TERM
         sleep 3
-        kill -KILL "$step_pid" 2>/dev/null
+        kill_tree "$step_pid" KILL
         wait "$step_pid" 2>/dev/null
         STEP_EXIT=124
     else
