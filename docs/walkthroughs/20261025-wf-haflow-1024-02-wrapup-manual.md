@@ -18,7 +18,7 @@
 | 3 合并确认 | 核验分支已合入 base（只读） | finish-task.sh `--dry-run --base main --forge github` | `bash .agents/skills/six-step-finish/scripts/finish-task.sh --dry-run --base main --forge github` | ⛔ DEFERRED | PR #349 OPEN 未合入；dry-run 输出 `⛔ 尚未合入`（`/tmp/wf326-wrapup/step3-dryrun.txt`）；**严禁自动合并**为任务硬约束，合并决策留人工 |
 | 4 锚点同步 | 切锚点 + rebase 最新 base | finish-task.sh | （未执行） | DEFERRED | 步骤 3 未过不执行；且 rebase 会使 head ≠ 认证候选 `183fbf9`，双门禁证据失效（见 §六 L-2） |
 | 5 分支核对 | 删除本地/远端任务分支 | finish-task.sh | （未执行） | DEFERRED | PR OPEN 期间删分支断反馈环（技能明令禁止）；craft 分支与他工位现场按规则保留 |
-| 6 卫生检查 | 未提交变更拦截、锁/孤儿 worktree | wrapup Agent | `git status --porcelain`、`git diff --check`、探针 worktree/服务清理 | ✅（范围化） | 工作树干净（仅 harness 工件 `.agent-task-context`/`.herdr-launch-identity.json` untracked，不提交不清理）；浏览器探针临时 worktree、`/tmp` 服务器与目录已全部关闭删除 |
+| 6 卫生检查 | 未提交变更拦截、锁/孤儿 worktree | wrapup Agent | `git status --porcelain`、`git diff --check`、探针 worktree/服务清理 | ✅（范围化） | 工作树干净（仅 harness 工件 `.agent-task-context`/`.herdr-launch-identity.json` untracked，不提交不清理）；浏览器探针与交付用临时 worktree（`/tmp/wf326-deliver-rpt`）、`/tmp` 服务器与目录已全部关闭删除；`/private/tmp/haflow-rebase-326`（craft 侧 rebase 现场）非本工位产物，按规则保留不删 |
 
 > 步骤 3-5 的 DEFERRED 是"PR 未合入"的正确形态，不是失败；实际执行顺序 0→1→2→0'→3(dry-run)→6。
 
