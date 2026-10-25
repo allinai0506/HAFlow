@@ -1143,3 +1143,136 @@ def test_finalize_none_mode_preservation_commit_keeps_chain(finalize_scene):
     assert final['status'] == 'resolved', json.dumps(final['detail'])
     assert final['detail']['reason'] == 'delivery_finalized'
     assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'set', 'cleanup'], s.calls
+
+
+def advance_main_unrelated(s):
+    """Move the main branch forward with an unrelated commit, as a merged
+    teammate change would between the task's commit and its integrate."""
+    (s.repo / 'unrelated.txt').write_text('main advanced independently\n')
+    subprocess.run(['git', '-C', str(s.repo), 'add', 'unrelated.txt'], check=True)
+    subprocess.run(['git', '-C', str(s.repo), 'commit', '-qm', 'unrelated main advance',
+                    '--no-gpg-sign'], check=True)
+
+
+def integration_facts_survive_cleanup(s, task, sha_b):
+    """B must be a real Git object reachable through this task's own refs."""
+    task_ref = subprocess.check_output(
+        ['git', '-C', str(s.repo), 'rev-parse', '--verify', 'refs/herdr/tasks/impl^{commit}'],
+        text=True).strip()
+    branch_ref = subprocess.check_output(
+        ['git', '-C', str(s.repo), 'rev-parse', '--verify',
+         f"refs/heads/{task['integration_branch']}^{{commit}}"], text=True).strip()
+    assert task_ref == branch_ref == sha_b
+    ancestor = subprocess.run(
+        ['git', '-C', str(s.repo), 'merge-base', '--is-ancestor',
+         task['integration_base_sha'], sha_b], capture_output=True)
+    assert ancestor.returncode == 0
+
+
+def test_finalize_legal_rebase_after_own_commit_completes_chain(finalize_scene):
+    """completed: the operation's own commit produces A, an unrelated main
+    advance makes integrate legally rebase A into B, and the guard must
+    attribute B to this operation so cleanup and business advance still run."""
+    s = finalize_scene
+    authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    op_id = op['id']
+    committed = []
+    def capture_then_advance(result):
+        committed.append(subprocess.check_output(
+            ['git', '-C', str(s.clone), 'rev-parse', 'HEAD'], text=True).strip())
+        advance_main_unrelated(s)
+    s.after['commit'] = capture_then_advance
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+    sha_a = committed[0]
+    task = s.store.get_task('impl')
+    sha_b = task['commit']
+    assert sha_a and sha_a != s.baseline
+    assert task['status'] == 'cleaned', 'the confirmed rebase must complete the whole chain'
+    assert sha_b == task['integrated_commit'] and sha_b != sha_a, 'integrate must really rebase A into B'
+    assert task['integration_head_before_rebase'] == sha_a
+    assert task['integration_ref'] == 'refs/herdr/tasks/impl'
+    integration_facts_survive_cleanup(s, task, sha_b)
+    op = s.finalize_op()
+    assert op['id'] == op_id and op['status'] == 'awaiting_result', json.dumps(op['detail'])
+    assert op['detail']['finalize_commits'] == {'impl': sha_b}
+    s.clock[0] += 30
+    s.tick()
+    final = s.finalize_op()
+    assert final['id'] == op_id
+    assert final['status'] == 'resolved', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'delivery_finalized'
+    assert s.advances == ['impl']
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'integrate', 'set', 'cleanup'], s.calls
+
+
+def test_finalize_legal_rebase_from_committed_entry_completes_chain(finalize_scene):
+    """committed: the task already sits on authorized commit A and this round
+    runs no commit; after an unrelated main advance integrate rebases A into
+    B. The guard must attribute B without any commit receipt, without
+    re-committing or re-integrating, and close the same operation out."""
+    s = finalize_scene
+    task_manager = str(Path(__file__).resolve().parents[1] / 'bin/herdr-task')
+    commit_proc = subprocess.run([task_manager, 'commit', 'impl', '--message', 'task: impl'],
+                                 text=True, capture_output=True)
+    assert commit_proc.returncode == 0, commit_proc.stdout + commit_proc.stderr
+    sha_a = subprocess.check_output(
+        ['git', '-C', str(s.clone), 'rev-parse', 'HEAD'], text=True).strip()
+    task = s.store.get_task('impl')
+    assert task['status'] == 'committed' and task['commit'] == sha_a and sha_a != s.baseline
+    # Authorized committed entry: the committed deliverable itself is the
+    # workflow's frozen candidate (as with a wrapup delivery), so the
+    # finalize obligation may retry without a fresh commit this round.
+    s.store.record_event('candidate_frozen', {'candidate_sha': sha_a}, workflow_id='wf',
+                         source='critical-path-scheduler', timestamp=int(s.clock[0]))
+    advance_main_unrelated(s)
+    authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    op_id = op['id']
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+    task = s.store.get_task('impl')
+    sha_b = task['commit']
+    assert task['status'] == 'cleaned', 'the confirmed rebase must complete the whole chain'
+    assert sha_b == task['integrated_commit'] and sha_b != sha_a, 'integrate must really rebase A into B'
+    assert task['integration_head_before_rebase'] == sha_a
+    integration_facts_survive_cleanup(s, task, sha_b)
+    op = s.finalize_op()
+    assert op['id'] == op_id and op['status'] == 'awaiting_result', json.dumps(op['detail'])
+    assert op['detail']['finalize_commits'] == {'impl': sha_b}
+    s.clock[0] += 30
+    s.tick()
+    final = s.finalize_op()
+    assert final['id'] == op_id
+    assert final['status'] == 'resolved', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'delivery_finalized'
+    assert s.advances == ['impl']
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'integrate', 'set', 'cleanup'], s.calls
+
+
+@pytest.mark.parametrize('tamper', ['commit', 'ref', 'execution'])
+def test_finalize_unattributable_integrate_result_blocks_chain(finalize_scene, tamper):
+    """A post-integrate change this operation cannot attribute (foreign SHA,
+    missing integration ref, or foreign execution) keeps the integration fact
+    but escalates instead of letting cleanup and advance trust the snapshot."""
+    s = finalize_scene
+    authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    def tamper_result(result):
+        if tamper == 'commit':
+            s.store.update_task_metadata('impl', {'commit': 'c' * 40})
+        elif tamper == 'ref':
+            s.store.update_task_metadata('impl', {'integration_ref': None})
+        else:
+            s.store.update_task_metadata('impl', {'execution_id': 'foreign-execution'})
+    s.after['integrate'] = tamper_result
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+    task = s.store.get_task('impl')
+    assert task['status'] == 'integrated', 'the real integration result must be preserved'
+    final = s.finalize_op()
+    assert final['status'] == 'waiting_human', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'integrate_result_unverified'
+    assert not s.advances
+    assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'integrate'], s.calls

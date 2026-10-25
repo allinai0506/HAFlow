@@ -3726,3 +3726,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - PR #349（#326）把折叠抽屉头锚进底栏同一条 48px 带后，z-40 `.drawer-head` 完全盖住 z-30 `.light-bottom-bar`：底栏 4 项状态与切换按钮折叠态不可见不可点（1440x900 `elementFromPoint` 全部命中 drawer-head，head 853..901 覆盖 bar 852..900）。
 - 修复：`shell-inspector.css` 折叠态 `.deep-drawer` 整体 `visibility: hidden`（几何保留、命中范围归零），`transition` 追加 `visibility 0s linear .2s` 延迟翻转保留下滑动画；展开态不变，底栏按钮成为折叠态唯一切换入口。
 - 新回归 `test_collapsed_drawer_leaves_bottom_bar_visible_and_clickable`：断言底栏五项折叠态命中自身、底栏按钮可展开、展开头可点回折；#326 原 e2e 与两条护栏（`bottom: [0,0]`、48px 同高）不变通过；合成页 fixture `styles[0]` SHA 同步更新。教训见 lessons §204。Evidence: 71 项受影响 console 测试全绿。
+
+## [2026-10-25] Recovery | finalize 合法 rebase 的结果归属补齐（PR #348 回归修复）
+- PR #348 的恢复守卫只认 commit 收据：合法 rebase 把授权输入 A 改写为 B 后，cleanup_ready/cleanup/stage_advance 仍传旧 A（committed 入口恒为 None），`guard_effect` 误判外来漂移 → `waiting_human/recovery_execution_failed`，集成成功但收尾停摆（completed/committed 两入口均复现）。
+- 修复：`git_finalize.py` integrate 前 pin 授权输入 A 与入口身份；integrate 后 `finalize_support._settle_integration_result` 以证据链确认 B（`integration_head_before_rebase==A`、`commit==integrated_commit==B`、任务专属 `refs/herdr/tasks/<id>` 与 `herdr/integration-<id>` 及 clone HEAD 的真实 Git 对象指向 B、B 位于 `integration_base_sha` 之上、入口身份未漂移），确认后 B 流入全部后续 guard 并持久化进 `finalize_commits`；无法归属 escalate `integrate_result_unverified`（retryable=False，集成事实保留）。#347/#348 预算、所有权与门禁路径不变。
+- 行数约束：`git_finalize.py` 超 controller 模块 500 行上限，none-mode worktree 保全块原样抽至 `finalize_support._preserve_none_mode_output`（行为不变，两文件 403/385 行）。
+- 新回归 5 条（completed/committed 两条真实 Git rebase A≠B 正向 + commit/ref/execution 三类篡改拒绝）；受影响 21 测试文件 451 项全绿。教训见 lessons §205。
+

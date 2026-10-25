@@ -868,25 +868,43 @@ class InvalidateFixLoopSubsetTest(unittest.TestCase):
 class FinalizeAlreadyCommittedTaskTest(unittest.TestCase):
     def test_finalize_skips_commit_if_already_committed(self):
         commands = []
+        committed_sha = "a" * 40
+        integrated_sha = "b" * 40
 
         def fake_run(cmd, **kwargs):
             commands.append(cmd)
+            # The attribution probes read the task-scoped integration refs.
+            if "rev-parse" in cmd:
+                return _resp(0, stdout=integrated_sha)
             return _resp(0)
 
         task = _task(
             "task-committed",
             status="committed",
             integration_mode="git",
+            commit=committed_sha,
+            clone_path="/clone",
         )
 
         def mock_get_task(tid):
             if any("integrate" in cmd for cmd in commands):
-                return _task(tid, status="integrated", integration_mode="git")
+                # The integrate CLI contract: integrated status plus the
+                # evidence fields a real run persists after a rebase.
+                return _task(tid, status="integrated", integration_mode="git",
+                             clone_path="/clone", commit=integrated_sha,
+                             integrated_commit=integrated_sha,
+                             integration_head_before_rebase=committed_sha,
+                             integration_ref=f"refs/herdr/tasks/{tid}",
+                             integration_branch=f"herdr/integration-{tid}",
+                             integration_base_sha="0" * 40,
+                             source_repo="/repo")
             return task
 
         with patch.object(_ctl, "get_task", side_effect=mock_get_task), \
              patch.object(_ctl, "set_task_status", return_value=True), \
              patch.object(_ctl, "enqueue_stage_advance"), \
+             patch.object(_ctl, "_get_store",
+                          return_value=type("Store", (), {"list_tasks": staticmethod(lambda **k: [])})()), \
              patch.object(_ctl.subprocess, "run", side_effect=fake_run):
             _ctl.finalize_completed_task("task-committed")
 
