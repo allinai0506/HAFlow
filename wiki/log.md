@@ -3663,3 +3663,26 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `python3 -m compileall -q herdr services bin tests` clean；`git diff --check` clean；
   - `docs/lessons/lessons-learned.md` §196。
 - 未覆盖（建议单独立项）：in_progress close 操作缺 flag 变更逃生通道（建议显式 `--force` 重启通道，设计决策待拍板）；close 成功后打印的 `--include-coordinator` 收尾指令对 completed 行是空转。
+
+## [2026-10-25] Sentinel / Controller / Evaluator | 静默长任务三带防护：评估器每步回执兜底、看门狗工件判活、看门狗死亡进有界补派（wf-haflow-1024-02 复盘）
+- 触发：wf-haflow-1024-02（issue #326）整夜卡死。craft-auto（agy）评估器跑全量 pytest（6405 项）超出包装超时，回执缺失成永久阻断（结构性不收敛）；TTY agent 探活盲区使 §195 存活宽限失效，看门狗按 idle 3601s 误判正干活的任务；hard_timeout_watchdog 不在 AUTO_RECOVER_REASONS，恢复操作停 waiting_human 零进展约 10 小时。判死后 agent 进程存活并于 22:42 提交完整修复 679f501（未 push，处置另行决定）。
+- 变更：
+  1. **INV-EVAL-03**（`herdr/evaluator.py`）：EVALUATOR.sh 内建每步预算（`run_bounded`：TERM→KILL、超限回执 TEST/LINT/REPRO_EXIT=124，命令经 shlex.quote 交 `sh -c`）；GOAL 契约新增 `<!-- HERDR_EVAL_TIMEOUT -->` 标记（内预算和 + 120s 余量，置于 REPRO 标记之前保持末行不变量）；自适应预算逻辑提取为 `_adaptive_suite_budget` 与包装解析共用；步骤进程留在脚本进程组，包装组击杀继续兜底全树回收。
+  2. **INV-SENTINEL-05**（`services/herdr-sentinel.py`）：`check_task_stalls` idle 基准取 `max(updated_at, .herdr-loop 工件最新 mtime)`（`_loop_progress_at`，只读、6 个固定工件 + logs 目录 32 条上限），静默推进的循环不再被误判；无 clone/无循环目录行为不变。
+  3. **INV-RECOVERY-07**（`services/herdr-controller.py`）：AUTO_RECOVER_REASONS 加入 `hard_timeout_watchdog`，与熔断/崩溃同受谱系次数上限（默认 2）与补派 SLA 核验约束。
+- 证据：
+  - 新增回归先红后绿：`pytest -q tests/test_evaluator_step_budgets.py tests/test_sentinel_loop_progress_liveness.py tests/test_watchdog_timeout_auto_recover.py` → 16 passed（RED 阶段 6 失败对应三个缺陷的行为断言）；
+  - 受影响专项：`pytest -q tests/test_recovery_supply_chain.py tests/test_evaluator_step_isolation.py tests/test_evaluator_process_cleanup.py tests/test_evaluator_process_isolation.py tests/test_evaluator_runner_contract.py tests/test_evaluator_execution_status.py tests/test_evaluator_multi_runner_metrics.py tests/test_evaluator_ansi_test_output.py tests/test_inner_loop_convergence.py tests/test_dispatch_fuse.py tests/test_liveness_guard.py tests/test_c05b_test_command_selection.py tests/test_gate_metrics_handoff.py …` → 219 passed；`tests/test_goal_repro_configuration.py` 等 GOAL 契约面 → 22 passed；
+  - 真实调用链：临时仓库 `init_loop` → `bin/herdr-loop eval`，收敛场景 converged=True；事故场景（test_cmd=`sleep 30`、预算 4s）9.8s 有界完成，`evaluation_exit_code=0`、`test_exit_code=124`、无 missing_exit_receipt（旧模式为 evaluator_exit:124 + 回执蒸发）；
+  - `python3 -m compileall -q herdr services bin tests` clean；`bin/herdr-loop`/`bin/herdr-task` AST 语法检查通过；`git diff --check` clean；
+  - `docs/lessons/lessons-learned.md` §197。
+- 已知边界（另行立项）：CI 级测试套件的循环默认命令策略（全量 pytest 对内循环天然不收敛，需任务级 --test-cmd 或选择策略）；看门狗判死后旧 pane/进程缺统一终止与成果收割路径（本次 679f501 险些丢失即此缺口）。
+
+## [2026-10-25] PR #344 评审修复 | Codex P1/P2：有界步骤恢复 bash pipefail 语义、违限时击杀步骤进程树
+- 触发：PR #344 Codex 评审两条（均已本地复现实锤）：
+  - P1——`sh -c` 丢失评估器的 `set -o pipefail`：`false | cat` 类管道命令上游失败也回执 0，可致假收敛（实测 test_exit_code=0）。
+  - P2——违限只 TERM 步骤壳本身：`python3 child.py; true` 场景下孤儿子进程存活并跨入 lint/repro 步骤继续写文件（实测 late-write 在后续步骤窗口出现）。
+- 变更（`herdr/evaluator.py` 生成模板）：
+  1. 步骤执行改为 `bash -o pipefail -c "$command_text"`，恢复预算化之前 bash 子壳 + pipefail 的既有契约；
+  2. 新增 `kill_tree`（`ps -axo pid=,ppid=` 递归枚举后代），违限时 TERM 全树 → 3s → KILL 全树 再回执 124；步骤仍留在脚本进程组，包装层组击杀契约不变，两道清理带的先后与覆盖互补。
+- 证据：`pytest -q tests/test_evaluator_step_budgets.py` → 7 passed（新增 P1/P2 两项先红后绿）；受影响 17 文件批次复跑 → 243 passed；`compileall`/`git diff --check` clean。

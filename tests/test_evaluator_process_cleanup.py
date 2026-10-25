@@ -54,9 +54,14 @@ def await_ready(tmp_path, process):
 def test_timeout_cleans_owned_children_and_persists_rejection(tmp_path, monkeypatch, ignore_term):
     directory = setup_runner(tmp_path, ignore_term=ignore_term)
     loop = load_loop()
+    # The wrapper timeout is whatever the GOAL contract pins for this loop
+    # (inner step budgets + margin since wf-haflow-1024-02); shorten exactly
+    # that resolved timeout so the wrapper kill path is exercised.
+    from herdr.evaluator import resolve_evaluation_timeout
+    resolved_timeout = resolve_evaluation_timeout(tmp_path)
     original = subprocess.Popen.communicate
     def short_timeout(process, *args, **kwargs):
-        if kwargs.get('timeout') == 300:
+        if kwargs.get('timeout') == resolved_timeout:
             await_ready(tmp_path, process)
             kwargs['timeout'] = 0.4
         return original(process, *args, **kwargs)

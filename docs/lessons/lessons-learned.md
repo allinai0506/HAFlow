@@ -8234,3 +8234,31 @@ CLI 门禁改为模式无关（`finalize_escalated` 且非 superseded 即拦，`
 pytest -q tests/test_task_cli_workflow_close.py tests/test_workflow_close_claim.py tests/test_impl_fix4_regression.py
 pytest -q tests/test_wrapup_failure_recovery_closed_loop.py tests/test_fix_loop_gates.py tests/test_gate_metrics_handoff.py tests/test_close_workflow_receipt_cli.py tests/test_liveness_guard.py
 ```
+
+---
+
+## 197. 静默长任务的三带防护：评估器每步回执兜底、看门狗工件判活、看门狗死亡进有界补派（2026-10-25）
+
+### 问题背景
+
+wf-haflow-1024-02（issue #326，2026-10-24）复现并放大了 §195 的 watchdog 误杀链：craft-auto（agy）的内循环评估器按默认命令跑全量 `pytest`（6405 项），评估包装自身超时（自适应上限 1800s）把 EVALUATOR.sh 整体杀死——TEST_EXIT/LINT_EXIT 回执从未发出，`evaluator_exit:124` + `missing_exit_receipt` 成为任何 agent 行为都无法消除的永久阻断，循环结构性不收敛；同时 agy 的 TTY pane 探活读不到 `working`（§195 的两阶段宽限失效），任务行 updated_at 一小时不动，看门狗按 idle 3601s 判死；而 `hard_timeout_watchdog` 不在 AUTO_RECOVER_REASONS，恢复操作整夜停在 waiting_human、attempts=0。判死后 agent 进程实际存活，22:42 还在 clone 里提交完整修复（679f501）——"判死"只改了数据库，没人终止进程，也没人收割成果。
+
+### 经验教训
+
+| 教训 | 依据 |
+| --- | --- |
+| 超时体系必须双带且内小于外：只有包装一层超时的脚手架，超时本身就是回执的杀手——步骤级预算先兜住回执（124 也算回执），包装超时只做最后 belt | evaluator_exit:124 + missing_exit_receipt 组合阻断，agent 无从自救 |
+| "判活"要认产出证据而不是单一信号：状态迁移、pane 探活、工件 mtime 三路信号任一新鲜都表明在干活；TTY agent 探活天然有盲区，工件进展是最不依赖 agent 实现的那一路 | agy 探不到 working，§195 宽限整体失效；test.log 一直在写却无人看 |
+| 看门狗判死属于基础设施裁决而非质量结论：它不评价代码好坏，只声明"没有进展证据"，理应进入与其他基础设施失败相同的有界补派管线（谱系上限 + SLA 核验），而不是制造一个只能等人的新死路 | waiting_human 整夜零进展；同因任务两年内两次整夜卡死（1022-01、1024-02） |
+| "判死 ≠ 进程终止"：数据库终态切换不会杀死 pane 里的进程，补派前必须默认旧执行者可能还活着（成果可能已落盘但无人认领） | 判死后 26 分钟仍在提交，修复险些随 clone 清理丢失 |
+
+### 修复与防护
+
+三带落位：(1) `herdr/evaluator.py` 生成的 EVALUATOR.sh 内建每步预算（`run_bounded`，TERM→KILL，超限回执 124），GOAL 契约钉住包装超时 = 内部预算和 + 余量（`HERDR_EVAL_TIMEOUT` 标记在 REPRO 标记之前，保持"REPRO 必须是最后一行"的既有不变量）；步骤进程留在脚本进程组内，包装层组击杀兜底全树回收。(2) `services/herdr-sentinel.py` `check_task_stalls` 的 idle 基准取 `max(updated_at, .herdr-loop 工件最新 mtime)`（只读、有界 scandir，不写任务行避免 completion epoch 抖动）。(3) `services/herdr-controller.py` AUTO_RECOVER_REASONS 加入 `hard_timeout_watchdog`，复用谱系上限与补派 SLA 核验。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_evaluator_step_budgets.py tests/test_sentinel_loop_progress_liveness.py tests/test_watchdog_timeout_auto_recover.py
+pytest -q tests/test_recovery_supply_chain.py tests/test_evaluator_process_cleanup.py tests/test_goal_repro_configuration.py tests/test_inner_loop_convergence.py
+```
