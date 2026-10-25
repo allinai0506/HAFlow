@@ -143,6 +143,35 @@ class OrphanPaneJanitorTest(unittest.TestCase):
         self._sweep(NOW + 60)
         self.assertEqual(self.calls["interrupt"], 1, "must not re-interrupt")
 
+    def test_ownership_unproven_retains_without_interrupt(self):
+        """Codex P1: no ctrl-c until the pane identity is proven ours."""
+        self.probe_verdict = {"status": "unknown", "reason": "agent_identity_mismatch"}
+        self._sweep(NOW)
+        self.assertEqual(self.calls["interrupt"], 0)
+        self.assertEqual(self.calls["close"], 0)
+        retained = [e for e in self.events if e[0] == "orphan_pane_reap"]
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0][1]["action"], "retained")
+        # Bounded: the retained verdict never retries.
+        self._sweep(NOW + 700)
+        self.assertEqual(self.calls["interrupt"], 0)
+        self.assertEqual(len([e for e in self.events if e[0] == "orphan_pane_reap"]), 1)
+
+    def test_probe_failure_preserves_interrupt_episode(self):
+        """Codex P2: unknown status is not inactivity — no re-interrupt, no reset."""
+        self._sweep(NOW)
+        self.assertEqual(self.calls["interrupt"], 1)
+        self.agent_status_value = None  # transient lookup failure
+        self._sweep(NOW + 60)
+        self.assertEqual(self.calls["interrupt"], 1)
+        self._sweep(NOW + 120)  # working again
+        self.assertEqual(self.calls["interrupt"], 1, "episode must survive probe failure")
+        # The close grace counts from the ORIGINAL interrupt, not the recovery.
+        self.agent_status_value = "working"
+        self._sweep(NOW + 700)
+        self.assertEqual(self.calls["evidence"], 1)
+        self.assertEqual(self.calls["close"], 1)
+
     def test_reap_after_close_grace_with_evidence_first(self):
         self._sweep(NOW)
         self.probe_verdict = {"status": "available", "reason": "identity_match"}
@@ -167,17 +196,6 @@ class OrphanPaneJanitorTest(unittest.TestCase):
         self._sweep(NOW + 700)
         self.assertEqual(self.calls["close"], 0, "missing pane needs no close transport")
         self.assertIsNone(self.store.get_task("wf-x-impl-auto").get("pane_id"))
-
-    def test_retained_reap_not_retried(self):
-        self._sweep(NOW)
-        self.probe_verdict = {"status": "unknown", "reason": "agent_identity_mismatch"}
-        self._sweep(NOW + 700)
-        self.assertEqual(self.calls["close"], 0)
-        reap_events = [e for e in self.events if e[0] == "orphan_pane_reap"]
-        self.assertEqual(len(reap_events), 1)
-        self.assertIn("retained", str(reap_events[0][1]))
-        self._sweep(NOW + 1_400)
-        self.assertEqual(self.calls["evidence"], 1, "no repeat reap attempts")
 
     def test_dead_agent_clears_episode(self):
         self.agent_status_value = None

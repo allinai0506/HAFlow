@@ -227,11 +227,14 @@ def _unclaimed_commit_evidence(task):
 def check_orphan_panes(tasks, state, now=None):
     """INV-SENTINEL-06: bounded janitor for orphaned panes of archived tasks.
 
-    Per orphaned task, at most one cooperative interrupt and one guarded reap
-    attempt (via the existing ``reap_task_pane`` identity checks — anything
-    unproven is retained, never force-closed). Before a reap, the clone's tip
+    Enforcement order per orphaned task: confirmed-working agent only, then
+    an ownership precheck (identity proven or pane missing — anything else is
+    retained untouched), then at most one cooperative interrupt and one
+    guarded reap attempt via the existing ``reap_task_pane`` identity checks.
+    A transient ``agent_status`` failure is never treated as inactivity: the
+    episode and its close-grace clock survive. Before a reap, the clone's tip
     commits are recorded as durable evidence so unclaimed work stays
-    discoverable. Never writes task status; kill-switch
+    discoverable. Never writes task status; never force-kills; kill-switch
     ``HERDR_ORPHAN_PANE_JANITOR=0`` restores the do-nothing behaviour.
     """
     if not orphan_pane_janitor_enabled():
@@ -249,10 +252,55 @@ def check_orphan_panes(tasks, state, now=None):
         episode = episodes.get(tid) or {}
         if episode.get("done"):
             continue
-        if agent_status(pane) != "working":
+
+        status = agent_status(pane)
+        if status is None:
+            # A transient probe failure is not inactivity (Codex P2): keep
+            # any existing episode — its interrupt timestamp and close grace
+            # survive — and retry on the next sweep. Without an episode,
+            # there is nothing to preserve and nothing to enforce yet.
+            continue
+        if status != "working":
             if episode:
                 episodes.pop(tid, None)
                 changed = True
+            continue
+
+        # Ownership precheck (Codex P1): never send keys — or close — to a
+        # pane this task does not provably own. Reused/shared/claimed panes
+        # retain untouched; the reap's full guard chain re-verifies at close.
+        verdict = _orphan_probe({**task, "pane_id": pane})
+        proven = (
+            verdict.get("status") == "available"
+            and verdict.get("reason") in {"identity_match", "agent_identity_match"}
+        )
+        missing = (
+            verdict.get("status") == "unavailable"
+            and verdict.get("reason") == "pane_missing"
+        )
+        if not (proven or missing):
+            episodes[tid] = {
+                "done": True,
+                "reap_action": "retained",
+                "reap_reason": verdict.get("reason") or "ownership_unproven",
+            }
+            changed = True
+            _record_sentinel_event(
+                _get_store(), task, "orphan_pane_reap",
+                {"pane_id": pane, "action": "retained",
+                 "reason": verdict.get("reason") or "ownership_unproven"},
+            )
+            print(
+                f"[SENTINEL ORPHAN] task={tid} pane={pane} ownership unproven "
+                f"({verdict.get('reason')}) — retained, no interrupt",
+                flush=True,
+            )
+            continue
+        if missing and not episode:
+            # Nothing alive behind a missing pane: skip the interrupt send
+            # and let the close-grace timer run straight into the reap.
+            episodes[tid] = {"interrupted_at": now, "pane_missing": True}
+            changed = True
             continue
 
         if not episode:
@@ -265,7 +313,7 @@ def check_orphan_panes(tasks, state, now=None):
                     flush=True,
                 )
             else:
-                episode["interrupt_failed"] = True
+                episodes[tid]["interrupt_failed"] = True
                 print(
                     f"[SENTINEL ORPHAN] task={tid} pane={pane} interrupt send failed; "
                     "close grace continues regardless",
