@@ -452,6 +452,40 @@ def select_infra_failures_for_recovery(
     return selected
 
 
+def select_orphaned_pane_tasks(
+    tasks: Iterable[Dict[str, Any]],
+    now: float,
+    grace_seconds: float,
+) -> List[Dict[str, Any]]:
+    """Pick archived tasks whose pane was orphaned and has waited out grace.
+
+    wf-haflow-1024-02: a watchdog kill or supersede only marks the pane
+    ``pane_lifecycle=orphaned`` — the agent process behind it keeps running
+    (a DB transition is not process termination). The janitor acts only on
+    tasks that are already archived (failed/superseded/cleaned), still hold a
+    pane reference, and whose orphan transition is older than the grace
+    window. Selection is read-only; enforcement stays with the caller.
+    """
+    from .archive import ARCHIVED_STATUSES
+
+    selected: List[Dict[str, Any]] = []
+    for task in tasks or []:
+        if task.get("status") not in ARCHIVED_STATUSES:
+            continue
+        if not task.get("pane_id"):
+            continue
+        if task.get("pane_lifecycle") != "orphaned":
+            continue
+        try:
+            updated_at = float(task.get("updated_at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not updated_at or now - updated_at < grace_seconds:
+            continue
+        selected.append(dict(task))
+    return selected
+
+
 class BoundedWait:
     """Track a bounded waiting episode (SLA) for actor interactions."""
 

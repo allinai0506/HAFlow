@@ -220,6 +220,7 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None,
 
     acceptance = "\n".join(f"- {item}" for item in acceptance_list) if acceptance_list else ""
     clone = Path(clone_path)
+    test_mode = "run"
     if not test_cmd:
         from herdr.evaluator import select_default_test_command
 
@@ -236,6 +237,16 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None,
         if "refused" in decision:
             return decision
         test_cmd = decision["command"]
+        if test_cmd == "pytest":
+            # INV-EVAL-04: the default must fit its own evaluation budget.
+            # A cheap collection probe (no test execution) decides whether a
+            # CI-scale suite switches the default to a labelled collection
+            # smoke; the probe is advisory and any failure keeps the default.
+            from herdr.evaluator import apply_suite_scale_policy, probe_suite_size
+
+            policy = apply_suite_scale_policy(test_cmd, probe_suite_size(clone))
+            test_cmd = policy["command"]
+            test_mode = policy["mode"]
 
     if not lint_cmd:
         if (clone / "package.json").exists():
@@ -257,6 +268,7 @@ def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None,
             lint_cmd=lint_cmd or "true",
             repro_cmd=repro_cmd or "",
             capture_baseline=True,
+            test_mode=test_mode,
         )
     except TimeoutError as exc:
         print(f"[HERDR_LOOP_WARN] Failed to snapshot lint baseline: {exc}")
