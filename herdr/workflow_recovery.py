@@ -216,8 +216,15 @@ def drive_recovery(store, workflow_id, execute, now=None):
                 status, detail = 'waiting_human', {**detail, 'reason': 'recovery_legacy_budget_unknown'}
             else:
                 detail = {**detail, 'result_deadline_at': deadline, 'next_due_at': now + 30}
-        recovery_store.finish_operation(store.db_path, op['id'], owner, status, detail,
-                                        time.time() if now > 1_000_000_000 else now)
+        try:
+            recovery_store.finish_operation(store.db_path, op['id'], owner, status, detail,
+                                            time.time() if now > 1_000_000_000 else now)
+        except ValueError as exc:
+            if str(exc) != 'stale recovery owner or lease':
+                raise
+            # Ownership was lost while effects ran; the lease expiry and
+            # re-claim machinery owns the outcome, so the stale owner must
+            # not force-close or overwrite the replacement's state.
     return recovery_store.list_operations(store.db_path, workflow_id)
 
 

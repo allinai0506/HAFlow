@@ -8322,3 +8322,33 @@ python3 -m pytest -q tests/test_recovery_autonomy.py tests/test_recovery_store.p
 ```
 
 Evidence：`tests/test_recovery_autonomy.py#test_same_operation_end_to_end` 使用真实 Controller、返工派发协议、SQLite、checkpoint 和 business acceptance；只替换原生 Agent/终端边界。隔离验证不证明生产部署或用户业务验收。
+
+## 200. 慢子流程的每个独立副作用前必须重查预算与所有权（2026-10-25）
+
+### 问题背景
+
+基线 `8092ed6`（PR #347 合并结果）中，恢复 finalize 链只在调用 `finalize_completed_task` 之前由外层 `before_effect()` 检查一次总预算与所有权；commit 子进程耗时跨过总截止后，finalize 内部仍无条件继续启动 integrate、cleanup_ready 推进与 cleanup。隔离真实 Controller/SQLite/受控时钟回归复现：默认 10800 秒预算、首次预检临时故障后延迟到截止前 60 秒重试、commit 模拟耗时 70 秒，integrate 在超截止 10 秒时仍然启动。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+| --- | --- | --- |
+| 入口一次预算检查 | 长子流程内的"下一个独立动作"会跨越检查点之后的时间窗口 | 每个新动作（commit、integrate、状态推进、cleanup）开始前重查总截止、owner/lease 与任务代际 |
+| commit 后原样重查身份 | 本次合法提交必然改写 commit 事实，原样重查会把合法 SHA 当漂移误拒 | 以本次 commit 子进程回执（HERDR_COMMIT_RESULT）为权威归因，持久化到操作 detail，后续只接受 fact.commit 或归因 SHA |
+| guard 异常的传播 | 宽泛捕获会把"预算耗尽/所有权失效"吞成普通 Git 故障或假成功 | RecoveryBudgetExhausted 与 stale owner 沿既有异常通道上行；stale owner 不强行结案，交给租约回收接管 |
+| 已发生的真实结果 | 停止新动作不等于回滚已完成的 commit/integrate | 保留任务持久状态（committed/integrated），后续核验路径据此继续收敛 |
+
+### 操作规范（已固化到 finalize 调用链与回归）
+
+1. `git_finalize.finalize_completed_task` 接受可选 `before_action` 守卫，在每个独立动作前调用；普通调用不传即保持原行为。
+2. `recovery_store.guard_effect(own_commits=...)` 是唯一合法放行口：finalize 事实检查中 commit 允许集合 = 原 fact.commit ∪ 本操作归因 SHA，其余身份事实（run_id、execution_id、candidate_sha、stage_verdict、stage_verdict_note）仍严格相等。
+3. 归因 SHA 由 finalize 从本次 commit 回执解析，经 guard 通过后原子持久化到操作 `detail.finalize_commits`，供后续 pass 与核验识别；外来 SHA、外来 Run/execution 一律拒绝。
+4. `drive_recovery` 在 finish 时对 `stale recovery owner or lease` 让路：不覆盖新 owner 状态，由 `_expire` 与重新认领接管。
+
+### 验证命令 / 守护测试
+
+```bash
+python3 -m pytest -q tests/test_recovery_autonomy.py -k finalize
+```
+
+Evidence：`tests/test_recovery_autonomy.py#test_finalize_commit_crossing_total_deadline_never_starts_integrate` 使用真实 Controller 恢复入口、真实 SQLite、生产 finalize 实现与真实 guard，临时 Git 仓真实提交并核对新 SHA；仅原生子进程传输被包装且真实执行。隔离集成验证通过，用户现场未验证。

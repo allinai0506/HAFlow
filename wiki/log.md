@@ -3708,3 +3708,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-25] update | 恢复链路自主继续 V1
 - Updated [[workflow-progress-recovery]]：原恢复操作的可信进展窗口、固定总预算、安全前置重试与未知交付核验；补充旧数据、单操作人工核验和未部署边界。Evidence: `tests/test_recovery_autonomy.py`。
+
+## [2026-10-25] update | finalize 恢复预算边界补齐 V1
+- Updated [[workflow-progress-recovery]]：finalize 子流程内每个独立动作（commit、integrate、cleanup_ready、cleanup、业务推进）开始前经可选 `before_action` 守卫重查总预算、owner/lease、任务代际；本操作自身 commit 的 SHA 经 `HERDR_COMMIT_RESULT` 回执归因并持久化到 `detail.finalize_commits`，是 finalize 事实检查唯一放行的 commit 漂移。Evidence: `tests/test_recovery_autonomy.py`（默认 10800s 预算跨期反例先红后绿）。
