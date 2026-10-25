@@ -402,6 +402,59 @@ def test_collapsed_drawer_does_not_intercept_controller_button(cockpit):
     assert 'ISSUE326_CLICK={"workflowId":"__ctl__","nodeId":"gate","drawerCollapsed":true}' in out
 
 
+def test_collapsed_drawer_leaves_bottom_bar_visible_and_clickable(cockpit):
+    """Issue #350: collapsed drawer head must not cover the bottom bar content.
+
+    The #326 fix anchored the collapsed drawer head into the bottom bar's own
+    48px band; the z-40 head then covered the z-30 bar's status text, ticker,
+    worker/polling stats and its drawer toggle. Every bar entry point must hit
+    itself under `document.elementFromPoint`, never the drawer head.
+    """
+    open_cockpit(cockpit)
+    out = cockpit.browser("""
+        await page.cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
+        await page.evaluate(()=>returnFromControllerCockpit());
+        await page.waitForFunction(()=>state.workflowId!=='__ctl__'&&document.getElementById('flowWrap')?.style.display==='flex');
+        const probe=await page.evaluate(()=>{
+            const bar=document.getElementById('consoleBottomBar');
+            const drawer=document.getElementById('deepDrawer');
+            const head=drawer.querySelector('.drawer-head');
+            const targets=[
+                ...['bottomStatusText','bottomTicker','bottomActiveWorkers','bottomPollLatency']
+                    .map(id=>document.getElementById(id)),
+                bar.querySelector('.btn-bottom-action')];
+            const rect=node=>{const r=node.getBoundingClientRect();return {top:r.top,bottom:r.bottom,height:r.height};};
+            const items=targets.map(node=>{
+                const r=node.getBoundingClientRect();
+                const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                return {id:node.id||node.className,
+                    hit:hit===null?'none':(node.contains(hit)||hit===node?'self'
+                        :(hit===head||head.contains(hit)?'drawer-head':hit.tagName))};
+            });
+            return {items,drawerCollapsed:drawer.classList.contains('collapsed'),
+                head:rect(head),bar:rect(bar)};
+        });
+        console.log('ISSUE350_PROBE='+JSON.stringify(probe));
+        if(!probe.drawerCollapsed) throw new Error('deep drawer must start collapsed');
+        const covered=probe.items.filter(item=>item.hit!=='self');
+        if(covered.length) throw new Error('bottom bar covered in collapsed state: '+JSON.stringify(covered));
+        await page.click('loc=css:.btn-bottom-action',{label:'expand deep drawer from the bottom bar'});
+        await page.waitForFunction(()=>!document.getElementById('deepDrawer').classList.contains('collapsed'));
+        const expanded=await page.evaluate(()=>{
+            const head=document.querySelector('#deepDrawer .drawer-head');
+            const r=head.getBoundingClientRect();
+            const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+            return {headVisible:hit!==null&&(hit===head||head.contains(hit))};
+        });
+        if(!expanded.headVisible) throw new Error('expanded drawer head must be visible and clickable');
+        await page.click('loc=css:.drawer-head',{label:'collapse drawer from its head'});
+        await page.waitForFunction(()=>document.getElementById('deepDrawer').classList.contains('collapsed'));
+    """)
+    assert '"drawerCollapsed":true' in out
+    for item in ("bottomStatusText", "bottomTicker", "bottomActiveWorkers", "bottomPollLatency", "btn-bottom-action"):
+        assert f'"{item}","hit":"self"' in out
+
+
 def test_recovery_read_failure_shows_unknown(cockpit, monkeypatch):
     from herdr import state_db
     open_cockpit(cockpit)
