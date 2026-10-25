@@ -237,13 +237,8 @@ function isRejectedCockpitAction(action){
   return receipt?.status==='rejected'&&receipt.stale_action&&receipt.workflow_id===cockpitWorkflowId()&&cockpitActionKey(action)===cockpitActionKey(receipt.stale_action);
 }
 function renderControllerHeader(data){
-  const c=data.controller||{};
-  const labels={running:'运行中',stopped:'已停止',unknown:'未确认'};
-  const wf=data.workflow||{};
-  const policy=data.control_policy||null;
-  const policyLabels={automatic:'自动推进',confirmation_required:'需人工确认'};
-  const candidate=wf.candidate_sha?esc(String(wf.candidate_sha).slice(0,12))+(wf.candidate_episode_id?' · 事件 #'+esc(wf.candidate_episode_id):''):'未确认';
-  const identity=[['Controller 版本',c.version||'未确认'],['执行身份',wf.execution_id||'未确认'],['候选 / 回合',candidate],['控制策略',policy?esc(policyLabels[policy.mode]||policy.mode||'未确认')+'（'+esc(policy.source||'来源未确认')+'）':'未确认']];
+  const c=data.controller||{},labels={running:'运行中',stopped:'已停止',unknown:'未确认'},wf=data.workflow||{},policy=data.control_policy||null,policyLabels={automatic:'自动推进',confirmation_required:'需人工确认'};
+  const identity=[['Controller 版本',c.version||'未确认'],['执行身份',wf.execution_id||'未确认'],['候选 / 回合',wf.candidate_sha?esc(String(wf.candidate_sha).slice(0,12))+(wf.candidate_episode_id?' · 事件 #'+esc(wf.candidate_episode_id):''):'未确认'],['控制策略',policy?esc(policyLabels[policy.mode]||policy.mode||'未确认')+'（'+esc(policy.source||'来源未确认')+'）':'未确认']];
   return '<header class="controller-cockpit-header"><div><div class="controller-cockpit-eyebrow">工作流驾驶舱</div><h2>'+esc(data.workflow?.title||data.workflow?.workflow_id||cockpitWorkflowId())+'</h2>'+(state.controllerReturnContext?'<button class="mini" onclick="returnFromControllerCockpit()">返回原位置</button>':'')+'</div><div>调度服务 · '+esc(labels[c.status]||c.status||'未确认')+'<div class="muted">最后检查：'+esc(c.last_check_at||c.checked_at||'未提供')+'</div><div class="muted controller-cockpit-identity">'+identity.map(([label,value])=>'<div>'+esc(label)+'：<strong>'+esc(value)+'</strong></div>').join('')+'</div><button class="mini" onclick="loadControllerCockpit('+cockpitArg(cockpitWorkflowId())+')">刷新状态</button></div></header>';
 }
 function renderControllerJudgment(data){
@@ -345,8 +340,7 @@ function openControllerCockpit(target={}){
   state.workflowId='__ctl__';renderWorkflowTabs();paintControllerCockpit();
   const actionId=state.controllerTarget?.operationId!=null?wid+':confirm_dispatch:'+state.controllerTarget.operationId:'';
   const missingAction=actionId&&!state.controllerCockpit?.actions?.some(a=>a.action_id===actionId);
-  const lookup=typeof cockpitTargetLookup==='function'?cockpitTargetLookup(wid):{key:actionId};
-  const staleLookup=lookup.key?state.controllerCockpit?.action_lookup!==lookup.key:!!state.controllerCockpit?.action_lookup;
+  const lookup=typeof cockpitTargetLookup==='function'?cockpitTargetLookup(wid):{key:actionId},staleLookup=lookup.key?state.controllerCockpit?.action_lookup!==lookup.key:!!state.controllerCockpit?.action_lookup;
   if(state.controllerCockpit?.workflow?.workflow_id!==wid||(navigating&&(
       missingAction||staleLookup)))return loadControllerCockpit(wid);
 }
@@ -381,8 +375,7 @@ async function executeCockpitAction(actionId){
   const actionKey=cockpitActionKey(snapshot);
   const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk);
   const isSteer=action.api_payload?.type==='steer';
-  const isDispatchConfirm=action.api_payload?.type==='confirm_dispatch';
-  const needsReason=highRisk||isDispatchConfirm;
+  const isDispatchConfirm=action.api_payload?.type==='confirm_dispatch',needsReason=highRisk||isDispatchConfirm;
   openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+(isSteer?'<label for="cockpitInstruction">指导内容</label><textarea id="cockpitInstruction" rows="3"></textarea>':'')+'<label for="cockpitReason">处理依据'+(needsReason?'（必填）':'')+'</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
   const button=document.getElementById('cockpitActionConfirm');
   button.onclick=async()=>{
