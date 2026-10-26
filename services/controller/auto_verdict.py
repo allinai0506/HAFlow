@@ -120,6 +120,14 @@ def try_auto_verdict(ports, task_id):
     if not ports.node_is_gate(workflow_id, node_id):
         return False
 
+    # V1 telemetry only: it cannot alter verdict, route, status or retry policy.
+    if task.get("execution_contract_v1"):
+        try:
+            from herdr.ego_execution_evidence import submit_ego_observation
+            submit_ego_observation(task, ports._get_store().db_path)
+        except Exception:
+            pass  # Observation availability is never a business gate.
+
     verdict, note, source = ports.read_gate_verdict(task)
     if verdict not in ("pass", "blocked"):
         if hasattr(ports, "sync_verdict_from_business_acceptance"):
@@ -223,7 +231,7 @@ DEPENDENCIES = {'max_clock_skew_seconds': ('DEFAULT_MAX_CLOCK_SKEW_SECONDS', 'ma
                                           'sync_verdict_from_business_acceptance',
                                           'task_gate_handoff_grace_seconds', 'time',
                                           'try_auto_verdict', 'workflow_config_for'),
- 'try_auto_verdict': ('TASK_MANAGER', '_gate_verdict_is_fresh', '_verdict_affected_task_ids',
+ 'try_auto_verdict': ('_get_store', 'TASK_MANAGER', '_gate_verdict_is_fresh', '_verdict_affected_task_ids',
                       'auto_verdict_enabled', 'get_task', 'node_is_gate', 'read_gate_verdict',
                       'subprocess', 'sync_verdict_from_business_acceptance', 'sys'),
  'classify_verdict_deferral': ('re',),

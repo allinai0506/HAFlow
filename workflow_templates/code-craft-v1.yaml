@@ -60,6 +60,9 @@ nodes:
       allow_soft_degrade: true
     gate:
       retry_node: craft
+    required_executions:
+      - tool: ego-browser
+        source: native-session-v1
     required_outputs:
       - 测试执行记录
       - 缺陷清单
@@ -70,6 +73,7 @@ nodes:
       - ego-browser 真实 E2E 报告（步骤、预期/实际结果、业务主路径及失败边界）
       - E2E 截图/浏览器记录与状态回读证据（绑定候选 SHA 和 Task/Run）
     rules:
+      - required_executions V1 仅用于旁路观察；采集核验的 missing / failed / unverifiable 不等于代码测试失败，不得仅因本功能缺少调用证据而输出 blocked 或要求 craft 重派。业务 E2E 本身的通过条件仍按以下规则执行。
       - 真实 E2E 为本测试节点必过门禁：必须在隔离测试环境启动当前冻结候选版本的本地服务，执行真实端到端测试；不得用单元测试、静态检查、截图、页面可打开或 HTTP 200 替代。
       - 浏览器 E2E 必须使用 ego-browser 技能：先读取目标环境技能并运行 ego-browser skill，遵循当前版本指南操作真实本地应用；不得用静态 mock/demo 页面、测试替身或伪造成功页面替代被验收业务链。
       - 按项目文档启动所需前后端及依赖，使用隔离端口、临时数据库和测试账号；服务实际加载版本必须对应冻结 candidate_sha。记录启动命令、工作目录、端口/URL、版本核验及就绪证据；不得复用身份不明的旧服务或重启生产服务。
