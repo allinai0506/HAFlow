@@ -134,10 +134,15 @@ def execute_workflow_recovery(ports, operation, owner):
             if not ports.clear_finalize_escalation(task['task_id']):
                 return 'waiting_human', {'reason': 'escalation_clear_failed', **details}
             before_effect()
-            ports.finalize_completed_task(task['task_id'], before_action=finalize_guard)
+            outcome = ports.finalize_completed_task(task['task_id'], before_action=finalize_guard)
             fresh = store.get_task(task['task_id']) or {}
-            if fresh.get('finalize_escalated'):
-                return 'waiting_human', {'reason': fresh.get('finalize_escalate_reason') or 'finalize_refused', **details}
+            if fresh.get('finalize_escalated') or (isinstance(outcome, dict) and outcome.get('kind') == 'refused'):
+                refusal_reason = (
+                    fresh.get('finalize_escalate_reason')
+                    or (outcome.get('reason') if isinstance(outcome, dict) else None)
+                    or 'finalize_refused'
+                )
+                return 'waiting_human', {'reason': refusal_reason, **details}
         return 'awaiting_result', {'step': 'awaiting_delivery', **details}
     for task in ([] if verifying else targets):
         tid = task['task_id']

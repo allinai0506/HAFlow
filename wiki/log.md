@@ -3733,3 +3733,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 行数约束：`git_finalize.py` 超 controller 模块 500 行上限，none-mode worktree 保全块原样抽至 `finalize_support._preserve_none_mode_output`（行为不变，两文件 403/385 行）。
 - 新回归 5 条（completed/committed 两条真实 Git rebase A≠B 正向 + commit/ref/execution 三类篡改拒绝）；受影响 21 测试文件 451 项全绿。教训见 lessons §205。
 
+## [2026-10-26] Recovery | finalize 拒绝结果直接识别闭环（修复升级标记写入异常时的失败逃逸）
+- 触发：集成结果归属校验失败（`_settle_integration_result` 拒绝）且 `_escalate_finalize` 写入 `finalize_escalated` 异常时，`workflow_recovery.py` 未检查 `finalize_completed_task` 返回值，仅重读任务标记；因标记未写入误返回 `awaiting_result`（`awaiting_delivery`），导致失败关闭出现缺口。
+- 修复：`services/controller/workflow_recovery.py` 捕获 `finalize_completed_task` 返回值，`outcome.get('kind') == 'refused'` 与 `fresh.get('finalize_escalated')` 均判定为拒绝，提取 `reason` 明确返回 `waiting_human`；`git_finalize.py` 及 `finalize_support.py` 的所有 `refused` 统一透传确定性 `reason`。
+- 验证：新增真实隔离注入测试 `test_finalize_refusal_without_escalation_flag_enters_waiting_human`（模拟元数据写入异常，断言明确转入 `waiting_human` 且 `reason == 'integrate_result_unverified'`，集成事实完整保留）；66 项恢复自主性测试全绿。教训见 lessons §206。
+

@@ -165,7 +165,7 @@ def finalize_completed_task(ports, task_id, before_action=None):
                     "commit_refused",
                     commit_payload,
                 )
-                return {"retryable": False, "kind": "refused", "rc": 4}
+                return {"retryable": False, "kind": "refused", "rc": 4, "reason": "commit_refused"}
             elif result.returncode == 75:
                 print(
                     f"[FINALIZE WAIT] "
@@ -242,7 +242,7 @@ def finalize_completed_task(ports, task_id, before_action=None):
                     "integrate_rebase_conflict",
                     ports._parse_integrate_result(result.stdout),
                 )
-                return {"retryable": False, "kind": "refused", "rc": 6}
+                return {"retryable": False, "kind": "refused", "rc": 6, "reason": "integrate_rebase_conflict"}
 
             if result.returncode == 4:
                 # M-7: two exit-4 sources carry different payloads:
@@ -263,7 +263,7 @@ def finalize_completed_task(ports, task_id, before_action=None):
                     reason,
                     integrate_payload,
                 )
-                return {"retryable": False, "kind": "refused", "rc": 4}
+                return {"retryable": False, "kind": "refused", "rc": 4, "reason": reason}
 
             if result.returncode == 5:
                 # H-1: main-repo tracked changes are persistent (never
@@ -281,7 +281,7 @@ def finalize_completed_task(ports, task_id, before_action=None):
                     "integrate_main_dirty",
                     integrate_payload,
                 )
-                return {"retryable": False, "kind": "refused", "rc": 5}
+                return {"retryable": False, "kind": "refused", "rc": 5, "reason": "integrate_main_dirty"}
 
             if result.returncode != 0:
                 print(
