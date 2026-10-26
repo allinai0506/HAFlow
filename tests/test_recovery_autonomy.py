@@ -1276,3 +1276,31 @@ def test_finalize_unattributable_integrate_result_blocks_chain(finalize_scene, t
     assert final['detail']['reason'] == 'integrate_result_unverified'
     assert not s.advances
     assert [c[1] for c in s.calls if Path(c[0]).name == 'herdr-task'] == ['commit', 'integrate'], s.calls
+
+
+def test_finalize_refusal_without_escalation_flag_enters_waiting_human(finalize_scene, monkeypatch):
+    """Even if finalize_escalated metadata write fails, recovery must recognize
+    finalize's refusal outcome and enter waiting_human rather than awaiting_result."""
+    s = finalize_scene
+    authorize_finalize_recovery(s)
+    op = retry_after_preflight_failure(s)
+    s.after['integrate'] = lambda result: s.store.update_task_metadata('impl', {'commit': 'c' * 40})
+
+    from herdr import kernel
+    orig_update = kernel.update_task_metadata
+    def fail_escalation_metadata(task_id, metadata, store=None):
+        if metadata.get('finalize_escalated') is True:
+            raise RuntimeError("simulated metadata persistence failure")
+        return orig_update(task_id, metadata, store=store)
+
+    monkeypatch.setattr(kernel, 'update_task_metadata', fail_escalation_metadata)
+    s.clock[0] = op['detail']['total_deadline_at'] - 60
+    s.tick()
+
+    task = s.store.get_task('impl')
+    assert task['status'] == 'integrated'
+    assert not task.get('finalize_escalated'), 'simulated failure must prevent metadata flag'
+    final = s.finalize_op()
+    assert final['status'] == 'waiting_human', json.dumps(final['detail'])
+    assert final['detail']['reason'] == 'integrate_result_unverified'
+    assert not s.advances

@@ -8527,3 +8527,38 @@ pytest -q tests/test_recovery_autonomy.py tests/test_task_cli_integration.py tes
 - PR #348 审查意见：收尾继续使用旧 own_head 的路径（`git_finalize.py` L193-L306 @ 8a5d4c9）
 
 ---
+
+## 206. 恢复流程必须直接识别收尾拒绝结果，不可只依赖元数据升级标记（2026-10-26）
+
+### 问题背景
+
+在 `services/controller/workflow_recovery.py` 中，执行 finalize 恢复时调用 `ports.finalize_completed_task`。若集成结果归属校验失败（`_settle_integration_result` 拒绝）或其他收尾步骤被拒绝（返回 `{"retryable": False, "kind": "refused", ...}`），`_escalate_finalize` 尝试将 `finalize_escalated: True` 写入任务元数据。若该元数据写入发生异常（内部捕获并打印日志），恢复调用方此前未检查 `finalize_completed_task` 的返回值，仅重新读取 task 的 `finalize_escalated` 标记。因标记未写入，恢复操作被错误判定为 `awaiting_result`（`awaiting_delivery`），导致失败关闭机制出现缺口，拒绝事实未能即时阻断并转入 `waiting_human`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 忽略收尾函数返回值 | 仅读取持久化标记存在单点依赖，标记写入失败时会导致失败被吞没 | 恢复调用方必须检查 `finalize_completed_task` 返回值，若 `kind == 'refused'` 立即转入 `waiting_human` |
+| 拒绝原因隐式依赖元数据 | 若元数据未写入，拒绝原因退化为未知 | `git_finalize.py` 与 `finalize_support.py` 所有 `refused` 统一在返回字典中携带确定性 `reason` |
+| 失败关闭与事实保全并重 | 归属无法证实绝不盲目推进，同时必须保留真实完成的 Git 状态 | 归属失败 escalate 后保留集成状态与对象，恢复操作明确转入人工介入，不得结算为成功 |
+
+### 操作规范（已固化到 `services/controller/workflow_recovery.py` + `git_finalize.py`）
+
+1. `workflow_recovery.py` 在 `finalize_completed_task` 调用后获取 `outcome`，若 `fresh.get('finalize_escalated')` 或 `outcome.get('kind') == 'refused'` 均判定为拒绝，提取 `reason` 并返回 `waiting_human`。
+2. `git_finalize.py` 与 `finalize_support.py` 的所有 `refused` 返回结构补充 `reason`（`commit_refused`、`integrate_rebase_conflict`、`integrate_main_dirty`、`integrate_result_unverified`）。
+3. 即使 `kernel.update_task_metadata` 发生异常，拒绝事实仍然在恢复状态机中强闭环。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_recovery_autonomy.py -k "test_finalize_refusal_without_escalation_flag_enters_waiting_human"
+pytest -q tests/test_recovery_autonomy.py
+```
+
+### 相关文档 / 关联证据
+
+- `services/controller/workflow_recovery.py` — `execute_workflow_recovery` finalize 异常处理闭环
+- `services/controller/git_finalize.py` — `finalize_completed_task` 统一携带 `reason` 的拒绝结果
+- `tests/test_recovery_autonomy.py` — `test_finalize_refusal_without_escalation_flag_enters_waiting_human`（隔离注入元数据写入失败，验证依然准确阻断转入 `waiting_human`）
+
+---

@@ -193,7 +193,7 @@ def _preserve_none_mode_output(ports, task_id, task, own_head, guard):
                 "commit_refused",
                 commit_payload,
             )
-            return own_head, {"retryable": False, "kind": "refused", "rc": 4}
+            return own_head, {"retryable": False, "kind": "refused", "rc": 4, "reason": "commit_refused"}
         elif commit_proc.returncode == 75:
             print(
                 f"[FINALIZE WAIT] "
