@@ -124,15 +124,13 @@ def candidate_branch_for_node(
             continue
         if task.get("status") == "superseded" or task.get("superseded_by"):
             continue
+        if task.get("integration_mode") == "none" or task.get("node") in ("test", "requirements", "plan"):
+            # Non-Git deliverables and verifier/docs stations never produce candidate code branches
+            continue
         if delivered_in_base and task.get("integration_mode") == "git" \
                 and task.get("status") in GIT_DELIVERED_STATUSES:
             # 交付物已在 base 上：onto 若指向本地任务分支，launch 会因
             # origin 无该分支而拒绝派发。跳过，让候选回退到 base。
-            continue
-        if delivered_in_base and task.get("integration_mode") == "none" \
-                and task.get("status") in {"completed", "committed", "integrated", "cleanup_ready", "cleaned"}:
-            # Non-Git deliverables use the shared document contract, not an
-            # unpublished task branch as the next Worker's Git baseline.
             continue
         branch = sanitize_branch_name(task.get("branch"))
         if not branch:
@@ -152,6 +150,19 @@ def candidate_branch_for_node(
         # 返回 None 让任务落在 source HEAD（即 base）上。
         return None
     if dep_ids:
+        # If specified dependencies (e.g. test) produced no git code branches,
+        # look for upstream code-producing dependencies (e.g. implementation).
+        impl_tasks = [
+            t for t in tasks or []
+            if isinstance(t, dict) and t.get("workflow_id") == workflow_id
+            and (t.get("node") or t.get("stage")) in ("implementation", "feat", "impl")
+            and t.get("integration_mode") == "git"
+            and t.get("status") not in ("superseded", "failed")
+        ]
+        if impl_tasks and "implementation" not in dep_ids:
+            return candidate_branch_for_node(
+                tasks, workflow_id, node_id, ["implementation"], delivered_in_base=delivered_in_base
+            )
         return candidate_branch_for_node(
             tasks, workflow_id, node_id, [], delivered_in_base=delivered_in_base
         )
@@ -448,6 +459,26 @@ def _prompt(
 
     docs_section = f"\n{docs_block}\n" if docs_block else ""
 
+    stage_context_section = ""
+    try:
+        from herdr import stage_skills
+        node_id = str(node.get("id") or "").strip()
+        wf_id = str(node.get("workflow_id") or "").strip()
+        configured_skills = node.get("skills")
+        if configured_skills or node_id in stage_skills.STAGE_SKILL_BINDINGS:
+            ctx = stage_skills.assemble_stage_context(
+                workflow_id=wf_id,
+                task_id=task_id or "",
+                run_id="",
+                node_id=node_id,
+                dispatch_role=node.get("dispatch_role", "worker"),
+                candidate_sha=candidate_sha or "",
+                configured_skills=configured_skills,
+            )
+            stage_context_section = f"\n{ctx['prompt_block']}\n"
+    except Exception:
+        stage_context_section = ""
+
     return f"""HERDR_DIRECT_DISPATCH
 
 workflow_id: {node.get("workflow_id", "")}
@@ -458,7 +489,7 @@ node: {node["id"]} ({node["label"]})
 
 任务目标：
 {goal}
-
+{stage_context_section}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 节点职责
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

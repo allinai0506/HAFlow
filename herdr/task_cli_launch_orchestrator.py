@@ -480,6 +480,13 @@ def launch_task_orchestrated(args, *, deps):
     print(f"[WORKER] pane={pane_id}")
     print(f"[WORKER] pane_source={pane_source}")
     print(f"[WORKER] agent={resolved_agent} requested={requested_agent}")
+    try:
+        from herdr.stage_skills import stage_skills_for_node, stage_skills_into_workspace
+        node_skills = stage_skills_for_node(node_id, getattr(node, "get", lambda k, d=None: d)("skills") if isinstance(node, dict) else None)
+        if node_skills and clone_path:
+            stage_skills_into_workspace(clone_path, node_skills)
+    except Exception as exc:
+        print(f"[STAGE SKILLS WARN] task={args.task_id} failed to stage skills: {exc}")
     _loop_refusal = auto_init_task_loop(
         clone_path,
         args.goal,

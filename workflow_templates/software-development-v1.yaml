@@ -1,7 +1,7 @@
 name: software-development-v1
 label: 软件开发标准流程
-version: "1.1"
-description: 标准 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)。按 unified-dev-flow 的阶段思想执行：HAFlow 是唯一主控，各节点只调用对应技能。需求由一人起草；计划保留一次方案对抗。默认交付到工作区，PR、合并和部署要另有授权。
+version: "1.2"
+description: 标准 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)。按 unified-dev-flow 的阶段思想执行：HAFlow 是唯一主控，各节点只调用对应技能。需求由一人起草；计划保留一次方案对抗；实现完成自测与删除式清理；测试按计划验证并出具证据；评审在测试完成后核验需求、代码与测试证据；收尾按授权交付并核对同一候选结论。默认交付到工作区，PR、合并和部署要另有授权。
 delivery_ceiling_default: workspace
 
 # 统一开发流程映射。不在节点里再启动 speckit-chain、executing-plans、
@@ -10,8 +10,8 @@ delivery_ceiling_default: workspace
 # plan            = S3 计划。对抗只评审，不改写成第二份方案
 # implementation  = S4 实现。先有失败证明，离开前做删除式清理
 # test            = S5 按计划里的证明方式做新鲜验证
-# review          = S6 独立评审。同一候选打回三轮仍不通过就停给人
-# wrapup          = S7 收尾 + S8 沉淀。停在需求记下的交付上限
+# review          = S6 独立评审。在 test 完成后核查需求、代码与测试证据
+# wrapup          = S7 收尾 + S8 沉淀。核对同一候选的 test/review 结论，停在需求记下的交付上限
 
 # 选择性重新验证策略 (Scheduler v1 / PR #108)
 #
@@ -54,6 +54,7 @@ nodes:
     depends_on: []
     parallel: false
     purpose: 理解需求、澄清范围、识别约束、形成可验收需求规格。
+    skills: [brainstorming, parse-prd, domain-modeling]
     default_integration_mode: none
     default_task_type: docs
     agent_policy:
@@ -94,6 +95,7 @@ nodes:
     depends_on: [requirements]
     parallel: true
     purpose: 把已确认需求转化为可并行执行、可验收的工程任务，明确任务解耦边界与依赖拓扑。
+    skills: [writing-plans, plan-eng-review, architect]
     default_integration_mode: none
     default_task_type: docs
     agent_policy:
@@ -141,6 +143,7 @@ nodes:
     depends_on: [plan]
     parallel: true
     purpose: 按照计划完成真实代码实现，支持解耦任务受控并发与独立自测。
+    skills: [test-driven-development, ai-slop-cleaner]
     default_integration_mode: git
     default_task_type: feat
     agent_policy:
@@ -170,7 +173,8 @@ nodes:
     node_type: agent
     depends_on: [implementation]
     parallel: false
-    purpose: 独立验证实现结果是否满足需求与验收标准。与 review 节点并行执行，针对同一冻结 candidate_sha。
+    purpose: 独立验证实现结果是否满足需求与验收标准。针对 implementation 清理后的同一冻结 candidate_sha。
+    skills: [verification-before-completion, e2e-testing, self-verifying-tests, acceptance-evidence-gate]
     default_integration_mode: none
     default_task_type: test
     agent_policy:
@@ -197,7 +201,8 @@ nodes:
       - 以验证为主，不得随意修改代码；发现问题必须提报明确缺陷清单与复现步骤。
       - 必须覆盖计划阶段制定的验证方案与对抗审查提出的极端边界。
       - 测试必须针对 Candidate 分支或隔离 Clone 进行验证。
-      - 关键路径并行声明（Scheduler v1）：本节点与 review 节点在 implementation 完成后同时就绪并行执行；两者必须验证同一个冻结候选版本（candidate_sha，由派发时注入），严禁各验证各的版本；最终由 wrapup 汇聚门禁做确定性 SHA 一致性校验后方可收尾。
+      - 验证契约声明：本节点在 implementation 完成后执行新鲜验证，验证对象必须为派发注入的冻结 candidate_sha；测试完成后出具包含命令、退出码与结论的测试证据，供 downstream review 节点与 wrapup 门禁核验。
+      - 确定性候选一致性：下游 review 节点将在 test 完成且有效测试证据可用后执行；两者验证同一个冻结 candidate_sha，最终由 wrapup 汇聚门禁做确定性 SHA 一致性与双 pass 校验后方可收尾。
       - "门禁结论契约：必须按照契约输出机器可采纳结论（HERDR_GATE_VERDICT: pass 或 blocked）；未发现阻塞缺陷时为 pass，发现阻碍发布的缺陷时为 blocked 并触发返工。"
       - 仅当 workflow_id 以 e2e- 开头时：验收不得依赖 Pane/TUI 是否能读到完成文本；Task 的 acceptance criteria 必须以 Herdr 生命周期到达 done/agent_done 且 verify-baseline 返回 BASELINE_MATCH 为完成依据；不得要求 E2E_*_OK 或 HERDR_TASK_DONE 必须能通过 pane read 读取；满足上述条件直接 completed，不要因为 alternate-screen 空白而 rework。
       - 创建 Task 时默认使用 --agent auto，由 Agent Router 根据当前 node、task_type 和项目 Agent Pool 动态选择（自动排除实现阶段 Agent）；只有存在明确理由或用户显式指定时才固定具体 Agent。
@@ -206,9 +211,10 @@ nodes:
     max_tasks_per_node: 4
     label: 6评审
     node_type: agent
-    depends_on: [implementation]
+    depends_on: [test]
     parallel: false
-    purpose: 对代码质量、架构、安全性和可维护性进行独立评审。与 test 节点并行执行（同 implementation 前置），验证同一冻结 candidate_sha。
+    purpose: 对代码质量、架构、安全性和可维护性进行独立评审。在 test 完成且有效测试证据可用后执行，核验同一冻结 candidate_sha 与测试结果。
+    skills: [google-code-review, health, code-review]
     default_integration_mode: none
     default_task_type: test
     agent_policy:
@@ -241,6 +247,7 @@ nodes:
       确认整个 Workflow 完成。必须使用 six-step-finish（六步收尾）技能
       作为标准收尾程序，产出包含逐步（0-6）状态表与 PR 审核闭环证据的
       收尾报告。汇总成果、风险和交付信息。
+    skills: [six-step-finish, knowledge-capture]
     artifact_mode: shared_artifacts
     review_closure_required: true
     default_integration_mode: none
