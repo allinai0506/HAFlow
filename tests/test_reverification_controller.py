@@ -419,10 +419,13 @@ class ControllerReverificationTest(unittest.TestCase):
         """
         self.launches.clear()
         self.queue.clear()
-        _ctl.check_workflow_stage_advance(WF)
-        for item in list(self.queue):
-            if item.get("kind") == "stage_advance":
-                _ctl._handle_coordinator_item(item)
+        for _ in range(2):
+            _ctl.check_workflow_stage_advance(WF)
+            for item in list(self.queue):
+                if item.get("kind") == "stage_advance":
+                    _ctl._handle_coordinator_item(item)
+            if self.launches:
+                break
 
     def test_first_freeze_creates_no_reverification_plan(self):
         """首个候选没有 A -> B episode,不应产生任何重新验证决策。"""

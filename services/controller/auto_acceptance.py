@@ -61,15 +61,132 @@ def try_auto_accept(ports, task_id):
         return False
     if task.get("stage_verdict") == "blocked":
         return False
-    # Review roles may share a requirements/plan node with its author.
-    # Legacy task IDs also carry the role when dispatch_role was not recorded.
+
     role_text = " ".join(str(task.get(key) or "").lower() for key in
                          ("dispatch_role", "agent_role", "role", "task_id"))
-    if ports.re.search(r"(?:^|[^a-z])(review(?:er)?|adversarial)(?:$|[^a-z])", role_text):
-        return False
+    is_challenger = bool(ports.re.search(r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])", role_text))
 
-    if not ports.task_changes_recorded(task):
-        return False
+    wf_cfg = None
+    if hasattr(ports, "workflow_config_for"):
+        try:
+            wf_cfg = ports.workflow_config_for(workflow_id)
+        except Exception:
+            wf_cfg = None
+
+    from herdr.stage_skills import (
+        is_staged_dev_flow_workflow,
+        validate_requirements_deliverable_content,
+        validate_plan_deliverable_content,
+    )
+    from herdr.workflow_docs import load_notes
+    import os
+
+    is_staged = is_staged_dev_flow_workflow(wf_cfg)
+
+    if is_staged:
+        clone_path = task.get("clone_path") or ""
+        role = "challenger" if is_challenger else "executor"
+
+        if node_id == "requirements":
+            deliverable_text = ""
+            if clone_path:
+                for fname in ("requirements.md", "spec.md", "PRD.md", "docs/requirements.md", "docs/spec.md"):
+                    fpath = os.path.join(clone_path, fname)
+                    if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+                        try:
+                            with open(fpath, "r", encoding="utf-8") as f:
+                                deliverable_text = f.read()
+                            break
+                        except Exception:
+                            pass
+            if not deliverable_text:
+                try:
+                    notes = load_notes(workflow_id)
+                    for n in notes:
+                        if n.get("stale"):
+                            continue
+                        if n.get("task_id") == task_id or (task.get("agent") and n.get("agent") == task.get("agent")):
+                            if n.get("node") == "requirements" or n.get("kind") in ("requirement", "spec"):
+                                deliverable_text += "\n" + str(n.get("title", "")) + "\n" + str(n.get("body", ""))
+                except Exception:
+                    pass
+
+            ok, missing = validate_requirements_deliverable_content(deliverable_text)
+            if not ok:
+                print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} requirements invalid: {missing}")
+                return False
+
+        elif node_id == "plan":
+            deliverable_text = ""
+            if is_challenger:
+                if clone_path:
+                    for fname in ("challenger-review.md", "challenge.md", "plan-review.md"):
+                        fpath = os.path.join(clone_path, fname)
+                        if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+                            try:
+                                with open(fpath, "r", encoding="utf-8") as f:
+                                    deliverable_text = f.read()
+                                break
+                            except Exception:
+                                pass
+                if not deliverable_text:
+                    try:
+                        notes = load_notes(workflow_id)
+                        for n in notes:
+                            if n.get("stale"):
+                                continue
+                            if n.get("task_id") == task_id or (task.get("agent") and n.get("agent") == task.get("agent")):
+                                if n.get("node") == "plan" or n.get("kind") in ("plan", "review", "challenge"):
+                                    deliverable_text += "\n" + str(n.get("title", "")) + "\n" + str(n.get("body", ""))
+                    except Exception:
+                        pass
+            else:
+                if clone_path:
+                    for fname in ("plan.md", "docs/plan.md", "docs/superpowers/plans"):
+                        fpath = os.path.join(clone_path, fname)
+                        if os.path.isdir(fpath):
+                            for pf in os.listdir(fpath):
+                                if pf.endswith(".md"):
+                                    try:
+                                        with open(os.path.join(fpath, pf), "r", encoding="utf-8") as f:
+                                            deliverable_text += "\n" + f.read()
+                                    except Exception:
+                                        pass
+                        elif os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+                            try:
+                                with open(fpath, "r", encoding="utf-8") as f:
+                                    deliverable_text = f.read()
+                                break
+                            except Exception:
+                                pass
+                if not deliverable_text:
+                    try:
+                        notes = load_notes(workflow_id)
+                        for n in notes:
+                            if n.get("stale"):
+                                continue
+                            if n.get("task_id") == task_id or (task.get("agent") and n.get("agent") == task.get("agent")):
+                                if n.get("node") == "plan" or n.get("kind") in ("plan", "spec"):
+                                    deliverable_text += "\n" + str(n.get("title", "")) + "\n" + str(n.get("body", ""))
+                    except Exception:
+                        pass
+
+            ok, missing = validate_plan_deliverable_content(deliverable_text, role=role)
+            if not ok:
+                print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} plan ({role}) invalid: {missing}")
+                return False
+
+        elif node_id == "implementation":
+            if not ports.task_changes_recorded(task):
+                return False
+        else:
+            if not ports.task_changes_recorded(task):
+                return False
+    else:
+        if is_challenger:
+            return False
+        if not ports.task_changes_recorded(task):
+            return False
 
     if not ports.set_task_status(
         task_id, "completed", expected_status="agent_done",
@@ -80,7 +197,7 @@ def try_auto_accept(ports, task_id):
 
     print(
         f"[AUTO ACCEPT] task={task_id} "
-        f"node={node_id} baseline=TASK_CHANGED -> completed"
+        f"node={node_id} -> completed"
     )
     return True
 
@@ -144,7 +261,7 @@ def gate_verdict_ready(ports, task):
 DEPENDENCIES = {'auto_accept_enabled': ('os',),
  'task_changes_recorded': ('TASK_MANAGER', 'json', 'subprocess'),
  'try_auto_accept': ('_task_version', 'auto_accept_enabled', 'get_task', 'node_is_gate', 're',
-                     'set_task_status', 'task_changes_recorded'),
+                     'set_task_status', 'task_changes_recorded', 'workflow_config_for'),
  'check_task_deliverables_ready': ('find_node', 'os', 'subprocess', 'workflow_config_for'),
  'gate_verdict_ready': ('node_is_gate', 'read_gate_verdict')}
 

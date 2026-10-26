@@ -40,7 +40,10 @@ def cli(scene, *args, ok=True):
     return result
 
 
-@pytest.fixture(params=["software-development-v1", "spec-development-v1"])
+# Note: software-development-v1 migrated to sequential verifiers (review depends on test)
+# in v1.2 (covered in test_software_development_v1_adapter.py and test_software_development_v1_e2e_isolated.py).
+# spec-development-v1 covers parallel verifier branches.
+@pytest.fixture(params=["spec-development-v1"])
 def scene(tmp_path, monkeypatch, request):
     repo, clone, remote = (
         tmp_path / "repo",

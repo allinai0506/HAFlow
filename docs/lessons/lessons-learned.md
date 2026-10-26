@@ -8562,3 +8562,55 @@ pytest -q tests/test_recovery_autonomy.py
 - `tests/test_recovery_autonomy.py` — `test_finalize_refusal_without_escalation_flag_enters_waiting_human`（隔离注入元数据写入失败，验证依然准确阻断转入 `waiting_human`）
 
 ---
+
+## 207. [2026-10-26] Workflow | software-development-v1 固定六阶段与 unified-dev-flow 适配工程化实践
+
+### 现状 / 触发条件
+
+在多阶段软件开发工作流 `software-development-v1` 中，此前存在四项核心工程阻断：
+1. 规划阶段技能（`writing-plans`）默认在产物头部输出 `REQUIRED SUB-SKILL: subagent-driven-development / executing-plans`，诱导 Agent 在工位内二次分流或询问用户执行器，违反 HAFlow 单一主控原则；
+2. 全任务 Stop Hook（`entry-gate-check.py --check-review`）在源码修改后硬性要求工件中存在下游 S5（`.omc/verify-*.md`）与 S6（`.omc/review-*.md`），导致 S4 实现节点无法合法退出并交接下游；
+3. 非门禁节点（需求、计划）在 `auto_acceptance.py` 中仅凭 `TASK_CHANGED`（任意文件变更）即误放行，缺少结构化交付物与验收条目校验，且共享文档产物无法免除无意义 Git diff；
+4. `review` 节点原先与 `test` 并行依赖 `implementation`，未固定在测试证据可用后执行，且 `candidate_branch_for_node` 会在 verifier 依赖下误读无交付物的测试工位分支。
+
+### 根因剖析
+
+- **主控与技能职责混淆**：通用规划技能默认面向交互式独立 Agent，未声明在编排主控（Orchestrator）下运行的交接契约；
+- **全生命周期门禁与阶段边界错位**：Stop Hook 未基于真实权威数据库核验工位任务归属与当前阶段，将整条流程的 S6 终局要求压在单一中间工位上；
+- **验收依据语义退化**：以底层 Git porcelain/baseline 文件变动替代需求与架构结构化契约，无法保证条目覆盖；
+- **并行 verifier 顺序未解耦**：评审需要审查测试执行记录，两者简单并行会导致评审无法取得真实测试证据。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 规划技能越权分流 | 编排器主控上下文下，技能不得擅自开启次级控制器 | `writing-plans` 增加 Orchestrator Handoff 契约，HAFlow 计划阶段显式注入交接禁令 |
+| S4 阶段被下游 S6 门禁卡死 | 阶段退出条件必须与阶段职责物理分离 | Stop Hook 基于 `state.db` 核验 active task 真实身份，对 S4 仅核验实现自测，下游 S5/S6 留待独立工位 |
+| 需求/计划凭文件变化误放行 | 业务与规划产物必须核对关键字段结构 | `auto_acceptance.py` 接入阶段化交付物校验（目标/范围/AC条目/证明命令），非 Git 共享文档无需伪造 diff |
+| review 依赖 test 候选分支解析 | 串行 verifier 不能把只读测试工位当作代码来源 | `candidate_branch_for_node` 遇到无交付物 verifier 时向上递归寻找代码交付源，锁定冻结候选 SHA |
+
+### 操作规范（已固化到 `herdr/stage_skills.py`、`software-development-v1.yaml`、`auto_acceptance.py`）
+
+1. `software-development-v1.yaml` 固定顺序 `requirements → plan → implementation → test → review → wrapup`，`review` 明确 `depends_on: [test]`，`wrapup` 汇聚核验同一 `candidate_sha`。
+2. `herdr/stage_skills.py` 负责阶段技能动态解析、能力缺口检测、工位技能装配及交付物结构化验证。
+3. `services/controller/auto_acceptance.py` 对阶段化流程执行字段级交付物检查。
+4. `entry-gate-check.py` 结合 `state.db` 安全识别阶段任务，杜绝环境变量伪造豁免。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_software_development_v1_adapter.py
+pytest -q tests/test_software_development_v1_e2e_isolated.py
+```
+
+### 相关文档 / 关联证据
+
+- `workflow_templates/software-development-v1.yaml` — 固定六阶段与技能绑定
+- `herdr/stage_skills.py` — 阶段技能装配、契约注入与结构化交付物校验
+- `services/controller/auto_acceptance.py` — 阶段化规则化验收
+- `herdr/direct_dispatch.py` — 候选分支向上追溯与阶段上下文注入
+- `tests/test_software_development_v1_adapter.py` — 12 项适配回归测试全通过
+- `tests/test_software_development_v1_e2e_isolated.py` — 真实六节点与缺陷返工端到端测试全通过
+
+
+---

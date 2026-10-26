@@ -3741,3 +3741,12 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-10-26] Added | ego-browser 只观察执行义务
 - Updated [[execution-trace]]：记录冻结声明、Task/Run/candidate 绑定、原生调用事实与 Observation/Ledger 复用；明确当前无法证明完整 E2E、不能生成 satisfied，以及未来强制模式尚需覆盖持久化旁路。
+
+## [2026-10-26] Workflow | software-development-v1 固定六阶段与 unified-dev-flow 适配工程化落地
+- 顺序与依赖改造：`workflow_templates/software-development-v1.yaml` 将 review 调整为在 test 完成且有效测试证据可用后执行（`test -> review -> wrapup`），wrapup 继续核验同一 candidate_sha 的 test/review pass 结论；固定 6 节点不变。
+- 阶段技能装配：新增 `herdr/stage_skills.py`，支持技能动态解析与能力缺口检测（缺失技能/无执行权限脚本直接阻断），将阶段技能装配入任务克隆 `.agents/skills`，并在派发提示词中注入统一阶段契约。
+- 规划技能交接适配：`writing-plans` 增加 Orchestrator Handoff 契约，HAFlow 计划阶段显式注入禁令，禁止在计划头部要求下游启动 SDD/executing-plans 或询问执行器。
+- Stop Hook 阶段解耦：`entry-gate-check.py` 基于 `state.db` 核验 active task 归属与 workflow 配置，允许 S4 implementation 节点携带自测完成交接，不被下游 S5/S6 卡死；非 HAFlow 任务或伪造身份保持严格拦截。
+- 交付物结构化验收：`auto_acceptance.py` 改造为字段级内容检查（用户目标/范围/AC条目/证明命令），非 Git 共享文档无需制造无意义 diff 即可通过。
+- 候选分支溯源：`herdr/direct_dispatch.py` 中 `candidate_branch_for_node` 支持在 verifier 依赖下向上溯源代码实现分支，避免误用无代码交付物的只读测试工位分支。
+- 验证：12 项专项回归测试（`tests/test_software_development_v1_adapter.py`）与真实 6 阶段 + 缺陷返工端到端测试（`tests/test_software_development_v1_e2e_isolated.py`）全绿，教训见 lessons §207。
