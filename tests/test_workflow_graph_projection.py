@@ -23,16 +23,16 @@ class TestGraphProjectionEdges(unittest.TestCase):
             ("requirements", "plan"),
             ("plan", "implementation"),
             ("implementation", "test"),
-            ("implementation", "review"),
+            ("test", "review"),
             ("test", "wrapup"),
             ("review", "wrapup"),
         }
         self.assertEqual(edges, expected)
-        self.assertNotIn(("test", "review"), edges)
+        self.assertIn(("test", "review"), edges)
         self.assertNotIn(("review", "test"), edges)
 
     def test_parallel_nodes_keep_parallel_topology(self):
-        wf = _sdv1()
+        wf = herdr_workflow.load_template("spec-development-v1")
         proj = herdr_graph.workflow_graph_projection(wf, [])
         by_id = {n["id"]: n for n in proj["nodes"]}
         self.assertEqual(by_id["test"]["depends_on"], ["implementation"])

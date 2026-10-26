@@ -385,6 +385,96 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
         self.assertFalse(is_staged_dev_flow_workflow({"name": "code-craft-v1"}))
         self.assertFalse(is_staged_dev_flow_workflow({"name": "custom-wf"}))
 
+    def test_13_agents_directory_internal_untracked(self):
+        """Scenario 13: Staged skills in .agents are internal untracked files."""
+        from herdr.repo_hygiene import is_internal_untracked
+
+        self.assertTrue(is_internal_untracked(".agents"))
+        self.assertTrue(is_internal_untracked(".agents/skills/writing-plans"))
+        self.assertTrue(is_internal_untracked(".agents/skills/acceptance-evidence-gate/SKILL.md"))
+        self.assertFalse(is_internal_untracked("src/agents.py"))
+        self.assertFalse(is_internal_untracked("docs/plan.md"))
+
+    def test_14_challenger_cannot_auto_accept_on_executor_plan(self):
+        """Scenario 14: Plan challenger role cannot auto-accept on executor's plan.md or stale notes."""
+        from services.controller import auto_acceptance
+        from unittest import mock
+        import re
+
+        clone = Path(self.tmp_dir) / "clone"
+        clone.mkdir(parents=True, exist_ok=True)
+        (clone / "plan.md").write_text("## Execution Plan\n- task 1: implement\n- test cmd: pytest\n", encoding="utf-8")
+
+        task = {
+            "task_id": "wf-1-plan-challenger",
+            "workflow_id": "wf-1",
+            "node": "plan",
+            "dispatch_role": "challenger",
+            "clone_path": str(clone),
+            "status": "agent_done",
+        }
+
+        mock_ports = mock.MagicMock()
+        mock_ports.auto_accept_enabled.return_value = True
+        mock_ports.get_task.return_value = task
+        mock_ports.node_is_gate.return_value = False
+        mock_ports.workflow_config_for.return_value = {"name": "software-development-v1"}
+        mock_ports.re = re
+        mock_ports.task_changes_recorded.return_value = False
+        mock_ports._task_version.return_value = 1
+        mock_ports.set_task_status.return_value = True
+
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=[]):
+            # Challenger should reject executor's plan.md
+            res = auto_acceptance.try_auto_accept(mock_ports, "wf-1-plan-challenger")
+            self.assertFalse(res)
+
+        # With stale note from another task, should still reject
+        stale_note = {
+            "node": "plan",
+            "kind": "review",
+            "title": "Challenger Review",
+            "body": "Plan reviewed and approved. Baseline verified.",
+            "stale": True,
+            "task_id": "old-task",
+        }
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=[stale_note]):
+            res = auto_acceptance.try_auto_accept(mock_ports, "wf-1-plan-challenger")
+            self.assertFalse(res)
+
+        # With active note owned by challenger task, should accept
+        valid_note = {
+            "node": "plan",
+            "kind": "review",
+            "title": "Challenger Review",
+            "body": "方案对抗与质询评估：经过对执行计划与文件修改范围的详细核查，本方案对验收标准的映射完整。可行性评估认为风险与验证命令具备可行性，无过度设计与死锁风险，验证基线完备。确认通过。",
+            "stale": False,
+            "task_id": "wf-1-plan-challenger",
+        }
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=[valid_note]):
+            res = auto_acceptance.try_auto_accept(mock_ports, "wf-1-plan-challenger")
+            self.assertTrue(res)
+
+    def test_15_skill_capability_gap_yields_structured_refusal(self):
+        """Scenario 15: Skill capability gap during dispatch planning returns structured refusal."""
+        from herdr.direct_dispatch import plan_stage_dispatch, permanent_dispatch_refusal
+
+        node = {
+            "id": "requirements",
+            "label": "Requirements",
+            "purpose": "Define requirements",
+            "task_type": "docs",
+            "integration_mode": "none",
+            "skills": ["nonexistent-skill-9999"],
+        }
+        plan = plan_stage_dispatch("wf-test", node, [], "Build feature")
+        self.assertEqual(plan.get("mode"), "refusal")
+        self.assertEqual(plan.get("refusal_code"), "skill_capability_gap")
+
+        # Verify permanent_dispatch_refusal recognizes the refusal marker
+        code = permanent_dispatch_refusal("[STAGE SKILLS REFUSED] task=t1 skill capability gap: missing")
+        self.assertEqual(code, "skill_capability_gap")
+
 
 if __name__ == "__main__":
     unittest.main()

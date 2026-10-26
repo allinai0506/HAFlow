@@ -55,6 +55,7 @@ PERMANENT_DISPATCH_REFUSALS = (
     ("[DISPATCH REJECTED]", "dispatch_rejected"),
     ("[ROUTER REJECTED]", "router_isolation_rejected"),
     ("ROUTER OPT-OUT AUDIT FAILED", "router_isolation_rejected"),
+    ("[STAGE SKILLS REFUSED]", "skill_capability_gap"),
 )
 
 
@@ -348,6 +349,7 @@ def normalize_node(node):
         ).strip(),
         "roles": roles,
         "artifact_mode": node.get("artifact_mode"),
+        "skills": node.get("skills"),
         # Enterprise experience attribution (optional template keys; absent = no behavior).
         "customer": str(node.get("customer") or "").strip(),
         "business_task_type": str(node.get("business_task_type") or "").strip(),
@@ -476,6 +478,8 @@ def _prompt(
                 configured_skills=configured_skills,
             )
             stage_context_section = f"\n{ctx['prompt_block']}\n"
+    except stage_skills.SkillCapabilityGap:
+        raise
     except Exception:
         stage_context_section = ""
 
@@ -658,132 +662,146 @@ def plan_stage_dispatch(
         task for task in node_tasks if task.get("status") != "superseded"
     ]
 
-    if awaiting:
+    try:
+        if awaiting:
+            existing_ids = {
+                str(task.get("task_id"))
+                for task in (tasks or [])
+                if task.get("task_id")
+            }
+            existing_ids.update(str(task_id) for task_id in (reserved_task_ids or ()) if task_id)
+            specs = []
+            for task in sorted(
+                awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or "")
+            ):
+                old_id = str(task.get("task_id"))
+                goal = str(task.get("goal") or "").strip() or f"{normalized['label']}: {normalized['purpose']}"
+                acceptance = _acceptance_lines(
+                    normalized, task.get("acceptance_criteria")
+                )
+                new_id = next_replacement_id(old_id, existing_ids)
+                existing_ids.add(new_id)
+                specs.append(
+                    _dispatch_spec(
+                        normalized,
+                        requirement,
+                        goal,
+                        acceptance,
+                        new_id,
+                        redispatch_of=old_id,
+                        last_failure_note=str(
+                            task.get("same_node_redo_note")
+                            or task.get("stage_verdict_note")
+                            or ""
+                        ).strip()
+                        or None,
+                        context_branch=context_branch,
+                        integration_mode=task.get("integration_mode"),
+                        gate_contract=gate_contract,
+                        docs_block=docs_block,
+                        candidate_sha=candidate_sha,
+                        gate_inventory_block=gate_inventory_block,
+                        redispatch_blocker_note=(
+                            redispatch_blocker_notes or {}
+                        ).get(old_id),
+                    )
+                )
+            for spec, task in zip(specs, sorted(awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or ""))):
+                spec["dispatch_role"] = task.get("dispatch_role") or "worker"
+                spec["dispatch_round"] = int(task.get("dispatch_round") or 1) + 1
+                spec["supersedes"] = task["task_id"]
+            return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
+
+        if active:
+            return {
+                "mode": "wait",
+                "reason": "node has active tasks",
+                "specs": [],
+            }
+
+        if any(t.get("replacement_pending") is False and not t.get("superseded_by") for t in node_tasks):
+            return {"mode": "wait", "reason": "node tasks explicitly abandoned; confirm remaining scope",
+                    "specs": []}
+
+        if dispatch_kind == "dynamic":
+            return {"mode": "fallback", "reason": "dynamic node requires planning", "specs": []}
+
+        if not (requirement or "").strip():
+            return {
+                "mode": "fallback",
+                "reason": "requirement text missing",
+                "specs": [],
+            }
+
         existing_ids = {
             str(task.get("task_id"))
             for task in (tasks or [])
             if task.get("task_id")
         }
         existing_ids.update(str(task_id) for task_id in (reserved_task_ids or ()) if task_id)
-        specs = []
-        for task in sorted(
-            awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or "")
-        ):
-            old_id = str(task.get("task_id"))
-            goal = str(task.get("goal") or "").strip() or f"{normalized['label']}: {normalized['purpose']}"
-            acceptance = _acceptance_lines(
-                normalized, task.get("acceptance_criteria")
-            )
-            new_id = next_replacement_id(old_id, existing_ids)
-            existing_ids.add(new_id)
-            specs.append(
-                _dispatch_spec(
-                    normalized,
-                    requirement,
-                    goal,
-                    acceptance,
-                    new_id,
-                    redispatch_of=old_id,
-                    last_failure_note=str(
-                        task.get("same_node_redo_note")
-                        or task.get("stage_verdict_note")
-                        or ""
-                    ).strip()
-                    or None,
-                    context_branch=context_branch,
-                    integration_mode=task.get("integration_mode"),
-                    gate_contract=gate_contract,
-                    docs_block=docs_block,
-                    candidate_sha=candidate_sha,
-                    gate_inventory_block=gate_inventory_block,
-                    redispatch_blocker_note=(
-                        redispatch_blocker_notes or {}
-                    ).get(old_id),
+
+        roles = normalized.get("roles") or []
+        if roles:
+            specs = []
+            for r in roles:
+                r_name = str(r.get("name") or "worker").strip()
+                r_label = str(r.get("label") or r_name).strip()
+                r_goal = str(r.get("goal") or "").strip()
+                if not r_goal:
+                    suffix = str(r.get("purpose_suffix") or "").strip()
+                    r_goal = f"{normalized['label']} ({r_label}): {suffix or normalized['purpose']}"
+                r_outputs = _as_list(r.get("outputs")) or list(normalized["required_outputs"])
+                r_acceptance = _acceptance_lines(normalized, r_outputs)
+
+                task_id = f"{workflow_id}-{node_id}-{r_name}"
+                if task_id in existing_ids:
+                    task_id = initial_task_id(workflow_id, f"{node_id}-{r_name}", existing_ids)
+                existing_ids.add(task_id)
+
+                specs.append(
+                    _dispatch_spec(
+                        normalized,
+                        requirement.strip(),
+                        r_goal,
+                        r_acceptance,
+                        task_id,
+                        role_outputs=r_outputs,
+                        context_branch=context_branch,
+                        gate_contract=gate_contract,
+                        docs_block=docs_block,
+                        candidate_sha=candidate_sha,
+                        gate_inventory_block=gate_inventory_block,
+                    )
                 )
-            )
-        for spec, task in zip(specs, sorted(awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or ""))):
-            spec["dispatch_role"] = task.get("dispatch_role") or "worker"
-            spec["dispatch_round"] = int(task.get("dispatch_round") or 1) + 1
-            spec["supersedes"] = task["task_id"]
-        return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
+            for spec, role in zip(specs, roles):
+                spec["dispatch_role"] = str(role["name"]).strip()
+            return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
 
-    if active:
-        return {
-            "mode": "wait",
-            "reason": "node has active tasks",
-            "specs": [],
-        }
-
-    if any(t.get("replacement_pending") is False and not t.get("superseded_by") for t in node_tasks):
-        return {"mode": "wait", "reason": "node tasks explicitly abandoned; confirm remaining scope",
-                "specs": []}
-
-    if dispatch_kind == "dynamic":
-        return {"mode": "fallback", "reason": "dynamic node requires planning", "specs": []}
-
-    if not (requirement or "").strip():
-        return {
-            "mode": "fallback",
-            "reason": "requirement text missing",
-            "specs": [],
-        }
-
-    existing_ids = {
-        str(task.get("task_id"))
-        for task in (tasks or [])
-        if task.get("task_id")
-    }
-    existing_ids.update(str(task_id) for task_id in (reserved_task_ids or ()) if task_id)
-
-    roles = normalized.get("roles") or []
-    if roles:
-        specs = []
-        for r in roles:
-            r_name = str(r.get("name") or "worker").strip()
-            r_label = str(r.get("label") or r_name).strip()
-            r_goal = str(r.get("goal") or "").strip()
-            if not r_goal:
-                suffix = str(r.get("purpose_suffix") or "").strip()
-                r_goal = f"{normalized['label']} ({r_label}): {suffix or normalized['purpose']}"
-            r_outputs = _as_list(r.get("outputs")) or list(normalized["required_outputs"])
-            r_acceptance = _acceptance_lines(normalized, r_outputs)
-
-            task_id = f"{workflow_id}-{node_id}-{r_name}"
-            if task_id in existing_ids:
-                task_id = initial_task_id(workflow_id, f"{node_id}-{r_name}", existing_ids)
-            existing_ids.add(task_id)
-
-            specs.append(
-                _dispatch_spec(
-                    normalized,
-                    requirement.strip(),
-                    r_goal,
-                    r_acceptance,
-                    task_id,
-                    role_outputs=r_outputs,
-                    context_branch=context_branch,
-                    gate_contract=gate_contract,
-                    docs_block=docs_block,
-                    candidate_sha=candidate_sha,
-                    gate_inventory_block=gate_inventory_block,
-                )
-            )
-        for spec, role in zip(specs, roles):
-            spec["dispatch_role"] = str(role["name"]).strip()
-        return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
-
-    acceptance = _acceptance_lines(normalized, None)
-    goal = f"{normalized['label']}: {normalized['purpose']}"
-    spec = _dispatch_spec(
-        normalized,
-        requirement.strip(),
-        goal,
-        acceptance,
-        initial_task_id(workflow_id, node_id, existing_ids),
-        context_branch=context_branch,
-        gate_contract=gate_contract,
-        docs_block=docs_block,
-        candidate_sha=candidate_sha,
-        gate_inventory_block=gate_inventory_block,
-    )
-    return {"mode": "dispatch", "reason": "initial node dispatch", "specs": [spec]}
+        acceptance = _acceptance_lines(normalized, None)
+        goal = f"{normalized['label']}: {normalized['purpose']}"
+        spec = _dispatch_spec(
+            normalized,
+            requirement.strip(),
+            goal,
+            acceptance,
+            initial_task_id(workflow_id, node_id, existing_ids),
+            context_branch=context_branch,
+            gate_contract=gate_contract,
+            docs_block=docs_block,
+            candidate_sha=candidate_sha,
+            gate_inventory_block=gate_inventory_block,
+        )
+        return {"mode": "dispatch", "reason": "initial node dispatch", "specs": [spec]}
+    except Exception as exc:
+        try:
+            from herdr.stage_skills import SkillCapabilityGap
+            if isinstance(exc, SkillCapabilityGap):
+                return {
+                    "mode": "refusal",
+                    "reason": f"skill_capability_gap: {exc}",
+                    "refusal_code": "skill_capability_gap",
+                    "specs": [],
+                }
+        except ImportError:
+            pass
+        raise

@@ -11,8 +11,8 @@ import ast
 import os
 
 MAX_LISTED_FILES = 10
-INTERNAL_EXACT = frozenset({".agent-task-context", ".herdr-launch-identity.json", ".herdr-loop", ".herdr"})
-INTERNAL_PREFIXES = (".herdr-loop/", ".herdr/")
+INTERNAL_EXACT = frozenset({".agent-task-context", ".herdr-launch-identity.json", ".herdr-loop", ".herdr", ".agents"})
+INTERNAL_PREFIXES = (".herdr-loop/", ".herdr/", ".agents/skills/", ".agents/")
 
 
 def is_internal_untracked(path: str) -> bool:

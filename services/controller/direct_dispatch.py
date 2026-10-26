@@ -234,9 +234,9 @@ def try_direct_stage_advance(ports, item):
         )
         return True
 
-    if mode == "fallback":
+    if mode in ("fallback", "refusal"):
         print(
-            f"[DIRECT DISPATCH FALLBACK] "
+            f"[DIRECT DISPATCH {mode.upper()}] "
             f"workflow={workflow_id} "
             f"node={ready_id} "
             f"reason={plan.get('reason')}"

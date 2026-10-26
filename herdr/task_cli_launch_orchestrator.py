@@ -481,10 +481,35 @@ def launch_task_orchestrated(args, *, deps):
     print(f"[WORKER] pane_source={pane_source}")
     print(f"[WORKER] agent={resolved_agent} requested={requested_agent}")
     try:
-        from herdr.stage_skills import stage_skills_for_node, stage_skills_into_workspace
-        node_skills = stage_skills_for_node(node_id, getattr(node, "get", lambda k, d=None: d)("skills") if isinstance(node, dict) else None)
+        from herdr.stage_skills import (
+            stage_skills_for_node,
+            stage_skills_into_workspace,
+            SkillCapabilityGap,
+        )
+        node_skills = stage_skills_for_node(
+            node_id,
+            getattr(node, "get", lambda k, d=None: d)("skills") if isinstance(node, dict) else None,
+        )
         if node_skills and clone_path:
             stage_skills_into_workspace(clone_path, node_skills)
+            from herdr.workspace_fingerprint import current_workspace_fingerprint, fingerprint_file
+            from herdr.repo_hygiene import is_internal_untracked
+
+            baseline_fingerprint = current_workspace_fingerprint(
+                clone_path,
+                is_internal_untracked=is_internal_untracked,
+                fingerprint_file=fingerprint_file,
+            )
+            baseline_untracked = list(baseline_fingerprint.get("untracked", {}).keys())
+    except SkillCapabilityGap as exc:
+        print(f"[STAGE SKILLS REFUSED] task={args.task_id} skill capability gap: {exc}")
+        _reclaim_unregistered_launch_resources(
+            args,
+            clone_path=clone_path,
+            pane_id=pane_id,
+            pane_source=pane_source,
+        )
+        sys.exit(2)
     except Exception as exc:
         print(f"[STAGE SKILLS WARN] task={args.task_id} failed to stage skills: {exc}")
     _loop_refusal = auto_init_task_loop(
