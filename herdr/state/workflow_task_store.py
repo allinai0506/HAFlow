@@ -42,9 +42,26 @@ def save_workflow(
     meta = {k: v for k, v in wf_dict.items() if k not in {
         "workflow_id", "title", "status", "template_name", "current_stage", "stage", "config", "created_at"
     }}
-    metadata_json = json.dumps(meta, ensure_ascii=False)
-
     try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE")
+        # Freeze only on first registration. Existing/historical workflows cannot
+        # acquire obligations through a later template/configuration upsert.
+        existing = conn.execute("SELECT metadata_json FROM workflows WHERE workflow_id=?", (wid,)).fetchone()
+        meta.pop("execution_declarations_v1", None)
+        if existing:
+            previous = json.loads(existing["metadata_json"] or "{}")
+            if "execution_declarations_v1" in previous:
+                meta["execution_declarations_v1"] = previous["execution_declarations_v1"]
+        else:
+            config = wf_dict.get("config")
+            nodes = config.get("nodes") if isinstance(config, dict) else None
+            declarations = {n["id"]: n["required_executions"]
+                            for n in nodes if isinstance(n, dict) and isinstance(n.get("id"), str)
+                            and n.get("required_executions")} if isinstance(nodes, list) else {}
+            if declarations:
+                meta["execution_declarations_v1"] = declarations
+        metadata_json = json.dumps(meta, ensure_ascii=False)
         conn.execute("""
             INSERT INTO workflows (workflow_id, title, status, template_name, current_stage, config_json, metadata_json, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -57,6 +74,12 @@ def save_workflow(
                 metadata_json=excluded.metadata_json,
                 updated_at=excluded.updated_at;
         """, (wid, title, status, template_name, current_stage, config_json, metadata_json, created_at, now))
+        if should_close:
+            conn.execute("COMMIT")
+    except BaseException:
+        if should_close and conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
     finally:
         if should_close:
             conn.close()
@@ -143,8 +166,6 @@ def save_task(
         "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker",
         "created_at", "version"
     }}
-    payload_json = json.dumps(payload, ensure_ascii=False)
-
     should_close = conn is None
     if should_close:
         conn = _facade().get_db_connection(db_path)
@@ -258,6 +279,18 @@ def save_task(
         elif task_dict.get('workflow_id') is not None:
             from herdr.node_dispatch_store import validate_task_registration
             validate_task_registration(conn, task_dict, now)
+        # Contract is server-derived once, never accepted from Agent metadata.
+        payload.pop('execution_contract_v1', None)
+        if existing:
+            if previous.get('execution_contract_v1'):
+                payload['execution_contract_v1'] = previous['execution_contract_v1']
+        else:
+            workflow_row = conn.execute('SELECT metadata_json FROM workflows WHERE workflow_id=?', (wid,)).fetchone()
+            declarations = json.loads(workflow_row['metadata_json'] or '{}').get('execution_declarations_v1', {})
+            if declarations.get(node):
+                from herdr.execution_obligations import freeze_contract
+                payload['execution_contract_v1'] = freeze_contract(task_dict, declarations[node])
+        payload_json = json.dumps(payload, ensure_ascii=False)
         if fail_if_exists:
             try:
                 conn.execute("""

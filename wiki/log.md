@@ -3738,3 +3738,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 修复：`services/controller/workflow_recovery.py` 捕获 `finalize_completed_task` 返回值，`outcome.get('kind') == 'refused'` 与 `fresh.get('finalize_escalated')` 均判定为拒绝，提取 `reason` 明确返回 `waiting_human`；`git_finalize.py` 及 `finalize_support.py` 的所有 `refused` 统一透传确定性 `reason`。
 - 验证：新增真实隔离注入测试 `test_finalize_refusal_without_escalation_flag_enters_waiting_human`（模拟元数据写入异常，断言明确转入 `waiting_human` 且 `reason == 'integrate_result_unverified'`，集成事实完整保留）；66 项恢复自主性测试全绿。教训见 lessons §206。
 
+
+## [2026-10-26] Added | ego-browser 只观察执行义务
+- Updated [[execution-trace]]：记录冻结声明、Task/Run/candidate 绑定、原生调用事实与 Observation/Ledger 复用；明确当前无法证明完整 E2E、不能生成 satisfied，以及未来强制模式尚需覆盖持久化旁路。

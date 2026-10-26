@@ -198,6 +198,8 @@ def parse_claude_jsonl(text: str, *, session_id: str = "") -> Tuple[List[Dict[st
             is_error=bool(result and result.get("is_error") is True),
             ref_prefix="claude",
         )
+        if tool == "Bash" and result is not None:
+            action["ego_native_receipt"] = _ego_native_receipt("claude", result)
         actions.append(action)
         if tool_id:
             known_ids[tool_id] = action["source_ref"]
@@ -243,6 +245,9 @@ def parse_opencode_parts(parts: Sequence[Dict[str, Any]], *, session_id: str = "
             is_error=str(state.get("status") or "") == "error",
             ref_prefix="opencode",
         )
+        if data.get("tool") == "bash" and state.get("status") in {"completed", "error"}:
+            action["ego_native_receipt"] = _ego_native_receipt("opencode", {
+                "exit_code": metadata.get("exit"), "is_error": state.get("status") == "error"})
         actions.append(action)
         part_id = part.get("id")
         if isinstance(part_id, str) and part_id:
@@ -606,7 +611,7 @@ def _actions_from_codex_calls(calls, outputs, session_id):
         ordinal += 1
         arguments = _object_args(payload.get("arguments"))
         exits = _exit_codes(blob)
-        actions.append(_tool_action(
+        action = _tool_action(
             session_id=session_id,
             ordinal=ordinal,
             timestamp=timestamp,
@@ -617,9 +622,32 @@ def _actions_from_codex_calls(calls, outputs, session_id):
             retry_of=retry_of,
             is_error=False,
             ref_prefix="codex",
-        ))
+        )
+        if name == "exec_command" and outputs.get(call_id):
+            try:
+                receipt = json.loads(blob)
+            except (TypeError, json.JSONDecodeError):
+                receipt = {}
+            action["ego_native_receipt"] = _ego_native_receipt("codex", receipt)
+        actions.append(action)
         known_ids.append((call_id, f"codex:{session_id}:{ordinal}"))
     return actions
+
+
+def _ego_native_receipt(provider, result):
+    """V1 provenance: only structured native shell results, never stdout regexes.
+
+    Codex exec-wrapper command extraction remains display-only. It deliberately
+    does not receive this marker, even if wrapper output resembles an exit code.
+    """
+    result = result if isinstance(result, dict) else {}
+    code = result.get("exit_code")
+    if type(code) is int:
+        outcome = "success" if code == 0 and result.get("is_error") is not True else "failed"
+    else:
+        # A tool-level error can be admission rejection before process launch.
+        outcome = "unknown"
+    return {"provider": provider, "outcome": outcome}
 
 
 def _js_string_literals(source: str) -> list[str]:

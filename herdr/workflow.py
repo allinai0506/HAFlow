@@ -440,7 +440,7 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
             }
             if _gate_was_declared(node):
                 norm_node["gate_declared"] = True
-            for field in ("control_mode", "confirm_before"):
+            for field in ("control_mode", "confirm_before", "required_executions"):
                 if field in node:
                     norm_node[field] = node[field]
             # Enterprise experience attribution (optional template keys).
@@ -547,7 +547,7 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(policy.get("rules") or []),
                 "gate": dict(policy.get("gate") or {}),
             }
-            for field in ("control_mode", "confirm_before"):
+            for field in ("control_mode", "confirm_before", "required_executions"):
                 if field in policy:
                     norm_node[field] = policy[field]
             # Enterprise experience attribution (optional policy keys).

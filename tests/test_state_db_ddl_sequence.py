@@ -108,6 +108,12 @@ def _assert_trace(name: str, actual: list[str]) -> None:
     # immediately before a legacy task INSERT.  The non-legacy traces contain
     # no matching statements at this position; all original DDL remains exact.
     if name == "legacy":
+        # V1 adds exactly two read-only contract lookups. Keep all writes,
+        # transaction boundaries and original DDL ordering under the old gate.
+        lookup = "SELECT metadata_json FROM workflows WHERE workflow_id='w-legacy'"
+        assert actual.count(lookup) == 2
+        actual = [statement for statement in actual if statement != lookup]
+    if name == "legacy":
         insert_at = next(i for i, statement in enumerate(actual)
                          if statement.startswith("INSERT INTO tasks "))
         prefix = actual[:insert_at]

@@ -53,3 +53,11 @@ Claude 先按已记录的会话文件名直接打开。找不到时才逐个查�
 Evidence: `herdr/execution_trace.py::project_stored_event/trace_availability`；`herdr/native_session_trace.py::load_native_actions`；`console/herdr_factory_console.py::renderExecutionTrace/renderTaskDrawer`；`tests/test_execution_trace_api.py::test_ledger_reports_dispatch_artifacts_and_candidate_without_native_session`。
 
 `FACT` 轨迹页优先展示具体事件与执行者报告，再展示本任务产出；不重复渲染概览/运行时已有的完整属性卡，避免报告被推到首屏下方。Evidence: `renderTaskDrawer`；`tests/test_console_execution_trace.py::test_trace_drawer_prioritizes_execution_over_repeated_attributes_and_artifacts`。
+
+## ego-browser 执行义务 V1
+
+FACT：新 Workflow 可在节点声明 `required_executions`，由数据库首次注册冻结并绑定到 Task/Run/candidate。自动裁决入口只观察，证据写 ObservationStore，Ledger 引用核验结果；无契约历史任务保持原行为。
+
+UNKNOWN：当前原生工具记录不能证明浏览器动作、服务加载候选与业务回读，因此生产适配器不能生成 satisfied。原生 shell 成功、Agent 报告或技能读取都不能补足此缺口。真实工具探针不等于冻结候选 E2E。
+
+Evidence：`herdr/execution_obligations.py::verify_executions`、`herdr/ego_execution_evidence.py::observe_task`、`tests/test_execution_obligations.py`。完整信任边界、只观察覆盖范围及未来事务接入要求见 [执行义务 V1](../docs/engineering/ego-execution-contract-v1.md)。

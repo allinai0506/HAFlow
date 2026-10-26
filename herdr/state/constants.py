@@ -83,6 +83,7 @@ def _route_decision_bucket_exprs() -> Tuple[str, str, str, str]:
     return mode, recommended, node, task_type
 
 PROTECTED_TASK_METADATA_FIELDS = {
+    "execution_contract_v1",
     "task_id",
     "workflow_id",
     "run_id",
@@ -96,6 +97,7 @@ PROTECTED_TASK_METADATA_FIELDS = {
 }
 
 PROTECTED_WORKFLOW_METADATA_FIELDS = {
+    "execution_declarations_v1",
     "workflow_id",
     "status",
     "created_at",
