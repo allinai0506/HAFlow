@@ -3750,3 +3750,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 交付物结构化验收：`auto_acceptance.py` 改造为字段级内容检查（用户目标/范围/AC条目/证明命令），非 Git 共享文档无需制造无意义 diff 即可通过。
 - 候选分支溯源：`herdr/direct_dispatch.py` 中 `candidate_branch_for_node` 支持在 verifier 依赖下向上溯源代码实现分支，避免误用无代码交付物的只读测试工位分支。
 - 验证：12 项专项回归测试（`tests/test_software_development_v1_adapter.py`）与真实 6 阶段 + 缺陷返工端到端测试（`tests/test_software_development_v1_e2e_isolated.py`）全绿，教训见 lessons §207。
+
+## [2026-10-27] Workflow | software-development-v1 去全局总指挥依赖与计划驱动实现任务直接派发
+- 去除全局总指挥依赖：`services/controller/stage_delivery.py` 对 `is_staged_dev_flow_workflow` 显式禁用 `coordinator_intake_enabled`，直派未完成时记录结构化 attention note，不再检索或依赖 `coordinator_pane`；`direct_dispatch.py` 跳过无意义的 `maybe_compact_coordinator`。
+- 计划成果直接驱动实现：新增 `herdr/plan_parser.py`，实现 `find_plan_deliverables`、`verify_plan_and_challenger`、`parse_plan_tasks` 与 `validate_task_decoupling`。`herdr/direct_dispatch.py` 在动态 implementation 节点中直接消费 executor 规划成果与 challenger 审查结论，校验合法后直接生成 TaskSpecs（`mode: "dispatch"`）。
+- 严格解耦与门禁阻断：对多任务要求修改文件集合严格互不相交（disjoint）且无内部 DAG 依赖；计划缺失、格式不合法、质询阻断（`[BLOCKED]`）或强耦合重叠时严格返回 `refusal` 并记录结构化原因，杜绝静默放行或回退总指挥。
+- 验证：21 项适配器专项定向测试（含 `test_21_global_coordinator_lockout_enforced` 全局总指挥入口锁定断言）全绿；3 项端到端隔离生命周期测试（标准 6 阶段、缺陷返工流、多任务并发流）全绿；核心引擎 62 项测试全部通过（共 86 passed）。教训见 lessons §208。

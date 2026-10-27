@@ -475,6 +475,309 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
         code = permanent_dispatch_refusal("[STAGE SKILLS REFUSED] task=t1 skill capability gap: missing")
         self.assertEqual(code, "skill_capability_gap")
 
+    def test_16_valid_single_task_plan_direct_dispatch(self):
+        """Scenario 16: Valid single-task plan directly creates and dispatches implementation task."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-direct-01"
+        plan_body = """
+        # Implementation Plan
+        ## 目标
+        实现偏好设置与自测
+        ## 验收条目映射
+        - Task 1: 满足 AC-1，实现 pref.py
+        ## 修改文件范围
+        - Create: pref.py
+        - Test: test_pref.py
+        ## 验证命令
+        pytest -q test_pref.py
+        """
+        challenger_body = """
+        ## 方案对抗性审查与可行性风险评估
+        对偏好设置方案进行了审查，任务划分合理，无死锁和过度设计风险，验证命令 pytest -q test_pref.py 具备可行性。确认通过。
+        """
+
+        tasks = [
+            {
+                "task_id": f"{wf_id}-plan-executor",
+                "workflow_id": wf_id,
+                "node": "plan",
+                "dispatch_role": "executor",
+                "status": "completed",
+            },
+            {
+                "task_id": f"{wf_id}-plan-challenger",
+                "workflow_id": wf_id,
+                "node": "plan",
+                "dispatch_role": "challenger",
+                "status": "completed",
+            },
+        ]
+        notes = [
+            {"node": "plan", "kind": "plan", "title": "实现计划", "body": plan_body, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "方案对抗质询", "body": challenger_body, "task_id": f"{wf_id}-plan-challenger"},
+        ]
+
+        from unittest import mock
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "实现用户偏好设置", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch")
+            specs = res.get("specs", [])
+            self.assertEqual(len(specs), 1)
+            spec = specs[0]
+            self.assertIn("pref.py", spec.get("planned_files", []))
+            self.assertEqual(spec.get("verify_command"), "pytest -q test_pref.py")
+            self.assertEqual(spec.get("integration_mode"), "git")
+            self.assertEqual(spec.get("task_type"), "feat")
+            self.assertEqual(spec.get("onto_branch"), "main")
+
+    def test_17_valid_multi_task_decoupled_plan_direct_dispatch(self):
+        """Scenario 17: Valid multi-task decoupled plan dispatches multiple tasks within concurrency limits."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-multi-01"
+        plan_body = """
+        # Implementation Plan
+        ## 任务拆分与验收条目映射
+        ### Task 1: 偏好设置核心模块
+        - **Goal:** 实现偏好存储与读取核心接口
+        - **Files:**
+          - Create: pref_core.py
+          - Test: test_pref_core.py
+        - **Verify:**
+          pytest -q test_pref_core.py
+        - **Dependencies:** None
+
+        ### Task 2: 偏好设置 CLI 导出模块
+        - **Goal:** 实现偏好设置命令行导出
+        - **Files:**
+          - Create: pref_cli.py
+          - Test: test_pref_cli.py
+        - **Verify:**
+          pytest -q test_pref_cli.py
+        - **Dependencies:** None
+        """
+        challenger_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：两个任务文件范围（pref_core vs pref_cli）完全解耦互不重叠，无死锁和循环依赖风险，验证命令独立且完备。可行性评估通过。
+        """
+
+        tasks = [
+            {"task_id": f"{wf_id}-plan-executor", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-challenger", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+        notes = [
+            {"node": "plan", "kind": "plan", "title": "解耦实现计划", "body": plan_body, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "对抗质询", "body": challenger_body, "task_id": f"{wf_id}-plan-challenger"},
+        ]
+
+        from unittest import mock
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "实现偏好设置与命令行工具", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch")
+            specs = res.get("specs", [])
+            self.assertEqual(len(specs), 2, "Should dispatch 2 decoupled implementation tasks")
+            self.assertEqual(specs[0]["dispatch_role"], "impl_1")
+            self.assertEqual(specs[1]["dispatch_role"], "impl_2")
+            self.assertEqual(specs[0]["planned_files"], ["pref_core.py", "test_pref_core.py"])
+            self.assertEqual(specs[1]["planned_files"], ["pref_cli.py", "test_pref_cli.py"])
+            self.assertNotEqual(specs[0]["task_id"], specs[1]["task_id"])
+
+    def test_18_challenger_adversarial_review_gate_enforced(self):
+        """Scenario 18: Missing, invalid, or blocked challenger review prevents implementation dispatch."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-gate-01"
+        plan_body = """
+        # Implementation Plan
+        ## 验收条目映射
+        - Task 1: 满足 AC-1
+        ## 修改文件范围
+        - Create: pref.py
+        ## 验证命令
+        pytest -q test_pref.py
+        """
+
+        from unittest import mock
+
+        # 1. Missing challenger review
+        tasks = [
+            {"task_id": f"{wf_id}-plan-executor", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-challenger", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+        notes_no_chal = [
+            {"node": "plan", "kind": "plan", "title": "实现计划", "body": plan_body, "task_id": f"{wf_id}-plan-executor"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes_no_chal):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "实现需求")
+            self.assertEqual(res.get("mode"), "refusal")
+            self.assertEqual(res.get("refusal_code"), "challenger_missing")
+
+        # 2. Blocked challenger review verdict
+        tasks_blocked = [
+            {"task_id": f"{wf_id}-plan-executor", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-challenger", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed", "stage_verdict": "blocked", "stage_verdict_note": "存在死锁风险"},
+        ]
+        notes_blocked = [
+            {"node": "plan", "kind": "plan", "title": "实现计划", "body": plan_body, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "质询", "body": "方案对抗与质询评估：发现严重死锁风险与循环依赖。HERDR_GATE_VERDICT: blocked", "task_id": f"{wf_id}-plan-challenger"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes_blocked):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks_blocked, "实现需求")
+            self.assertEqual(res.get("mode"), "refusal")
+            self.assertEqual(res.get("refusal_code"), "challenger_blocked")
+
+    def test_19_invalid_plan_decoupling_refused(self):
+        """Scenario 19: Tasks with overlapping files or intra-node dependencies are strictly refused."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-overlap-01"
+
+        # 1. Overlapping files
+        plan_overlapping = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 模块 A
+        - **Files:**
+          - Modify: shared_config.py
+          - Test: test_a.py
+        - **Verify:** pytest -q test_a.py
+
+        ### Task 2: 模块 B
+        - **Files:**
+          - Modify: shared_config.py
+          - Test: test_b.py
+        - **Verify:** pytest -q test_b.py
+        """
+        chal_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：经过对各拆解任务的详细核查，本方案对验收标准的映射完整。可行性评估认为风险与验证命令具备可行性，无过度设计与死锁风险，验证基线完备。确认通过。
+        """
+        tasks = [
+            {"task_id": f"{wf_id}-plan-executor", "workflow_id": wf_id, "node": "plan", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-challenger", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+        notes = [
+            {"node": "plan", "kind": "plan", "title": "重叠计划", "body": plan_overlapping, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "质询", "body": chal_body, "task_id": f"{wf_id}-plan-challenger"},
+        ]
+
+        from unittest import mock
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求")
+            self.assertEqual(res.get("mode"), "refusal")
+            self.assertEqual(res.get("refusal_code"), "plan_decoupling_refusal")
+            self.assertIn("overlapping file 'shared_config.py'", res.get("reason", ""))
+
+        # 2. Declared intra-node dependency
+        plan_dep = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 数据层
+        - **Files:**
+          - Create: db.py
+          - Test: test_db.py
+        - **Verify:** pytest -q test_db.py
+
+        ### Task 2: 业务层
+        - **Dependencies:** Task 1
+        - **Files:**
+          - Create: service.py
+          - Test: test_service.py
+        - **Verify:** pytest -q test_service.py
+        """
+        notes_dep = [
+            {"node": "plan", "kind": "plan", "title": "依赖计划", "body": plan_dep, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "质询", "body": chal_body, "task_id": f"{wf_id}-plan-challenger"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes_dep):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求")
+            self.assertEqual(res.get("mode"), "refusal")
+            self.assertEqual(res.get("refusal_code"), "plan_decoupling_refusal")
+            self.assertIn("intra-node dependency", res.get("reason", ""))
+
+    def test_20_duplicate_event_and_resume_idempotent(self):
+        """Scenario 20: Idempotent dispatch handling; active task yields wait, no duplicate creation."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-idempotent-01"
+        tasks_with_active = [
+            {
+                "task_id": f"{wf_id}-implementation-t1",
+                "workflow_id": wf_id,
+                "node": "implementation",
+                "status": "working",
+            }
+        ]
+        res = plan_stage_dispatch(wf_id, impl_node, tasks_with_active, "需求")
+        self.assertEqual(res.get("mode"), "wait")
+        self.assertEqual(res.get("reason"), "node has active tasks")
+
+    def test_21_global_coordinator_lockout_enforced(self):
+        """Scenario 21: Global coordinator invocation raises AssertionError; workflow executes without coordinator."""
+        from services.controller import stage_delivery
+        from unittest import mock
+
+        mock_ports = mock.MagicMock()
+        mock_ports.workflow_config_for.return_value = {"name": "software-development-v1"}
+        mock_ports.find_node.return_value = {"id": "requirements", "node_type": "agent"}
+        mock_ports.coordinator_intake_enabled.side_effect = AssertionError("coordinator_intake_enabled called!")
+        mock_ports.coordinator_pane_for_workflow.side_effect = AssertionError("coordinator_pane_for_workflow called!")
+        mock_ports.coordinator_status.side_effect = AssertionError("coordinator_status called!")
+        mock_ports.maybe_compact_coordinator.side_effect = AssertionError("maybe_compact_coordinator called!")
+
+        # 1. Direct dispatch success -> completely avoids coordinator
+        mock_ports.try_direct_stage_advance.return_value = True
+
+        item = {
+            "workflow_id": "wf-lockout-01",
+            "node_id": "requirements",
+            "stage": "start",
+        }
+        with mock.patch("herdr.coordinator_stage_admission.admit_stage_dispatch", return_value=(item, {"id": "requirements"}, None, None)):
+            # Should not raise AssertionError
+            stage_delivery._handle_stage_advance_item(mock_ports, item)
+            mock_ports.try_direct_stage_advance.assert_called_once()
+
+        # 2. Direct dispatch refusal -> records attention directly without coordinator
+        mock_ports.try_direct_stage_advance.return_value = False
+        item_refused = {
+            "workflow_id": "wf-lockout-02",
+            "node_id": "implementation",
+            "direct_dispatch_fallback_reason": "plan_invalid: missing sections",
+        }
+        with mock.patch("herdr.coordinator_stage_admission.admit_stage_dispatch", return_value=(item_refused, {"id": "implementation"}, None, None)):
+            stage_delivery._handle_stage_advance_item(mock_ports, item_refused)
+            mock_ports.attention_note.assert_called()
+            # Verify reason in attention call
+            call_args = mock_ports.attention_note.call_args
+            self.assertEqual(call_args[1]["reason"], "plan_invalid: missing sections")
+
 
 if __name__ == "__main__":
     unittest.main()

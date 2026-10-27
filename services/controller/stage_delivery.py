@@ -74,7 +74,11 @@ def _handle_stage_advance_item(ports, item):
     if ports.try_direct_stage_advance(item):
         return
 
-    if item.get("stage") in (None, "", "start") and ports.coordinator_intake_enabled():
+    config = ports.workflow_config_for(item["workflow_id"]) or {}
+    from herdr.stage_skills import is_staged_dev_flow_workflow
+    is_staged = is_staged_dev_flow_workflow(config)
+
+    if not is_staged and item.get("stage") in (None, "", "start") and ports.coordinator_intake_enabled():
         item = dict(item, intake=True)
         print(
             f"[COORDINATOR INTAKE] "
@@ -83,6 +87,35 @@ def _handle_stage_advance_item(ports, item):
             "-> dispatch via coordinator"
         )
     workflow_id = item["workflow_id"]
+
+    if is_staged:
+        fallback_reason = item.get("direct_dispatch_fallback_reason") or "direct_dispatch_unavailable"
+        if dispatch_op:
+            from herdr.node_dispatch_store import defer
+            defer(ports._get_store().db_path, dispatch_op['id'], fallback_reason, owner=dispatch_owner)
+            ports.clear_stage_advance(workflow_id, target_node_id)
+        else:
+            ports.clear_stage_advance(workflow_id, target_node_id)
+        key = f"{workflow_id}:stage_advance:{target_node_id}"
+        episode = ports.attention_get(key) or {}
+        attempts = ports._stage_advance_next_attempts(episode)
+        ports.attention_note(
+            key,
+            {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+            "stage_advance",
+            reason=fallback_reason,
+            attempts=attempts,
+            next_retry_at=ports.time.time() + ports.liveness.attention_retry_interval(),
+            detail=f"direct dispatch refused for {target_node_id}: {fallback_reason}",
+        )
+        print(
+            f"[STAGE ADVANCE REFUSED] "
+            f"workflow={workflow_id} "
+            f"node={target_node_id} "
+            f"reason={fallback_reason} -> attention recorded without coordinator"
+        )
+        return
+
     coord_pane = ports.coordinator_pane_for_workflow(workflow_id)
     if not coord_pane:
         fallback_reason = item.get("direct_dispatch_fallback_reason") or "coordinator_missing"

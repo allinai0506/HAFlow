@@ -196,6 +196,7 @@ def try_direct_stage_advance(ports, item):
                 workflow_id, ready_id
             ),
             reserved_task_ids=reserved_task_ids,
+            project_root=project_root,
         )
     except ValueError as exc:
         print(
@@ -477,7 +478,13 @@ def try_direct_stage_advance(ports, item):
             f"workflow={workflow_id} node={ready_id}: {type(exc).__name__}"
         )
 
-    ports.maybe_compact_coordinator(workflow_id, reason=f"stage_advance:{ready_id}")
+    try:
+        from herdr.stage_skills import is_staged_dev_flow_workflow
+        wf_cfg = ports.workflow_config_for(workflow_id) or {}
+        if not is_staged_dev_flow_workflow(wf_cfg):
+            ports.maybe_compact_coordinator(workflow_id, reason=f"stage_advance:{ready_id}")
+    except Exception:
+        ports.maybe_compact_coordinator(workflow_id, reason=f"stage_advance:{ready_id}")
 
     return True
 

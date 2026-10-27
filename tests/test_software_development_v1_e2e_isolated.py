@@ -142,14 +142,53 @@ class TestSoftwareDevelopmentV1E2EIsolated(unittest.TestCase):
         ## 验证命令
         pytest -q test_pref.py
         """
+        challenger_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：经过对偏好设置方案与文件修改范围的详细核查，本方案对验收标准的映射完整。可行性评估认为风险与验证命令具备可行性，无过度设计与死锁风险，验证基线完备。确认通过。
+        """
         ok, missing = validate_plan_deliverable_content(plan_body, role="executor")
         self.assertTrue(ok, f"Plan content must be valid: {missing}")
-        append_note(wf_id, kind="plan", title="偏好设置实现计划", body=plan_body, node="plan")
+        ok, missing = validate_plan_deliverable_content(challenger_body, role="challenger")
+        self.assertTrue(ok, f"Challenger content must be valid: {missing}")
+
+        self.store.save_task({
+            "task_id": f"{wf_id}-plan-executor",
+            "workflow_id": wf_id,
+            "node": "plan",
+            "dispatch_role": "executor",
+            "status": "completed",
+        })
+        self.store.save_task({
+            "task_id": f"{wf_id}-plan-challenger",
+            "workflow_id": wf_id,
+            "node": "plan",
+            "dispatch_role": "challenger",
+            "status": "completed",
+        })
+
+        append_note(wf_id, kind="plan", title="偏好设置实现计划", body=plan_body, node="plan", task_id=f"{wf_id}-plan-executor")
+        append_note(wf_id, kind="review", title="方案对抗审查与可行性评估", body=challenger_body, node="plan", task_id=f"{wf_id}-plan-challenger")
         completed_nodes.add("plan")
 
-        # Stage 3: Implementation
+        # Stage 3: Implementation - Directly planned & dispatched from plan deliverable!
         ready = [n["id"] for n in get_ready_nodes(wf_cfg, completed_nodes)]
         self.assertEqual(ready, ["implementation"])
+
+        impl_node = find_node(wf_cfg, "implementation")
+        all_tasks = self.store.list_tasks(wf_id)
+        dispatch_plan = dd.plan_stage_dispatch(
+            wf_id,
+            impl_node,
+            all_tasks,
+            "实现用户偏好设置",
+            context_branch="main",
+            project_root=str(self.repo_dir),
+        )
+        self.assertEqual(dispatch_plan.get("mode"), "dispatch")
+        specs = dispatch_plan.get("specs", [])
+        self.assertEqual(len(specs), 1)
+        spec = specs[0]
+        self.assertIn("pref.py", spec.get("planned_files", []))
 
         # Implementation writes code and commits to candidate branch
         pref_file = self.repo_dir / "pref.py"
@@ -163,7 +202,7 @@ class TestSoftwareDevelopmentV1E2EIsolated(unittest.TestCase):
         self.assertTrue(len(candidate_sha) == 40)
 
         impl_task = {
-            "task_id": f"{wf_id}-impl-t3",
+            "task_id": spec["task_id"],
             "workflow_id": wf_id,
             "node": "implementation",
             "status": "completed",
@@ -389,6 +428,198 @@ class TestSoftwareDevelopmentV1E2EIsolated(unittest.TestCase):
         passed, reason, details = evaluate_join_gate(wrapup_node, active_tasks, wf_id, expected_candidate_sha=fixed_candidate_sha)
         self.assertTrue(passed, f"Wrapup must pass on fixed candidate SHA: {reason}, {details}")
         print("\n[E2E DEFECT REWORK PASS] Defect accurately blocked, reworked, and re-verified on new candidate SHA.")
+
+    def test_03_multi_task_decoupled_lifecycle_e2e(self):
+        """End-to-End multi-task decoupled flow: plan outputs 2 decoupled tasks -> direct dispatch -> candidate freeze -> test -> review -> wrapup."""
+        wf_id = "wf-e2e-multi-task-03"
+        wf_cfg = dict(self.template_cfg)
+        wf_cfg["workflow_id"] = wf_id
+
+        self.store.save_workflow({
+            "workflow_id": wf_id,
+            "name": "software-development-v1",
+            "status": "running",
+            "config_json": json.dumps(wf_cfg),
+            "payload_json": json.dumps({"project_root": str(self.repo_dir)}),
+        })
+
+        completed_nodes = set()
+
+        # 1. Requirements
+        req_body = """
+        # 用户档案与配置模块需求规格
+        ## 用户目标与背景
+        提供解耦的用户档案读取与设置模块。
+        ## 功能范围与非目标
+        范围：user_profile.py 与 user_settings.py
+        非目标：不修改全局配置。
+        ## 验收标准
+        - AC-1: user_profile.py 返回用户档案
+        - AC-2: user_settings.py 返回用户设置
+        ## 证明方式与验证计划
+        proof_mode: tdd
+        验证命令: pytest -q test_user_profile.py test_user_settings.py
+        ## 交付上限
+        delivery_ceiling: workspace
+        """
+        append_note(wf_id, kind="requirement", title="需求规格", body=req_body, node="requirements")
+        completed_nodes.add("requirements")
+
+        # 2. Plan (executor + challenger)
+        plan_body = """
+        # 用户模块实现计划
+        ## 任务拆分与验收条目映射
+        ### Task 1: 用户档案模块实现
+        - **Goal:** 实现 user_profile.py 档案接口
+        - **Files:**
+          - Create: user_profile.py
+          - Create: test_user_profile.py
+        - **Verify:**
+          pytest -q test_user_profile.py
+        - **Dependencies:** None
+
+        ### Task 2: 用户设置模块实现
+        - **Goal:** 实现 user_settings.py 配置接口
+        - **Files:**
+          - Create: user_settings.py
+          - Create: test_user_settings.py
+        - **Verify:**
+          pytest -q test_user_settings.py
+        - **Dependencies:** None
+        """
+        challenger_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：各子任务修改文件预估与重叠分析表明，Task 1（user_profile.py）与 Task 2（user_settings.py）完全解耦，文件互不重叠，无死锁与循环依赖风险，支撑实现阶段并发执行。可行性评估通过。
+        """
+
+        self.store.save_task({
+            "task_id": f"{wf_id}-plan-executor",
+            "workflow_id": wf_id,
+            "node": "plan",
+            "dispatch_role": "executor",
+            "status": "completed",
+        })
+        self.store.save_task({
+            "task_id": f"{wf_id}-plan-challenger",
+            "workflow_id": wf_id,
+            "node": "plan",
+            "dispatch_role": "challenger",
+            "status": "completed",
+        })
+        append_note(wf_id, kind="plan", title="解耦任务拆分计划", body=plan_body, node="plan", task_id=f"{wf_id}-plan-executor")
+        append_note(wf_id, kind="review", title="方案对抗审查", body=challenger_body, node="plan", task_id=f"{wf_id}-plan-challenger")
+        completed_nodes.add("plan")
+
+        # 3. Implementation: directly plan stage dispatch!
+        impl_node = find_node(wf_cfg, "implementation")
+        all_tasks = self.store.list_tasks(wf_id)
+        dispatch_plan = dd.plan_stage_dispatch(
+            wf_id,
+            impl_node,
+            all_tasks,
+            "实现用户档案与配置模块",
+            context_branch="main",
+            project_root=str(self.repo_dir),
+        )
+        self.assertEqual(dispatch_plan.get("mode"), "dispatch")
+        specs = dispatch_plan.get("specs", [])
+        self.assertEqual(len(specs), 2, "Must dispatch 2 decoupled implementation tasks")
+
+        # Task 1 writes user_profile.py and test_user_profile.py
+        (self.repo_dir / "user_profile.py").write_text("def get_profile():\n    return {'name': 'Alice'}\n", encoding="utf-8")
+        (self.repo_dir / "test_user_profile.py").write_text("from user_profile import get_profile\ndef test_profile():\n    assert get_profile()['name'] == 'Alice'\n", encoding="utf-8")
+
+        # Task 2 writes user_settings.py and test_user_settings.py
+        (self.repo_dir / "user_settings.py").write_text("def get_settings():\n    return {'notify': True}\n", encoding="utf-8")
+        (self.repo_dir / "test_user_settings.py").write_text("from user_settings import get_settings\ndef test_settings():\n    assert get_settings()['notify'] is True\n", encoding="utf-8")
+
+        subprocess.run(["git", "add", "user_profile.py", "test_user_profile.py", "user_settings.py", "test_user_settings.py"], cwd=str(self.repo_dir), check=True)
+        subprocess.run(["git", "commit", "-m", "feat: implement profile and settings decoupled modules"], cwd=str(self.repo_dir), check=True)
+
+        candidate_sha = self._get_head_sha(self.repo_dir)
+
+        # Both implementation tasks complete
+        for idx, spec in enumerate(specs):
+            self.store.save_task({
+                "task_id": spec["task_id"],
+                "workflow_id": wf_id,
+                "node": "implementation",
+                "status": "completed",
+                "commit": candidate_sha,
+                "integration_mode": "git",
+                "candidate_sha": candidate_sha,
+            })
+        completed_nodes.add("implementation")
+
+        # 4. Test stage (single verifier validating both modules on candidate_sha)
+        ready = [n["id"] for n in get_ready_nodes(wf_cfg, completed_nodes)]
+        self.assertEqual(ready, ["test"])
+
+        test_res = subprocess.run(["pytest", "-q", "test_user_profile.py", "test_user_settings.py"], cwd=str(self.repo_dir), capture_output=True, text=True)
+        self.assertEqual(test_res.returncode, 0, f"Tests should pass: {test_res.stderr}")
+
+        test_evidence = {
+            "command": "pytest -q test_user_profile.py test_user_settings.py",
+            "exit_code": 0,
+            "output": test_res.stdout,
+            "candidate_sha": candidate_sha,
+        }
+        append_note(
+            wf_id,
+            kind="evidence",
+            title="S5 多任务测试执行证据",
+            body=json.dumps(test_evidence, ensure_ascii=False),
+            node="test",
+            base_sha=candidate_sha,
+        )
+        self.store.save_task({
+            "task_id": f"{wf_id}-test-t4",
+            "workflow_id": wf_id,
+            "node": "test",
+            "status": "completed",
+            "candidate_sha": candidate_sha,
+            "verified_candidate_sha": candidate_sha,
+            "stage_verdict": "pass",
+            "integration_mode": "none",
+        })
+        completed_nodes.add("test")
+
+        # 5. Review stage
+        ready = [n["id"] for n in get_ready_nodes(wf_cfg, completed_nodes)]
+        self.assertEqual(ready, ["review"])
+
+        self.store.save_task({
+            "task_id": f"{wf_id}-review-t5",
+            "workflow_id": wf_id,
+            "node": "review",
+            "status": "completed",
+            "candidate_sha": candidate_sha,
+            "verified_candidate_sha": candidate_sha,
+            "stage_verdict": "pass",
+            "integration_mode": "none",
+        })
+        completed_nodes.add("review")
+
+        # 6. Wrapup stage
+        ready = [n["id"] for n in get_ready_nodes(wf_cfg, completed_nodes)]
+        self.assertEqual(ready, ["wrapup"])
+
+        wrapup_node = find_node(wf_cfg, "wrapup")
+        all_tasks = self.store.list_tasks(workflow_id=wf_id)
+        passed, reason, details = evaluate_join_gate(wrapup_node, all_tasks, wf_id, expected_candidate_sha=candidate_sha)
+        self.assertTrue(passed, f"Join gate must pass: {reason}, {details}")
+
+        self.store.save_task({
+            "task_id": f"{wf_id}-wrapup-t6",
+            "workflow_id": wf_id,
+            "node": "wrapup",
+            "status": "completed",
+            "candidate_sha": candidate_sha,
+            "integration_mode": "none",
+        })
+        completed_nodes.add("wrapup")
+        self.assertEqual(len(completed_nodes), 6)
+        print("\n[E2E MULTI-TASK PASS] Completed decoupled multi-task execution without coordinator.")
 
 
 if __name__ == "__main__":

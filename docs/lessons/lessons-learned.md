@@ -8614,3 +8614,52 @@ pytest -q tests/test_software_development_v1_e2e_isolated.py
 
 
 ---
+
+## 208. [2026-10-27] Workflow | software-development-v1 去全局总指挥依赖与计划驱动实现任务直接派发
+
+### 现状 / 触发条件
+
+在 `software-development-v1` 流程中，此前存在全局常驻 LLM 总指挥（Coordinator）依赖：
+1. 首阶段 Intake：`stage_delivery.py` 默认开启 `coordinator_intake_enabled`，非直派阶段未完成时依赖 `coordinator_pane`，若无总指挥则报错挂起；
+2. 动态 Implementation 节点派发退化：`direct_dispatch.py` 将 implementation 阶段判定为 dynamic，直接抛出 `dynamic node requires planning` 并回退总指挥 LLM，导致无总指挥时无法进入实现；
+3. 规划成果未直接消费：规划阶段由 executor 制定计划、challenger 对抗审查，但计划成果未结构化转化为实现任务的 TaskSpecs；
+4. 调度期无意义开销：阶段流转前频繁尝试向总指挥 Pane 发送 `/compact`。
+
+### 根因剖析
+
+- **调度控制权未完全下沉至代码 Controller**：原设计将多任务拆解与并发决策委托给全局 LLM 总指挥，未建立纯代码的任务规格提取与解耦校验器；
+- **规划成果消费缺失**：缺少对计划文档结构及对抗质询审查结论的机器可判定解析模块；
+- **总指挥硬编码依赖**：状态流转与推进逻辑假设总指挥 Pane 始终在线，阻碍了端到端自主执行。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 动态实现节点回退总指挥 | 阶段产物应由代码直接解析并消费为结构化规格 | 新增 `plan_parser.py` 解析计划任务，Controller 校验后直接返回 `mode: "dispatch"` 生成 TaskSpecs |
+| 多任务盲目并发导致冲突 | 文件重叠或内部 DAG 依赖不能由 LLM 随意放行 | `validate_task_decoupling` 严格要求任务文件集 disjoint 且无内部依赖，违反即拒绝并提示合并 |
+| 缺乏对抗审查的计划被直接执行 | 未通过质询或存在阻塞缺陷的计划不能流向下游 | `verify_plan_and_challenger` 严格把关 executor 计划完备性与 challenger 质询有效性，有阻塞缺陷即 `refusal` |
+| 总指挥会话死等与压缩开销 | 阶段化开发流应当自包含运行 | `stage_delivery.py` 与 `direct_dispatch.py` 对 staged 模板跳过总指挥检索与 compact |
+
+### 操作规范（已固化到 `herdr/plan_parser.py`、`herdr/direct_dispatch.py`、`services/controller/stage_delivery.py`）
+
+1. 计划阶段输出有效 plan 与 approved challenger 质询，Controller 自动提取并校验章节结构与结论。
+2. 解耦任务遵循文件集合互不相交且无内部 DAG 依赖，受 `max_concurrency: 3` 与节点任务预算 `max_tasks_per_node: 12` 约束。
+3. 计划不合法、质询未决或强耦合任务严格阻断（`refusal`），记录结构化 attention note，绝不静默放行或死等总指挥。
+4. 全局总指挥检索入口在定向测试中注入 Lockout 断言，保证零总指挥访问。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_software_development_v1_adapter.py
+pytest -q tests/test_software_development_v1_e2e_isolated.py
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/plan_parser.py` — 计划提取、对抗质询校验与解耦规格生成
+- `herdr/direct_dispatch.py` — implementation 动态计划消费与直接派发
+- `services/controller/stage_delivery.py` — staged 流程禁用总指挥 intake 与检索
+- `tests/test_software_development_v1_adapter.py` — 包含 Lockout 门禁断言的 21 项定向测试
+- `tests/test_software_development_v1_e2e_isolated.py` — 3 项端到端隔离全生命周期测试
+
+---
