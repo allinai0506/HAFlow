@@ -429,6 +429,8 @@ def _prompt(
     docs_block=None,
     gate_inventory_block=None,
     redispatch_blocker_note=None,
+    plan_chunk=None,
+    plan_ref=None,
 ):
     target_outputs = role_outputs if role_outputs is not None else node["required_outputs"]
     outputs = "\n".join(f"- {line}" for line in target_outputs) or "- 未定义"
@@ -460,6 +462,15 @@ def _prompt(
     )
 
     docs_section = f"\n{docs_block}\n" if docs_block else ""
+
+    plan_section = ""
+    if plan_chunk:
+        ref_text = f"（已批准计划版本: {plan_ref}）\n" if plan_ref else ""
+        plan_section = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+已审计划约束与任务规格 {ref_text}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{plan_chunk.strip()}
+"""
 
     stage_context_section = ""
     try:
@@ -493,6 +504,7 @@ node: {node["id"]} ({node["label"]})
 
 任务目标：
 {goal}
+{plan_section}
 {stage_context_section}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 节点职责
@@ -537,6 +549,8 @@ def _dispatch_spec(
     candidate_sha=None,
     gate_inventory_block=None,
     redispatch_blocker_note=None,
+    plan_chunk=None,
+    plan_ref=None,
 ):
     from .workflow import validate_artifact_contract
     validate_artifact_contract(node.get("artifact_mode"), integration_mode or node["integration_mode"], node_id=node.get("id"), task_type=node.get("task_type"))
@@ -564,6 +578,8 @@ def _dispatch_spec(
             docs_block=docs_block,
             gate_inventory_block=gate_inventory_block,
             redispatch_blocker_note=redispatch_blocker_note,
+            plan_chunk=plan_chunk,
+            plan_ref=plan_ref,
         ),
         "artifact_mode": node.get("artifact_mode"),
         "dispatch_role": "worker",
@@ -789,12 +805,16 @@ def plan_stage_dispatch(
 
                 specs = []
                 num_tasks = len(parsed_tasks)
+                plan_ref = str(details.get("plan_id") or details.get("target_ref") or "").strip()
                 for idx, t in enumerate(parsed_tasks):
                     t_idx = t.get("task_index", idx + 1)
                     t_name = str(t.get("name") or f"Task {t_idx}").strip()
                     t_files = t.get("files") or []
                     t_verify = str(t.get("verify_command") or "").strip()
                     t_goal_text = str(t.get("goal") or "").strip()
+                    t_scope_text = str(t.get("scope") or "").strip()
+                    t_ac_text = str(t.get("acceptance") or "").strip()
+                    t_chunk = str(t.get("raw_chunk") or "").strip()
 
                     t_goal = f"{normalized['label']} ({t_name}): {t_goal_text or normalized['purpose']}"
                     if t_files:
@@ -803,6 +823,10 @@ def plan_stage_dispatch(
                     t_acceptance = []
                     if t_goal_text:
                         t_acceptance.append(f"满足目标：{t_goal_text}")
+                    if t_scope_text:
+                        t_acceptance.append(f"限定范围：{t_scope_text}")
+                    if t_ac_text:
+                        t_acceptance.append(f"具体验收条件：{t_ac_text}")
                     if t_files:
                         t_acceptance.append(f"限定修改文件范围：{', '.join(t_files)}")
                     if t_verify:
@@ -833,10 +857,16 @@ def plan_stage_dispatch(
                         docs_block=docs_block,
                         candidate_sha=candidate_sha,
                         gate_inventory_block=gate_inventory_block,
+                        plan_chunk=t_chunk,
+                        plan_ref=plan_ref,
                     )
                     spec["dispatch_role"] = f"impl_{idx + 1}" if num_tasks > 1 else "worker"
                     spec["planned_files"] = t_files
                     spec["verify_command"] = t_verify
+                    spec["plan_chunk"] = t_chunk
+                    spec["plan_scope"] = t_scope_text
+                    spec["plan_acceptance"] = t_ac_text
+                    spec["plan_ref"] = plan_ref
                     specs.append(spec)
 
                 return {

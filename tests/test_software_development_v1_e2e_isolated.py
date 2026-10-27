@@ -168,8 +168,9 @@ class TestSoftwareDevelopmentV1E2EIsolated(unittest.TestCase):
             "status": "completed",
         })
 
-        append_note(wf_id, kind="plan", title="偏好设置实现计划", body=plan_body, node="plan", task_id=f"{wf_id}-plan-executor")
-        append_note(wf_id, kind="review", title="方案对抗审查与可行性评估", body=challenger_body, node="plan", task_id=f"{wf_id}-plan-challenger")
+        p_note = append_note(wf_id, kind="plan", title="偏好设置实现计划", body=plan_body, node="plan", task_id=f"{wf_id}-plan-executor")
+        challenger_body_with_ref = f"{challenger_body.strip()}\nPlan-Ref: {p_note['note_id']}\n"
+        append_note(wf_id, kind="review", title="方案对抗审查与可行性评估", body=challenger_body_with_ref, node="plan", task_id=f"{wf_id}-plan-challenger")
         completed_nodes.add("plan")
 
         # Stage 3: Implementation - Directly planned & dispatched from plan deliverable!
@@ -491,7 +492,8 @@ class TestSoftwareDevelopmentV1E2EIsolated(unittest.TestCase):
         """
         challenger_body = """
         ## 方案对抗性审查与可行性风险评估
-        质询审查：各子任务修改文件预估与重叠分析表明，Task 1（user_profile.py）与 Task 2（user_settings.py）完全解耦，文件互不重叠，无死锁与循环依赖风险，支撑实现阶段并发执行。可行性评估通过。
+        质询审查：各子任务修改文件预估与重叠分析表明，Task 1（user_profile.py）与 Task 2（user_settings.py）完全解耦，文件互不重叠，无死锁与循环依赖风险，支撑实现阶段并发执行。评估确认通过。
+        HERDR_GATE_VERDICT: PASS
         """
 
         self.store.save_task({
@@ -508,8 +510,9 @@ class TestSoftwareDevelopmentV1E2EIsolated(unittest.TestCase):
             "dispatch_role": "challenger",
             "status": "completed",
         })
-        append_note(wf_id, kind="plan", title="解耦任务拆分计划", body=plan_body, node="plan", task_id=f"{wf_id}-plan-executor")
-        append_note(wf_id, kind="review", title="方案对抗审查", body=challenger_body, node="plan", task_id=f"{wf_id}-plan-challenger")
+        p_note = append_note(wf_id, kind="plan", title="解耦任务拆分计划", body=plan_body, node="plan", task_id=f"{wf_id}-plan-executor")
+        challenger_body_with_ref = f"{challenger_body.strip()}\nPlan-Ref: {p_note['note_id']}\n"
+        append_note(wf_id, kind="review", title="方案对抗审查", body=challenger_body_with_ref, node="plan", task_id=f"{wf_id}-plan-challenger")
         completed_nodes.add("plan")
 
         # 3. Implementation: directly plan stage dispatch!

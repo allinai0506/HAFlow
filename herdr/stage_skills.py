@@ -220,9 +220,10 @@ def stage_skills_into_workspace(clone_path: str | Path, skill_names: List[str]) 
     return resolved_skills
 
 
-def render_planning_orchestrator_rules() -> str:
+def render_planning_orchestrator_rules(task_id: str = "") -> str:
     """Explicit planning orchestrator rules forbidding secondary execution loops."""
-    return """\
+    task_arg = f'--task "{task_id}"' if task_id else '--task "$HERDR_TASK_ID"'
+    return f"""\
 【HAFlow 规划交接契约 - Orchestrator Handoff Protocol】
 1. HAFlow 是当前流程的唯一主控系统，直接管理后续实现、测试、评审与收尾节点；
 2. 计划产出后直接作为 plan 节点交付物，交回 HAFlow；
@@ -230,7 +231,7 @@ def render_planning_orchestrator_rules() -> str:
 4. 禁止询问用户选择 subagent 还是 inline 执行器；
 5. 禁止在本节点启动实现或另开工作区；
 6. 计划必须明确：每项验收条目对应的实现任务、文件范围（Create/Modify/Test）、具体的验证命令及预期结果；
-7. 计划产出应通过 `herdr-task note-add --workflow-id <wf> --node plan --task "$HERDR_TASK_ID" --kind plan --title "..."` 登记入共享文档；
+7. 计划产出应通过 `herdr-task note-add --workflow-id <wf> --node plan {task_arg} --kind plan --title "..."` 登记入共享文档；
 8. challenger 对抗质询必须在头部或专用行给出终态裁决（`HERDR_GATE_VERDICT: PASS` 或 `[PASS]` / `[BLOCKED]`），并显式声明所审查的计划 note ID（`Plan-Ref: <note_id>` 或 `--field target_note_id=<ID>`）。计划若在审查后发生变更，必须重新进行对抗质询。\
 """
 
@@ -299,7 +300,7 @@ def assemble_stage_context(
 
     # Specific orchestrator rules for plan node
     if node_id == "plan":
-        lines.append("\n" + render_planning_orchestrator_rules())
+        lines.append("\n" + render_planning_orchestrator_rules(task_id))
 
     # Upstream deliverables
     if upstream_notes:

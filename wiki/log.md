@@ -8,6 +8,17 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-27] fix | 规划产物文件版本绑定、任务身份精准匹配、严格终态裁决与完整实现约束透传
+
+- 背景：PR #356 代码复核指出：文件交付（如 `challenger-review.md`）绕过了版本与 `Plan-Ref` 强校验；同 Agent 无归属 note 覆盖了当前任务显式 BLOCKED；正文模糊包含“通过”放行了非终态（PENDING/未完成）审查；已审计划中的任务范围（Scope）、独立验收（Acceptance）及完整任务块在派发给实现工位时丢失；Worker 启动链缺少 `HERDR_TASK_ID` 环境变量注入。
+- 变更：
+  1. **文件交付物统一版本与引用核验**：`herdr/plan_parser.py` 将文件交付物包装为带有 `note_id` 的结构化对象，`verify_plan_and_challenger` 统一对 note 和文件强制校验 `Plan-Ref` 或 `target_note_id`，版本不符立即阻断；
+  2. **任务归属精准匹配**：在 `find_plan_deliverables` 中当任务 ID 已知时强制 `n_task == task_id`，杜绝使用 Agent 名称宽松回退覆盖当前任务阻断裁决；
+  3. **严格终态裁决（fail-closed）**：`extract_challenger_verdict` 移除模糊正文“通过”扫描，未完成/非终态标记（`尚未完成`、`PENDING` 等）或条件性通过强制返回 `missing` 或 `blocked`；
+  4. **已审计划约束完整透传**：`herdr/direct_dispatch.py` 提取任务 `scope`、`acceptance`、`raw_chunk` 及 `plan_ref`，将其挂载进 TaskSpecs 并完整注入实现工位提示词；
+  5. **任务身份注入**：在 `stage_skills.py` 提示词中直接静态渲染真实任务 ID，并在 `herdr-worker.py` 中对复用和新建 pane 显式注入 `export HERDR_TASK_ID={task_id}`。
+- 证据：`tests/test_software_development_v1_adapter.py`（39 项全通，含 test_36~test_39 专项）、`tests/test_software_development_v1_e2e_isolated.py`（3 项全通）、`tests/test_controller_modularity.py`（10 项全通，Controller 与 stage_skills 严格 <= 500 行）。
+
 ## [2026-10-23] fix | 空门禁标记不能在第二次规范化时凭空出现
 
 - 背景：没写 `gate` 的节点第一次规范化后是占位 `gate: {}`。再规范化一次时，这个占位被当成作者声明，多出 `gate_declared`。

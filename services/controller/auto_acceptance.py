@@ -135,7 +135,8 @@ def try_auto_accept(ports, task_id):
                         for n in notes:
                             if n.get("stale"):
                                 continue
-                            if n.get("task_id") == task_id or (task.get("agent") and n.get("agent") == task.get("agent")):
+                            matches = (n.get("task_id") == task_id) if task_id else bool(task.get("agent") and n.get("agent") == task.get("agent"))
+                            if matches:
                                 if n.get("node") == "plan" or n.get("kind") in ("plan", "review", "challenge"):
                                     deliverable_text += "\n" + str(n.get("title", "")) + "\n" + str(n.get("body", ""))
                     except Exception:
@@ -150,7 +151,8 @@ def try_auto_accept(ports, task_id):
                         for n in notes:
                             if n.get("stale"):
                                 continue
-                            if n.get("task_id") == task_id or (task.get("agent") and n.get("agent") == task.get("agent")):
+                            matches = (n.get("task_id") == task_id) if task_id else bool(task.get("agent") and n.get("agent") == task.get("agent"))
+                            if matches:
                                 if n.get("node") == "plan" or n.get("kind") in ("plan", "spec"):
                                     deliverable_text += "\n" + str(n.get("title", "")) + "\n" + str(n.get("body", ""))
                     except Exception:

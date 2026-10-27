@@ -38,7 +38,11 @@ _GOAL_LINE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _SCOPE_LINE_RE = re.compile(
-    r"[-*]?\s*(?:\*\*)?(?:范围|Scope|验收标准|验收条目|AC)(?:\*\*)?[:：]?\s*(.+)$",
+    r"[-*]?\s*(?:\*\*)?(?:范围|Scope)(?:\*\*)?[:：]?\s*(?:\*\*)?\s*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ACCEPTANCE_LINE_RE = re.compile(
+    r"[-*]?\s*(?:\*\*)?(?:验收|验收标准|验收条目|Acceptance|AC)(?:\*\*)?[:：]?\s*(?:\*\*)?\s*(.+)$",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -130,21 +134,14 @@ def extract_verify_command(chunk: str) -> str:
     return ""
 
 
-def read_plan_file_from_dir(base_dir: str) -> str:
-    """从指定目录查找计划文件（支持 plan.md, docs/plan.md 及 docs/superpowers/plans 下单一最新计划）。
-
-    选择单一最新计划文件，绝不跨文件全量拼接，确保与自动验收逻辑完全一致。
-    """
+def find_plan_file_path_in_dir(base_dir: str) -> Optional[str]:
+    """从指定目录查找计划文件路径（支持 plan.md, docs/plan.md 及 docs/superpowers/plans 下单一最新计划）。"""
     if not base_dir or not os.path.exists(base_dir):
-        return ""
+        return None
     for fname in ("plan.md", "docs/plan.md"):
         fpath = os.path.join(base_dir, fname)
         if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    return f.read()
-            except Exception:
-                pass
+            return fpath
     plans_dir = os.path.join(base_dir, "docs/superpowers/plans")
     if os.path.isdir(plans_dir):
         md_files = [
@@ -152,12 +149,22 @@ def read_plan_file_from_dir(base_dir: str) -> str:
             if f.endswith(".md") and os.path.isfile(os.path.join(plans_dir, f))
         ]
         if md_files:
-            newest = max(md_files, key=os.path.getmtime)
-            try:
-                with open(newest, "r", encoding="utf-8") as f:
-                    return f.read()
-            except Exception:
-                pass
+            return max(md_files, key=os.path.getmtime)
+    return None
+
+
+def read_plan_file_from_dir(base_dir: str) -> str:
+    """从指定目录查找计划文件（支持 plan.md, docs/plan.md 及 docs/superpowers/plans 下单一最新计划）。
+
+    选择单一最新计划文件，绝不跨文件全量拼接，确保与自动验收逻辑完全一致。
+    """
+    fpath = find_plan_file_path_in_dir(base_dir)
+    if fpath:
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            pass
     return ""
 
 
@@ -209,6 +216,8 @@ def extract_challenger_verdict(
         has_explicit_pass = True
         pass_reasons.append("explicit [PASS] marker found")
 
+    is_unfinished = bool(re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", text, re.IGNORECASE))
+
     # 2. 严格行首字段边界匹配裁决行（避免误匹配正文中间出现的 '测试结论' 等非裁决字段）
     verdict_lines = re.finditer(
         r"^[ \t]*(?:[-*][ \t]*)?(?:HERDR_GATE_VERDICT|GATE_VERDICT|VERDICT|最终裁决|审查裁决|评审裁决|最终结论|方案审查结论|对抗审查结论|可行性评估结论|结论)[:：][ \t]*(.+)$",
@@ -225,14 +234,17 @@ def extract_challenger_verdict(
         elif re.search(r"(?:方可通过|方可批准|方可实施|修[复改].*后.*通过|须.*通过|待.*通过)", line_val):
             has_explicit_blocked = True
             blocked_reasons.append(f"conditional approval rejected as blocked: {line_val}")
-        # 肯定通过检查 (必须无否定前缀)
+        # 非终态/未完成判定为阻断
+        elif re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", line_val, re.IGNORECASE):
+            has_explicit_blocked = True
+            blocked_reasons.append(f"verdict line indicates non-terminal state: {line_val}")
+        # 肯定通过检查 (必须无否定前缀且非条件短语)
         elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|建议通过|确认通过|准予通过|同意实施|通过", line_val, re.IGNORECASE):
             if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", line_val):
                 has_explicit_pass = True
                 pass_reasons.append(f"verdict line indicates pass: {line_val}")
 
-    # 3. 显式短语判决（必须是完整明确短语，严禁在正文模糊匹配单个“通过”）
-    # 阻断短语
+    # 3. 显式短语判决：正文明确阻塞缺陷判决
     for bm in re.finditer(r"(?:方案对抗质询[:：]\s*(?:目前)?(?:不能|不予|暂不)通过|【阻塞】|发现阻塞性缺陷|存在阻塞性缺陷)", text):
         start_pos = bm.start()
         prefix = text[max(0, start_pos - 10):start_pos]
@@ -240,25 +252,27 @@ def extract_challenger_verdict(
             has_explicit_blocked = True
             blocked_reasons.append("blocking defect phrase detected in body")
 
-    # 通过短语（严格限定完整肯定短语）
-    for pm in re.finditer(r"(?:建议通过|确认通过|同意实施|准予通过|审查通过|评估通过|可行性评估通过|未发现阻塞性缺陷|无阻塞性缺陷|(?:没有|不曾)发现阻塞性缺陷)", text):
+    # 4. 独立终态裁决短语（严禁正文模糊扫描非终态、历史记录或条件性短语）
+    for pm in re.finditer(r"(?:建议通过|确认通过|准予通过|同意实施)", text):
         start_pos = pm.start()
-        prefix = text[max(0, start_pos - 10):start_pos]
-        if not re.search(r"(?:不|未|不能|暂不|不予)\s*$", prefix):
-            # 排除条件性短语（如 '修复问题后建议通过'）
+        prefix = text[max(0, start_pos - 15):start_pos]
+        if not re.search(r"(?:不|未|不能|暂不|不予|上轮|历史|前次|如|若|如果|待|需|修)\s*$", prefix):
             surrounding = text[start_pos:start_pos + 30]
             if not re.search(r"(?:方可通过|方可批准|方可实施|修[复改].*后.*通过)", surrounding):
                 has_explicit_pass = True
-                pass_reasons.append("approval phrase detected in body")
+                pass_reasons.append(f"terminal approval verb: {pm.group(0)}")
 
-    # 4. 裁决仲裁：阻断信号绝对优先（fail-closed）
+    # 5. 裁决仲裁：阻断信号绝对优先（fail-closed）
     if has_explicit_blocked:
         return "blocked", "; ".join(blocked_reasons)
+
+    if is_unfinished:
+        return "missing", "challenger review is incomplete or in-progress (e.g. 尚未完成 / PENDING)"
 
     if has_explicit_pass:
         return "pass", "; ".join(pass_reasons)
 
-    return "missing", "challenger review missing explicit verdict declaration (PASS/BLOCKED/通过/阻断)"
+    return "missing", "challenger review missing explicit final terminal verdict (PASS/BLOCKED/通过/阻断)"
 
 
 def find_plan_deliverables(
@@ -319,9 +333,10 @@ def find_plan_deliverables(
             combined = f"{n_title}\n{n_body}"
 
             if not plan_text:
-                matches_exec = (n_task == exec_task_id) if exec_task_id else (n_task is None or not exec_task_id)
-                if not matches_exec and not n_task and executor_task and executor_task.get("agent") and n.get("agent") == executor_task.get("agent"):
-                    matches_exec = True
+                if exec_task_id:
+                    matches_exec = (n_task == exec_task_id)
+                else:
+                    matches_exec = (not n_task) or bool(executor_task and executor_task.get("agent") and n.get("agent") == executor_task.get("agent"))
                 if matches_exec:
                     if n_node == "plan" and n_kind in ("plan", "spec"):
                         plan_text = combined
@@ -333,9 +348,10 @@ def find_plan_deliverables(
                         plan_source = "notes"
 
             if not challenger_text:
-                matches_chal = (n_task == chal_task_id) if chal_task_id else (n_task is None or not chal_task_id)
-                if not matches_chal and not n_task and challenger_task and challenger_task.get("agent") and n.get("agent") == challenger_task.get("agent"):
-                    matches_chal = True
+                if chal_task_id:
+                    matches_chal = (n_task == chal_task_id)
+                else:
+                    matches_chal = (not n_task) or bool(challenger_task and challenger_task.get("agent") and n.get("agent") == challenger_task.get("agent"))
                 if matches_chal:
                     if n_node == "plan" and n_kind in ("challenge", "review"):
                         challenger_text = combined
@@ -346,13 +362,32 @@ def find_plan_deliverables(
     except Exception:
         pass
 
+    plan_file_path = ""
+    chal_file_path = ""
+
     # 2. 仅当 notes 缺失时，回退读取任务所属 Clone 目录中绑定的单文件（绝不拼接历史多文件）
     if not plan_text and executor_task and executor_task.get("clone_path"):
         cpath = executor_task["clone_path"]
-        fcontent = read_plan_file_from_dir(cpath)
-        if fcontent:
-            plan_text = fcontent
-            plan_source = "clone_file"
+        fpath = find_plan_file_path_in_dir(cpath)
+        if fpath:
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    plan_text = f.read()
+                plan_source = "clone_file"
+                plan_file_path = fpath
+                mtime = os.path.getmtime(fpath) if os.path.exists(fpath) else 0.0
+                selected_plan_note = {
+                    "note_id": os.path.basename(fpath),
+                    "kind": "plan",
+                    "node": "plan",
+                    "task_id": exec_task_id or "",
+                    "file_path": fpath,
+                    "ts": mtime,
+                    "body": plan_text,
+                    "source": "file",
+                }
+            except Exception:
+                pass
 
     if not challenger_text and challenger_task and challenger_task.get("clone_path"):
         cpath = challenger_task["clone_path"]
@@ -362,21 +397,55 @@ def find_plan_deliverables(
                 try:
                     with open(fpath, "r", encoding="utf-8") as f:
                         challenger_text = f.read()
+                    chal_file_path = fpath
+                    mtime = os.path.getmtime(fpath) if os.path.exists(fpath) else 0.0
+                    selected_chal_note = {
+                        "note_id": fname,
+                        "kind": "review",
+                        "node": "plan",
+                        "task_id": chal_task_id or "",
+                        "file_path": fpath,
+                        "ts": mtime,
+                        "body": challenger_text,
+                        "source": "file",
+                    }
                     break
                 except Exception:
                     pass
 
     # 3. 仅当上述均缺失时，回退 project_root 下单一规范文件
     if not plan_text and project_root and os.path.exists(project_root):
-        fcontent = read_plan_file_from_dir(project_root)
-        if fcontent:
-            plan_text = fcontent
-            plan_source = "project_root"
+        fpath = find_plan_file_path_in_dir(project_root)
+        if fpath:
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    plan_text = f.read()
+                plan_source = "project_root"
+                plan_file_path = fpath
+                mtime = os.path.getmtime(fpath) if os.path.exists(fpath) else 0.0
+                selected_plan_note = {
+                    "note_id": os.path.basename(fpath),
+                    "kind": "plan",
+                    "node": "plan",
+                    "task_id": exec_task_id or "",
+                    "file_path": fpath,
+                    "ts": mtime,
+                    "body": plan_text,
+                    "source": "file",
+                }
+            except Exception:
+                pass
 
+    plan_id = ""
+    if selected_plan_note:
+        plan_id = str(selected_plan_note.get("note_id") or "").strip()
     meta = {
         "plan_note": selected_plan_note,
         "challenger_note": selected_chal_note,
         "plan_source": plan_source,
+        "plan_id": plan_id,
+        "plan_file_path": plan_file_path,
+        "challenger_file_path": chal_file_path,
     }
     return PlanDeliverablesResult(plan_text.strip(), challenger_text.strip(), executor_task, challenger_task, meta=meta)
 
@@ -449,38 +518,61 @@ def verify_plan_and_challenger(
         # 校验审查与计划版本对应关系（防止旧审查放行新修改的计划）
         plan_note = meta.get("plan_note")
         chal_note = meta.get("challenger_note")
-        if plan_note and chal_note:
-            plan_nid = str(plan_note.get("note_id") or plan_note.get("id") or "").strip()
-            plan_ts = float(plan_note.get("ts") or 0.0)
-            chal_ts = float(chal_note.get("ts") or 0.0)
 
+        target_ref = ""
+        if chal_note:
             target_ref = str(
                 chal_note.get("target_note_id")
                 or chal_note.get("plan_note_id")
+                or chal_note.get("plan_ref")
                 or ""
             ).strip()
+        if not target_ref:
+            ref_m = re.search(
+                r"(?:plan[_-]note[_-]id|plan[_-]ref|target[_-]note[_-]id|被审计划|审查目标|计划版本)[:：]\s*([a-zA-Z0-9_.\-]+)",
+                challenger_text or "",
+                re.IGNORECASE,
+            )
+            if ref_m:
+                target_ref = ref_m.group(1).strip()
+
+        valid_plan_ids = set()
+        plan_nid = ""
+        if plan_note:
+            plan_nid = str(plan_note.get("note_id") or plan_note.get("id") or "").strip()
+            if plan_nid:
+                valid_plan_ids.add(plan_nid)
+            fpath = plan_note.get("file_path")
+            if fpath:
+                valid_plan_ids.add(os.path.basename(fpath))
+        if meta.get("plan_id"):
+            valid_plan_ids.add(str(meta["plan_id"]).strip())
+        if meta.get("plan_file_path"):
+            valid_plan_ids.add(os.path.basename(meta["plan_file_path"]).strip())
+
+        if valid_plan_ids:
             if not target_ref:
-                ref_m = re.search(
-                    r"(?:plan[_-]note[_-]id|plan[_-]ref|target[_-]note[_-]id|被审计划|审查目标|计划版本)[:：]\s*([a-zA-Z0-9_\-]+)",
-                    challenger_text or "",
-                    re.IGNORECASE,
-                )
-                if ref_m:
-                    target_ref = ref_m.group(1).strip()
-
-            if target_ref and plan_nid and target_ref != plan_nid:
                 return (
                     False,
-                    f"challenger_plan_version_mismatch: challenger review targets {target_ref} but selected plan is {plan_nid}",
-                    {"target_plan": target_ref, "selected_plan": plan_nid},
+                    "challenger_plan_ref_missing: challenger approved without specifying Plan-Ref (<note_id> or plan file)",
+                    {"valid_plan_ids": sorted(valid_plan_ids)},
                 )
-
-            if plan_ts > chal_ts > 0.0:
+            matches_ref = any(target_ref.lower() == pid.lower() or target_ref == pid for pid in valid_plan_ids)
+            if not matches_ref:
                 return (
                     False,
-                    f"challenger_outdated: plan was updated (ts={plan_ts}) after challenger review was published (ts={chal_ts}); new plan requires re-review",
-                    {"plan_ts": plan_ts, "challenger_ts": chal_ts, "plan_id": plan_nid},
+                    f"challenger_plan_version_mismatch: challenger review targets {target_ref} but selected plan is {plan_nid or sorted(valid_plan_ids)}",
+                    {"target_plan": target_ref, "selected_plan": plan_nid or sorted(valid_plan_ids)},
                 )
+
+        plan_ts = float((plan_note or {}).get("ts") or 0.0)
+        chal_ts = float((chal_note or {}).get("ts") or 0.0)
+        if plan_ts > chal_ts > 0.0:
+            return (
+                False,
+                f"challenger_outdated: plan was updated (ts={plan_ts}) after challenger review was published (ts={chal_ts}); new plan requires re-review",
+                {"plan_ts": plan_ts, "challenger_ts": chal_ts, "plan_id": plan_nid},
+            )
 
     return (
         True,
@@ -490,6 +582,10 @@ def verify_plan_and_challenger(
             "challenger_text": challenger_text,
             "executor_task": exec_task,
             "challenger_task": chal_task,
+            "plan_id": plan_nid or meta.get("plan_id") or "",
+            "target_ref": target_ref,
+            "plan_note": plan_note,
+            "challenger_note": chal_note,
         },
     )
 
@@ -544,7 +640,12 @@ def parse_plan_tasks(
             scope = ""
             sm = _SCOPE_LINE_RE.search(chunk)
             if sm:
-                scope = sm.group(1).strip()
+                scope = re.sub(r"^\*+|\*+$", "", sm.group(1).strip()).strip().strip("`'\"")
+
+            acceptance = ""
+            am = _ACCEPTANCE_LINE_RE.search(chunk)
+            if am:
+                acceptance = re.sub(r"^\*+|\*+$", "", am.group(1).strip()).strip().strip("`'\"")
 
             verify_cmd = extract_verify_command(chunk)
 
@@ -572,6 +673,7 @@ def parse_plan_tasks(
                 "name": t_title,
                 "goal": goal,
                 "scope": scope,
+                "acceptance": acceptance,
                 "files": sorted(files),
                 "verify_command": verify_cmd,
                 "dependencies": deps,
@@ -588,6 +690,18 @@ def parse_plan_tasks(
 
         verify_cmd = extract_verify_command(plan_text)
 
+        scope = ""
+        sm = _SCOPE_LINE_RE.search(plan_text)
+        if sm:
+            scope = re.sub(r"^\*+|\*+$", "", sm.group(1).strip()).strip().strip("`'\"")
+        else:
+            scope = "满足计划定义的验收条目与文件范围"
+
+        acceptance = ""
+        am = _ACCEPTANCE_LINE_RE.search(plan_text)
+        if am:
+            acceptance = re.sub(r"^\*+|\*+$", "", am.group(1).strip()).strip().strip("`'\"")
+
         title = default_name
         for line in lines:
             line_str = line.strip()
@@ -599,7 +713,8 @@ def parse_plan_tasks(
             "task_index": 1,
             "name": title,
             "goal": f"按计划完成 {title} 代码修改与自测",
-            "scope": "满足计划定义的验收条目与文件范围",
+            "scope": scope,
+            "acceptance": acceptance,
             "files": sorted(files),
             "verify_command": verify_cmd,
             "dependencies": [],

@@ -8651,6 +8651,11 @@ pytest -q tests/test_software_development_v1_e2e_isolated.py
 | 非裁决字段（如测试结论）被当作最终裁决误放行 | 正则缺少行首边界导致正文中的“测试结论：通过”覆盖后续“最终裁决：阻断”，且条件性通过（“修复...方可通过”）被误判 | 裁决字段采用多行行首严格匹配，扫描全部信号且阻断与条件通过绝对优先（fail-closed） |
 | 自动验收与计划派发读取路径分歧 | `auto_acceptance` 认 `docs/superpowers/plans/`，而派发器仅读 `plan.md`，导致验收通过但派发报 `plan_missing` | 抽离 `read_plan_file_from_dir` 单一事实源，自动选取 mtime 最新单文件，两端消费同源 |
 | CLI 示例缺 `--task` 导致 note 身份丢失 | 命令行未传 `--task` 时，原本无法关联 task_id 导致 notes 被严格绑定机制过滤 | `herdr-task note-add` 自动从环境变量 `HERDR_TASK_ID` 提取身份，并在提示词中显式注入 `--task "$HERDR_TASK_ID"` |
+| 文件交付物绕过计划版本校验与引用要求 | 只要有一侧交付物来自文件，版本与引用校验被跳过，导致引用旧计划的文件审查通过新计划 | 文件读取包装为统一带 `note_id` 的产物结构，无论 note 还是文件均强制校验 `Plan-Ref` 或 `target_note_id` 与计划版本严格一致 |
+| 同名 Agent 回退覆盖当前任务明确阻断 | 缺少 task_id 的 note 仅凭 agent 相同回退导致较新无归属 PASS 覆盖当前任务的 BLOCKED | `find_plan_deliverables` 中当任务 ID 已知时强制 `n_task == task_id` 精确匹配，禁止宽松回退 |
+| 历史“通过”短语放行非终态/未完成审查 | 含有“上轮审查通过”或带 `HERDR_GATE_VERDICT: PENDING` 因正文模糊命中通过被误放行 | 彻底移除正文模糊肯定扫描，仅认独立终态动词与专用字段，非终态标记（`尚未完成`、`PENDING` 等）强制 fail-closed |
+| 已审计划范围与独立验收未传至实现工位 | 解析器提取了 `scope` 与 `acceptance`，但派发时丢失，且未传递完整已审任务片段 | TaskSpecs 与实现工位提示词完整透传 `plan_chunk`、`plan_scope`、`plan_acceptance` 及 `plan_ref` |
+| Worker 运行时未注入任务环境变量 | 启动 worker 仅传 `--task-id` 参数，窗格未导出环境变量导致命令补全失效 | `herdr-worker.py` 对复用及新建 pane 均注入 `export HERDR_TASK_ID={task_id}`，提示词直接静态渲染任务 ID |
 
 ### 操作规范（已固化到 `herdr/plan_parser.py`、`herdr/direct_dispatch.py`、`services/controller/stage_delivery.py`）
 

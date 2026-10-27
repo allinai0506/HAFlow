@@ -1342,6 +1342,160 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
                 call_kwargs = mock_append.call_args[1]
                 self.assertEqual(call_kwargs.get("task_id"), "t-env-123")
 
+    def test_36_file_deliverable_version_binding_and_ref_enforced(self):
+        """Scenario 36: File deliverables strictly enforce plan version binding and mandatory Plan-Ref."""
+        from pathlib import Path
+        from herdr.plan_parser import verify_plan_and_challenger
+        from unittest import mock
+
+        wf_id = "wf-file-bind-01"
+        chal_dir = Path(self.tmp_dir) / "clone_chal_file"
+        chal_dir.mkdir(parents=True, exist_ok=True)
+        chal_file = chal_dir / "challenger-review.md"
+
+        tasks = [
+            {"task_id": "t-exec-01", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": "t-chal-01", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "clone_path": str(chal_dir), "status": "completed"},
+        ]
+
+        plan_v1_body = "# Implementation Plan\n## 验收条目\n- Task 1: v1\n## 修改文件范围\n- Create: a.py\n## 验证命令\npytest -q test_a.py"
+        plan_v2_body = "# Implementation Plan\n## 验收条目\n- Task 1: v2\n## 修改文件范围\n- Create: b.py\n## 验证命令\npytest -q test_b.py"
+
+        # 1. Challenger writes [PASS] referencing note-1 in file (> 100 chars)
+        chal_file.write_text(
+            "## 方案对抗性审查与可行性风险评估\n"
+            "质询审查：经过对抗性质询深度评估与核实，架构无死锁和循环依赖风险，任务分解逻辑清晰，验证命令具备可行性。评估确认通过。\n"
+            "HERDR_GATE_VERDICT: PASS\n"
+            "Plan-Ref: note-1\n",
+            encoding="utf-8",
+        )
+
+        # Active plan in notes is note-2
+        notes = [
+            {"note_id": "note-1", "node": "plan", "kind": "plan", "title": "计划v1", "body": plan_v1_body, "task_id": "t-exec-01", "ts": 100.0},
+            {"note_id": "note-2", "node": "plan", "kind": "plan", "title": "计划v2", "body": plan_v2_body, "task_id": "t-exec-01", "ts": 102.0},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok, reason, details = verify_plan_and_challenger(wf_id, tasks)
+            self.assertFalse(ok, "File challenger review referencing note-1 must not verify note-2")
+            self.assertIn("challenger_plan_version_mismatch", reason)
+
+        # 2. Challenger review missing Plan-Ref is rejected
+        chal_file.write_text(
+            "## 方案对抗性审查与可行性风险评估\n"
+            "质询审查：经过对抗性质询深度评估与核实，架构无死锁和循环依赖风险，任务分解逻辑清晰，验证命令具备可行性。评估确认通过。\n"
+            "HERDR_GATE_VERDICT: PASS\n",
+            encoding="utf-8",
+        )
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok_ref, reason_ref, _ = verify_plan_and_challenger(wf_id, tasks)
+            self.assertFalse(ok_ref, "Approval without Plan-Ref must be rejected")
+            self.assertIn("challenger_plan_ref_missing", reason_ref)
+
+        # 3. Challenger updates file to reference note-2 -> PASS
+        chal_file.write_text(
+            "## 方案对抗性审查与可行性风险评估\n"
+            "质询审查：经过对抗性质询深度评估与核实，架构无死锁和循环依赖风险，任务分解逻辑清晰，验证命令具备可行性。评估确认通过。\n"
+            "HERDR_GATE_VERDICT: PASS\n"
+            "Plan-Ref: note-2\n",
+            encoding="utf-8",
+        )
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok2, reason2, _ = verify_plan_and_challenger(wf_id, tasks)
+            self.assertTrue(ok2, f"Should pass when challenger review references note-2: {reason2}")
+            self.assertEqual(reason2, "plan_and_challenger_verified")
+
+    def test_37_agent_name_fallback_cannot_override_task_blocked(self):
+        """Scenario 37: Unassigned note from same agent cannot override current task's BLOCKED review."""
+        from herdr.plan_parser import verify_plan_and_challenger
+        from unittest import mock
+
+        wf_id = "wf-agent-override-01"
+        tasks = [
+            {"task_id": "t-exec-01", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": "t-chal-01", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "agent": "codex", "status": "completed"},
+        ]
+
+        plan_body = "# Implementation Plan\n## 验收条目\n- Task 1: feat\n## 修改文件范围\n- Create: c.py\n## 验证命令\npytest -q test_c.py"
+        notes = [
+            {"note_id": "note-plan", "node": "plan", "kind": "plan", "title": "计划", "body": plan_body, "task_id": "t-exec-01", "ts": 100.0},
+            # Real task review is BLOCKED
+            {"note_id": "note-chal-1", "node": "plan", "kind": "review", "title": "质询", "body": "## 方案对抗性审查与可行性风险评估\nHERDR_GATE_VERDICT: blocked", "task_id": "t-chal-01", "agent": "codex", "ts": 101.0},
+            # Unassigned note claiming PASS later
+            {"note_id": "note-chal-unassigned", "node": "plan", "kind": "review", "title": "质询无归属", "body": "## 方案对抗性审查与可行性风险评估\nHERDR_GATE_VERDICT: PASS\nPlan-Ref: note-plan", "task_id": "", "agent": "codex", "ts": 102.0},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok, reason, details = verify_plan_and_challenger(wf_id, tasks)
+            self.assertFalse(ok)
+            self.assertIn("challenger_blocked", reason)
+
+    def test_38_non_terminal_and_unfinished_verdicts_strictly_prevent_approval(self):
+        """Scenario 38: Non-terminal and unfinished review phrases strictly fail-closed."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # 1. PENDING with past pass mention -> BLOCKED
+        text1 = "HERDR_GATE_VERDICT: PENDING\n历史记录：上轮审查通过；当前审查尚未完成。"
+        v1, r1 = extract_challenger_verdict(text1)
+        self.assertEqual(v1, "blocked")
+
+        # 2. Unfinished review without verdict -> MISSING
+        text2 = "上轮审查通过，本轮方案审查尚未完成。"
+        v2, r2 = extract_challenger_verdict(text2)
+        self.assertEqual(v2, "missing")
+
+    def test_39_plan_constraints_and_acceptance_passed_to_implementation_specs(self):
+        """Scenario 39: Scope, acceptance criteria, and raw task chunk are preserved in implementation specs & prompt."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+        from unittest import mock
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-constraints-01"
+        plan_body = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 配置读取核心
+        - **Goal:** 实现配置读取
+        - **Scope:** 仅增加读取逻辑，不修改持久化格式
+        - **Acceptance:** 损坏 JSON 必须原样保留并返回错误，禁止覆盖用户原文件
+        - **Files:**
+          - Modify: settings.py
+          - Test: test_settings.py
+        - **Verify:**
+          pytest -q tests/test_settings.py
+        - **Dependencies:** None
+        """
+        chal_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：被审计划 note-p1 详细核实，无死锁和循环依赖风险。确认通过。
+        HERDR_GATE_VERDICT: PASS
+        Plan-Ref: note-p1
+        """
+        tasks = [
+            {"task_id": f"{wf_id}-plan-exec", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-chal", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+        notes = [
+            {"note_id": "note-p1", "node": "plan", "kind": "plan", "title": "计划", "body": plan_body, "task_id": f"{wf_id}-plan-exec"},
+            {"note_id": "note-c1", "node": "plan", "kind": "review", "title": "审查", "body": chal_body, "task_id": f"{wf_id}-plan-chal"},
+        ]
+
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch")
+            specs = res.get("specs", [])
+            self.assertEqual(len(specs), 1)
+            spec = specs[0]
+            self.assertEqual(spec.get("plan_scope"), "仅增加读取逻辑，不修改持久化格式")
+            self.assertEqual(spec.get("plan_acceptance"), "损坏 JSON 必须原样保留并返回错误，禁止覆盖用户原文件")
+            self.assertIn("仅增加读取逻辑，不修改持久化格式", spec.get("prompt", ""))
+            self.assertIn("损坏 JSON 必须原样保留并返回错误，禁止覆盖用户原文件", spec.get("prompt", ""))
+            self.assertIn("pytest -q tests/test_settings.py", spec.get("prompt", ""))
+            self.assertIn("note-p1", spec.get("plan_ref", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
