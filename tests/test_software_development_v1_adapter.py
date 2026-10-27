@@ -1164,6 +1164,184 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
         ok, reason = validate_task_decoupling(tasks)
         self.assertTrue(ok, f"Decoupling should pass for Dockerfile and README.md: {reason}")
 
+    def test_33_plan_version_binding_rejects_outdated_challenger_review(self):
+        """Scenario 33: If executor updates plan (v2) after challenger reviewed v1, verification fails until re-reviewed."""
+        from herdr.plan_parser import verify_plan_and_challenger
+        from unittest import mock
+
+        wf_id = "wf-ver-bind-01"
+        tasks = [
+            {"task_id": "t-exec-01", "workflow_id": wf_id, "node": "plan", "role": "executor", "status": "completed"},
+            {"task_id": "t-chal-01", "workflow_id": wf_id, "node": "plan", "role": "challenger", "status": "completed"},
+        ]
+
+        plan_v1_body = """
+        # Implementation Plan
+        ## 目标
+        方案第一版实现。
+        ## 验收条目映射
+        - Task 1: 满足第一版需求
+        ## 修改文件范围
+        - Create: v1.py
+        ## 验证命令
+        pytest -q test_v1.py
+        """
+        review_v1_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：被审计划 note-1 评估通过，无死锁和依赖冲突，验证命令完备。
+        HERDR_GATE_VERDICT: PASS
+        Plan-Ref: note-1
+        """
+        plan_v2_body = """
+        # Implementation Plan
+        ## 目标
+        方案第二版重构实现。
+        ## 验收条目映射
+        - Task 1: 满足第二版重构需求
+        ## 修改文件范围
+        - Create: v2.py
+        ## 验证命令
+        pytest -q test_v2.py
+        """
+
+        # 1. executor posts plan v1 (ts=100.0, id=note-1)
+        # 2. challenger reviews v1 with [PASS] (ts=101.0, targeting note-1)
+        # 3. executor updates and posts plan v2 (ts=102.0, id=note-2)
+        notes = [
+            {"note_id": "note-1", "node": "plan", "kind": "plan", "title": "计划v1", "body": plan_v1_body, "task_id": "t-exec-01", "ts": 100.0},
+            {"note_id": "note-chal", "node": "plan", "kind": "review", "title": "审查v1", "body": review_v1_body, "task_id": "t-chal-01", "ts": 101.0, "target_note_id": "note-1"},
+            {"note_id": "note-2", "node": "plan", "kind": "plan", "title": "计划v2", "body": plan_v2_body, "task_id": "t-exec-01", "ts": 102.0},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok, reason, details = verify_plan_and_challenger(wf_id, tasks)
+            # Must reject because challenger only reviewed note-1, but active plan is note-2 (ts=102 > 101)
+            self.assertFalse(ok)
+            self.assertTrue("challenger_plan_version_mismatch" in reason or "challenger_outdated" in reason)
+
+        # 4. challenger reviews plan v2 (ts=103.0, id=note-3, targeting note-2) -> PASS
+        review_v2_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：被审计划 note-2 针对第二版重构评估通过，无阻塞性缺陷。
+        HERDR_GATE_VERDICT: PASS
+        Plan-Ref: note-2
+        """
+        notes.append({
+            "note_id": "note-chal-2",
+            "node": "plan",
+            "kind": "review",
+            "title": "审查v2",
+            "body": review_v2_body,
+            "task_id": "t-chal-01",
+            "ts": 103.0,
+            "target_note_id": "note-2",
+        })
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok2, reason2, details2 = verify_plan_and_challenger(wf_id, tasks)
+            self.assertTrue(ok2, f"Verification should pass with re-reviewed plan v2: {reason2}")
+            self.assertEqual(reason2, "plan_and_challenger_verified")
+
+    def test_34_verdict_extraction_conflicts_and_conditionals_blocked(self):
+        """Scenario 34: Non-verdict lines like '测试结论' do not override '最终裁决: 阻断', and conditional pass is blocked."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # 1. "测试结论：通过。\n最终裁决：阻断，须补齐验收方案。" -> BLOCKED
+        text1 = """
+        ## 方案对抗性审查与可行性风险评估
+        测试结论：通过。
+        最终裁决：阻断，须补齐验收方案。
+        """
+        v1, r1 = extract_challenger_verdict(text1)
+        self.assertEqual(v1, "blocked")
+
+        # 2. "结论：修复上述问题后方可通过。" -> BLOCKED (conditional approval)
+        text2 = """
+        ## 方案对抗性审查与可行性风险评估
+        结论：修复上述问题后方可通过。
+        """
+        v2, r2 = extract_challenger_verdict(text2)
+        self.assertEqual(v2, "blocked")
+
+    def test_35_superpowers_plan_path_and_env_task_id_unified(self):
+        """Scenario 35: docs/superpowers/plans/xxx.md is accepted by auto_acceptance and read by find_plan_deliverables; env task_id bound."""
+        import os
+        from pathlib import Path
+        from herdr.plan_parser import find_plan_deliverables
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr.task_cli_evidence import note_add
+        import argparse
+        from unittest import mock
+
+        clone_dir = Path(self.tmp_dir) / "clone_superpowers"
+        plans_dir = clone_dir / "docs" / "superpowers" / "plans"
+        plans_dir.mkdir(parents=True, exist_ok=True)
+
+        plan_file = plans_dir / "2026-10-27-feature.md"
+        plan_content = """
+        # Implementation Plan
+        ## 目标
+        实现超级能力模块解耦。
+        ## 验收条目映射
+        - Task 1: 交付超级能力功能
+        ## 修改文件范围
+        - Create: superpower.py
+        ## 验证命令
+        pytest -q test_superpower.py
+        """
+        plan_file.write_text(plan_content, encoding="utf-8")
+
+        wf_id = "wf-superpower-01"
+        tasks = [
+            {"task_id": "t-exec-sp", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "clone_path": str(clone_dir), "status": "agent_done"},
+            {"task_id": "t-chal-sp", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+
+        # 1. try_auto_accept accepts plan from docs/superpowers/plans/2026-10-27-feature.md
+        import re as real_re
+        mock_ports = mock.MagicMock()
+        mock_ports.re = real_re
+        mock_ports.auto_accept_enabled.return_value = True
+        mock_ports.node_is_gate.return_value = False
+        mock_ports.set_task_status.return_value = True
+        mock_ports.get_task.return_value = tasks[0]
+        mock_ports.load_tasks.return_value = tasks
+        mock_ports.workflow_config_for.return_value = {"workflow_template": "software-development-v1"}
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=[]):
+            acc_ok = try_auto_accept(mock_ports, "t-exec-sp")
+            self.assertTrue(acc_ok, "auto_acceptance should accept plan in docs/superpowers/plans/*.md")
+
+        # 2. find_plan_deliverables reads the same file from docs/superpowers/plans/
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=[]):
+            p, c, e, ch = find_plan_deliverables(wf_id, tasks)
+            self.assertIn("superpower.py", p)
+
+        # 3. note_add auto-populates task_id from HERDR_TASK_ID when --task omitted
+        with mock.patch.dict(os.environ, {"HERDR_TASK_ID": "t-env-123"}):
+            fake_args = argparse.Namespace(
+                workflow_id=wf_id,
+                kind="plan",
+                title="环境变量任务绑定",
+                text="内容测试",
+                file=None,
+                node="plan",
+                task="",
+                agent="",
+                source="agent",
+                base_sha="",
+                round=1,
+                invalidates=None,
+                field=[],
+            )
+            fake_deps = {
+                "find_task": lambda tasks, tid: None,
+                "load_tasks": lambda: [],
+                "task_head_sha": lambda task: "",
+            }
+            with mock.patch("herdr.workflow_docs.append_note") as mock_append:
+                note_add(fake_args, deps=fake_deps)
+                mock_append.assert_called_once()
+                call_kwargs = mock_append.call_args[1]
+                self.assertEqual(call_kwargs.get("task_id"), "t-env-123")
+
 
 if __name__ == "__main__":
     unittest.main()

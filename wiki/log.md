@@ -3773,3 +3773,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 无后缀合法文件支持：`herdr/plan_parser.py` 引入 `is_valid_file_path`，兼容带路径文件及 `Dockerfile`、`Makefile`、`LICENSE` 等标准根无后缀文件，防止合法任务被解耦检查拒绝。
 - CI 测试契约同步：`tests/test_console_project_creation.py` 与 `tests/test_projects_coordinator_missing_error.py` 同步区分 `software-development-v1`（免总指挥）与传统模板（需自愈恢复）的测试断言。
 - 验证：32 项适配器专项测试、3 项真实隔离端到端测试、10 项模块化架构测试、26 项项目与自愈测试全部通过（共 71 passed）。
+
+## [2026-10-27] Fix | PR #356 最新复核修复：计划版本与对抗审查双向绑定、行首裁决字段防串扰与单源计划读取
+- 计划版本与对抗审查双向强绑定：`herdr/plan_parser.py` 实现 `verify_plan_and_challenger` 的引用与时序校验；支持 challenger 通过 `Plan-Ref: <note_id>` 或 `target_note_id` 显式指向被审计划 note，并在 executor 更新发布新计划（`plan_ts > chal_ts`）时拒绝旧审查放行（返回 `challenger_outdated` 或 `challenger_plan_version_mismatch`），彻底杜绝计划修改后旧审查放行新版本漏洞。
+- 审查裁决抽取严格行首边界与条件性阻断：重构 `extract_challenger_verdict`，对裁决行使用严格行首正则（`^[ \t]*(?:[-*][ \t]*)?(?:HERDR_GATE_VERDICT|最终裁决|...):`），杜绝正文中的“测试结论：通过”误命中断言覆盖后续“最终裁决：阻断”；增加条件性批准扫描（如“修复上述问题后方可通过”），任何阻断或条件性短语绝对优先判定为 `blocked`（fail-closed）。
+- 共享文档与文件读取单源统一：抽离 `herdr.plan_parser.read_plan_file_from_dir`，统一支持 `plan.md`、`docs/plan.md` 及 `docs/superpowers/plans/*.md`（单选 mtime 最新文件，杜绝历史文件全量拼接）；`services/controller/auto_acceptance.py` 与 `find_plan_deliverables` 接入该统一函数，消除路径读取分歧。
+- 任务命令行工具环境身份自动补齐：`herdr/task_cli_evidence.py` 在 `note_add` 时自动从 `os.environ.get("HERDR_TASK_ID")` 补齐缺省的 `--task` 参数，并在 `herdr/workflow_docs.py` 与 `herdr/stage_skills.py` 中规范注入 `--task "$HERDR_TASK_ID"` 及 Plan-Ref 提示词契约。
+- 验证：35 项适配器专项测试（含版本版本更新旧审查失效、行首裁决与条件性阻断、superpowers 单源读取与环境变量任务身份补齐）全绿；3 项端到端隔离全生命周期测试、10 项模块化门禁测试、26 项项目契约测试全部通过（共 74 passed）。

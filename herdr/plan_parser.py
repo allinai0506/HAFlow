@@ -130,6 +130,50 @@ def extract_verify_command(chunk: str) -> str:
     return ""
 
 
+def read_plan_file_from_dir(base_dir: str) -> str:
+    """从指定目录查找计划文件（支持 plan.md, docs/plan.md 及 docs/superpowers/plans 下单一最新计划）。
+
+    选择单一最新计划文件，绝不跨文件全量拼接，确保与自动验收逻辑完全一致。
+    """
+    if not base_dir or not os.path.exists(base_dir):
+        return ""
+    for fname in ("plan.md", "docs/plan.md"):
+        fpath = os.path.join(base_dir, fname)
+        if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+    plans_dir = os.path.join(base_dir, "docs/superpowers/plans")
+    if os.path.isdir(plans_dir):
+        md_files = [
+            os.path.join(plans_dir, f) for f in os.listdir(plans_dir)
+            if f.endswith(".md") and os.path.isfile(os.path.join(plans_dir, f))
+        ]
+        if md_files:
+            newest = max(md_files, key=os.path.getmtime)
+            try:
+                with open(newest, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+    return ""
+
+
+class PlanDeliverablesResult(tuple):
+    """4-element tuple for backward compatibility with p, c, e, ch unpacking, carrying meta."""
+    def __new__(cls, plan_text, challenger_text, executor_task, challenger_task, meta=None):
+        return super().__new__(cls, (plan_text, challenger_text, executor_task, challenger_task))
+
+    def __init__(self, plan_text, challenger_text, executor_task, challenger_task, meta=None):
+        self.plan_text = plan_text
+        self.challenger_text = challenger_text
+        self.executor_task = executor_task
+        self.challenger_task = challenger_task
+        self.meta = meta or {}
+
+
 def extract_challenger_verdict(
     challenger_text: str,
     chal_task: Optional[Dict[str, Any]] = None,
@@ -152,50 +196,67 @@ def extract_challenger_verdict(
 
     text = challenger_text.strip()
 
-    # 1. 显式大写/方括号标记优先判决
-    if re.search(r"\[(?:BLOCKED|REJECT(?:ED)?|FAILED)\]", text, re.IGNORECASE):
-        return "blocked", "challenger review has explicit [BLOCKED] marker"
-    if re.search(r"\[(?:PASS(?:ED)?|APPROVED?)\]", text, re.IGNORECASE):
-        return "pass", "challenger review has explicit [PASS] marker"
+    has_explicit_blocked = False
+    blocked_reasons: List[str] = []
+    has_explicit_pass = False
+    pass_reasons: List[str] = []
 
-    # 2. 专用结论行/键值对:
-    verdict_line_m = re.search(
-        r"(?:HERDR_GATE_VERDICT|VERDICT|审查结论|评审结论|结论|最终裁决|可行性评估结论)[:：]\s*([^\n\r]+)",
+    # 1. 显式方括号标记优先判决
+    if re.search(r"\[(?:BLOCKED|REJECT(?:ED)?|FAILED)\]", text, re.IGNORECASE):
+        has_explicit_blocked = True
+        blocked_reasons.append("explicit [BLOCKED] marker found")
+    if re.search(r"\[(?:PASS(?:ED)?|APPROVED?)\]", text, re.IGNORECASE):
+        has_explicit_pass = True
+        pass_reasons.append("explicit [PASS] marker found")
+
+    # 2. 严格行首字段边界匹配裁决行（避免误匹配正文中间出现的 '测试结论' 等非裁决字段）
+    verdict_lines = re.finditer(
+        r"^[ \t]*(?:[-*][ \t]*)?(?:HERDR_GATE_VERDICT|GATE_VERDICT|VERDICT|最终裁决|审查裁决|评审裁决|最终结论|方案审查结论|对抗审查结论|可行性评估结论|结论)[:：][ \t]*(.+)$",
         text,
-        re.IGNORECASE,
+        re.IGNORECASE | re.MULTILINE,
     )
-    if verdict_line_m:
-        vline = verdict_line_m.group(1).strip()
-        # 结论行阻断
-        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|存在阻塞|驳回|暂不予通过|不予通过|不能通过|暂不通过", vline, re.IGNORECASE):
-            return "blocked", f"challenger verdict line indicates blocked: {vline}"
-        # 结论行通过 (必须无否定词)
-        if re.search(r"\b(?:pass(?:ed)?|approved?)\b|建议通过|确认通过|准予通过|同意实施|通过", vline, re.IGNORECASE):
-            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", vline):
-                return "pass", f"challenger verdict line indicates pass: {vline}"
+    for vm in verdict_lines:
+        line_val = vm.group(1).strip()
+        # 阻断检查
+        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|存在阻塞|驳回|暂不予通过|不予通过|不能通过|暂不通过|拒绝", line_val, re.IGNORECASE):
+            has_explicit_blocked = True
+            blocked_reasons.append(f"verdict line indicates blocked: {line_val}")
+        # 条件性通过判定为阻断/未完成
+        elif re.search(r"(?:方可通过|方可批准|方可实施|修[复改].*后.*通过|须.*通过|待.*通过)", line_val):
+            has_explicit_blocked = True
+            blocked_reasons.append(f"conditional approval rejected as blocked: {line_val}")
+        # 肯定通过检查 (必须无否定前缀)
+        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|建议通过|确认通过|准予通过|同意实施|通过", line_val, re.IGNORECASE):
+            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", line_val):
+                has_explicit_pass = True
+                pass_reasons.append(f"verdict line indicates pass: {line_val}")
 
     # 3. 显式短语判决（必须是完整明确短语，严禁在正文模糊匹配单个“通过”）
     # 阻断短语
-    blocked_phrase_m = re.search(
-        r"(?:方案对抗质询[:：]\s*(?:目前)?(?:不能|不予|暂不)通过|【阻塞】|发现阻塞性缺陷|存在阻塞性缺陷)",
-        text,
-    )
-    if blocked_phrase_m:
-        start_pos = blocked_phrase_m.start()
+    for bm in re.finditer(r"(?:方案对抗质询[:：]\s*(?:目前)?(?:不能|不予|暂不)通过|【阻塞】|发现阻塞性缺陷|存在阻塞性缺陷)", text):
+        start_pos = bm.start()
         prefix = text[max(0, start_pos - 10):start_pos]
         if not re.search(r"(?:未|无|没有|不曾)\s*$", prefix):
-            return "blocked", "challenger review reported blocking issues"
+            has_explicit_blocked = True
+            blocked_reasons.append("blocking defect phrase detected in body")
 
     # 通过短语（严格限定完整肯定短语）
-    pass_phrase_m = re.search(
-        r"(?:建议通过|确认通过|同意实施|准予通过|审查通过|评估通过|可行性评估通过|未发现阻塞性缺陷|无阻塞性缺陷|(?:没有|不曾)发现阻塞性缺陷)",
-        text,
-    )
-    if pass_phrase_m:
-        start_pos = pass_phrase_m.start()
+    for pm in re.finditer(r"(?:建议通过|确认通过|同意实施|准予通过|审查通过|评估通过|可行性评估通过|未发现阻塞性缺陷|无阻塞性缺陷|(?:没有|不曾)发现阻塞性缺陷)", text):
+        start_pos = pm.start()
         prefix = text[max(0, start_pos - 10):start_pos]
         if not re.search(r"(?:不|未|不能|暂不|不予)\s*$", prefix):
-            return "pass", "challenger review approved plan"
+            # 排除条件性短语（如 '修复问题后建议通过'）
+            surrounding = text[start_pos:start_pos + 30]
+            if not re.search(r"(?:方可通过|方可批准|方可实施|修[复改].*后.*通过)", surrounding):
+                has_explicit_pass = True
+                pass_reasons.append("approval phrase detected in body")
+
+    # 4. 裁决仲裁：阻断信号绝对优先（fail-closed）
+    if has_explicit_blocked:
+        return "blocked", "; ".join(blocked_reasons)
+
+    if has_explicit_pass:
+        return "pass", "; ".join(pass_reasons)
 
     return "missing", "challenger review missing explicit verdict declaration (PASS/BLOCKED/通过/阻断)"
 
@@ -208,12 +269,15 @@ def find_plan_deliverables(
     """寻找本轮计划节点产出的 plan（executor）文本与 challenge（challenger）审查文本。
 
     具备失效版本过滤（通过 workflow_docs.annotate_notes 排除 stale 产物）和任务身份精确绑定。
-    返回: (plan_text, challenger_text, executor_task, challenger_task)
+    返回 PlanDeliverablesResult，兼容 4 元组解包同时携带 meta 字典。
     """
     plan_text = ""
     challenger_text = ""
     executor_task = None
     challenger_task = None
+    selected_plan_note = None
+    selected_chal_note = None
+    plan_source = "none"
 
     plan_tasks = [
         t for t in (tasks or [])
@@ -255,37 +319,40 @@ def find_plan_deliverables(
             combined = f"{n_title}\n{n_body}"
 
             if not plan_text:
-                # 严格匹配 executor 任务身份：当明确已知 exec_task_id 时，无归属 note 绝不匹配
                 matches_exec = (n_task == exec_task_id) if exec_task_id else (n_task is None or not exec_task_id)
+                if not matches_exec and not n_task and executor_task and executor_task.get("agent") and n.get("agent") == executor_task.get("agent"):
+                    matches_exec = True
                 if matches_exec:
                     if n_node == "plan" and n_kind in ("plan", "spec"):
                         plan_text = combined
+                        selected_plan_note = n
+                        plan_source = "notes"
                     elif n_kind == "plan" or ("计划" in n_title and "质询" not in n_title and "审查" not in n_title):
                         plan_text = combined
+                        selected_plan_note = n
+                        plan_source = "notes"
 
             if not challenger_text:
-                # 严格匹配 challenger 任务身份：当明确已知 chal_task_id 时，无归属 note 绝不匹配
                 matches_chal = (n_task == chal_task_id) if chal_task_id else (n_task is None or not chal_task_id)
+                if not matches_chal and not n_task and challenger_task and challenger_task.get("agent") and n.get("agent") == challenger_task.get("agent"):
+                    matches_chal = True
                 if matches_chal:
                     if n_node == "plan" and n_kind in ("challenge", "review"):
                         challenger_text = combined
+                        selected_chal_note = n
                     elif n_kind == "challenge" or ("质询" in n_title or "对抗" in n_title or "审查" in n_title or "可行性评估" in n_title):
                         challenger_text = combined
+                        selected_chal_note = n
     except Exception:
         pass
 
     # 2. 仅当 notes 缺失时，回退读取任务所属 Clone 目录中绑定的单文件（绝不拼接历史多文件）
     if not plan_text and executor_task and executor_task.get("clone_path"):
         cpath = executor_task["clone_path"]
-        for fname in ("plan.md", "docs/plan.md"):
-            fpath = os.path.join(cpath, fname)
-            if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
-                try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        plan_text = f.read()
-                    break
-                except Exception:
-                    pass
+        fcontent = read_plan_file_from_dir(cpath)
+        if fcontent:
+            plan_text = fcontent
+            plan_source = "clone_file"
 
     if not challenger_text and challenger_task and challenger_task.get("clone_path"):
         cpath = challenger_task["clone_path"]
@@ -301,17 +368,17 @@ def find_plan_deliverables(
 
     # 3. 仅当上述均缺失时，回退 project_root 下单一规范文件
     if not plan_text and project_root and os.path.exists(project_root):
-        for fname in ("docs/plan.md", "plan.md"):
-            fpath = os.path.join(project_root, fname)
-            if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
-                try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        plan_text = f.read()
-                    break
-                except Exception:
-                    pass
+        fcontent = read_plan_file_from_dir(project_root)
+        if fcontent:
+            plan_text = fcontent
+            plan_source = "project_root"
 
-    return plan_text.strip(), challenger_text.strip(), executor_task, challenger_task
+    meta = {
+        "plan_note": selected_plan_note,
+        "challenger_note": selected_chal_note,
+        "plan_source": plan_source,
+    }
+    return PlanDeliverablesResult(plan_text.strip(), challenger_text.strip(), executor_task, challenger_task, meta=meta)
 
 
 def verify_plan_and_challenger(
@@ -324,9 +391,11 @@ def verify_plan_and_challenger(
 
     返回: (ok, reason, details_dict)
     """
-    plan_text, challenger_text, exec_task, chal_task = find_plan_deliverables(
+    deliverables = find_plan_deliverables(
         workflow_id, tasks, project_root
     )
+    plan_text, challenger_text, exec_task, chal_task = deliverables
+    meta = getattr(deliverables, "meta", {})
 
     if not plan_text:
         return (
@@ -376,6 +445,42 @@ def verify_plan_and_challenger(
                 f"challenger_verdict_missing: {verdict_reason}",
                 {"challenger_preview": challenger_text[:300]},
             )
+
+        # 校验审查与计划版本对应关系（防止旧审查放行新修改的计划）
+        plan_note = meta.get("plan_note")
+        chal_note = meta.get("challenger_note")
+        if plan_note and chal_note:
+            plan_nid = str(plan_note.get("note_id") or plan_note.get("id") or "").strip()
+            plan_ts = float(plan_note.get("ts") or 0.0)
+            chal_ts = float(chal_note.get("ts") or 0.0)
+
+            target_ref = str(
+                chal_note.get("target_note_id")
+                or chal_note.get("plan_note_id")
+                or ""
+            ).strip()
+            if not target_ref:
+                ref_m = re.search(
+                    r"(?:plan[_-]note[_-]id|plan[_-]ref|target[_-]note[_-]id|被审计划|审查目标|计划版本)[:：]\s*([a-zA-Z0-9_\-]+)",
+                    challenger_text or "",
+                    re.IGNORECASE,
+                )
+                if ref_m:
+                    target_ref = ref_m.group(1).strip()
+
+            if target_ref and plan_nid and target_ref != plan_nid:
+                return (
+                    False,
+                    f"challenger_plan_version_mismatch: challenger review targets {target_ref} but selected plan is {plan_nid}",
+                    {"target_plan": target_ref, "selected_plan": plan_nid},
+                )
+
+            if plan_ts > chal_ts > 0.0:
+                return (
+                    False,
+                    f"challenger_outdated: plan was updated (ts={plan_ts}) after challenger review was published (ts={chal_ts}); new plan requires re-review",
+                    {"plan_ts": plan_ts, "challenger_ts": chal_ts, "plan_id": plan_nid},
+                )
 
     return (
         True,

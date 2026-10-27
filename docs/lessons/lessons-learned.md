@@ -8647,6 +8647,10 @@ pytest -q tests/test_software_development_v1_e2e_isolated.py
 | 计划读取优先拼接工作区历史文件且误匹配无归属审查 | 优先读 clone 下所有 md 会把历史任务与当前任务拼接导致重复索引；note 缺少 `task_id` 被误当作匹配 | 严格以已做失效过滤的 `load_notes` 为第一事实源且要求 `n_task == task_id` 精准匹配；回退 clone 仅读取单文件 `plan.md` |
 | 全文模糊匹配“通过”导致否定与条件表达误放行 | `(?<![未无不])通过` 无法排除“不能通过”、“不予通过”、“测试通过” | `extract_challenger_verdict` 仅认专用标记（`[PASS]`/`[BLOCKED]`）、结论键值对与完整肯定短语，正文模糊提及一律 fail-closed |
 | 无后缀根文件被后缀检查误伤 | `Dockerfile`、`Makefile`、`LICENSE` 因不含 `.` 被过滤，导致合法单/多任务被拒 | `is_valid_file_path` 兼容目录路径（含 `/`）、扩展名（含 `.`）及常用根无后缀文件名 |
+| 计划更新后旧审查仍可放行新版本 | 同一 executor 任务修改发布 v2 计划时，若只取最新审查而未校验审查引用的版本与时间戳，会导致未审内容放行 | `verify_plan_and_challenger` 校验 `Plan-Ref: <note_id>` 引用一致性及时序约束（`plan_ts > chal_ts` 拒绝并提示 `challenger_outdated`） |
+| 非裁决字段（如测试结论）被当作最终裁决误放行 | 正则缺少行首边界导致正文中的“测试结论：通过”覆盖后续“最终裁决：阻断”，且条件性通过（“修复...方可通过”）被误判 | 裁决字段采用多行行首严格匹配，扫描全部信号且阻断与条件通过绝对优先（fail-closed） |
+| 自动验收与计划派发读取路径分歧 | `auto_acceptance` 认 `docs/superpowers/plans/`，而派发器仅读 `plan.md`，导致验收通过但派发报 `plan_missing` | 抽离 `read_plan_file_from_dir` 单一事实源，自动选取 mtime 最新单文件，两端消费同源 |
+| CLI 示例缺 `--task` 导致 note 身份丢失 | 命令行未传 `--task` 时，原本无法关联 task_id 导致 notes 被严格绑定机制过滤 | `herdr-task note-add` 自动从环境变量 `HERDR_TASK_ID` 提取身份，并在提示词中显式注入 `--task "$HERDR_TASK_ID"` |
 
 ### 操作规范（已固化到 `herdr/plan_parser.py`、`herdr/direct_dispatch.py`、`services/controller/stage_delivery.py`）
 

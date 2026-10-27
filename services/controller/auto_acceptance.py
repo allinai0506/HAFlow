@@ -142,23 +142,8 @@ def try_auto_accept(ports, task_id):
                         pass
             else:
                 if clone_path:
-                    for fname in ("plan.md", "docs/plan.md", "docs/superpowers/plans"):
-                        fpath = os.path.join(clone_path, fname)
-                        if os.path.isdir(fpath):
-                            for pf in os.listdir(fpath):
-                                if pf.endswith(".md"):
-                                    try:
-                                        with open(os.path.join(fpath, pf), "r", encoding="utf-8") as f:
-                                            deliverable_text += "\n" + f.read()
-                                    except Exception:
-                                        pass
-                        elif os.path.exists(fpath) and os.path.getsize(fpath) > 0:
-                            try:
-                                with open(fpath, "r", encoding="utf-8") as f:
-                                    deliverable_text = f.read()
-                                break
-                            except Exception:
-                                pass
+                    from herdr.plan_parser import read_plan_file_from_dir
+                    deliverable_text = read_plan_file_from_dir(clone_path)
                 if not deliverable_text:
                     try:
                         notes = load_notes(workflow_id)

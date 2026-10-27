@@ -51,7 +51,7 @@ def note_add(args, *, deps):
             title=args.title,
             body=body,
             node=node,
-            task_id=args.task or "",
+            task_id=args.task or os.environ.get("HERDR_TASK_ID") or "",
             agent=agent,
             source=args.source,
             base_sha=base_sha,

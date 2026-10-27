@@ -229,7 +229,9 @@ def render_planning_orchestrator_rules() -> str:
 3. 禁止在计划文档头部添加 REQUIRED SUB-SKILL（如 subagent-driven-development 或 executing-plans）声明；
 4. 禁止询问用户选择 subagent 还是 inline 执行器；
 5. 禁止在本节点启动实现或另开工作区；
-6. 计划必须明确：每项验收条目对应的实现任务、文件范围（Create/Modify/Test）、具体的验证命令及预期结果。\
+6. 计划必须明确：每项验收条目对应的实现任务、文件范围（Create/Modify/Test）、具体的验证命令及预期结果；
+7. 计划产出应通过 `herdr-task note-add --workflow-id <wf> --node plan --task "$HERDR_TASK_ID" --kind plan --title "..."` 登记入共享文档；
+8. challenger 对抗质询必须在头部或专用行给出终态裁决（`HERDR_GATE_VERDICT: PASS` 或 `[PASS]` / `[BLOCKED]`），并显式声明所审查的计划 note ID（`Plan-Ref: <note_id>` 或 `--field target_note_id=<ID>`）。计划若在审查后发生变更，必须重新进行对抗质询。\
 """
 
 
