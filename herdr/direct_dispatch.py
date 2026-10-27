@@ -789,8 +789,8 @@ def plan_stage_dispatch(
 
                 specs = []
                 num_tasks = len(parsed_tasks)
-                for t in parsed_tasks:
-                    t_idx = t.get("task_index", 1)
+                for idx, t in enumerate(parsed_tasks):
+                    t_idx = t.get("task_index", idx + 1)
                     t_name = str(t.get("name") or f"Task {t_idx}").strip()
                     t_files = t.get("files") or []
                     t_verify = str(t.get("verify_command") or "").strip()
@@ -815,7 +815,7 @@ def plan_stage_dispatch(
                     if num_tasks == 1:
                         task_id = initial_task_id(workflow_id, node_id, existing_ids)
                     else:
-                        suffix = f"t{t_idx}"
+                        suffix = f"t{idx + 1}"
                         candidate_id = f"{workflow_id}-{node_id}-{suffix}"
                         if candidate_id in existing_ids:
                             candidate_id = initial_task_id(workflow_id, f"{node_id}-{suffix}", existing_ids)
@@ -834,7 +834,7 @@ def plan_stage_dispatch(
                         candidate_sha=candidate_sha,
                         gate_inventory_block=gate_inventory_block,
                     )
-                    spec["dispatch_role"] = f"impl_{t_idx}" if num_tasks > 1 else "worker"
+                    spec["dispatch_role"] = f"impl_{idx + 1}" if num_tasks > 1 else "worker"
                     spec["planned_files"] = t_files
                     spec["verify_command"] = t_verify
                     specs.append(spec)

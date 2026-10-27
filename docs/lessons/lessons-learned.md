@@ -8636,9 +8636,12 @@ pytest -q tests/test_software_development_v1_e2e_isolated.py
 | 问题 | 教训 | 规范 |
 |------|------|------|
 | 动态实现节点回退总指挥 | 阶段产物应由代码直接解析并消费为结构化规格 | 新增 `plan_parser.py` 解析计划任务，Controller 校验后直接返回 `mode: "dispatch"` 生成 TaskSpecs |
-| 多任务盲目并发导致冲突 | 文件重叠或内部 DAG 依赖不能由 LLM 随意放行 | `validate_task_decoupling` 严格要求任务文件集 disjoint 且无内部依赖，违反即拒绝并提示合并 |
-| 缺乏对抗审查的计划被直接执行 | 未通过质询或存在阻塞缺陷的计划不能流向下游 | `verify_plan_and_challenger` 严格把关 executor 计划完备性与 challenger 质询有效性，有阻塞缺陷即 `refusal` |
-| 总指挥会话死等与压缩开销 | 阶段化开发流应当自包含运行 | `stage_delivery.py` 与 `direct_dispatch.py` 对 staged 模板跳过总指挥检索与 compact |
+| 启动与返工残留总指挥依赖 | 启动时不应强行拉起或恢复不存在的总指挥窗格，返工时不应死等总指挥 prompt | `herdr/projects.py` 引入 `template_requires_coordinator` 免去启动探活/恢复，`services/controller/fix_notification.py` 在 staged 流程直接清理 attention 走 Controller 直派 |
+| 作废旧计划被派发器误消费 | 历史计划作废后不可只读原始 notes 字段 | `find_plan_deliverables` 接入 `workflow_docs.annotate_notes` 标记 stale 并剔除作废记录，按当前活跃任务 ID 精准绑定有效成果 |
+| 对抗审查正反判错与遗漏 | 简单子串匹配会将否定句误判为阻断，同时遗漏 `[BLOCKED]` | `extract_challenger_verdict` 使用负向后行断言排除"未/无/不发现"，明确识别 `[BLOCKED]` 与显式建议通过，缺裁决严格 fail-closed |
+| 未识别依赖被静默丢弃导致错误并发 | 计划文本中非标准格式依赖若被忽略会导致本有依赖的任务并发竞争 | 非空依赖无法解析为有效任务编号时强制拒绝（refusal），路径统一做 `os.path.normpath` 防止 `./a.py` 与 `a.py` 碰撞 |
+| 任务编号重叠导致 role 碰撞与验证命令解析退化 | 任务编号重复会导致 `impl_1` 覆盖，`- **Verify:**` 会被截断为 `**` | 派发时按列表枚举索引生成稳定唯一的 `impl_{idx+1}`；正则支持跨行缩进与行内代码提取 |
+| 控制器模块体积膨胀超标 | Controller 核心文件必须严格守住行数上限规范（<= 500 行） | 紧凑优化 `services/controller/direct_dispatch.py` 冗余声明，控制在 495 行并通过模块化门禁 |
 
 ### 操作规范（已固化到 `herdr/plan_parser.py`、`herdr/direct_dispatch.py`、`services/controller/stage_delivery.py`）
 
@@ -8652,14 +8655,19 @@ pytest -q tests/test_software_development_v1_e2e_isolated.py
 ```bash
 pytest -q tests/test_software_development_v1_adapter.py
 pytest -q tests/test_software_development_v1_e2e_isolated.py
+pytest -q tests/test_controller_modularity.py
 ```
 
 ### 相关文档 / 关联证据
 
-- `herdr/plan_parser.py` — 计划提取、对抗质询校验与解耦规格生成
-- `herdr/direct_dispatch.py` — implementation 动态计划消费与直接派发
+- `herdr/plan_parser.py` — 计划提取、失效过滤、对抗质询判定与解耦规格生成
+- `herdr/direct_dispatch.py` — implementation 动态计划消费、角色唯一性派发与直派逻辑
+- `herdr/projects.py` — `template_requires_coordinator` 避免无总指挥模板启动/恢复报错
+- `services/controller/direct_dispatch.py` — Controller 直派入库与模块化紧凑（<= 500 行）
+- `services/controller/fix_notification.py` — fix-loop 返工直达阶段推进无需总指挥
 - `services/controller/stage_delivery.py` — staged 流程禁用总指挥 intake 与检索
-- `tests/test_software_development_v1_adapter.py` — 包含 Lockout 门禁断言的 21 项定向测试
+- `tests/test_software_development_v1_adapter.py` — 28 项全通过适配测试（含启动/返工/失效/审查/依赖/去总指挥断言）
 - `tests/test_software_development_v1_e2e_isolated.py` — 3 项端到端隔离全生命周期测试
+- `tests/test_controller_modularity.py` — 10 项模块化与行数门禁测试全通过
 
 ---

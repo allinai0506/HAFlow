@@ -3756,3 +3756,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 计划成果直接驱动实现：新增 `herdr/plan_parser.py`，实现 `find_plan_deliverables`、`verify_plan_and_challenger`、`parse_plan_tasks` 与 `validate_task_decoupling`。`herdr/direct_dispatch.py` 在动态 implementation 节点中直接消费 executor 规划成果与 challenger 审查结论，校验合法后直接生成 TaskSpecs（`mode: "dispatch"`）。
 - 严格解耦与门禁阻断：对多任务要求修改文件集合严格互不相交（disjoint）且无内部 DAG 依赖；计划缺失、格式不合法、质询阻断（`[BLOCKED]`）或强耦合重叠时严格返回 `refusal` 并记录结构化原因，杜绝静默放行或回退总指挥。
 - 验证：21 项适配器专项定向测试（含 `test_21_global_coordinator_lockout_enforced` 全局总指挥入口锁定断言）全绿；3 项端到端隔离生命周期测试（标准 6 阶段、缺陷返工流、多任务并发流）全绿；核心引擎 62 项测试全部通过（共 86 passed）。教训见 lessons §208。
+
+## [2026-10-27] Fix | PR #356 审核缺陷修复：启动/返工去总指挥、计划版本绑定与解耦健壮性
+- 启动与返工总指挥残留解除：`herdr/projects.py` 引入 `template_requires_coordinator(template_name)` 统一判据，针对 `software-development-v1` 等声明 `coordinator_required: false` 的模板，在 `ensure_project`、`provision_project` 与 `reprovision_project_template` 中跳过总指挥窗格的启动与死等恢复；`services/controller/fix_notification.py` 在 `_handle_fix_loop_item` 中对分阶段流程显式跳过检索总指挥与 prompt 注入，直接清理 attention 由 Controller 补派。
+- 计划失效与版本绑定：`herdr/plan_parser.py` 的 `find_plan_deliverables` 接入 `workflow_docs.annotate_notes(raw_notes)`，准确剔除带有 `stale: True` 的作废历史计划，并按当前活跃执行轮次的 `exec_task_id` 和 `chal_task_id` 精确绑定产物，杜绝用当前任务身份包装作废旧计划派发。
+- 对抗审查精准判决：重构 `extract_challenger_verdict`，运用负向后行断言排除"未/无/不发现阻塞性缺陷"等肯定否定句，同时识别 `[BLOCKED]` 标记与显式建议通过结论；对缺失明确裁决的文本严格 fail-closed 拦截（`challenger_verdict_missing`）。
+- 依赖丢弃防范与解耦健壮性：多任务声明的依赖若包含非空内容却无法匹配标准任务编号时，不再静默丢弃，而是强制拒绝（`task_internal_dependency_unsupported`）；严格校验多任务中每个任务的文件与验证命令；路径引入 `os.path.normpath` 消除 `./` 规范化碰撞；按任务枚举索引稳定生成 `impl_{idx+1}` 杜绝重复角色；验证命令正则增强支持多行缩进与行内代码块。
+- 控制器行数治理：`services/controller/direct_dispatch.py` 精简冗余引用，严格控制在 495 行（<= 500 行），通过模块化架构门禁。
+- 验证：28 项适配器专项测试、3 项真实隔离端到端测试、10 项模块化门禁测试全绿（共 41 passed）。

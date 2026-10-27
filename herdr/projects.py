@@ -712,6 +712,30 @@ _COORDINATOR_HEAL_LOCK = threading.Lock()
 _COORDINATOR_HEAL_ATTEMPTS: dict[str, float] = {}
 
 
+def template_requires_coordinator(template_name) -> bool:
+    """Determine whether a workflow template requires an active global coordinator session."""
+    if not template_name:
+        return True
+    if isinstance(template_name, str):
+        tname = template_name.strip()
+        if tname == "software-development-v1" or tname.startswith("software-development-v1"):
+            return False
+        try:
+            from .workflow_templates import load_template
+            tpl = load_template(tname)
+            if tpl.get("coordinator_required") is False:
+                return False
+        except Exception:
+            pass
+    elif isinstance(template_name, dict):
+        if template_name.get("coordinator_required") is False:
+            return False
+        tname = str(template_name.get("name") or "")
+        if tname == "software-development-v1" or tname.startswith("software-development-v1"):
+            return False
+    return True
+
+
 def ensure_coordinator_running(project_id, coordinator_pane_id, min_interval_seconds=30.0):
     """Ensure the coordinator agent is running on the given coordinator pane.
 
@@ -935,7 +959,8 @@ def provision_project(root, template_name="software-development-v1", project_nam
         "总指挥",
     ])
 
-    _start_coordinator(project_id, coordinator_pane_id)
+    if template_requires_coordinator(template_name):
+        _start_coordinator(project_id, coordinator_pane_id)
 
     runtime_nodes = []
     for node in nodes:
@@ -1113,7 +1138,8 @@ def adopt_workspace_as_project(
 
     coordinator_pane_id = coord_pane["pane_id"]
     _run(["herdr", "pane", "rename", coordinator_pane_id, "总指挥"], check=False)
-    _start_coordinator(project_id, coordinator_pane_id)
+    if template_requires_coordinator(template_name):
+        _start_coordinator(project_id, coordinator_pane_id)
 
     # 2. Stage nodes Tabs & Anchor Panes
     runtime_nodes = []
@@ -1321,27 +1347,31 @@ def ensure_project(root, template_name=None):
         # Do NOT reprovision the entire project merely because an anchor Pane
         # or Agent lifecycle check looks stale. User-created/retained Panes
         # are part of the project state and must be preserved.
-        if _workspace_alive(workspace_id):
-            if not _pane_alive(coordinator_pane_id):
-                healed_pane, healed_tab = _recover_coordinator_pane(workspace_id, root)
-                if not healed_pane:
-                    raise RuntimeError(
-                        f"工作区会话仍存活（{workspace_id}），但协调器窗格已丢失（{coordinator_pane_id}）"
-                        "且无法在既有工作区内就地恢复。请手动检查/重建『1总指挥』标签页，"
-                        "或关闭旧会话后重试。"
-                    )
-                record = _persist_coordinator_pane(record, healed_pane, healed_tab)
-                print(
-                    f"[COORDINATOR PANE HEALED] workspace={workspace_id} "
-                    f"stale_pane={coordinator_pane_id} pane={healed_pane} tab={healed_tab}"
-                )
-                coordinator_pane_id = healed_pane
+        target_template = template_name or _workflow_template_of(record)
+        req_coord = template_requires_coordinator(target_template)
 
-            if not _coordinator_alive(coordinator_pane_id):
-                _start_coordinator(
-                    record["project_id"],
-                    coordinator_pane_id,
-                )
+        if _workspace_alive(workspace_id):
+            if req_coord:
+                if not _pane_alive(coordinator_pane_id):
+                    healed_pane, healed_tab = _recover_coordinator_pane(workspace_id, root)
+                    if not healed_pane:
+                        raise RuntimeError(
+                            f"工作区会话仍存活（{workspace_id}），但协调器窗格已丢失（{coordinator_pane_id}）"
+                            "且无法在既有工作区内就地恢复。请手动检查/重建『1总指挥』标签页，"
+                            "或关闭旧会话后重试。"
+                        )
+                    record = _persist_coordinator_pane(record, healed_pane, healed_tab)
+                    print(
+                        f"[COORDINATOR PANE HEALED] workspace={workspace_id} "
+                        f"stale_pane={coordinator_pane_id} pane={healed_pane} tab={healed_tab}"
+                    )
+                    coordinator_pane_id = healed_pane
+
+                if not _coordinator_alive(coordinator_pane_id):
+                    _start_coordinator(
+                        record["project_id"],
+                        coordinator_pane_id,
+                    )
 
             # 显式请求了不同模板(如控制台 run --template)时切换节点拓扑;
             # 未指定模板(template_name=None)保持现状。
@@ -1390,23 +1420,24 @@ def ensure_context_project(root, template_name, context_bindings=None):
     record = project_by_root(root)
     if record:
         if _workspace_alive(record.get("workspace_id", "")):
-            stale_pane = record.get("coordinator_pane_id", "")
-            if not _pane_alive(stale_pane):
-                healed_pane, healed_tab = _recover_coordinator_pane(
-                    record.get("workspace_id", ""), root
-                )
-                if not healed_pane:
-                    raise RuntimeError(
-                        f"工作区会话仍存活（{record.get('workspace_id')}），"
-                        f"但协调器窗格已丢失（{stale_pane}）且无法在既有工作区内就地恢复。"
-                        "请手动检查/重建『1总指挥』标签页，或关闭旧会话后重试。"
+            if template_requires_coordinator(template_name):
+                stale_pane = record.get("coordinator_pane_id", "")
+                if not _pane_alive(stale_pane):
+                    healed_pane, healed_tab = _recover_coordinator_pane(
+                        record.get("workspace_id", ""), root
                     )
-                record = _persist_coordinator_pane(record, healed_pane, healed_tab)
-                _start_coordinator(record["project_id"], healed_pane)
-                print(
-                    f"[COORDINATOR PANE HEALED] workspace={record.get('workspace_id')} "
-                    f"stale_pane={stale_pane} pane={healed_pane} tab={healed_tab}"
-                )
+                    if not healed_pane:
+                        raise RuntimeError(
+                            f"工作区会话仍存活（{record.get('workspace_id')}），"
+                            f"但协调器窗格已丢失（{stale_pane}）且无法在既有工作区内就地恢复。"
+                            "请手动检查/重建『1总指挥』标签页，或关闭旧会话后重试。"
+                        )
+                    record = _persist_coordinator_pane(record, healed_pane, healed_tab)
+                    _start_coordinator(record["project_id"], healed_pane)
+                    print(
+                        f"[COORDINATOR PANE HEALED] workspace={record.get('workspace_id')} "
+                        f"stale_pane={stale_pane} pane={healed_pane} tab={healed_tab}"
+                    )
             # Workspace Identity != Workflow Template：
             # 同一业务 Workspace 可依次运行不同 context 模板（无活跃工作流时）。
             current_template = _workflow_template_of(record)

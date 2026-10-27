@@ -2,8 +2,8 @@
 
 核心原则：
 1. 语义规划留在计划节点：由 executor 起草技术方案与任务拆解，challenger 进行破防质询与可行性评估；
-2. 审查闭环验证：核实 challenger 审查的是本轮有效计划，且无未解决的阻塞性缺陷（未通过/blocked）；
-3. 严格任务解耦：支持单任务与符合解耦条件的多任务（无文件重叠、无不支持的内部依赖、受并发与预算约束）；
+2. 审查闭环验证：核实 challenger 审查的是本轮有效计划，且给出明确通过结论，无未解决的阻塞缺陷（未通过/blocked）；
+3. 严格任务解耦：支持单任务与符合解耦条件的多任务（无文件重叠、规范化路径匹配、无未解依赖、受并发与预算约束）；
 4. 纯代码确定性转换：将经过验证的计划直接转化为 TaskSpecs 经由现有 launch 入口直接派发，
    不回退总指挥，不引入第二套规划 LLM。
 """
@@ -29,10 +29,6 @@ _FILE_LINE_RE = re.compile(
     r"[-*]\s*(?:Create|Modify|Test|新增|修改|测试)[:：]?\s*[`'\"]?([^`'\"\n\r\t]+)[`'\"]?",
     re.IGNORECASE,
 )
-_VERIFY_CMD_RE = re.compile(
-    r"(?:(?:验证命令|自测命令|Test command|Verify)[:：]?\s*[`'\"]?([^\n`'\"]+)[`'\"]?|```(?:bash|sh|shell)?\n\s*([^\n]+(?:pytest|python3|npm|pnpm|cargo|go|make)[^\n]*)\n```)",
-    re.IGNORECASE,
-)
 _DEP_LINE_RE = re.compile(
     r"[-*]?\s*(?:\*\*)?(?:依赖|Depends on|Dependencies|Consumes)(?:\*\*)?[:：]?\s*(.+)$",
     re.IGNORECASE | re.MULTILINE,
@@ -45,18 +41,101 @@ _SCOPE_LINE_RE = re.compile(
     r"[-*]?\s*(?:\*\*)?(?:范围|Scope|验收标准|验收条目|AC)(?:\*\*)?[:：]?\s*(.+)$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# 阻断性裁决正则：包含 [BLOCKED]、[REJECTED]、显式阻断结论或非否定形态的阻塞缺陷报告
 _CHALLENGER_BLOCKED_RE = re.compile(
-    r"(?:HERDR_GATE_VERDICT:\s*blocked|VERDICT:\s*BLOCKED|结论[:：]\s*(?:不通过|阻断|blocked)|【阻塞】|发现阻塞性缺陷)",
+    r"(?:\[(?:BLOCKED|REJECT(?:ED)?|FAILED)\]"
+    r"|(?:HERDR_GATE_VERDICT|VERDICT|结论|裁决|审查结论)[:：]\s*(?:blocked|reject(?:ed)?|fail(?:ed)?|不通过|阻断|存在阻塞|驳回)"
+    r"|【阻塞】"
+    r"|(?<![未无不])(?:发现|存在)阻塞性缺陷)",
+    re.IGNORECASE,
+)
+
+# 显式通过裁决正则：包含 [PASS]、[APPROVED]、显式通过结论或无阻塞性缺陷声明
+_CHALLENGER_PASS_RE = re.compile(
+    r"(?:\[(?:PASS(?:ED)?|APPROVED?)\]"
+    r"|(?:HERDR_GATE_VERDICT|VERDICT|结论|裁决|审查结论)[:：]\s*(?:pass(?:ed)?|approved?|通过|无阻塞|建议通过)"
+    r"|(?:确认|建议|审查|评估|判定|验收)通过"
+    r"|(?<![未无不])通过"
+    r"|(?<![有并])未发现阻塞性缺陷"
+    r"|无阻塞性缺陷)",
     re.IGNORECASE,
 )
 
 
 def clean_file_path(raw: str) -> str:
-    """清理文件路径中的行号后缀、注释或引号。"""
+    """清理文件路径中的行号后缀、注释或引号，并规范化相对路径。"""
     cleaned = str(raw or "").strip().strip("`'\"")
     # 去除尾部可能带有的行号范围如 :123-145
     cleaned = re.sub(r":\d+(?:-\d+)?$", "", cleaned).strip()
+    if cleaned:
+        cleaned = os.path.normpath(cleaned).replace("\\", "/")
+        if cleaned.startswith("./"):
+            cleaned = cleaned[2:]
     return cleaned
+
+
+def extract_verify_command(chunk: str) -> str:
+    """从计划任务块中提取自测/验证命令，严格避免解析为 markdown 符号。"""
+    lines = chunk.splitlines()
+    for idx, line in enumerate(lines):
+        m = re.search(
+            r"[-*]?\s*(?:\*\*)?(?:验证命令|自测命令|Test command|Verify|Verification)(?:\*\*)?[:：]?(.*)$",
+            line,
+            re.IGNORECASE,
+        )
+        if m:
+            rest = m.group(1).strip()
+            rest_clean = re.sub(r"^\*+|\*+$", "", rest).strip().strip("`'\"")
+            if rest_clean and rest_clean != "**":
+                return rest_clean
+            # 若命令在下一行
+            if idx + 1 < len(lines):
+                next_line = lines[idx + 1].strip()
+                if next_line.startswith("```"):
+                    if idx + 2 < len(lines) and not lines[idx + 2].strip().startswith("```"):
+                        return lines[idx + 2].strip()
+                elif next_line and not next_line.startswith("-") and not next_line.startswith("#"):
+                    next_clean = next_line.strip("`'\"")
+                    if next_clean and next_clean != "**":
+                        return next_clean
+
+    cb_m = re.search(
+        r"```(?:bash|sh|shell)?\n\s*([^\n]+(?:pytest|python3|npm|pnpm|cargo|go|make)[^\n]*)\n```",
+        chunk,
+        re.IGNORECASE,
+    )
+    if cb_m:
+        return cb_m.group(1).strip()
+    return ""
+
+
+def extract_challenger_verdict(
+    challenger_text: str,
+    chal_task: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """提取 challenger 对抗审查结论。
+
+    返回: (verdict, reason)
+    verdict 取值为: "pass" | "blocked" | "missing"
+    """
+    if chal_task and chal_task.get("stage_verdict") == "blocked":
+        note = chal_task.get("stage_verdict_note") or "task stage_verdict is blocked"
+        return "blocked", f"challenger task stage_verdict is blocked: {note}"
+
+    if not challenger_text or not challenger_text.strip():
+        return "missing", "challenger review text is empty"
+
+    is_blocked = bool(_CHALLENGER_BLOCKED_RE.search(challenger_text))
+    is_pass = bool(_CHALLENGER_PASS_RE.search(challenger_text))
+
+    if is_blocked:
+        return "blocked", "challenger review concluded with blocked verdict or reported blocking issues"
+
+    if is_pass:
+        return "pass", "challenger review approved plan"
+
+    return "missing", "challenger review missing explicit verdict declaration (PASS/BLOCKED/通过/阻断)"
 
 
 def find_plan_deliverables(
@@ -66,6 +145,7 @@ def find_plan_deliverables(
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """寻找本轮计划节点产出的 plan（executor）文本与 challenge（challenger）审查文本。
 
+    具备失效版本过滤（通过 workflow_docs.annotate_notes 排除 stale 产物）和任务身份精确绑定。
     返回: (plan_text, challenger_text, executor_task, challenger_task)
     """
     plan_text = ""
@@ -80,12 +160,22 @@ def find_plan_deliverables(
         and t.get("workflow_id") == workflow_id
     ]
 
-    for t in plan_tasks:
+    # 优先筛选当前未被作废的活跃计划任务
+    active_plan_tasks = [
+        t for t in plan_tasks
+        if not t.get("superseded_by") and t.get("status") not in ("superseded", "cancelled", "failed")
+    ]
+    candidate_tasks = active_plan_tasks if active_plan_tasks else plan_tasks
+
+    for t in candidate_tasks:
         role = " ".join(str(t.get(k) or "").lower() for k in ("dispatch_role", "agent_role", "role", "task_id"))
         if re.search(r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])", role):
             challenger_task = t
         else:
             executor_task = t
+
+    exec_task_id = executor_task.get("task_id") if executor_task else None
+    chal_task_id = challenger_task.get("task_id") if challenger_task else None
 
     # 1. 优先读取任务所属 Clone 目录
     if executor_task and executor_task.get("clone_path"):
@@ -120,28 +210,33 @@ def find_plan_deliverables(
                 except Exception:
                     pass
 
-    # 2. 从共享 notes 中读取
+    # 2. 从共享 notes 中读取（应用失效标注 annotate_notes，严格排除 stale 产物，并按任务身份匹配）
     try:
-        notes = workflow_docs.load_notes(workflow_id)
-        for n in notes:
-            if n.get("stale"):
-                continue
+        raw_notes = workflow_docs.load_notes(workflow_id)
+        annotated_notes = workflow_docs.annotate_notes(raw_notes)
+        valid_notes = [n for n in annotated_notes if not n.get("stale")]
+
+        # 按时间倒序查找最新有效记录
+        for n in reversed(valid_notes):
             n_node = n.get("node")
             n_kind = n.get("kind")
+            n_task = n.get("task_id") or n.get("author")
             n_title = str(n.get("title") or "")
             n_body = str(n.get("body") or "")
             combined = f"{n_title}\n{n_body}"
 
             if not plan_text:
-                if n_node == "plan" and n_kind in ("plan", "spec"):
+                matches_task = (n_task == exec_task_id) if (exec_task_id and n_task) else True
+                if matches_task and n_node == "plan" and n_kind in ("plan", "spec"):
                     plan_text = combined
-                elif n_kind == "plan" or ("计划" in n_title and "质询" not in n_title and "审查" not in n_title):
+                elif matches_task and (n_kind == "plan" or ("计划" in n_title and "质询" not in n_title and "审查" not in n_title)):
                     plan_text = combined
 
             if not challenger_text:
-                if n_node == "plan" and n_kind in ("challenge", "review"):
+                matches_task = (n_task == chal_task_id) if (chal_task_id and n_task) else True
+                if matches_task and n_node == "plan" and n_kind in ("challenge", "review"):
                     challenger_text = combined
-                elif n_kind == "challenge" or ("质询" in n_title or "对抗" in n_title or "可行性评估" in n_title):
+                elif matches_task and (n_kind == "challenge" or ("质询" in n_title or "对抗" in n_title or "可行性评估" in n_title)):
                     challenger_text = combined
     except Exception:
         pass
@@ -201,11 +296,13 @@ def verify_plan_and_challenger(
 
     # 校验 challenger 审查闭环
     if require_challenger:
-        if chal_task and chal_task.get("stage_verdict") == "blocked":
+        # 优先检查显式阻断（task stage_verdict 或 文本包含 blocked 裁决）
+        verdict, verdict_reason = extract_challenger_verdict(challenger_text or "", chal_task)
+        if verdict == "blocked":
             return (
                 False,
-                f"challenger_blocked: challenger task {chal_task.get('task_id')} stage_verdict is blocked: {chal_task.get('stage_verdict_note')}",
-                {"challenger_task": chal_task.get("task_id"), "verdict": "blocked"},
+                f"challenger_blocked: {verdict_reason}",
+                {"challenger_preview": (challenger_text or "")[:300]},
             )
 
         if not challenger_text:
@@ -223,11 +320,10 @@ def verify_plan_and_challenger(
                 {"missing_sections": chal_missing},
             )
 
-        # 检查 challenger 文本中是否包含未解决的阻断结论
-        if _CHALLENGER_BLOCKED_RE.search(challenger_text):
+        if verdict != "pass":
             return (
                 False,
-                "challenger_blocked: challenger review explicitly concluded with blocked verdict or unaddressed blocking issues",
+                f"challenger_verdict_missing: {verdict_reason}",
                 {"challenger_preview": challenger_text[:300]},
             )
 
@@ -256,11 +352,19 @@ def parse_plan_tasks(
 
     # 查找任务头
     header_indices = []
+    seen_task_nums = set()
+    has_duplicate_index = False
+    duplicate_num = 0
+
     for idx, line in enumerate(lines):
         m = _TASK_HEADER_RE.match(line.strip())
         if m:
             task_num = int(m.group(1))
             task_title = m.group(2).strip()
+            if task_num in seen_task_nums:
+                has_duplicate_index = True
+                duplicate_num = task_num
+            seen_task_nums.add(task_num)
             header_indices.append((idx, task_num, task_title))
 
     if header_indices:
@@ -287,20 +391,26 @@ def parse_plan_tasks(
             if sm:
                 scope = sm.group(1).strip()
 
-            verify_cmd = ""
-            vm = _VERIFY_CMD_RE.search(chunk)
-            if vm:
-                verify_cmd = (vm.group(1) or vm.group(2) or "").strip()
+            verify_cmd = extract_verify_command(chunk)
 
             deps: List[str] = []
             for dm in _DEP_LINE_RE.finditer(chunk):
-                dep_text = dm.group(1).strip()
-                # 检查是否依赖了同阶段其他任务
+                raw_dep = dm.group(1).strip()
+                cleaned_dep = re.sub(r"[`'\"*]", "", raw_dep).strip()
+                if cleaned_dep.lower() in ("", "none", "n/a", "na", "null", "nil", "无", "无依赖", "无内部依赖", "-"):
+                    continue
+
+                matched_other = False
                 for other_idx, other_num, other_title in header_indices:
                     if other_num != t_num:
                         pat = rf"(?:Task|任务)\s*{other_num}\b"
-                        if re.search(pat, dep_text, re.IGNORECASE):
+                        if re.search(pat, raw_dep, re.IGNORECASE):
                             deps.append(f"Task {other_num}")
+                            matched_other = True
+
+                # 若非空且未匹配到任务编号，仍作为未识别依赖记录，由解耦校验器判定
+                if not matched_other and cleaned_dep:
+                    deps.append(cleaned_dep)
 
             tasks.append({
                 "task_index": t_num,
@@ -311,6 +421,7 @@ def parse_plan_tasks(
                 "verify_command": verify_cmd,
                 "dependencies": deps,
                 "raw_chunk": chunk,
+                "duplicate_index": has_duplicate_index and t_num == duplicate_num,
             })
     else:
         # 单任务计划（无显式 ### Task N 标题，解析全篇）
@@ -320,12 +431,8 @@ def parse_plan_tasks(
             if fpath and not fpath.startswith("http") and "." in fpath:
                 files.add(fpath)
 
-        verify_cmd = ""
-        vm = _VERIFY_CMD_RE.search(plan_text)
-        if vm:
-            verify_cmd = (vm.group(1) or vm.group(2) or "").strip()
+        verify_cmd = extract_verify_command(plan_text)
 
-        # 尝试提取标题
         title = default_name
         for line in lines:
             line_str = line.strip()
@@ -342,6 +449,7 @@ def parse_plan_tasks(
             "verify_command": verify_cmd,
             "dependencies": [],
             "raw_chunk": plan_text,
+            "duplicate_index": False,
         })
 
     return tasks
@@ -357,9 +465,10 @@ def validate_task_decoupling(
     规则：
     1. 任务数必须 >= 1且 <= max_tasks_per_node；
     2. 并发数 <= max_concurrency；
-    3. 多任务并发时：各任务必须完全解耦，文件范围无交集；
-    4. 严禁节点内未支持的串行 DAG 依赖（如 Task 2 依赖 Task 1 产出）；
-    5. 每个任务必须包含明确的文件或验证命令。
+    3. 严禁重复任务编号（如多个 Task 1）；
+    4. 每个任务必须包含明确的文件范围和验证命令；
+    5. 多任务并发时：各任务必须完全解耦，文件范围无交集（规范化路径判定）；
+    6. 严禁节点内未支持的串行 DAG 依赖或未识别的前置依赖声明。
     """
     if not tasks:
         return False, "plan contains no parsed implementation tasks"
@@ -370,7 +479,15 @@ def validate_task_decoupling(
     if len(tasks) > max_concurrency:
         return False, f"parallel task count {len(tasks)} exceeds max_concurrency limit {max_concurrency}"
 
-    # 单任务天然无内部依赖和文件冲突
+    # 检查重复任务编号
+    seen_task_nums: Set[int] = set()
+    for t in tasks:
+        t_num = t.get("task_index", 0)
+        if t.get("duplicate_index") or t_num in seen_task_nums:
+            return False, f"duplicate task index 'Task {t_num}' detected in plan"
+        seen_task_nums.add(t_num)
+
+    # 单任务校验
     if len(tasks) == 1:
         t = tasks[0]
         if not t.get("files") and not t.get("verify_command"):
@@ -383,7 +500,13 @@ def validate_task_decoupling(
         t_num = t.get("task_index", 0)
         t_name = t.get("name", f"Task {t_num}")
 
-        # 检查内部依赖声明
+        # 逐任务检查必要字段（多任务每个任务必须有明确文件和验证命令）
+        if not t.get("files"):
+            return False, f"task {t_name} has no specified file scope (Create/Modify/Test files required)"
+        if not t.get("verify_command"):
+            return False, f"task {t_name} has no specified verification command"
+
+        # 检查内部或非空依赖声明
         deps = t.get("dependencies") or []
         if deps:
             return (
@@ -392,15 +515,16 @@ def validate_task_decoupling(
                 "Intra-node DAG is not supported; tasks must be independent and decoupled, or unified into a single task."
             )
 
-        # 检查文件重叠
+        # 检查文件重叠（经过 clean_file_path 规范化处理）
         for f in t.get("files", []):
-            if f in seen_files:
-                prior_task = seen_files[f]
+            norm_f = clean_file_path(f)
+            if norm_f in seen_files:
+                prior_task = seen_files[norm_f]
                 return (
                     False,
-                    f"overlapping file '{f}' detected between Task {prior_task} and Task {t_num}. "
+                    f"overlapping file '{norm_f}' detected between Task {prior_task} and Task {t_num}. "
                     "Decoupled concurrent tasks must have disjoint file sets to prevent Git merge conflicts."
                 )
-            seen_files[f] = t_num
+            seen_files[norm_f] = t_num
 
     return True, "decoupled tasks valid"
