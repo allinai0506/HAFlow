@@ -1522,6 +1522,42 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
             self.assertIn("plan_verified", reason)
             self.assertEqual(details.get("plan_id"), "note-p-single")
 
+    def test_41_challenger_detection_strictly_scoped_to_current_workflow(self):
+        """Scenario 41: Unrelated workflow's challenger does not force require_challenger=True on current workflow."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+        from unittest import mock
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-scoped-01"
+        plan_body = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 核心模块修改
+        - **Goal:** 修改核心模块
+        - **Files:**
+          - Modify: core.py
+        - **Verify:**
+          pytest -q tests/test_core.py
+        - **Dependencies:** None
+        """
+        # Tasks passed from controller include an unrelated workflow's challenger
+        tasks = [
+            {"task_id": "wf-other-chal", "workflow_id": "wf-other", "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-exec", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+        ]
+        notes = [
+            {"note_id": "note-p-scoped", "node": "plan", "kind": "plan", "title": "计划", "body": plan_body, "task_id": f"{wf_id}-plan-exec"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            # wf-scoped-01 only has an executor, no challenger.
+            # Unrelated wf-other's challenger must NOT cause challenger_missing on wf-scoped-01.
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch", f"Should dispatch without requiring challenger: {res}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -743,6 +743,7 @@ def plan_stage_dispatch(
         if dispatch_kind == "dynamic":
             has_plan_tasks = any(
                 isinstance(t, dict) and (t.get("node") == "plan" or t.get("stage") == "plan")
+                and (not t.get("workflow_id") or t.get("workflow_id") == workflow_id)
                 for t in (tasks or [])
             )
             # For implementation stage or nodes depending on plan, consume plan deliverables directly
@@ -759,6 +760,7 @@ def plan_stage_dispatch(
 
                 has_challenger_role = any(
                     isinstance(t, dict) and (t.get("node") == "plan" or t.get("stage") == "plan")
+                    and (not t.get("workflow_id") or t.get("workflow_id") == workflow_id)
                     and any(k in str(t.get(rk) or "").lower() for rk in ("dispatch_role", "role", "task_id") for k in ("challenger", "review", "adversarial"))
                     for t in (tasks or [])
                 )
