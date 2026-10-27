@@ -54,10 +54,19 @@ def is_staged_dev_flow_workflow(workflow_config: Any) -> bool:
     """Check if the given workflow configuration belongs to software-development-v1 / staged dev flow."""
     if not isinstance(workflow_config, dict):
         return False
-    name = str(workflow_config.get("name") or workflow_config.get("workflow_id") or "").strip()
+    name = str(
+        workflow_config.get("workflow_template")
+        or workflow_config.get("template")
+        or workflow_config.get("template_name")
+        or workflow_config.get("name")
+        or workflow_config.get("workflow_id")
+        or ""
+    ).strip()
     if name == "software-development-v1" or name.startswith("software-development-v1"):
         return True
     if workflow_config.get("staged_dev_flow"):
+        return True
+    if workflow_config.get("coordinator_required") is False:
         return True
     return False
 

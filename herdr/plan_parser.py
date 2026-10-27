@@ -63,6 +63,26 @@ _CHALLENGER_PASS_RE = re.compile(
 )
 
 
+def is_valid_file_path(path: str) -> bool:
+    """检查是否为合法的代码/配置文件路径，支持无后缀根文件如 Dockerfile、Makefile。"""
+    if not path or path.startswith("http://") or path.startswith("https://"):
+        return False
+    # 路径中包含目录分隔符（如 bin/herdr-task, herdr/plan_parser.py）
+    if "/" in path:
+        return True
+    # 包含扩展名（如 a.py, config.yaml）
+    if "." in path:
+        return True
+    # 常见的无扩展名根文件名
+    base_lower = os.path.basename(path).lower()
+    if base_lower in (
+        "dockerfile", "makefile", "license", "containerfile",
+        "procfile", "gemfile", "rakefile", "vagrantfile", "jenkinsfile"
+    ):
+        return True
+    return False
+
+
 def clean_file_path(raw: str) -> str:
     """清理文件路径中的行号后缀、注释或引号，并规范化相对路径。"""
     cleaned = str(raw or "").strip().strip("`'\"")
@@ -119,21 +139,63 @@ def extract_challenger_verdict(
     返回: (verdict, reason)
     verdict 取值为: "pass" | "blocked" | "missing"
     """
-    if chal_task and chal_task.get("stage_verdict") == "blocked":
-        note = chal_task.get("stage_verdict_note") or "task stage_verdict is blocked"
-        return "blocked", f"challenger task stage_verdict is blocked: {note}"
+    if chal_task and chal_task.get("stage_verdict"):
+        v = str(chal_task.get("stage_verdict")).lower().strip()
+        if v in ("blocked", "failed", "reject", "rejected"):
+            note = chal_task.get("stage_verdict_note") or "task stage_verdict is blocked"
+            return "blocked", f"challenger task stage_verdict is blocked: {note}"
+        elif v in ("pass", "passed", "approved"):
+            return "pass", "challenger task stage_verdict is pass"
 
     if not challenger_text or not challenger_text.strip():
         return "missing", "challenger review text is empty"
 
-    is_blocked = bool(_CHALLENGER_BLOCKED_RE.search(challenger_text))
-    is_pass = bool(_CHALLENGER_PASS_RE.search(challenger_text))
+    text = challenger_text.strip()
 
-    if is_blocked:
-        return "blocked", "challenger review concluded with blocked verdict or reported blocking issues"
+    # 1. 显式大写/方括号标记优先判决
+    if re.search(r"\[(?:BLOCKED|REJECT(?:ED)?|FAILED)\]", text, re.IGNORECASE):
+        return "blocked", "challenger review has explicit [BLOCKED] marker"
+    if re.search(r"\[(?:PASS(?:ED)?|APPROVED?)\]", text, re.IGNORECASE):
+        return "pass", "challenger review has explicit [PASS] marker"
 
-    if is_pass:
-        return "pass", "challenger review approved plan"
+    # 2. 专用结论行/键值对:
+    verdict_line_m = re.search(
+        r"(?:HERDR_GATE_VERDICT|VERDICT|审查结论|评审结论|结论|最终裁决|可行性评估结论)[:：]\s*([^\n\r]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if verdict_line_m:
+        vline = verdict_line_m.group(1).strip()
+        # 结论行阻断
+        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|存在阻塞|驳回|暂不予通过|不予通过|不能通过|暂不通过", vline, re.IGNORECASE):
+            return "blocked", f"challenger verdict line indicates blocked: {vline}"
+        # 结论行通过 (必须无否定词)
+        if re.search(r"\b(?:pass(?:ed)?|approved?)\b|建议通过|确认通过|准予通过|同意实施|通过", vline, re.IGNORECASE):
+            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", vline):
+                return "pass", f"challenger verdict line indicates pass: {vline}"
+
+    # 3. 显式短语判决（必须是完整明确短语，严禁在正文模糊匹配单个“通过”）
+    # 阻断短语
+    blocked_phrase_m = re.search(
+        r"(?:方案对抗质询[:：]\s*(?:目前)?(?:不能|不予|暂不)通过|【阻塞】|发现阻塞性缺陷|存在阻塞性缺陷)",
+        text,
+    )
+    if blocked_phrase_m:
+        start_pos = blocked_phrase_m.start()
+        prefix = text[max(0, start_pos - 10):start_pos]
+        if not re.search(r"(?:未|无|没有|不曾)\s*$", prefix):
+            return "blocked", "challenger review reported blocking issues"
+
+    # 通过短语（严格限定完整肯定短语）
+    pass_phrase_m = re.search(
+        r"(?:建议通过|确认通过|同意实施|准予通过|审查通过|评估通过|可行性评估通过|未发现阻塞性缺陷|无阻塞性缺陷|(?:没有|不曾)发现阻塞性缺陷)",
+        text,
+    )
+    if pass_phrase_m:
+        start_pos = pass_phrase_m.start()
+        prefix = text[max(0, start_pos - 10):start_pos]
+        if not re.search(r"(?:不|未|不能|暂不|不予)\s*$", prefix):
+            return "pass", "challenger review approved plan"
 
     return "missing", "challenger review missing explicit verdict declaration (PASS/BLOCKED/通过/阻断)"
 
@@ -177,40 +239,7 @@ def find_plan_deliverables(
     exec_task_id = executor_task.get("task_id") if executor_task else None
     chal_task_id = challenger_task.get("task_id") if challenger_task else None
 
-    # 1. 优先读取任务所属 Clone 目录
-    if executor_task and executor_task.get("clone_path"):
-        cpath = executor_task["clone_path"]
-        for fname in ("plan.md", "docs/plan.md", "docs/superpowers/plans"):
-            fpath = os.path.join(cpath, fname)
-            if os.path.isdir(fpath):
-                for pf in sorted(os.listdir(fpath)):
-                    if pf.endswith(".md"):
-                        try:
-                            with open(os.path.join(fpath, pf), "r", encoding="utf-8") as f:
-                                plan_text += "\n" + f.read()
-                        except Exception:
-                            pass
-            elif os.path.exists(fpath) and os.path.getsize(fpath) > 0:
-                try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        plan_text = f.read()
-                    break
-                except Exception:
-                    pass
-
-    if challenger_task and challenger_task.get("clone_path"):
-        cpath = challenger_task["clone_path"]
-        for fname in ("challenger-review.md", "challenge.md", "plan-review.md"):
-            fpath = os.path.join(cpath, fname)
-            if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
-                try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        challenger_text = f.read()
-                    break
-                except Exception:
-                    pass
-
-    # 2. 从共享 notes 中读取（应用失效标注 annotate_notes，严格排除 stale 产物，并按任务身份匹配）
+    # 1. 优先从共享 notes 中读取（权威事实源，应用失效标注 annotate_notes 排除 stale，严格按任务 ID 匹配）
     try:
         raw_notes = workflow_docs.load_notes(workflow_id)
         annotated_notes = workflow_docs.annotate_notes(raw_notes)
@@ -226,34 +255,55 @@ def find_plan_deliverables(
             combined = f"{n_title}\n{n_body}"
 
             if not plan_text:
-                matches_task = (n_task == exec_task_id) if (exec_task_id and n_task) else True
-                if matches_task and n_node == "plan" and n_kind in ("plan", "spec"):
-                    plan_text = combined
-                elif matches_task and (n_kind == "plan" or ("计划" in n_title and "质询" not in n_title and "审查" not in n_title)):
-                    plan_text = combined
+                # 严格匹配 executor 任务身份：当明确已知 exec_task_id 时，无归属 note 绝不匹配
+                matches_exec = (n_task == exec_task_id) if exec_task_id else (n_task is None or not exec_task_id)
+                if matches_exec:
+                    if n_node == "plan" and n_kind in ("plan", "spec"):
+                        plan_text = combined
+                    elif n_kind == "plan" or ("计划" in n_title and "质询" not in n_title and "审查" not in n_title):
+                        plan_text = combined
 
             if not challenger_text:
-                matches_task = (n_task == chal_task_id) if (chal_task_id and n_task) else True
-                if matches_task and n_node == "plan" and n_kind in ("challenge", "review"):
-                    challenger_text = combined
-                elif matches_task and (n_kind == "challenge" or ("质询" in n_title or "对抗" in n_title or "可行性评估" in n_title)):
-                    challenger_text = combined
+                # 严格匹配 challenger 任务身份：当明确已知 chal_task_id 时，无归属 note 绝不匹配
+                matches_chal = (n_task == chal_task_id) if chal_task_id else (n_task is None or not chal_task_id)
+                if matches_chal:
+                    if n_node == "plan" and n_kind in ("challenge", "review"):
+                        challenger_text = combined
+                    elif n_kind == "challenge" or ("质询" in n_title or "对抗" in n_title or "审查" in n_title or "可行性评估" in n_title):
+                        challenger_text = combined
     except Exception:
         pass
 
-    # 3. 回退 project_root 下的标准路径
+    # 2. 仅当 notes 缺失时，回退读取任务所属 Clone 目录中绑定的单文件（绝不拼接历史多文件）
+    if not plan_text and executor_task and executor_task.get("clone_path"):
+        cpath = executor_task["clone_path"]
+        for fname in ("plan.md", "docs/plan.md"):
+            fpath = os.path.join(cpath, fname)
+            if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        plan_text = f.read()
+                    break
+                except Exception:
+                    pass
+
+    if not challenger_text and challenger_task and challenger_task.get("clone_path"):
+        cpath = challenger_task["clone_path"]
+        for fname in ("challenger-review.md", "challenge.md", "plan-review.md"):
+            fpath = os.path.join(cpath, fname)
+            if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        challenger_text = f.read()
+                    break
+                except Exception:
+                    pass
+
+    # 3. 仅当上述均缺失时，回退 project_root 下单一规范文件
     if not plan_text and project_root and os.path.exists(project_root):
-        for fname in ("docs/plan.md", "plan.md", "docs/superpowers/plans"):
+        for fname in ("docs/plan.md", "plan.md"):
             fpath = os.path.join(project_root, fname)
-            if os.path.isdir(fpath):
-                for pf in sorted(os.listdir(fpath)):
-                    if pf.endswith(".md"):
-                        try:
-                            with open(os.path.join(fpath, pf), "r", encoding="utf-8") as f:
-                                plan_text += "\n" + f.read()
-                        except Exception:
-                            pass
-            elif os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+            if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
                 try:
                     with open(fpath, "r", encoding="utf-8") as f:
                         plan_text = f.read()
@@ -376,7 +426,7 @@ def parse_plan_tasks(
             files: Set[str] = set()
             for fm in _FILE_LINE_RE.finditer(chunk):
                 fpath = clean_file_path(fm.group(1))
-                if fpath and not fpath.startswith("http") and "." in fpath:
+                if fpath and is_valid_file_path(fpath):
                     files.add(fpath)
 
             goal = ""
@@ -428,7 +478,7 @@ def parse_plan_tasks(
         files = set()
         for fm in _FILE_LINE_RE.finditer(plan_text):
             fpath = clean_file_path(fm.group(1))
-            if fpath and not fpath.startswith("http") and "." in fpath:
+            if fpath and is_valid_file_path(fpath):
                 files.add(fpath)
 
         verify_cmd = extract_verify_command(plan_text)

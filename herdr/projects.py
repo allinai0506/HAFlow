@@ -744,6 +744,17 @@ def ensure_coordinator_running(project_id, coordinator_pane_id, min_interval_sec
     Returns True if the coordinator agent is alive (or was successfully started),
     False otherwise.
     """
+    if project_id:
+        try:
+            projects_map = load_projects().get("projects", {})
+            record = next((r for r in projects_map.values() if r.get("project_id") == project_id), None)
+            if record:
+                tpl = _workflow_template_of(record)
+                if not template_requires_coordinator(tpl):
+                    return False
+        except Exception:
+            pass
+
     if not coordinator_pane_id or not _pane_alive(coordinator_pane_id):
         return False
 
@@ -1031,6 +1042,8 @@ def _register_project_workflow(
         },
         "nodes": runtime_nodes,
     }
+    if not template_requires_coordinator(template_name):
+        workflow["coordinator_required"] = False
     if execution:
         workflow["execution"] = execution
     if context_contract:

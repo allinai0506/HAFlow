@@ -8642,6 +8642,11 @@ pytest -q tests/test_software_development_v1_e2e_isolated.py
 | 未识别依赖被静默丢弃导致错误并发 | 计划文本中非标准格式依赖若被忽略会导致本有依赖的任务并发竞争 | 非空依赖无法解析为有效任务编号时强制拒绝（refusal），路径统一做 `os.path.normpath` 防止 `./a.py` 与 `a.py` 碰撞 |
 | 任务编号重叠导致 role 碰撞与验证命令解析退化 | 任务编号重复会导致 `impl_1` 覆盖，`- **Verify:**` 会被截断为 `**` | 派发时按列表枚举索引生成稳定唯一的 `impl_{idx+1}`；正则支持跨行缩进与行内代码提取 |
 | 控制器模块体积膨胀超标 | Controller 核心文件必须严格守住行数上限规范（<= 500 行） | 紧凑优化 `services/controller/direct_dispatch.py` 冗余声明，控制在 495 行并通过模块化门禁 |
+| 真实运行配置模板字段不一致导致旁路失效 | `workflow.json` 持久化字段为 `workflow_template`，只检查 `name` 会导致真实项目无法识别并回退总指挥 | `is_staged_dev_flow_workflow` 全面识别 `workflow_template`/`template`/`coordinator_required: False`，并在注册时持久化 |
+| 节点自动验收失败通过 Task 事件重新拉起总指挥 | 自动验收/裁决未通过时，`task_events.py` 仍调用 `coordinator_status` 导致 auto-heal 重新启动总指挥 | `task_events.py` 在 staged 流程对 `done`/`blocked` 事件直接记录 attention note 并退出；`ensure_coordinator_running` 在根部校验模板是否允许总指挥 |
+| 计划读取优先拼接工作区历史文件且误匹配无归属审查 | 优先读 clone 下所有 md 会把历史任务与当前任务拼接导致重复索引；note 缺少 `task_id` 被误当作匹配 | 严格以已做失效过滤的 `load_notes` 为第一事实源且要求 `n_task == task_id` 精准匹配；回退 clone 仅读取单文件 `plan.md` |
+| 全文模糊匹配“通过”导致否定与条件表达误放行 | `(?<![未无不])通过` 无法排除“不能通过”、“不予通过”、“测试通过” | `extract_challenger_verdict` 仅认专用标记（`[PASS]`/`[BLOCKED]`）、结论键值对与完整肯定短语，正文模糊提及一律 fail-closed |
+| 无后缀根文件被后缀检查误伤 | `Dockerfile`、`Makefile`、`LICENSE` 因不含 `.` 被过滤，导致合法单/多任务被拒 | `is_valid_file_path` 兼容目录路径（含 `/`）、扩展名（含 `.`）及常用根无后缀文件名 |
 
 ### 操作规范（已固化到 `herdr/plan_parser.py`、`herdr/direct_dispatch.py`、`services/controller/stage_delivery.py`）
 
@@ -8666,8 +8671,9 @@ pytest -q tests/test_controller_modularity.py
 - `services/controller/direct_dispatch.py` — Controller 直派入库与模块化紧凑（<= 500 行）
 - `services/controller/fix_notification.py` — fix-loop 返工直达阶段推进无需总指挥
 - `services/controller/stage_delivery.py` — staged 流程禁用总指挥 intake 与检索
-- `tests/test_software_development_v1_adapter.py` — 28 项全通过适配测试（含启动/返工/失效/审查/依赖/去总指挥断言）
+- `tests/test_software_development_v1_adapter.py` — 32 项全通过适配测试（含启动/返工/失效/审查/依赖/去总指挥断言）
 - `tests/test_software_development_v1_e2e_isolated.py` — 3 项端到端隔离全生命周期测试
 - `tests/test_controller_modularity.py` — 10 项模块化与行数门禁测试全通过
+- `tests/test_console_project_creation.py` 与 `tests/test_projects_coordinator_missing_error.py` — 26 项同步测试契约全通过
 
 ---

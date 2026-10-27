@@ -62,6 +62,8 @@ class TestSoftwareDevelopmentV1E2EIsolated(unittest.TestCase):
         template_file = HERDR_ROOT / "workflow_templates" / "software-development-v1.yaml"
         with open(template_file, "r", encoding="utf-8") as f:
             self.template_cfg = yaml.safe_load(f)
+        self.template_cfg["workflow_template"] = "software-development-v1"
+        self.template_cfg["coordinator_required"] = False
 
     def tearDown(self):
         os.environ.pop("HERDR_WORKFLOW_DOCS_DIR", None)

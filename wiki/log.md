@@ -3764,3 +3764,12 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 依赖丢弃防范与解耦健壮性：多任务声明的依赖若包含非空内容却无法匹配标准任务编号时，不再静默丢弃，而是强制拒绝（`task_internal_dependency_unsupported`）；严格校验多任务中每个任务的文件与验证命令；路径引入 `os.path.normpath` 消除 `./` 规范化碰撞；按任务枚举索引稳定生成 `impl_{idx+1}` 杜绝重复角色；验证命令正则增强支持多行缩进与行内代码块。
 - 控制器行数治理：`services/controller/direct_dispatch.py` 精简冗余引用，严格控制在 495 行（<= 500 行），通过模块化架构门禁。
 - 验证：28 项适配器专项测试、3 项真实隔离端到端测试、10 项模块化门禁测试全绿（共 41 passed）。
+
+## [2026-10-27] Fix | PR #356 复核缺陷修复：真实配置穿透、节点验收旁路、计划/审查身份严格绑定与无后缀文件支持
+- 真实运行配置穿透：`herdr/stage_skills.py` 中的 `is_staged_dev_flow_workflow` 支持对持久化字段 `workflow_template`、`template`、`coordinator_required: False` 的完整识别；`herdr/projects.py` 在 `_save_workflow` 时将 `coordinator_required: False` 持久化至 `workflow.json`。
+- 节点验收失败旁路总指挥：`services/controller/task_events.py` 在自动验收拒收或未裁决时，对分阶段工作流直接生成结构化 `attention_note`，不再进入 `coordinator_status` 与 `herdr agent prompt` 轮询；`herdr/projects.py` 在 `ensure_coordinator_running` 根部拦截非总指挥模板的自愈启动请求。
+- 计划产物与审查身份严格绑定：`herdr/plan_parser.py` 将经过失效过滤的 `workflow_docs.load_notes` 作为第一权威事实源，要求 `n_task == task_id` 强匹配，彻底杜绝无任务身份 note 越权绕过；Clone 目录回退严格限定读取单文件 `plan.md`，彻底移除对 `docs/superpowers/plans/` 目录历史文件的全量拼接。
+- 审查裁决精准抽取与 fail-closed：移除正文模糊 `(?<![未无不])通过` 匹配，仅认专用判决标签（`[PASS]`/`[BLOCKED]`）、专用结论行与完整肯定短语；严格识别并阻断“目前不能通过”、“暂不予通过”，排除“没有发现阻塞性缺陷”误判，正文模糊提及一律判定为 missing 并 fail-closed 拦截。
+- 无后缀合法文件支持：`herdr/plan_parser.py` 引入 `is_valid_file_path`，兼容带路径文件及 `Dockerfile`、`Makefile`、`LICENSE` 等标准根无后缀文件，防止合法任务被解耦检查拒绝。
+- CI 测试契约同步：`tests/test_console_project_creation.py` 与 `tests/test_projects_coordinator_missing_error.py` 同步区分 `software-development-v1`（免总指挥）与传统模板（需自愈恢复）的测试断言。
+- 验证：32 项适配器专项测试、3 项真实隔离端到端测试、10 项模块化架构测试、26 项项目与自愈测试全部通过（共 71 passed）。
