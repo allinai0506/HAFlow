@@ -1496,6 +1496,32 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
             self.assertIn("pytest -q tests/test_settings.py", spec.get("prompt", ""))
             self.assertIn("note-p1", spec.get("plan_ref", ""))
 
+    def test_40_require_challenger_false_compatibility(self):
+        """Scenario 40: verify_plan_and_challenger succeeds when require_challenger=False without challenger deliverable."""
+        from herdr.plan_parser import verify_plan_and_challenger
+        from unittest import mock
+
+        wf_id = "wf-no-challenger-01"
+        plan_body = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 基础工具类重构
+        - **Goal:** 重构工具类模块
+        - **Files:**
+          - Modify: utils.py
+        - **Verify:**
+          pytest -q tests/test_utils.py
+        - **Dependencies:** None
+        """
+        notes = [
+            {"note_id": "note-p-single", "node": "plan", "kind": "plan", "title": "计划", "body": plan_body, "task_id": "t-exec-only"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok, reason, details = verify_plan_and_challenger(wf_id, tasks=[], require_challenger=False)
+            self.assertTrue(ok)
+            self.assertIn("plan_verified", reason)
+            self.assertEqual(details.get("plan_id"), "note-p-single")
+
 
 if __name__ == "__main__":
     unittest.main()

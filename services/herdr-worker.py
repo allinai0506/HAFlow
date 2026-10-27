@@ -789,10 +789,8 @@ def _create_pane(parent_pane, clone, launch_identity=None, task_id=None):
     return pane['pane_id']
 
 
-def prepare_existing_pane(pane_id, clone, task_id=None):
+def prepare_existing_pane(pane_id, clone):
     cmd = f"cd {shlex.quote(str(clone))}"
-    if task_id:
-        cmd += f" && export HERDR_TASK_ID={shlex.quote(str(task_id))}"
     result = subprocess.run(
         ["herdr", "pane", "run", pane_id, cmd],
         text=True,
@@ -893,7 +891,17 @@ def allocate_task_pane(parent_pane, clone, launch_identity=None, task_id=None):
         if renamed.returncode != 0:
             return _create_pane(parent_pane, clone, launch_identity, task_id=task_id), "dynamic"
         try:
-            prepare_existing_pane(parent_pane, clone, task_id=task_id)
+            prepare_existing_pane(parent_pane, clone)
+            if task_id:
+                try:
+                    subprocess.run(
+                        ["herdr", "pane", "run", parent_pane, f"export HERDR_TASK_ID={shlex.quote(str(task_id))}"],
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
         except Exception:
             if label:
                 subprocess.run(
@@ -1334,7 +1342,17 @@ def main():
 
         if args.pane_id:
             pane_id = args.pane_id
-            prepare_existing_pane(pane_id, clone, task_id=args.task_id)
+            prepare_existing_pane(pane_id, clone)
+            if args.task_id:
+                try:
+                    subprocess.run(
+                        ["herdr", "pane", "run", pane_id, f"export HERDR_TASK_ID={shlex.quote(str(args.task_id))}"],
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
             pane_source = "prebuilt"
         else:
             if not args.parent_pane:

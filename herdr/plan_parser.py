@@ -333,10 +333,7 @@ def find_plan_deliverables(
             combined = f"{n_title}\n{n_body}"
 
             if not plan_text:
-                if exec_task_id:
-                    matches_exec = (n_task == exec_task_id)
-                else:
-                    matches_exec = (not n_task) or bool(executor_task and executor_task.get("agent") and n.get("agent") == executor_task.get("agent"))
+                matches_exec = (n_task == exec_task_id) if exec_task_id else True
                 if matches_exec:
                     if n_node == "plan" and n_kind in ("plan", "spec"):
                         plan_text = combined
@@ -348,10 +345,7 @@ def find_plan_deliverables(
                         plan_source = "notes"
 
             if not challenger_text:
-                if chal_task_id:
-                    matches_chal = (n_task == chal_task_id)
-                else:
-                    matches_chal = (not n_task) or bool(challenger_task and challenger_task.get("agent") and n.get("agent") == challenger_task.get("agent"))
+                matches_chal = (n_task == chal_task_id) if chal_task_id else True
                 if matches_chal:
                     if n_node == "plan" and n_kind in ("challenge", "review"):
                         challenger_text = combined
@@ -482,6 +476,43 @@ def verify_plan_and_challenger(
             {"missing_sections": missing_sections, "plan_preview": plan_text[:200]},
         )
 
+    # 提取计划与审查身份元数据
+    plan_note = meta.get("plan_note")
+    chal_note = meta.get("challenger_note")
+
+    valid_plan_ids = set()
+    plan_nid = ""
+    if plan_note:
+        plan_nid = str(plan_note.get("note_id") or plan_note.get("id") or "").strip()
+        if plan_nid:
+            valid_plan_ids.add(plan_nid)
+        fpath = plan_note.get("file_path")
+        if fpath:
+            valid_plan_ids.add(os.path.basename(fpath))
+    if meta.get("plan_id"):
+        valid_plan_ids.add(str(meta["plan_id"]).strip())
+    if meta.get("plan_file_path"):
+        valid_plan_ids.add(os.path.basename(meta["plan_file_path"]).strip())
+    if not plan_nid and valid_plan_ids:
+        plan_nid = sorted(valid_plan_ids)[0]
+
+    target_ref = ""
+    if chal_note:
+        target_ref = str(
+            chal_note.get("target_note_id")
+            or chal_note.get("plan_note_id")
+            or chal_note.get("plan_ref")
+            or ""
+        ).strip()
+    if not target_ref and challenger_text:
+        ref_m = re.search(
+            r"(?:plan[_-]note[_-]id|plan[_-]ref|target[_-]note[_-]id|被审计划|审查目标|计划版本)[:：]\s*([a-zA-Z0-9_.\-]+)",
+            challenger_text,
+            re.IGNORECASE,
+        )
+        if ref_m:
+            target_ref = ref_m.group(1).strip()
+
     # 校验 challenger 审查闭环
     if require_challenger:
         # 优先检查显式阻断（task stage_verdict 或 文本包含 blocked 裁决）
@@ -515,41 +546,6 @@ def verify_plan_and_challenger(
                 {"challenger_preview": challenger_text[:300]},
             )
 
-        # 校验审查与计划版本对应关系（防止旧审查放行新修改的计划）
-        plan_note = meta.get("plan_note")
-        chal_note = meta.get("challenger_note")
-
-        target_ref = ""
-        if chal_note:
-            target_ref = str(
-                chal_note.get("target_note_id")
-                or chal_note.get("plan_note_id")
-                or chal_note.get("plan_ref")
-                or ""
-            ).strip()
-        if not target_ref:
-            ref_m = re.search(
-                r"(?:plan[_-]note[_-]id|plan[_-]ref|target[_-]note[_-]id|被审计划|审查目标|计划版本)[:：]\s*([a-zA-Z0-9_.\-]+)",
-                challenger_text or "",
-                re.IGNORECASE,
-            )
-            if ref_m:
-                target_ref = ref_m.group(1).strip()
-
-        valid_plan_ids = set()
-        plan_nid = ""
-        if plan_note:
-            plan_nid = str(plan_note.get("note_id") or plan_note.get("id") or "").strip()
-            if plan_nid:
-                valid_plan_ids.add(plan_nid)
-            fpath = plan_note.get("file_path")
-            if fpath:
-                valid_plan_ids.add(os.path.basename(fpath))
-        if meta.get("plan_id"):
-            valid_plan_ids.add(str(meta["plan_id"]).strip())
-        if meta.get("plan_file_path"):
-            valid_plan_ids.add(os.path.basename(meta["plan_file_path"]).strip())
-
         if valid_plan_ids:
             if not target_ref:
                 return (
@@ -574,18 +570,21 @@ def verify_plan_and_challenger(
                 {"plan_ts": plan_ts, "challenger_ts": chal_ts, "plan_id": plan_nid},
             )
 
+    plan_ref = target_ref or plan_nid or (valid_plan_ids and sorted(valid_plan_ids)[0]) or ""
     return (
         True,
-        "plan_and_challenger_verified",
+        "plan_and_challenger_verified" if require_challenger else "plan_verified",
         {
             "plan_text": plan_text,
-            "challenger_text": challenger_text,
+            "challenger_text": challenger_text or "",
             "executor_task": exec_task,
             "challenger_task": chal_task,
             "plan_id": plan_nid or meta.get("plan_id") or "",
             "target_ref": target_ref,
+            "plan_ref": plan_ref,
             "plan_note": plan_note,
             "challenger_note": chal_note,
+            "meta": meta,
         },
     )
 

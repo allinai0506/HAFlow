@@ -762,7 +762,9 @@ def plan_stage_dispatch(
                     and any(k in str(t.get(rk) or "").lower() for rk in ("dispatch_role", "role", "task_id") for k in ("challenger", "review", "adversarial"))
                     for t in (tasks or [])
                 )
-                require_challenger = has_challenger_role or node_id == "implementation"
+                require_challenger = bool(has_challenger_role)
+                if "require_challenger" in node:
+                    require_challenger = bool(node["require_challenger"])
 
                 verif_ok, verif_reason, details = verify_plan_and_challenger(
                     workflow_id,
