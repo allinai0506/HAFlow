@@ -8614,3 +8614,75 @@ pytest -q tests/test_software_development_v1_e2e_isolated.py
 
 
 ---
+
+## 208. [2026-10-27] Workflow | software-development-v1 去全局总指挥依赖与计划驱动实现任务直接派发
+
+### 现状 / 触发条件
+
+在 `software-development-v1` 流程中，此前存在全局常驻 LLM 总指挥（Coordinator）依赖：
+1. 首阶段 Intake：`stage_delivery.py` 默认开启 `coordinator_intake_enabled`，非直派阶段未完成时依赖 `coordinator_pane`，若无总指挥则报错挂起；
+2. 动态 Implementation 节点派发退化：`direct_dispatch.py` 将 implementation 阶段判定为 dynamic，直接抛出 `dynamic node requires planning` 并回退总指挥 LLM，导致无总指挥时无法进入实现；
+3. 规划成果未直接消费：规划阶段由 executor 制定计划、challenger 对抗审查，但计划成果未结构化转化为实现任务的 TaskSpecs；
+4. 调度期无意义开销：阶段流转前频繁尝试向总指挥 Pane 发送 `/compact`。
+
+### 根因剖析
+
+- **调度控制权未完全下沉至代码 Controller**：原设计将多任务拆解与并发决策委托给全局 LLM 总指挥，未建立纯代码的任务规格提取与解耦校验器；
+- **规划成果消费缺失**：缺少对计划文档结构及对抗质询审查结论的机器可判定解析模块；
+- **总指挥硬编码依赖**：状态流转与推进逻辑假设总指挥 Pane 始终在线，阻碍了端到端自主执行。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 动态实现节点回退总指挥 | 阶段产物应由代码直接解析并消费为结构化规格 | 新增 `plan_parser.py` 解析计划任务，Controller 校验后直接返回 `mode: "dispatch"` 生成 TaskSpecs |
+| 启动与返工残留总指挥依赖 | 启动时不应强行拉起或恢复不存在的总指挥窗格，返工时不应死等总指挥 prompt | `herdr/projects.py` 引入 `template_requires_coordinator` 免去启动探活/恢复，`services/controller/fix_notification.py` 在 staged 流程直接清理 attention 走 Controller 直派 |
+| 作废旧计划被派发器误消费 | 历史计划作废后不可只读原始 notes 字段 | `find_plan_deliverables` 接入 `workflow_docs.annotate_notes` 标记 stale 并剔除作废记录，按当前活跃任务 ID 精准绑定有效成果 |
+| 对抗审查正反判错与遗漏 | 简单子串匹配会将否定句误判为阻断，同时遗漏 `[BLOCKED]` | `extract_challenger_verdict` 使用负向后行断言排除"未/无/不发现"，明确识别 `[BLOCKED]` 与显式建议通过，缺裁决严格 fail-closed |
+| 未识别依赖被静默丢弃导致错误并发 | 计划文本中非标准格式依赖若被忽略会导致本有依赖的任务并发竞争 | 非空依赖无法解析为有效任务编号时强制拒绝（refusal），路径统一做 `os.path.normpath` 防止 `./a.py` 与 `a.py` 碰撞 |
+| 任务编号重叠导致 role 碰撞与验证命令解析退化 | 任务编号重复会导致 `impl_1` 覆盖，`- **Verify:**` 会被截断为 `**` | 派发时按列表枚举索引生成稳定唯一的 `impl_{idx+1}`；正则支持跨行缩进与行内代码提取 |
+| 控制器模块体积膨胀超标 | Controller 核心文件必须严格守住行数上限规范（<= 500 行） | 紧凑优化 `services/controller/direct_dispatch.py` 冗余声明，控制在 495 行并通过模块化门禁 |
+| 真实运行配置模板字段不一致导致旁路失效 | `workflow.json` 持久化字段为 `workflow_template`，只检查 `name` 会导致真实项目无法识别并回退总指挥 | `is_staged_dev_flow_workflow` 全面识别 `workflow_template`/`template`/`coordinator_required: False`，并在注册时持久化 |
+| 节点自动验收失败通过 Task 事件重新拉起总指挥 | 自动验收/裁决未通过时，`task_events.py` 仍调用 `coordinator_status` 导致 auto-heal 重新启动总指挥 | `task_events.py` 在 staged 流程对 `done`/`blocked` 事件直接记录 attention note 并退出；`ensure_coordinator_running` 在根部校验模板是否允许总指挥 |
+| 计划读取优先拼接工作区历史文件且误匹配无归属审查 | 优先读 clone 下所有 md 会把历史任务与当前任务拼接导致重复索引；note 缺少 `task_id` 被误当作匹配 | 严格以已做失效过滤的 `load_notes` 为第一事实源且要求 `n_task == task_id` 精准匹配；回退 clone 仅读取单文件 `plan.md` |
+| 全文模糊匹配“通过”导致否定与条件表达误放行 | `(?<![未无不])通过` 无法排除“不能通过”、“不予通过”、“测试通过” | `extract_challenger_verdict` 仅认专用标记（`[PASS]`/`[BLOCKED]`）、结论键值对与完整肯定短语，正文模糊提及一律 fail-closed |
+| 无后缀根文件被后缀检查误伤 | `Dockerfile`、`Makefile`、`LICENSE` 因不含 `.` 被过滤，导致合法单/多任务被拒 | `is_valid_file_path` 兼容目录路径（含 `/`）、扩展名（含 `.`）及常用根无后缀文件名 |
+| 计划更新后旧审查仍可放行新版本 | 同一 executor 任务修改发布 v2 计划时，若只取最新审查而未校验审查引用的版本与时间戳，会导致未审内容放行 | `verify_plan_and_challenger` 校验 `Plan-Ref: <note_id>` 引用一致性及时序约束（`plan_ts > chal_ts` 拒绝并提示 `challenger_outdated`） |
+| 非裁决字段（如测试结论）被当作最终裁决误放行 | 正则缺少行首边界导致正文中的“测试结论：通过”覆盖后续“最终裁决：阻断”，且条件性通过（“修复...方可通过”）被误判 | 裁决字段采用多行行首严格匹配，扫描全部信号且阻断与条件通过绝对优先（fail-closed） |
+| 自动验收与计划派发读取路径分歧 | `auto_acceptance` 认 `docs/superpowers/plans/`，而派发器仅读 `plan.md`，导致验收通过但派发报 `plan_missing` | 抽离 `read_plan_file_from_dir` 单一事实源，自动选取 mtime 最新单文件，两端消费同源 |
+| CLI 示例缺 `--task` 导致 note 身份丢失 | 命令行未传 `--task` 时，原本无法关联 task_id 导致 notes 被严格绑定机制过滤 | `herdr-task note-add` 自动从环境变量 `HERDR_TASK_ID` 提取身份，并在提示词中显式注入 `--task "$HERDR_TASK_ID"` |
+| 文件交付物绕过计划版本校验与引用要求 | 只要有一侧交付物来自文件，版本与引用校验被跳过，导致引用旧计划的文件审查通过新计划 | 文件读取包装为统一带 `note_id` 的产物结构，无论 note 还是文件均强制校验 `Plan-Ref` 或 `target_note_id` 与计划版本严格一致 |
+| 同名 Agent 回退覆盖当前任务明确阻断 | 缺少 task_id 的 note 仅凭 agent 相同回退导致较新无归属 PASS 覆盖当前任务的 BLOCKED | `find_plan_deliverables` 中当任务 ID 已知时强制 `n_task == task_id` 精确匹配，禁止宽松回退 |
+| 历史“通过”短语放行非终态/未完成审查 | 含有“上轮审查通过”或带 `HERDR_GATE_VERDICT: PENDING` 因正文模糊命中通过被误放行 | 彻底移除正文模糊肯定扫描，仅认独立终态动词与专用字段，非终态标记（`尚未完成`、`PENDING` 等）强制 fail-closed |
+| 已审计划范围与独立验收未传至实现工位 | 解析器提取了 `scope` 与 `acceptance`，但派发时丢失，且未传递完整已审任务片段 | TaskSpecs 与实现工位提示词完整透传 `plan_chunk`、`plan_scope`、`plan_acceptance` 及 `plan_ref` |
+| Worker 运行时未注入任务环境变量 | 启动 worker 仅传 `--task-id` 参数，窗格未导出环境变量导致命令补全失效 | `herdr-worker.py` 对复用及新建 pane 均注入 `export HERDR_TASK_ID={task_id}`，提示词直接静态渲染任务 ID |
+
+### 操作规范（已固化到 `herdr/plan_parser.py`、`herdr/direct_dispatch.py`、`services/controller/stage_delivery.py`）
+
+1. 计划阶段输出有效 plan 与 approved challenger 质询，Controller 自动提取并校验章节结构与结论。
+2. 解耦任务遵循文件集合互不相交且无内部 DAG 依赖，受 `max_concurrency: 3` 与节点任务预算 `max_tasks_per_node: 12` 约束。
+3. 计划不合法、质询未决或强耦合任务严格阻断（`refusal`），记录结构化 attention note，绝不静默放行或死等总指挥。
+4. 全局总指挥检索入口在定向测试中注入 Lockout 断言，保证零总指挥访问。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_software_development_v1_adapter.py
+pytest -q tests/test_software_development_v1_e2e_isolated.py
+pytest -q tests/test_controller_modularity.py
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/plan_parser.py` — 计划提取、失效过滤、对抗质询判定与解耦规格生成
+- `herdr/direct_dispatch.py` — implementation 动态计划消费、角色唯一性派发与直派逻辑
+- `herdr/projects.py` — `template_requires_coordinator` 避免无总指挥模板启动/恢复报错
+- `services/controller/direct_dispatch.py` — Controller 直派入库与模块化紧凑（<= 500 行）
+- `services/controller/fix_notification.py` — fix-loop 返工直达阶段推进无需总指挥
+- `services/controller/stage_delivery.py` — staged 流程禁用总指挥 intake 与检索
+- `tests/test_software_development_v1_adapter.py` — 32 项全通过适配测试（含启动/返工/失效/审查/依赖/去总指挥断言）
+- `tests/test_software_development_v1_e2e_isolated.py` — 3 项端到端隔离全生命周期测试
+- `tests/test_controller_modularity.py` — 10 项模块化与行数门禁测试全通过
+- `tests/test_console_project_creation.py` 与 `tests/test_projects_coordinator_missing_error.py` — 26 项同步测试契约全通过
+
+---

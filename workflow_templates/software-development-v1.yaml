@@ -1,6 +1,7 @@
 name: software-development-v1
 label: 软件开发标准流程
 version: "1.2"
+coordinator_required: false
 description: 标准 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)。按 unified-dev-flow 的阶段思想执行：HAFlow 是唯一主控，各节点只调用对应技能。需求由一人起草；计划保留一次方案对抗；实现完成自测与删除式清理；测试按计划验证并出具证据；评审在测试完成后核验需求、代码与测试证据；收尾按授权交付并核对同一候选结论。默认交付到工作区，PR、合并和部署要另有授权。
 delivery_ceiling_default: workspace
 

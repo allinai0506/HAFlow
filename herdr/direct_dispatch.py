@@ -429,6 +429,8 @@ def _prompt(
     docs_block=None,
     gate_inventory_block=None,
     redispatch_blocker_note=None,
+    plan_chunk=None,
+    plan_ref=None,
 ):
     target_outputs = role_outputs if role_outputs is not None else node["required_outputs"]
     outputs = "\n".join(f"- {line}" for line in target_outputs) or "- 未定义"
@@ -460,6 +462,15 @@ def _prompt(
     )
 
     docs_section = f"\n{docs_block}\n" if docs_block else ""
+
+    plan_section = ""
+    if plan_chunk:
+        ref_text = f"（已批准计划版本: {plan_ref}）\n" if plan_ref else ""
+        plan_section = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+已审计划约束与任务规格 {ref_text}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{plan_chunk.strip()}
+"""
 
     stage_context_section = ""
     try:
@@ -493,6 +504,7 @@ node: {node["id"]} ({node["label"]})
 
 任务目标：
 {goal}
+{plan_section}
 {stage_context_section}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 节点职责
@@ -537,6 +549,8 @@ def _dispatch_spec(
     candidate_sha=None,
     gate_inventory_block=None,
     redispatch_blocker_note=None,
+    plan_chunk=None,
+    plan_ref=None,
 ):
     from .workflow import validate_artifact_contract
     validate_artifact_contract(node.get("artifact_mode"), integration_mode or node["integration_mode"], node_id=node.get("id"), task_type=node.get("task_type"))
@@ -564,6 +578,8 @@ def _dispatch_spec(
             docs_block=docs_block,
             gate_inventory_block=gate_inventory_block,
             redispatch_blocker_note=redispatch_blocker_note,
+            plan_chunk=plan_chunk,
+            plan_ref=plan_ref,
         ),
         "artifact_mode": node.get("artifact_mode"),
         "dispatch_role": "worker",
@@ -618,6 +634,7 @@ def plan_stage_dispatch(
     gate_inventory_block=None,
     redispatch_blocker_notes=None,
     reserved_task_ids=None,
+    project_root=None,
 ):
     """决定 ready 节点该派发什么。
 
@@ -724,6 +741,144 @@ def plan_stage_dispatch(
                     "specs": []}
 
         if dispatch_kind == "dynamic":
+            has_plan_tasks = any(
+                isinstance(t, dict) and (t.get("node") == "plan" or t.get("stage") == "plan")
+                and (not t.get("workflow_id") or t.get("workflow_id") == workflow_id)
+                for t in (tasks or [])
+            )
+            # For implementation stage or nodes depending on plan, consume plan deliverables directly
+            if has_plan_tasks and (node_id == "implementation" or "plan" in (node.get("depends_on") or [])):
+                from herdr.plan_parser import (
+                    verify_plan_and_challenger,
+                    parse_plan_tasks,
+                    validate_task_decoupling,
+                )
+
+                policy = node.get("agent_policy") or node.get("worker_policy") or {}
+                max_concurrency = int(policy.get("max_concurrency", policy.get("max_agents", 3)) or 3)
+                max_tasks_per_node = int(node.get("max_tasks_per_node", 12) or 12)
+
+                has_challenger_role = any(
+                    isinstance(t, dict) and (t.get("node") == "plan" or t.get("stage") == "plan")
+                    and (not t.get("workflow_id") or t.get("workflow_id") == workflow_id)
+                    and any(k in str(t.get(rk) or "").lower() for rk in ("dispatch_role", "role", "task_id") for k in ("challenger", "review", "adversarial"))
+                    for t in (tasks or [])
+                )
+                require_challenger = bool(has_challenger_role)
+                if "require_challenger" in node:
+                    require_challenger = bool(node["require_challenger"])
+
+                verif_ok, verif_reason, details = verify_plan_and_challenger(
+                    workflow_id,
+                    tasks=tasks,
+                    project_root=project_root,
+                    require_challenger=require_challenger,
+                )
+                if not verif_ok:
+                    refusal_code = verif_reason.split(":")[0].strip()
+                    return {
+                        "mode": "refusal",
+                        "reason": verif_reason,
+                        "refusal_code": refusal_code,
+                        "specs": [],
+                    }
+
+                parsed_tasks = parse_plan_tasks(
+                    details.get("plan_text") or "",
+                    default_name=f"{normalized['label']}主实现任务",
+                )
+                decoupling_ok, decoupling_reason = validate_task_decoupling(
+                    parsed_tasks,
+                    max_concurrency=max_concurrency,
+                    max_tasks_per_node=max_tasks_per_node,
+                )
+                if not decoupling_ok:
+                    return {
+                        "mode": "refusal",
+                        "reason": f"plan_decoupling_refusal: {decoupling_reason}",
+                        "refusal_code": "plan_decoupling_refusal",
+                        "specs": [],
+                    }
+
+                existing_ids = {
+                    str(task.get("task_id"))
+                    for task in (tasks or [])
+                    if task.get("task_id")
+                }
+                existing_ids.update(str(task_id) for task_id in (reserved_task_ids or ()) if task_id)
+
+                specs = []
+                num_tasks = len(parsed_tasks)
+                plan_ref = str(details.get("plan_id") or details.get("target_ref") or "").strip()
+                for idx, t in enumerate(parsed_tasks):
+                    t_idx = t.get("task_index", idx + 1)
+                    t_name = str(t.get("name") or f"Task {t_idx}").strip()
+                    t_files = t.get("files") or []
+                    t_verify = str(t.get("verify_command") or "").strip()
+                    t_goal_text = str(t.get("goal") or "").strip()
+                    t_scope_text = str(t.get("scope") or "").strip()
+                    t_ac_text = str(t.get("acceptance") or "").strip()
+                    t_chunk = str(t.get("raw_chunk") or "").strip()
+
+                    t_goal = f"{normalized['label']} ({t_name}): {t_goal_text or normalized['purpose']}"
+                    if t_files:
+                        t_goal += f" | 修改文件范围: {', '.join(t_files)}"
+
+                    t_acceptance = []
+                    if t_goal_text:
+                        t_acceptance.append(f"满足目标：{t_goal_text}")
+                    if t_scope_text:
+                        t_acceptance.append(f"限定范围：{t_scope_text}")
+                    if t_ac_text:
+                        t_acceptance.append(f"具体验收条件：{t_ac_text}")
+                    if t_files:
+                        t_acceptance.append(f"限定修改文件范围：{', '.join(t_files)}")
+                    if t_verify:
+                        t_acceptance.append(f"通过自测与验证命令：{t_verify}")
+                    t_acceptance.extend(list(normalized["required_outputs"]))
+                    for item in GENERIC_ACCEPTANCE:
+                        if item not in t_acceptance:
+                            t_acceptance.append(item)
+
+                    if num_tasks == 1:
+                        task_id = initial_task_id(workflow_id, node_id, existing_ids)
+                    else:
+                        suffix = f"t{idx + 1}"
+                        candidate_id = f"{workflow_id}-{node_id}-{suffix}"
+                        if candidate_id in existing_ids:
+                            candidate_id = initial_task_id(workflow_id, f"{node_id}-{suffix}", existing_ids)
+                        task_id = candidate_id
+                    existing_ids.add(task_id)
+
+                    spec = _dispatch_spec(
+                        normalized,
+                        requirement.strip() if requirement else "",
+                        t_goal,
+                        t_acceptance,
+                        task_id,
+                        context_branch=context_branch,
+                        gate_contract=gate_contract,
+                        docs_block=docs_block,
+                        candidate_sha=candidate_sha,
+                        gate_inventory_block=gate_inventory_block,
+                        plan_chunk=t_chunk,
+                        plan_ref=plan_ref,
+                    )
+                    spec["dispatch_role"] = f"impl_{idx + 1}" if num_tasks > 1 else "worker"
+                    spec["planned_files"] = t_files
+                    spec["verify_command"] = t_verify
+                    spec["plan_chunk"] = t_chunk
+                    spec["plan_scope"] = t_scope_text
+                    spec["plan_acceptance"] = t_ac_text
+                    spec["plan_ref"] = plan_ref
+                    specs.append(spec)
+
+                return {
+                    "mode": "dispatch",
+                    "reason": f"plan-driven direct dispatch ({num_tasks} task{'s' if num_tasks > 1 else ''})",
+                    "specs": specs,
+                }
+
             return {"mode": "fallback", "reason": "dynamic node requires planning", "specs": []}
 
         if not (requirement or "").strip():

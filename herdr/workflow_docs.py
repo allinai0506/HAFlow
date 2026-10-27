@@ -384,7 +384,7 @@ def render_context_block(
         "权威层级: git commits / verify-baseline > controller 机器证据 > "
         "本区文档（仅供上下文，不得当作事实或跳过验证）",
         "追加写入: "
-        f"{cli_path()} note-add --workflow-id {wf} --node {node_arg} "
+        f"{cli_path()} note-add --workflow-id {wf} --node {node_arg} --task \"$HERDR_TASK_ID\" "
         '--kind spec --title "..." --text "..."',
     ]
 

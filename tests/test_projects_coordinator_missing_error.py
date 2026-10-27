@@ -24,11 +24,11 @@ def _record(tmp_path):
     }
 
 
-def _write_workflow(tmp_path, pane_id="w15:p1", tab_id="w15:t1"):
+def _write_workflow(tmp_path, pane_id="w15:p1", tab_id="w15:t1", template_name="legacy-workflow"):
     cfg = {
         "project_id": "test_proj",
         "workspace_id": "w15",
-        "workflow_template": "software-development-v1",
+        "workflow_template": template_name,
         "coordinator": {"tab_id": tab_id, "label": "1总指挥", "pane_id": pane_id},
         "nodes": [],
     }
@@ -159,6 +159,21 @@ def test_coordinator_pane_missing_unrecoverable_degrades(tmp_path):
             ensure_project(str(tmp_path))
 
     assert "无法在既有工作区内就地恢复" in str(exc_info.value)
+
+
+def test_software_development_v1_skips_coordinator_healing(tmp_path):
+    """software-development-v1 显式禁用总指挥，Pane 死亡时不尝试恢复也不报错。"""
+    record = _record(tmp_path)
+    _write_workflow(tmp_path, template_name="software-development-v1")
+
+    with patch.object(projects, "project_by_root", return_value=record), \
+         patch.object(projects, "_workspace_alive", return_value=True), \
+         patch.object(projects, "_pane_alive", return_value=False), \
+         patch.object(projects, "_recover_coordinator_pane", side_effect=AssertionError("recover should not be called")), \
+         patch.object(projects, "_start_coordinator", side_effect=AssertionError("start_coordinator should not be called")):
+        res = ensure_project(str(tmp_path))
+        assert res["project_id"] == "test_proj"
+
 
 
 

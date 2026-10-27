@@ -8,6 +8,17 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-27] fix | 规划产物文件版本绑定、任务身份精准匹配、严格终态裁决与完整实现约束透传
+
+- 背景：PR #356 代码复核指出：文件交付（如 `challenger-review.md`）绕过了版本与 `Plan-Ref` 强校验；同 Agent 无归属 note 覆盖了当前任务显式 BLOCKED；正文模糊包含“通过”放行了非终态（PENDING/未完成）审查；已审计划中的任务范围（Scope）、独立验收（Acceptance）及完整任务块在派发给实现工位时丢失；Worker 启动链缺少 `HERDR_TASK_ID` 环境变量注入。
+- 变更：
+  1. **文件交付物统一版本与引用核验**：`herdr/plan_parser.py` 将文件交付物包装为带有 `note_id` 的结构化对象，`verify_plan_and_challenger` 统一对 note 和文件强制校验 `Plan-Ref` 或 `target_note_id`，版本不符立即阻断；
+  2. **任务归属精准匹配**：在 `find_plan_deliverables` 中当任务 ID 已知时强制 `n_task == task_id`，杜绝使用 Agent 名称宽松回退覆盖当前任务阻断裁决；
+  3. **严格终态裁决（fail-closed）**：`extract_challenger_verdict` 移除模糊正文“通过”扫描，未完成/非终态标记（`尚未完成`、`PENDING` 等）或条件性通过强制返回 `missing` 或 `blocked`；
+  4. **已审计划约束完整透传**：`herdr/direct_dispatch.py` 提取任务 `scope`、`acceptance`、`raw_chunk` 及 `plan_ref`，将其挂载进 TaskSpecs 并完整注入实现工位提示词；
+  5. **任务身份注入**：在 `stage_skills.py` 提示词中直接静态渲染真实任务 ID，并在 `herdr-worker.py` 中对复用和新建 pane 显式注入 `export HERDR_TASK_ID={task_id}`。
+- 证据：`tests/test_software_development_v1_adapter.py`（39 项全通，含 test_36~test_39 专项）、`tests/test_software_development_v1_e2e_isolated.py`（3 项全通）、`tests/test_controller_modularity.py`（10 项全通，Controller 与 stage_skills 严格 <= 500 行）。
+
 ## [2026-10-23] fix | 空门禁标记不能在第二次规范化时凭空出现
 
 - 背景：没写 `gate` 的节点第一次规范化后是占位 `gate: {}`。再规范化一次时，这个占位被当成作者声明，多出 `gate_declared`。
@@ -3750,3 +3761,33 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 交付物结构化验收：`auto_acceptance.py` 改造为字段级内容检查（用户目标/范围/AC条目/证明命令），非 Git 共享文档无需制造无意义 diff 即可通过。
 - 候选分支溯源：`herdr/direct_dispatch.py` 中 `candidate_branch_for_node` 支持在 verifier 依赖下向上溯源代码实现分支，避免误用无代码交付物的只读测试工位分支。
 - 验证：12 项专项回归测试（`tests/test_software_development_v1_adapter.py`）与真实 6 阶段 + 缺陷返工端到端测试（`tests/test_software_development_v1_e2e_isolated.py`）全绿，教训见 lessons §207。
+
+## [2026-10-27] Workflow | software-development-v1 去全局总指挥依赖与计划驱动实现任务直接派发
+- 去除全局总指挥依赖：`services/controller/stage_delivery.py` 对 `is_staged_dev_flow_workflow` 显式禁用 `coordinator_intake_enabled`，直派未完成时记录结构化 attention note，不再检索或依赖 `coordinator_pane`；`direct_dispatch.py` 跳过无意义的 `maybe_compact_coordinator`。
+- 计划成果直接驱动实现：新增 `herdr/plan_parser.py`，实现 `find_plan_deliverables`、`verify_plan_and_challenger`、`parse_plan_tasks` 与 `validate_task_decoupling`。`herdr/direct_dispatch.py` 在动态 implementation 节点中直接消费 executor 规划成果与 challenger 审查结论，校验合法后直接生成 TaskSpecs（`mode: "dispatch"`）。
+- 严格解耦与门禁阻断：对多任务要求修改文件集合严格互不相交（disjoint）且无内部 DAG 依赖；计划缺失、格式不合法、质询阻断（`[BLOCKED]`）或强耦合重叠时严格返回 `refusal` 并记录结构化原因，杜绝静默放行或回退总指挥。
+- 验证：21 项适配器专项定向测试（含 `test_21_global_coordinator_lockout_enforced` 全局总指挥入口锁定断言）全绿；3 项端到端隔离生命周期测试（标准 6 阶段、缺陷返工流、多任务并发流）全绿；核心引擎 62 项测试全部通过（共 86 passed）。教训见 lessons §208。
+
+## [2026-10-27] Fix | PR #356 审核缺陷修复：启动/返工去总指挥、计划版本绑定与解耦健壮性
+- 启动与返工总指挥残留解除：`herdr/projects.py` 引入 `template_requires_coordinator(template_name)` 统一判据，针对 `software-development-v1` 等声明 `coordinator_required: false` 的模板，在 `ensure_project`、`provision_project` 与 `reprovision_project_template` 中跳过总指挥窗格的启动与死等恢复；`services/controller/fix_notification.py` 在 `_handle_fix_loop_item` 中对分阶段流程显式跳过检索总指挥与 prompt 注入，直接清理 attention 由 Controller 补派。
+- 计划失效与版本绑定：`herdr/plan_parser.py` 的 `find_plan_deliverables` 接入 `workflow_docs.annotate_notes(raw_notes)`，准确剔除带有 `stale: True` 的作废历史计划，并按当前活跃执行轮次的 `exec_task_id` 和 `chal_task_id` 精确绑定产物，杜绝用当前任务身份包装作废旧计划派发。
+- 对抗审查精准判决：重构 `extract_challenger_verdict`，运用负向后行断言排除"未/无/不发现阻塞性缺陷"等肯定否定句，同时识别 `[BLOCKED]` 标记与显式建议通过结论；对缺失明确裁决的文本严格 fail-closed 拦截（`challenger_verdict_missing`）。
+- 依赖丢弃防范与解耦健壮性：多任务声明的依赖若包含非空内容却无法匹配标准任务编号时，不再静默丢弃，而是强制拒绝（`task_internal_dependency_unsupported`）；严格校验多任务中每个任务的文件与验证命令；路径引入 `os.path.normpath` 消除 `./` 规范化碰撞；按任务枚举索引稳定生成 `impl_{idx+1}` 杜绝重复角色；验证命令正则增强支持多行缩进与行内代码块。
+- 控制器行数治理：`services/controller/direct_dispatch.py` 精简冗余引用，严格控制在 495 行（<= 500 行），通过模块化架构门禁。
+- 验证：28 项适配器专项测试、3 项真实隔离端到端测试、10 项模块化门禁测试全绿（共 41 passed）。
+
+## [2026-10-27] Fix | PR #356 复核缺陷修复：真实配置穿透、节点验收旁路、计划/审查身份严格绑定与无后缀文件支持
+- 真实运行配置穿透：`herdr/stage_skills.py` 中的 `is_staged_dev_flow_workflow` 支持对持久化字段 `workflow_template`、`template`、`coordinator_required: False` 的完整识别；`herdr/projects.py` 在 `_save_workflow` 时将 `coordinator_required: False` 持久化至 `workflow.json`。
+- 节点验收失败旁路总指挥：`services/controller/task_events.py` 在自动验收拒收或未裁决时，对分阶段工作流直接生成结构化 `attention_note`，不再进入 `coordinator_status` 与 `herdr agent prompt` 轮询；`herdr/projects.py` 在 `ensure_coordinator_running` 根部拦截非总指挥模板的自愈启动请求。
+- 计划产物与审查身份严格绑定：`herdr/plan_parser.py` 将经过失效过滤的 `workflow_docs.load_notes` 作为第一权威事实源，要求 `n_task == task_id` 强匹配，彻底杜绝无任务身份 note 越权绕过；Clone 目录回退严格限定读取单文件 `plan.md`，彻底移除对 `docs/superpowers/plans/` 目录历史文件的全量拼接。
+- 审查裁决精准抽取与 fail-closed：移除正文模糊 `(?<![未无不])通过` 匹配，仅认专用判决标签（`[PASS]`/`[BLOCKED]`）、专用结论行与完整肯定短语；严格识别并阻断“目前不能通过”、“暂不予通过”，排除“没有发现阻塞性缺陷”误判，正文模糊提及一律判定为 missing 并 fail-closed 拦截。
+- 无后缀合法文件支持：`herdr/plan_parser.py` 引入 `is_valid_file_path`，兼容带路径文件及 `Dockerfile`、`Makefile`、`LICENSE` 等标准根无后缀文件，防止合法任务被解耦检查拒绝。
+- CI 测试契约同步：`tests/test_console_project_creation.py` 与 `tests/test_projects_coordinator_missing_error.py` 同步区分 `software-development-v1`（免总指挥）与传统模板（需自愈恢复）的测试断言。
+- 验证：32 项适配器专项测试、3 项真实隔离端到端测试、10 项模块化架构测试、26 项项目与自愈测试全部通过（共 71 passed）。
+
+## [2026-10-27] Fix | PR #356 最新复核修复：计划版本与对抗审查双向绑定、行首裁决字段防串扰与单源计划读取
+- 计划版本与对抗审查双向强绑定：`herdr/plan_parser.py` 实现 `verify_plan_and_challenger` 的引用与时序校验；支持 challenger 通过 `Plan-Ref: <note_id>` 或 `target_note_id` 显式指向被审计划 note，并在 executor 更新发布新计划（`plan_ts > chal_ts`）时拒绝旧审查放行（返回 `challenger_outdated` 或 `challenger_plan_version_mismatch`），彻底杜绝计划修改后旧审查放行新版本漏洞。
+- 审查裁决抽取严格行首边界与条件性阻断：重构 `extract_challenger_verdict`，对裁决行使用严格行首正则（`^[ \t]*(?:[-*][ \t]*)?(?:HERDR_GATE_VERDICT|最终裁决|...):`），杜绝正文中的“测试结论：通过”误命中断言覆盖后续“最终裁决：阻断”；增加条件性批准扫描（如“修复上述问题后方可通过”），任何阻断或条件性短语绝对优先判定为 `blocked`（fail-closed）。
+- 共享文档与文件读取单源统一：抽离 `herdr.plan_parser.read_plan_file_from_dir`，统一支持 `plan.md`、`docs/plan.md` 及 `docs/superpowers/plans/*.md`（单选 mtime 最新文件，杜绝历史文件全量拼接）；`services/controller/auto_acceptance.py` 与 `find_plan_deliverables` 接入该统一函数，消除路径读取分歧。
+- 任务命令行工具环境身份自动补齐：`herdr/task_cli_evidence.py` 在 `note_add` 时自动从 `os.environ.get("HERDR_TASK_ID")` 补齐缺省的 `--task` 参数，并在 `herdr/workflow_docs.py` 与 `herdr/stage_skills.py` 中规范注入 `--task "$HERDR_TASK_ID"` 及 Plan-Ref 提示词契约。
+- 验证：35 项适配器专项测试（含版本版本更新旧审查失效、行首裁决与条件性阻断、superpowers 单源读取与环境变量任务身份补齐）全绿；3 项端到端隔离全生命周期测试、10 项模块化门禁测试、26 项项目契约测试全部通过（共 74 passed）。

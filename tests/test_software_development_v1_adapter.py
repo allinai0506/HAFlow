@@ -475,6 +475,1089 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
         code = permanent_dispatch_refusal("[STAGE SKILLS REFUSED] task=t1 skill capability gap: missing")
         self.assertEqual(code, "skill_capability_gap")
 
+    def test_16_valid_single_task_plan_direct_dispatch(self):
+        """Scenario 16: Valid single-task plan directly creates and dispatches implementation task."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-direct-01"
+        plan_body = """
+        # Implementation Plan
+        ## 目标
+        实现偏好设置与自测
+        ## 验收条目映射
+        - Task 1: 满足 AC-1，实现 pref.py
+        ## 修改文件范围
+        - Create: pref.py
+        - Test: test_pref.py
+        ## 验证命令
+        pytest -q test_pref.py
+        """
+        challenger_body = """
+        ## 方案对抗性审查与可行性风险评估
+        对偏好设置方案进行了审查，任务划分合理，无死锁和过度设计风险，验证命令 pytest -q test_pref.py 具备可行性。确认通过。
+        """
+
+        tasks = [
+            {
+                "task_id": f"{wf_id}-plan-executor",
+                "workflow_id": wf_id,
+                "node": "plan",
+                "dispatch_role": "executor",
+                "status": "completed",
+            },
+            {
+                "task_id": f"{wf_id}-plan-challenger",
+                "workflow_id": wf_id,
+                "node": "plan",
+                "dispatch_role": "challenger",
+                "status": "completed",
+            },
+        ]
+        notes = [
+            {"node": "plan", "kind": "plan", "title": "实现计划", "body": plan_body, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "方案对抗质询", "body": challenger_body, "task_id": f"{wf_id}-plan-challenger"},
+        ]
+
+        from unittest import mock
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "实现用户偏好设置", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch")
+            specs = res.get("specs", [])
+            self.assertEqual(len(specs), 1)
+            spec = specs[0]
+            self.assertIn("pref.py", spec.get("planned_files", []))
+            self.assertEqual(spec.get("verify_command"), "pytest -q test_pref.py")
+            self.assertEqual(spec.get("integration_mode"), "git")
+            self.assertEqual(spec.get("task_type"), "feat")
+            self.assertEqual(spec.get("onto_branch"), "main")
+
+    def test_17_valid_multi_task_decoupled_plan_direct_dispatch(self):
+        """Scenario 17: Valid multi-task decoupled plan dispatches multiple tasks within concurrency limits."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-multi-01"
+        plan_body = """
+        # Implementation Plan
+        ## 任务拆分与验收条目映射
+        ### Task 1: 偏好设置核心模块
+        - **Goal:** 实现偏好存储与读取核心接口
+        - **Files:**
+          - Create: pref_core.py
+          - Test: test_pref_core.py
+        - **Verify:**
+          pytest -q test_pref_core.py
+        - **Dependencies:** None
+
+        ### Task 2: 偏好设置 CLI 导出模块
+        - **Goal:** 实现偏好设置命令行导出
+        - **Files:**
+          - Create: pref_cli.py
+          - Test: test_pref_cli.py
+        - **Verify:**
+          pytest -q test_pref_cli.py
+        - **Dependencies:** None
+        """
+        challenger_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：两个任务文件范围（pref_core vs pref_cli）完全解耦互不重叠，无死锁和循环依赖风险，验证命令独立且完备。经详细审查，未发现阻塞性缺陷，结论：建议通过。
+        """
+
+        tasks = [
+            {"task_id": f"{wf_id}-plan-executor", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-challenger", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+        notes = [
+            {"node": "plan", "kind": "plan", "title": "解耦实现计划", "body": plan_body, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "对抗质询", "body": challenger_body, "task_id": f"{wf_id}-plan-challenger"},
+        ]
+
+        from unittest import mock
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "实现偏好设置与命令行工具", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch")
+            specs = res.get("specs", [])
+            self.assertEqual(len(specs), 2, "Should dispatch 2 decoupled implementation tasks")
+            self.assertEqual(specs[0]["dispatch_role"], "impl_1")
+            self.assertEqual(specs[1]["dispatch_role"], "impl_2")
+            self.assertEqual(specs[0]["planned_files"], ["pref_core.py", "test_pref_core.py"])
+            self.assertEqual(specs[1]["planned_files"], ["pref_cli.py", "test_pref_cli.py"])
+            self.assertNotEqual(specs[0]["task_id"], specs[1]["task_id"])
+
+    def test_18_challenger_adversarial_review_gate_enforced(self):
+        """Scenario 18: Missing, invalid, or blocked challenger review prevents implementation dispatch."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-gate-01"
+        plan_body = """
+        # Implementation Plan
+        ## 验收条目映射
+        - Task 1: 满足 AC-1
+        ## 修改文件范围
+        - Create: pref.py
+        ## 验证命令
+        pytest -q test_pref.py
+        """
+
+        from unittest import mock
+
+        # 1. Missing challenger review
+        tasks = [
+            {"task_id": f"{wf_id}-plan-executor", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-challenger", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+        notes_no_chal = [
+            {"node": "plan", "kind": "plan", "title": "实现计划", "body": plan_body, "task_id": f"{wf_id}-plan-executor"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes_no_chal):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "实现需求")
+            self.assertEqual(res.get("mode"), "refusal")
+            self.assertEqual(res.get("refusal_code"), "challenger_missing")
+
+        # 2. Blocked challenger review verdict
+        tasks_blocked = [
+            {"task_id": f"{wf_id}-plan-executor", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-challenger", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed", "stage_verdict": "blocked", "stage_verdict_note": "存在死锁风险"},
+        ]
+        notes_blocked = [
+            {"node": "plan", "kind": "plan", "title": "实现计划", "body": plan_body, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "质询", "body": "方案对抗与质询评估：发现严重死锁风险与循环依赖。HERDR_GATE_VERDICT: blocked", "task_id": f"{wf_id}-plan-challenger"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes_blocked):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks_blocked, "实现需求")
+            self.assertEqual(res.get("mode"), "refusal")
+            self.assertEqual(res.get("refusal_code"), "challenger_blocked")
+
+    def test_19_invalid_plan_decoupling_refused(self):
+        """Scenario 19: Tasks with overlapping files or intra-node dependencies are strictly refused."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-overlap-01"
+
+        # 1. Overlapping files
+        plan_overlapping = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 模块 A
+        - **Files:**
+          - Modify: shared_config.py
+          - Test: test_a.py
+        - **Verify:** pytest -q test_a.py
+
+        ### Task 2: 模块 B
+        - **Files:**
+          - Modify: shared_config.py
+          - Test: test_b.py
+        - **Verify:** pytest -q test_b.py
+        """
+        chal_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：经过对各拆解任务的详细核查，本方案对验收标准的映射完整。可行性评估认为风险与验证命令具备可行性，无过度设计与死锁风险，验证基线完备。确认通过。
+        """
+        tasks = [
+            {"task_id": f"{wf_id}-plan-executor", "workflow_id": wf_id, "node": "plan", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-challenger", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+        notes = [
+            {"node": "plan", "kind": "plan", "title": "重叠计划", "body": plan_overlapping, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "质询", "body": chal_body, "task_id": f"{wf_id}-plan-challenger"},
+        ]
+
+        from unittest import mock
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求")
+            self.assertEqual(res.get("mode"), "refusal")
+            self.assertEqual(res.get("refusal_code"), "plan_decoupling_refusal")
+            self.assertIn("overlapping file 'shared_config.py'", res.get("reason", ""))
+
+        # 2. Declared intra-node dependency
+        plan_dep = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 数据层
+        - **Files:**
+          - Create: db.py
+          - Test: test_db.py
+        - **Verify:** pytest -q test_db.py
+
+        ### Task 2: 业务层
+        - **Dependencies:** Task 1
+        - **Files:**
+          - Create: service.py
+          - Test: test_service.py
+        - **Verify:** pytest -q test_service.py
+        """
+        notes_dep = [
+            {"node": "plan", "kind": "plan", "title": "依赖计划", "body": plan_dep, "task_id": f"{wf_id}-plan-executor"},
+            {"node": "plan", "kind": "review", "title": "质询", "body": chal_body, "task_id": f"{wf_id}-plan-challenger"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes_dep):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求")
+            self.assertEqual(res.get("mode"), "refusal")
+            self.assertEqual(res.get("refusal_code"), "plan_decoupling_refusal")
+            self.assertIn("intra-node dependency", res.get("reason", ""))
+
+    def test_20_duplicate_event_and_resume_idempotent(self):
+        """Scenario 20: Idempotent dispatch handling; active task yields wait, no duplicate creation."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-idempotent-01"
+        tasks_with_active = [
+            {
+                "task_id": f"{wf_id}-implementation-t1",
+                "workflow_id": wf_id,
+                "node": "implementation",
+                "status": "working",
+            }
+        ]
+        res = plan_stage_dispatch(wf_id, impl_node, tasks_with_active, "需求")
+        self.assertEqual(res.get("mode"), "wait")
+        self.assertEqual(res.get("reason"), "node has active tasks")
+
+    def test_21_global_coordinator_lockout_enforced(self):
+        """Scenario 21: Real try_direct_stage_advance and stage delivery execute with coordinator locked out."""
+        from services.controller import stage_delivery, direct_dispatch
+        from unittest import mock
+
+        mock_ports = mock.MagicMock()
+        mock_ports.workflow_config_for.return_value = {"name": "software-development-v1"}
+        mock_ports.find_node.return_value = {"id": "requirements", "node_type": "agent", "purpose": "需求分析"}
+        mock_ports.get_stage_policy.return_value = {}
+        mock_ports.direct_stage_dispatch_enabled.return_value = True
+        mock_ports.TASK_MANAGER = "bin/herdr-task"
+        mock_ports._dispatch_candidate_ready.return_value = True
+        mock_ports.direct_dispatch_planner = mock.MagicMock()
+        mock_ports.direct_dispatch_planner.plan_stage_dispatch.return_value = {
+            "mode": "dispatch",
+            "specs": [{
+                "task_id": "t1",
+                "task_type": "coding",
+                "integration_mode": "git",
+                "goal": "完成需求分析",
+                "prompt": "分析需求",
+                "acceptance": [],
+                "dispatch_role": "worker",
+                "dispatch_round": 1,
+            }],
+        }
+        mock_ports.project_for_workflow.return_value = {
+            "startup_ready": True,
+            "project_root": self.tmp_dir,
+            "requirement": "测试真实直派",
+        }
+        mock_ports.load_tasks.return_value = []
+        mock_ports._scheduler_join_gate_allows.return_value = True
+        mock_ports.blocked_verdict_dep.return_value = None
+        mock_ports._reverification_reused_node.return_value = False
+        mock_ports.DIRECT_DISPATCH_LAUNCH_TIMEOUT = 10
+        mock_ports.subprocess.run.return_value = mock.MagicMock(returncode=0, stdout="LAUNCHED", stderr="")
+
+        # Lockout all coordinator interfaces
+        mock_ports.coordinator_intake_enabled.side_effect = AssertionError("coordinator_intake_enabled called!")
+        mock_ports.coordinator_pane_for_workflow.side_effect = AssertionError("coordinator_pane_for_workflow called!")
+        mock_ports.coordinator_status.side_effect = AssertionError("coordinator_status called!")
+        mock_ports.maybe_compact_coordinator.side_effect = AssertionError("maybe_compact_coordinator called!")
+
+        item = {
+            "workflow_id": "wf-lockout-01",
+            "node_id": "requirements",
+            "stage": "start",
+            "node": {"id": "requirements", "node_type": "agent", "purpose": "需求分析"},
+        }
+        # 1. Real try_direct_stage_advance without coordinator
+        res = direct_dispatch.try_direct_stage_advance(mock_ports, item)
+        self.assertTrue(res)
+        mock_ports.subprocess.run.assert_called()
+
+        # 2. Stage advance refusal records attention note without coordinator
+        mock_ports.try_direct_stage_advance = mock.MagicMock(return_value=False)
+        item_refused = {
+            "workflow_id": "wf-lockout-02",
+            "node_id": "implementation",
+            "direct_dispatch_fallback_reason": "plan_invalid: missing sections",
+        }
+        with mock.patch("herdr.coordinator_stage_admission.admit_stage_dispatch", return_value=(item_refused, {"id": "implementation"}, None, None)):
+            stage_delivery._handle_stage_advance_item(mock_ports, item_refused)
+            mock_ports.attention_note.assert_called()
+            call_args = mock_ports.attention_note.call_args
+            self.assertEqual(call_args[1]["reason"], "plan_invalid: missing sections")
+
+    def test_22_project_ensure_and_provision_skips_coordinator_for_software_development_v1(self):
+        """Scenario 22: ensure_project and provision_project skip coordinator start/healing for software-development-v1."""
+        from herdr.projects import ensure_project, template_requires_coordinator
+        from unittest import mock
+
+        self.assertFalse(template_requires_coordinator("software-development-v1"))
+        self.assertTrue(template_requires_coordinator("legacy-workflow"))
+
+        mock_record = {
+            "project_id": "p-1",
+            "project_name": "test-proj",
+            "project_root": self.tmp_dir,
+            "workspace_id": "w1",
+            "coordinator_pane_id": "dead-pane",
+            "workflow_file": "/tmp/wf.json",
+        }
+        with mock.patch("herdr.projects.project_by_root", return_value=mock_record), \
+             mock.patch("herdr.projects._workspace_alive", return_value=True), \
+             mock.patch("herdr.projects._pane_alive", return_value=False), \
+             mock.patch("herdr.projects._workflow_template_of", return_value="software-development-v1"), \
+             mock.patch("herdr.projects._recover_coordinator_pane", side_effect=AssertionError("recover called!")), \
+             mock.patch("herdr.projects._start_coordinator", side_effect=AssertionError("start_coordinator called!")):
+            # ensure_project should succeed without healing or starting coordinator
+            res = ensure_project(self.tmp_dir, template_name="software-development-v1")
+            self.assertEqual(res["project_id"], "p-1")
+
+    def test_23_fix_loop_item_handled_without_coordinator_for_staged_workflow(self):
+        """Scenario 23: fix_loop notifications bypass coordinator prompt and clear attention directly."""
+        from services.controller import fix_notification
+        from unittest import mock
+
+        mock_ports = mock.MagicMock()
+        mock_ports.workflow_config_for.return_value = {"name": "software-development-v1"}
+        mock_ports.coordinator_pane_for_workflow.side_effect = AssertionError("coordinator_pane_for_workflow called!")
+        mock_ports.coordinator_status.side_effect = AssertionError("coordinator_status called!")
+        mock_ports.subprocess.run.side_effect = AssertionError("subprocess.run prompt called!")
+
+        item = {
+            "kind": "fix_loop",
+            "workflow_id": "wf-rework-01",
+            "gate_stage": "test",
+            "retry_node": "implementation",
+            "invalidated": ["task-1"],
+            "loop_count": 1,
+            "max_loops": 3,
+        }
+        fix_notification._handle_fix_loop_item(mock_ports, item)
+        mock_ports.attention_clear.assert_called_with("wf-rework-01:fix_loop:test")
+
+    def test_24_plan_invalidation_stale_notes_excluded(self):
+        """Scenario 24: Obsolete plans marked stale by invalidation are excluded; fresh plan is dispatched."""
+        from herdr.plan_parser import find_plan_deliverables
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+        from unittest import mock
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-stale-01"
+        old_plan = """
+        # Implementation Plan
+        ## 目标
+        旧方案实现
+        ## 验收条目映射
+        - Task 1: 满足旧需求
+        ## 修改文件范围
+        - Create: obsolete.py
+        ## 验证命令
+        pytest -q test_obsolete.py
+        """
+        old_review = """
+        ## 方案对抗性审查与可行性风险评估
+        旧方案可行性评估通过。确认通过。无死锁和循环依赖。验证命令完备。
+        """
+        new_plan = """
+        # Implementation Plan
+        ## 目标
+        新方案实现，为实现阶段提供精准的任务规格与可执行验证命令，确保无全局总指挥直接派发。
+        ## 验收条目映射
+        - Task 1: 满足新需求，重构核心模块并保持向后兼容
+        ## 修改文件范围
+        - Create: fresh.py
+        - Test: test_fresh.py
+        ## 验证命令
+        pytest -q test_fresh.py
+        """
+        new_review = """
+        ## 方案对抗性审查与可行性风险评估
+        新方案可行性评估通过，修改文件范围限定在 fresh.py 和 test_fresh.py。任务划分清晰合理，无跨任务未声明依赖，无并发资源竞争。经仔细排查，未发现阻塞性缺陷，建议通过。
+        """
+
+        notes = [
+            {"node": "plan", "kind": "plan", "title": "旧计划", "body": old_plan, "task_id": "t-plan-old", "ts": 1000.0},
+            {"node": "plan", "kind": "review", "title": "旧审查", "body": old_review, "task_id": "t-chal-old", "ts": 1001.0},
+            {"node": "plan", "kind": "invalidation", "title": "作废", "invalidates": ["plan"], "ts": 1005.0},
+            {"node": "plan", "kind": "plan", "title": "新计划", "body": new_plan, "task_id": "t-plan-new", "ts": 1010.0},
+            {"node": "plan", "kind": "review", "title": "新审查", "body": new_review, "task_id": "t-chal-new", "ts": 1011.0},
+        ]
+        tasks = [
+            {"task_id": "t-plan-old", "workflow_id": wf_id, "node": "plan", "role": "executor", "status": "superseded", "superseded_by": "t-plan-new"},
+            {"task_id": "t-chal-old", "workflow_id": wf_id, "node": "plan", "role": "challenger", "status": "superseded", "superseded_by": "t-chal-new"},
+            {"task_id": "t-plan-new", "workflow_id": wf_id, "node": "plan", "role": "executor", "status": "completed"},
+            {"task_id": "t-chal-new", "workflow_id": wf_id, "node": "plan", "role": "challenger", "status": "completed"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            p, c, e, ch = find_plan_deliverables(wf_id, tasks)
+            self.assertIn("fresh.py", p)
+            self.assertNotIn("obsolete.py", p)
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch")
+            specs = res.get("specs", [])
+            self.assertEqual(len(specs), 1)
+            self.assertIn("fresh.py", specs[0]["planned_files"])
+            self.assertNotIn("obsolete.py", specs[0]["planned_files"])
+
+    def test_25_challenger_verdict_distinguishes_negation_and_blocked(self):
+        """Scenario 25: Challenger verdict correctly handles negation, [BLOCKED], and missing verdicts."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # 1. Negative wording of defects with approval -> PASS
+        v1, r1 = extract_challenger_verdict(
+            "## 方案对抗性审查与可行性风险评估\n经详细质询与可行性评估，架构无死锁风险。未发现阻塞性缺陷，建议通过。"
+        )
+        self.assertEqual(v1, "pass")
+
+        # 2. [BLOCKED] marker -> BLOCKED
+        v2, r2 = extract_challenger_verdict(
+            "## 方案对抗性审查与可行性风险评估\n[BLOCKED] 存在高风险，应先修订计划。"
+        )
+        self.assertEqual(v2, "blocked")
+
+        # 3. Explicit non-negated blocking defect -> BLOCKED
+        v3, r3 = extract_challenger_verdict(
+            "## 方案对抗性审查与可行性风险评估\n审查结论：发现阻塞性缺陷，模块之间存在循环依赖。"
+        )
+        self.assertEqual(v3, "blocked")
+
+        # 4. Text without explicit verdict -> MISSING
+        v4, r4 = extract_challenger_verdict(
+            "## 方案对抗性审查与可行性风险评估\n这是一份详细的审查备忘录，列出了一些设计考量与性能优化建议，但没有给出任何裁决。"
+        )
+        self.assertEqual(v4, "missing")
+
+    def test_26_unresolvable_dependencies_and_normalized_path_overlap_refused(self):
+        """Scenario 26: Unresolvable dependencies, missing task fields, and ./a.py vs a.py are refused."""
+        from herdr.plan_parser import parse_plan_tasks, validate_task_decoupling
+
+        # 1. Unresolvable dependency (function/artifact dependency)
+        plan_unresolved_dep = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: API 服务
+        - **Files:**
+          - Create: api.py
+        - **Verify:** pytest -q test_api.py
+
+        ### Task 2: 命令行入口
+        - **Dependencies:** api.py 中的 fetch_api 函数
+        - **Files:**
+          - Create: cli.py
+        - **Verify:** pytest -q test_cli.py
+        """
+        tasks1 = parse_plan_tasks(plan_unresolved_dep)
+        ok1, reason1 = validate_task_decoupling(tasks1)
+        self.assertFalse(ok1)
+        self.assertIn("unsupported intra-node dependency", reason1)
+
+        # 2. Path normalization overlap: ./a.py vs a.py
+        plan_path_overlap = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 核心
+        - **Files:**
+          - Create: ./a.py
+        - **Verify:** pytest -q test_a.py
+
+        ### Task 2: 包装
+        - **Files:**
+          - Create: a.py
+        - **Verify:** pytest -q test_b.py
+        """
+        tasks2 = parse_plan_tasks(plan_path_overlap)
+        ok2, reason2 = validate_task_decoupling(tasks2)
+        self.assertFalse(ok2)
+        self.assertIn("overlapping file 'a.py'", reason2)
+
+        # 3. Missing files or verify command in multi-task
+        plan_missing_fields = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 有效任务
+        - **Files:**
+          - Create: ok.py
+        - **Verify:** pytest -q test_ok.py
+
+        ### Task 2: 空白任务
+        - **Goal:** 无文件且无命令的任务
+        """
+        tasks3 = parse_plan_tasks(plan_missing_fields)
+        ok3, reason3 = validate_task_decoupling(tasks3)
+        self.assertFalse(ok3)
+
+    def test_27_duplicate_task_indices_refused_and_roles_unique(self):
+        """Scenario 27: Duplicate task numbers (Task 1 twice) are rejected and dispatch roles are unique."""
+        from herdr.plan_parser import parse_plan_tasks, validate_task_decoupling
+
+        plan_duplicate = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 模块 A
+        - **Files:**
+          - Create: a.py
+        - **Verify:** pytest -q test_a.py
+
+        ### Task 1: 模块 B
+        - **Files:**
+          - Create: b.py
+        - **Verify:** pytest -q test_b.py
+        """
+        tasks = parse_plan_tasks(plan_duplicate)
+        ok, reason = validate_task_decoupling(tasks)
+        self.assertFalse(ok)
+        self.assertIn("duplicate task index", reason)
+
+    def test_28_verify_command_multiline_extraction(self):
+        """Scenario 28: Multiline verify command extraction does not produce '**'."""
+        from herdr.plan_parser import parse_plan_tasks
+
+        plan_multiline_cmd = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 核心模块
+        - **Goal:** 核心逻辑
+        - **Files:**
+          - Create: core.py
+        - **Verify:**
+          pytest -q test_core.py
+        - **Dependencies:** None
+        """
+        tasks = parse_plan_tasks(plan_multiline_cmd)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["verify_command"], "pytest -q test_core.py")
+        self.assertNotEqual(tasks[0]["verify_command"], "**")
+
+    def test_29_real_workflow_template_config_recognition_and_task_event_bypass(self):
+        """Scenario 29: workflow_template identifies staged workflow and task_events bypasses coordinator on rejection."""
+        from herdr.stage_skills import is_staged_dev_flow_workflow
+        from services.controller import task_events
+        from unittest import mock
+
+        # 1. workflow_template recognition
+        real_cfg = {"workflow_template": "software-development-v1"}
+        self.assertTrue(is_staged_dev_flow_workflow(real_cfg))
+        self.assertTrue(is_staged_dev_flow_workflow({"coordinator_required": False}))
+
+        # 2. task event rejection bypasses coordinator
+        mock_ports = mock.MagicMock()
+        mock_ports.get_task.return_value = {
+            "task_id": "t-done-fail",
+            "workflow_id": "wf-staged-01",
+            "status": "agent_done",
+        }
+        mock_ports.workflow_config_for.return_value = {"workflow_template": "software-development-v1"}
+        mock_ports.try_auto_accept.return_value = False
+        mock_ports.try_auto_verdict.return_value = False
+        mock_ports.verdict_defer_reason.return_value = "plan deliverable incomplete"
+
+        # Coordinator interfaces must NOT be invoked
+        mock_ports.coordinator_status.side_effect = AssertionError("coordinator_status should not be called!")
+        mock_ports.coordinator_pane_for_workflow.side_effect = AssertionError("coordinator_pane_for_workflow should not be called!")
+        mock_ports.subprocess.run.side_effect = AssertionError("subprocess prompt should not be called!")
+
+        item = {
+            "key": "t-done-fail:event",
+            "task_id": "t-done-fail",
+            "event_type": "done",
+            "workflow_id": "wf-staged-01",
+        }
+        task_events._handle_task_event(mock_ports, item)
+        mock_ports.attention_note.assert_called_once()
+        args, kwargs = mock_ports.attention_note.call_args
+        self.assertIn("auto_acceptance_rejected", kwargs.get("reason", ""))
+
+    def test_30_unattributed_review_note_and_historic_plan_files_isolation(self):
+        """Scenario 30: Unattributed review notes cannot bypass [BLOCKED] and historic plan files do not override notes."""
+        from herdr.plan_parser import find_plan_deliverables
+        from unittest import mock
+
+        wf_id = "wf-iso-01"
+        tasks = [
+            {"task_id": "t-exec-01", "workflow_id": wf_id, "node": "plan", "role": "executor", "status": "completed"},
+            {"task_id": "t-chal-01", "workflow_id": wf_id, "node": "plan", "role": "challenger", "status": "completed"},
+        ]
+
+        # Note 1: challenger explicit [BLOCKED]
+        # Note 2: subsequent note with NO task attribution claiming [PASS]
+        notes = [
+            {"node": "plan", "kind": "plan", "title": "当前有效计划", "body": "# Plan\n## 目标\n当前方案", "task_id": "t-exec-01", "ts": 100.0},
+            {"node": "plan", "kind": "review", "title": "真实审查", "body": "[BLOCKED] 存在严重架构缺陷", "task_id": "t-chal-01", "ts": 101.0},
+            {"node": "plan", "kind": "review", "title": "伪造审查", "body": "[PASS] 虚假通过", "task_id": None, "author": None, "ts": 102.0},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            p, c, e, ch = find_plan_deliverables(wf_id, tasks)
+            self.assertIn("当前方案", p)
+            # Must strictly match challenger task's [BLOCKED], unattributed [PASS] ignored
+            self.assertIn("[BLOCKED]", c)
+            self.assertNotIn("虚假通过", c)
+
+    def test_31_challenger_verdict_subtle_negation_and_conditional_expressions(self):
+        """Scenario 31: Challenger verdict correctly evaluates negation, conditional expressions, and body mentions."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # 1. "方案对抗质询：目前不能通过。" -> BLOCKED
+        v1, r1 = extract_challenger_verdict("方案对抗质询：目前不能通过。")
+        self.assertEqual(v1, "blocked")
+
+        # 2. "结论：暂不予通过，需补充错误处理方案。" -> BLOCKED
+        v2, r2 = extract_challenger_verdict("结论：暂不予通过，需补充错误处理方案。")
+        self.assertEqual(v2, "blocked")
+
+        # 3. "自动测试已经通过，但本轮方案审查尚未完成，请等待。" -> MISSING (not approved!)
+        v3, r3 = extract_challenger_verdict("自动测试已经通过，但本轮方案审查尚未完成，请等待。")
+        self.assertEqual(v3, "missing")
+
+        # 4. "没有发现阻塞性缺陷，建议通过。" -> PASS
+        v4, r4 = extract_challenger_verdict("没有发现阻塞性缺陷，建议通过。")
+        self.assertEqual(v4, "pass")
+
+    def test_32_extensionless_files_support_in_plan(self):
+        """Scenario 32: Plan files without extension (Dockerfile, Makefile, LICENSE) are recognized."""
+        from herdr.plan_parser import parse_plan_tasks, validate_task_decoupling
+
+        plan_docker = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 容器化构建
+        - **Goal:** 添加容器镜像构建配置
+        - **Files:**
+          - Create: Dockerfile
+        - **Verify:** docker build .
+        - **Dependencies:** None
+
+        ### Task 2: 说明文档
+        - **Goal:** 更新文档
+        - **Files:**
+          - Modify: README.md
+        - **Verify:** pytest -q test_readme.py
+        - **Dependencies:** None
+        """
+        tasks = parse_plan_tasks(plan_docker)
+        self.assertEqual(len(tasks), 2)
+        self.assertIn("Dockerfile", tasks[0]["files"])
+        self.assertIn("README.md", tasks[1]["files"])
+        ok, reason = validate_task_decoupling(tasks)
+        self.assertTrue(ok, f"Decoupling should pass for Dockerfile and README.md: {reason}")
+
+    def test_33_plan_version_binding_rejects_outdated_challenger_review(self):
+        """Scenario 33: If executor updates plan (v2) after challenger reviewed v1, verification fails until re-reviewed."""
+        from herdr.plan_parser import verify_plan_and_challenger
+        from unittest import mock
+
+        wf_id = "wf-ver-bind-01"
+        tasks = [
+            {"task_id": "t-exec-01", "workflow_id": wf_id, "node": "plan", "role": "executor", "status": "completed"},
+            {"task_id": "t-chal-01", "workflow_id": wf_id, "node": "plan", "role": "challenger", "status": "completed"},
+        ]
+
+        plan_v1_body = """
+        # Implementation Plan
+        ## 目标
+        方案第一版实现。
+        ## 验收条目映射
+        - Task 1: 满足第一版需求
+        ## 修改文件范围
+        - Create: v1.py
+        ## 验证命令
+        pytest -q test_v1.py
+        """
+        review_v1_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：被审计划 note-1 评估通过，无死锁和依赖冲突，验证命令完备。
+        HERDR_GATE_VERDICT: PASS
+        Plan-Ref: note-1
+        """
+        plan_v2_body = """
+        # Implementation Plan
+        ## 目标
+        方案第二版重构实现。
+        ## 验收条目映射
+        - Task 1: 满足第二版重构需求
+        ## 修改文件范围
+        - Create: v2.py
+        ## 验证命令
+        pytest -q test_v2.py
+        """
+
+        # 1. executor posts plan v1 (ts=100.0, id=note-1)
+        # 2. challenger reviews v1 with [PASS] (ts=101.0, targeting note-1)
+        # 3. executor updates and posts plan v2 (ts=102.0, id=note-2)
+        notes = [
+            {"note_id": "note-1", "node": "plan", "kind": "plan", "title": "计划v1", "body": plan_v1_body, "task_id": "t-exec-01", "ts": 100.0},
+            {"note_id": "note-chal", "node": "plan", "kind": "review", "title": "审查v1", "body": review_v1_body, "task_id": "t-chal-01", "ts": 101.0, "target_note_id": "note-1"},
+            {"note_id": "note-2", "node": "plan", "kind": "plan", "title": "计划v2", "body": plan_v2_body, "task_id": "t-exec-01", "ts": 102.0},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok, reason, details = verify_plan_and_challenger(wf_id, tasks)
+            # Must reject because challenger only reviewed note-1, but active plan is note-2 (ts=102 > 101)
+            self.assertFalse(ok)
+            self.assertTrue("challenger_plan_version_mismatch" in reason or "challenger_outdated" in reason)
+
+        # 4. challenger reviews plan v2 (ts=103.0, id=note-3, targeting note-2) -> PASS
+        review_v2_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：被审计划 note-2 针对第二版重构评估通过，无阻塞性缺陷。
+        HERDR_GATE_VERDICT: PASS
+        Plan-Ref: note-2
+        """
+        notes.append({
+            "note_id": "note-chal-2",
+            "node": "plan",
+            "kind": "review",
+            "title": "审查v2",
+            "body": review_v2_body,
+            "task_id": "t-chal-01",
+            "ts": 103.0,
+            "target_note_id": "note-2",
+        })
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok2, reason2, details2 = verify_plan_and_challenger(wf_id, tasks)
+            self.assertTrue(ok2, f"Verification should pass with re-reviewed plan v2: {reason2}")
+            self.assertEqual(reason2, "plan_and_challenger_verified")
+
+    def test_34_verdict_extraction_conflicts_and_conditionals_blocked(self):
+        """Scenario 34: Non-verdict lines like '测试结论' do not override '最终裁决: 阻断', and conditional pass is blocked."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # 1. "测试结论：通过。\n最终裁决：阻断，须补齐验收方案。" -> BLOCKED
+        text1 = """
+        ## 方案对抗性审查与可行性风险评估
+        测试结论：通过。
+        最终裁决：阻断，须补齐验收方案。
+        """
+        v1, r1 = extract_challenger_verdict(text1)
+        self.assertEqual(v1, "blocked")
+
+        # 2. "结论：修复上述问题后方可通过。" -> BLOCKED (conditional approval)
+        text2 = """
+        ## 方案对抗性审查与可行性风险评估
+        结论：修复上述问题后方可通过。
+        """
+        v2, r2 = extract_challenger_verdict(text2)
+        self.assertEqual(v2, "blocked")
+
+    def test_35_superpowers_plan_path_and_env_task_id_unified(self):
+        """Scenario 35: docs/superpowers/plans/xxx.md is accepted by auto_acceptance and read by find_plan_deliverables; env task_id bound."""
+        import os
+        from pathlib import Path
+        from herdr.plan_parser import find_plan_deliverables
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr.task_cli_evidence import note_add
+        import argparse
+        from unittest import mock
+
+        clone_dir = Path(self.tmp_dir) / "clone_superpowers"
+        plans_dir = clone_dir / "docs" / "superpowers" / "plans"
+        plans_dir.mkdir(parents=True, exist_ok=True)
+
+        plan_file = plans_dir / "2026-10-27-feature.md"
+        plan_content = """
+        # Implementation Plan
+        ## 目标
+        实现超级能力模块解耦。
+        ## 验收条目映射
+        - Task 1: 交付超级能力功能
+        ## 修改文件范围
+        - Create: superpower.py
+        ## 验证命令
+        pytest -q test_superpower.py
+        """
+        plan_file.write_text(plan_content, encoding="utf-8")
+
+        wf_id = "wf-superpower-01"
+        tasks = [
+            {"task_id": "t-exec-sp", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "clone_path": str(clone_dir), "status": "agent_done"},
+            {"task_id": "t-chal-sp", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+
+        # 1. try_auto_accept accepts plan from docs/superpowers/plans/2026-10-27-feature.md
+        import re as real_re
+        mock_ports = mock.MagicMock()
+        mock_ports.re = real_re
+        mock_ports.auto_accept_enabled.return_value = True
+        mock_ports.node_is_gate.return_value = False
+        mock_ports.set_task_status.return_value = True
+        mock_ports.get_task.return_value = tasks[0]
+        mock_ports.load_tasks.return_value = tasks
+        mock_ports.workflow_config_for.return_value = {"workflow_template": "software-development-v1"}
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=[]):
+            acc_ok = try_auto_accept(mock_ports, "t-exec-sp")
+            self.assertTrue(acc_ok, "auto_acceptance should accept plan in docs/superpowers/plans/*.md")
+
+        # 2. find_plan_deliverables reads the same file from docs/superpowers/plans/
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=[]):
+            p, c, e, ch = find_plan_deliverables(wf_id, tasks)
+            self.assertIn("superpower.py", p)
+
+        # 3. note_add auto-populates task_id from HERDR_TASK_ID when --task omitted
+        with mock.patch.dict(os.environ, {"HERDR_TASK_ID": "t-env-123"}):
+            fake_args = argparse.Namespace(
+                workflow_id=wf_id,
+                kind="plan",
+                title="环境变量任务绑定",
+                text="内容测试",
+                file=None,
+                node="plan",
+                task="",
+                agent="",
+                source="agent",
+                base_sha="",
+                round=1,
+                invalidates=None,
+                field=[],
+            )
+            fake_deps = {
+                "find_task": lambda tasks, tid: None,
+                "load_tasks": lambda: [],
+                "task_head_sha": lambda task: "",
+            }
+            with mock.patch("herdr.workflow_docs.append_note") as mock_append:
+                note_add(fake_args, deps=fake_deps)
+                mock_append.assert_called_once()
+                call_kwargs = mock_append.call_args[1]
+                self.assertEqual(call_kwargs.get("task_id"), "t-env-123")
+
+    def test_36_file_deliverable_version_binding_and_ref_enforced(self):
+        """Scenario 36: File deliverables strictly enforce plan version binding and mandatory Plan-Ref."""
+        from pathlib import Path
+        from herdr.plan_parser import verify_plan_and_challenger
+        from unittest import mock
+
+        wf_id = "wf-file-bind-01"
+        chal_dir = Path(self.tmp_dir) / "clone_chal_file"
+        chal_dir.mkdir(parents=True, exist_ok=True)
+        chal_file = chal_dir / "challenger-review.md"
+
+        tasks = [
+            {"task_id": "t-exec-01", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": "t-chal-01", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "clone_path": str(chal_dir), "status": "completed"},
+        ]
+
+        plan_v1_body = "# Implementation Plan\n## 验收条目\n- Task 1: v1\n## 修改文件范围\n- Create: a.py\n## 验证命令\npytest -q test_a.py"
+        plan_v2_body = "# Implementation Plan\n## 验收条目\n- Task 1: v2\n## 修改文件范围\n- Create: b.py\n## 验证命令\npytest -q test_b.py"
+
+        # 1. Challenger writes [PASS] referencing note-1 in file (> 100 chars)
+        chal_file.write_text(
+            "## 方案对抗性审查与可行性风险评估\n"
+            "质询审查：经过对抗性质询深度评估与核实，架构无死锁和循环依赖风险，任务分解逻辑清晰，验证命令具备可行性。评估确认通过。\n"
+            "HERDR_GATE_VERDICT: PASS\n"
+            "Plan-Ref: note-1\n",
+            encoding="utf-8",
+        )
+
+        # Active plan in notes is note-2
+        notes = [
+            {"note_id": "note-1", "node": "plan", "kind": "plan", "title": "计划v1", "body": plan_v1_body, "task_id": "t-exec-01", "ts": 100.0},
+            {"note_id": "note-2", "node": "plan", "kind": "plan", "title": "计划v2", "body": plan_v2_body, "task_id": "t-exec-01", "ts": 102.0},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok, reason, details = verify_plan_and_challenger(wf_id, tasks)
+            self.assertFalse(ok, "File challenger review referencing note-1 must not verify note-2")
+            self.assertIn("challenger_plan_version_mismatch", reason)
+
+        # 2. Challenger review missing Plan-Ref is rejected
+        chal_file.write_text(
+            "## 方案对抗性审查与可行性风险评估\n"
+            "质询审查：经过对抗性质询深度评估与核实，架构无死锁和循环依赖风险，任务分解逻辑清晰，验证命令具备可行性。评估确认通过。\n"
+            "HERDR_GATE_VERDICT: PASS\n",
+            encoding="utf-8",
+        )
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok_ref, reason_ref, _ = verify_plan_and_challenger(wf_id, tasks)
+            self.assertFalse(ok_ref, "Approval without Plan-Ref must be rejected")
+            self.assertIn("challenger_plan_ref_missing", reason_ref)
+
+        # 3. Challenger updates file to reference note-2 -> PASS
+        chal_file.write_text(
+            "## 方案对抗性审查与可行性风险评估\n"
+            "质询审查：经过对抗性质询深度评估与核实，架构无死锁和循环依赖风险，任务分解逻辑清晰，验证命令具备可行性。评估确认通过。\n"
+            "HERDR_GATE_VERDICT: PASS\n"
+            "Plan-Ref: note-2\n",
+            encoding="utf-8",
+        )
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok2, reason2, _ = verify_plan_and_challenger(wf_id, tasks)
+            self.assertTrue(ok2, f"Should pass when challenger review references note-2: {reason2}")
+            self.assertEqual(reason2, "plan_and_challenger_verified")
+
+    def test_37_agent_name_fallback_cannot_override_task_blocked(self):
+        """Scenario 37: Unassigned note from same agent cannot override current task's BLOCKED review."""
+        from herdr.plan_parser import verify_plan_and_challenger
+        from unittest import mock
+
+        wf_id = "wf-agent-override-01"
+        tasks = [
+            {"task_id": "t-exec-01", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": "t-chal-01", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "agent": "codex", "status": "completed"},
+        ]
+
+        plan_body = "# Implementation Plan\n## 验收条目\n- Task 1: feat\n## 修改文件范围\n- Create: c.py\n## 验证命令\npytest -q test_c.py"
+        notes = [
+            {"note_id": "note-plan", "node": "plan", "kind": "plan", "title": "计划", "body": plan_body, "task_id": "t-exec-01", "ts": 100.0},
+            # Real task review is BLOCKED
+            {"note_id": "note-chal-1", "node": "plan", "kind": "review", "title": "质询", "body": "## 方案对抗性审查与可行性风险评估\nHERDR_GATE_VERDICT: blocked", "task_id": "t-chal-01", "agent": "codex", "ts": 101.0},
+            # Unassigned note claiming PASS later
+            {"note_id": "note-chal-unassigned", "node": "plan", "kind": "review", "title": "质询无归属", "body": "## 方案对抗性审查与可行性风险评估\nHERDR_GATE_VERDICT: PASS\nPlan-Ref: note-plan", "task_id": "", "agent": "codex", "ts": 102.0},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok, reason, details = verify_plan_and_challenger(wf_id, tasks)
+            self.assertFalse(ok)
+            self.assertIn("challenger_blocked", reason)
+
+    def test_38_non_terminal_and_unfinished_verdicts_strictly_prevent_approval(self):
+        """Scenario 38: Non-terminal and unfinished review phrases strictly fail-closed."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # 1. PENDING with past pass mention -> BLOCKED
+        text1 = "HERDR_GATE_VERDICT: PENDING\n历史记录：上轮审查通过；当前审查尚未完成。"
+        v1, r1 = extract_challenger_verdict(text1)
+        self.assertEqual(v1, "blocked")
+
+        # 2. Unfinished review without verdict -> MISSING
+        text2 = "上轮审查通过，本轮方案审查尚未完成。"
+        v2, r2 = extract_challenger_verdict(text2)
+        self.assertEqual(v2, "missing")
+
+    def test_39_plan_constraints_and_acceptance_passed_to_implementation_specs(self):
+        """Scenario 39: Scope, acceptance criteria, and raw task chunk are preserved in implementation specs & prompt."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+        from unittest import mock
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-plan-constraints-01"
+        plan_body = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 配置读取核心
+        - **Goal:** 实现配置读取
+        - **Scope:** 仅增加读取逻辑，不修改持久化格式
+        - **Acceptance:** 损坏 JSON 必须原样保留并返回错误，禁止覆盖用户原文件
+        - **Files:**
+          - Modify: settings.py
+          - Test: test_settings.py
+        - **Verify:**
+          pytest -q tests/test_settings.py
+        - **Dependencies:** None
+        """
+        chal_body = """
+        ## 方案对抗性审查与可行性风险评估
+        质询审查：被审计划 note-p1 详细核实，无死锁和循环依赖风险。确认通过。
+        HERDR_GATE_VERDICT: PASS
+        Plan-Ref: note-p1
+        """
+        tasks = [
+            {"task_id": f"{wf_id}-plan-exec", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-chal", "workflow_id": wf_id, "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+        ]
+        notes = [
+            {"note_id": "note-p1", "node": "plan", "kind": "plan", "title": "计划", "body": plan_body, "task_id": f"{wf_id}-plan-exec"},
+            {"note_id": "note-c1", "node": "plan", "kind": "review", "title": "审查", "body": chal_body, "task_id": f"{wf_id}-plan-chal"},
+        ]
+
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch")
+            specs = res.get("specs", [])
+            self.assertEqual(len(specs), 1)
+            spec = specs[0]
+            self.assertEqual(spec.get("plan_scope"), "仅增加读取逻辑，不修改持久化格式")
+            self.assertEqual(spec.get("plan_acceptance"), "损坏 JSON 必须原样保留并返回错误，禁止覆盖用户原文件")
+            self.assertIn("仅增加读取逻辑，不修改持久化格式", spec.get("prompt", ""))
+            self.assertIn("损坏 JSON 必须原样保留并返回错误，禁止覆盖用户原文件", spec.get("prompt", ""))
+            self.assertIn("pytest -q tests/test_settings.py", spec.get("prompt", ""))
+            self.assertIn("note-p1", spec.get("plan_ref", ""))
+
+    def test_40_require_challenger_false_compatibility(self):
+        """Scenario 40: verify_plan_and_challenger succeeds when require_challenger=False without challenger deliverable."""
+        from herdr.plan_parser import verify_plan_and_challenger
+        from unittest import mock
+
+        wf_id = "wf-no-challenger-01"
+        plan_body = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 基础工具类重构
+        - **Goal:** 重构工具类模块
+        - **Files:**
+          - Modify: utils.py
+        - **Verify:**
+          pytest -q tests/test_utils.py
+        - **Dependencies:** None
+        """
+        notes = [
+            {"note_id": "note-p-single", "node": "plan", "kind": "plan", "title": "计划", "body": plan_body, "task_id": "t-exec-only"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            ok, reason, details = verify_plan_and_challenger(wf_id, tasks=[], require_challenger=False)
+            self.assertTrue(ok)
+            self.assertIn("plan_verified", reason)
+            self.assertEqual(details.get("plan_id"), "note-p-single")
+
+    def test_41_challenger_detection_strictly_scoped_to_current_workflow(self):
+        """Scenario 41: Unrelated workflow's challenger does not force require_challenger=True on current workflow."""
+        from herdr.direct_dispatch import plan_stage_dispatch
+        import yaml
+        from unittest import mock
+
+        with open(self.template_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        impl_node = find_node(cfg, "implementation")
+
+        wf_id = "wf-scoped-01"
+        plan_body = """
+        # Implementation Plan
+        ## 任务拆分
+        ### Task 1: 核心模块修改
+        - **Goal:** 修改核心模块
+        - **Files:**
+          - Modify: core.py
+        - **Verify:**
+          pytest -q tests/test_core.py
+        - **Dependencies:** None
+        """
+        # Tasks passed from controller include an unrelated workflow's challenger
+        tasks = [
+            {"task_id": "wf-other-chal", "workflow_id": "wf-other", "node": "plan", "dispatch_role": "challenger", "status": "completed"},
+            {"task_id": f"{wf_id}-plan-exec", "workflow_id": wf_id, "node": "plan", "dispatch_role": "executor", "status": "completed"},
+        ]
+        notes = [
+            {"note_id": "note-p-scoped", "node": "plan", "kind": "plan", "title": "计划", "body": plan_body, "task_id": f"{wf_id}-plan-exec"},
+        ]
+        with mock.patch("herdr.workflow_docs.load_notes", return_value=notes):
+            # wf-scoped-01 only has an executor, no challenger.
+            # Unrelated wf-other's challenger must NOT cause challenger_missing on wf-scoped-01.
+            res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求", context_branch="main")
+            self.assertEqual(res.get("mode"), "dispatch", f"Should dispatch without requiring challenger: {res}")
+
 
 if __name__ == "__main__":
     unittest.main()

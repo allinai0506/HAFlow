@@ -13,6 +13,26 @@ def _handle_fix_loop_item(ports, item):
                                   and t.get("task_id") in affected
                                   and t.get("rework_request_id")}
     workflow_id = item["workflow_id"]
+    try:
+        from herdr.stage_skills import is_staged_dev_flow_workflow
+        wf_cfg = ports.workflow_config_for(workflow_id) or {}
+        is_staged = is_staged_dev_flow_workflow(wf_cfg)
+    except Exception:
+        is_staged = False
+
+    if is_staged:
+        gate_stage = item.get("gate_stage")
+        retry_node = item.get("retry_node")
+        ports.attention_clear(f"{workflow_id}:fix_loop:{gate_stage}")
+        print(
+            f"[FIX LOOP DIRECT] "
+            f"workflow={workflow_id} "
+            f"gate={gate_stage} "
+            f"retry={retry_node} "
+            f"-> handled by controller directly without coordinator"
+        )
+        return
+
     coord_pane = ports.coordinator_pane_for_workflow(workflow_id)
 
     if not coord_pane:
@@ -109,6 +129,6 @@ DEPENDENCIES = {'_handle_fix_loop_item': ('attention_clear', 'attention_get', 'a
                            'build_fix_loop_message', 'coordinator_pane_for_workflow',
                            'coordinator_status', 'liveness', 'load_tasks',
                            'maybe_compact_coordinator', 'project_for_workflow', 'subprocess',
-                           'time')}
+                           'time', 'workflow_config_for')}
 
 __all__ = tuple(DEPENDENCIES)

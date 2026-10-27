@@ -81,8 +81,15 @@ class TestProjectCreationLogic(unittest.TestCase):
 
                 self.assertEqual(record["workspace_id"], ws_id)
                 self.assertEqual(record["coordinator_pane_id"], "wTest:p1")
-                mock_coord.assert_called_once()
+                # software-development-v1 does not require coordinator
+                mock_coord.assert_not_called()
                 mock_save.assert_called_once()
+
+                # Legacy template requiring coordinator still starts it
+                mock_coord.reset_mock()
+                mock_save.reset_mock()
+                herdr_projects.adopt_workspace_as_project(ws_id, tmpdir, "legacy-workflow")
+                mock_coord.assert_called_once()
 
 
 class TemplateSwitchTest(unittest.TestCase):

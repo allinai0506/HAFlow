@@ -45,6 +45,23 @@ def _handle_task_event(ports, item):
             except Exception:
                 pass
 
+        _task_pre = ports.get_task(task_id)
+        if _task_pre:
+            _wf_id = _task_pre.get("workflow_id")
+            _wf_cfg = ports.workflow_config_for(_wf_id) or {} if _wf_id else {}
+            from herdr.stage_skills import is_staged_dev_flow_workflow
+            if is_staged_dev_flow_workflow(_wf_cfg):
+                _r = locals().get("_defer_reason", event_type)
+                ports.attention_note(
+                    key,
+                    _task_pre,
+                    event_type,
+                    reason=f"auto_acceptance_rejected: {_r}" if event_type == "done" else str(_r),
+                    detail=f"Task {task_id} {event_type} in staged workflow; coordinator bypass active",
+                )
+                print(f"[STAGED TASK EVENT BYPASS] task={task_id} event={event_type} reason={_r}")
+                return
+
         while True:
             task = ports.get_task(task_id)
 
@@ -235,6 +252,6 @@ DEPENDENCIES = {'_handle_task_event': ('attention_clear', 'attention_get', 'atte
                         'handle_coordinator_delivery_stall', 'liveness', 'lock', 'queued_events',
                         'retry_coordinator_decision', 'subprocess', 'time', 'try_auto_accept',
                         'try_auto_verdict', 'verdict_defer_reason',
-                        'wait_for_coordinator_decision')}
+                        'wait_for_coordinator_decision', 'workflow_config_for')}
 
 __all__ = tuple(DEPENDENCIES)
