@@ -342,7 +342,7 @@ function renderOpsCenter(){
   }).join(''):'<div class="empty">当前筛选条件下暂无工作流</div>';
 
   const anomsHtml=anoms.length?anoms.map(a=>{
-    const isBlocked=a.kind==='BLOCKED'||a.kind==='UPDATE_BLOCKED';
+    const isBlocked=a.kind==='BLOCKED'||a.kind==='UPDATE_BLOCKED'||a.kind==='FINALIZE_ESCALATED';
     return `
       <div class="ops-anomaly-card ${isBlocked?'is-blocked':''}">
         <div class="ops-anomaly-head">

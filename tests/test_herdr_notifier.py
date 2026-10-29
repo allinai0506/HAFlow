@@ -76,6 +76,50 @@ class TestHerdrNotifier(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8765/?workflow_id=wf-test", url_wf)
         self.assertNotIn("task_id=", url_wf)
 
+    def test_scan_notifies_finalize_escalated_and_dedups(self):
+        tasks_data = {
+            "tasks": [
+                {
+                    "task_id": "wf-1-impl",
+                    "workflow_id": "wf-1",
+                    "project_name": "my-project",
+                    "agent": "qodercli",
+                    "pane_id": "w1:p1",
+                    "status": "completed",
+                    "finalize_escalated": True,
+                    "finalize_escalate_reason": "retry_exhausted",
+                }
+            ]
+        }
+        with patch.object(self.notifier, "load", return_value=tasks_data), \
+             patch.object(self.notifier, "save") as mock_save, \
+             patch.object(self.notifier, "notify") as mock_notify:
+            # First scan with initialized state (prior un-escalated)
+            initial_state = {
+                "initialized": True,
+                "last_status": {"wf-1-impl": "completed"},
+                "last_escalated": {},
+                "completed_workflows": [],
+            }
+            new_state = self.notifier.scan(initial_state)
+            mock_notify.assert_called_once()
+            args = mock_notify.call_args[0]
+            self.assertEqual(args[0], "Herdr Factory · 终化升级（需人工）")
+            self.assertIn("wf-1-impl", args[1])
+            self.assertIn("retry_exhausted", args[2])
+            self.assertTrue(new_state["last_escalated"].get("wf-1-impl"))
+
+            # Second scan: same escalated state, must NOT notify again (deduped)
+            mock_notify.reset_mock()
+            new_state = self.notifier.scan(new_state)
+            mock_notify.assert_not_called()
+
+            # Third scan: escalation cleared
+            tasks_data["tasks"][0]["finalize_escalated"] = False
+            new_state = self.notifier.scan(new_state)
+            mock_notify.assert_not_called()
+            self.assertNotIn("wf-1-impl", new_state["last_escalated"])
+
 
 if __name__ == "__main__":
     unittest.main()

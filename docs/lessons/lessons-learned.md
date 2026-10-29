@@ -8686,3 +8686,46 @@ pytest -q tests/test_controller_modularity.py
 - `tests/test_console_project_creation.py` 与 `tests/test_projects_coordinator_missing_error.py` — 26 项同步测试契约全通过
 
 ---
+
+## 209. [2026-10-30] 终化升级（finalize_escalated）信号进入系统通知与可观测性看板闭环
+
+### 问题背景
+
+在 `wf-haflow-1029-02` 调度过程中，任务在 `completed` 阶段发生提交/集成重试超限，进入 `finalize_escalated: True`。但由于：
+1. **状态机保护**：`completed` 为准终态，普通返工 `rework` 拒绝接入（防死循环）；
+2. **Controller 终化重试**：重试 5 次提交动作超限后标记 `finalize_escalated=True`，Controller 停止干预等待人工；
+3. **可观测性盲区**：`herdr-notifier` 仅按 `ATTENTION = {"blocked", "failed", "human_review", "needs_action"}` 过滤，忽略 `completed + finalize_escalated`；`ops-center` 的 `blocked_workflows` 仅统计 `status == 'blocked'`，节点状态卡片将 `finalize_escalated` 误统计为 `completed`。
+
+三者叠加形成“无红字、无告警、无进展”的静默挂起盲区。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 任务元数据升级未进入系统通知 | 仅靠状态字段变更过滤事件会遗漏处于准终态的元数据级升级 | `herdr-notifier.py` 必须显式维护 `last_escalated` 状态，对 `finalize_escalated=True` 触发独立系统弹窗并幂等去重 |
+| 控制器升级未持久化 Attention 账本 | Controller 在记录元数据时遗漏写入全局 `attention.json` 与即时通知 | `_escalate_finalize` 必须显式调用 `ports.attention_note(f"{task_id}:finalize", ...)` 与 `ports.notify_attention(...)` |
+| 控制台工作流卡片出现“假绿/假静默” | 异常节点如果因为 status 是 completed 就计入 completed，看板无法暴露挂起 | `_node_task_status_counts` 对 `finalize_escalated` 任务强制记为 `blocked`，使卡片显式亮红 |
+| 异常处理缺乏恢复动作直达 | 用户在看板看到异常后无从下手 | Ops Center 异常卡片为 `FINALIZE_ESCALATED` 提供一键 `herdr-task clear-escalation <task_id>` 快捷动作 |
+
+### 操作规范
+
+1. **升级必须可观测**：任何导致 Controller 停止自动驱动并等待人工介入的元数据标记，必须至少打通系统通知（macOS terminal-notifier/osascript）与看板异常计数（`attention_required`）。
+2. **状态卡片 fail-closed**：未完成集成与清理的任务在存在终化升级时，禁止在聚合卡片中以“完成”或“绿色”示人，必须显式计入 `blocked`。
+3. **闭环恢复通道**：`clear_finalize_escalation` 负责清理 `attention.json` 中的 `task_id:finalize` 闩锁并复位元数据，使 Controller 重新评估重试预算。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest tests/test_herdr_notifier.py tests/test_ops_center_read_path.py tests/test_finalize_empty.py
+```
+
+### 相关文档 / 关联证据
+
+- `services/herdr-notifier.py` — `scan()` 针对 `finalize_escalated` 的检测、通知与去重
+- `services/controller/finalize_support.py` — `_escalate_finalize` 写入 Attention 与即时通知
+- `herdr/ops_center_helpers.py` 与 `herdr/ops_center_projection.py` — 异常分类、节点Blocked统计与阻塞工作流聚合
+- `tests/test_herdr_notifier.py` — `test_scan_notifies_finalize_escalated_and_dedups`
+- `tests/test_ops_center_read_path.py` — `test_finalize_escalated_surfaces_as_blocked_and_anomaly`
+- `tests/test_finalize_empty.py` — `test_escalate_finalize_records_attention_and_notifies`
+
+---

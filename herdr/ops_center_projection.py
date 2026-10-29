@@ -318,7 +318,11 @@ def _build_boss_summary(tasks, workflows, anomalies):
         "blocked_workflows": [
             workflow_id
             for workflow_id in sorted(workflows)
-            if any(task.get("status") == "blocked" for task in workflows.get(workflow_id, []))
+            if any(
+                (task.get("status") == "blocked" or task.get("finalize_escalated"))
+                for task in workflows.get(workflow_id, [])
+                if task.get("status") != "superseded" and not task.get("superseded_by")
+            )
         ],
         "attention_required": len(anomalies),
     }
