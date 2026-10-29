@@ -82,6 +82,22 @@ def clear_stage_advance(ports,
         state.pop(key, None)
         ports.save_stage_state(state)
 
+def clear_workflow_stage_state(ports,
+    workflow_id
+):
+    """Clear every queued/notified latch of one workflow (close-workflow semantics)."""
+    prefix = f"{workflow_id}:"
+
+    with ports.lock:
+        state = ports.load_stage_state()
+        removed = [key for key in state if key.startswith(prefix)]
+        for key in removed:
+            del state[key]
+        if removed:
+            ports.save_stage_state(state)
+
+    return removed
+
 def reset_queued_stage_states(ports):
     with ports.lock:
         state = ports.load_stage_state()
@@ -263,6 +279,7 @@ DEPENDENCIES = {'load_stage_state': ('STAGE_STATE_FILE', 'json', 'os'),
  'stage_advance_key': (),
  'mark_stage_advance_queued': ('load_stage_state', 'lock', 'save_stage_state', 'stage_advance_key'),
  'clear_stage_advance': ('load_stage_state', 'lock', 'save_stage_state', 'stage_advance_key'),
+ 'clear_workflow_stage_state': ('load_stage_state', 'lock', 'save_stage_state'),
  'reset_queued_stage_states': ('load_stage_state', 'lock', 'save_stage_state'),
  'get_stage_status': ('TASK_MANAGER', 'json', 'subprocess'),
  'is_node_complete': ('_reverification_satisfies_node', 'load_tasks', 'scheduler_core',

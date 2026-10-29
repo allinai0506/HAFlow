@@ -248,8 +248,12 @@ def set_workflow_agent_override(workflow_id, agent):
     if not record:
         return
 
-    record["agent_override"] = agent or "auto"
-    store.save_workflow(record)
+    # 条件写：启动窗口的 override 写入不得复活已终态的记录。
+    store.update_workflow_metadata(
+        workflow_id,
+        {"agent_override": agent or "auto"},
+        expected_status="running",
+    )
 
     # 投影必须经 StateStore 同步(环境变量感知)，严禁直写硬编码路径。
     try:

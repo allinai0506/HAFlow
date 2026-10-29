@@ -5,6 +5,13 @@ Dependencies are explicit inputs; importing this module creates no runtime state
 
 def check_all_workflows_stage_advance(ports):
 
+    # Startup-orphan reclaim runs before the sweep's waiting branches: a record
+    # that never became ready must be converged before anything waits on it.
+    try:
+        ports.scan_startup_orphans()
+    except Exception as exc:
+        print(f"[STARTUP WATCHDOG ERROR] {type(exc).__name__}: {exc}")
+
     now = ports.time.time()
     workflow_ids = ports.active_registered_workflows()
     if now - ports._continuation_scan_at >= 30:
@@ -316,6 +323,7 @@ def registry_watcher(ports):
 
 DEPENDENCIES = {'check_all_workflows_stage_advance': ('_continuation_scan_at', '_get_store', 'active_registered_workflows',
                                        'check_workflow_stage_advance', 'redeliver_pending_fix_loop',
+                                       'scan_startup_orphans',
                                        'schedule_workflow_continuations', 'time'),
  'sync_awake_guard': ('_awake_guard_proc', 'os', 'shutil', 'subprocess', 'sys'),
  'registry_watcher': ('_blocked_sla_key', '_check_finalize_retry', '_completion_marker_snapshot',

@@ -130,6 +130,7 @@ def test_registry_keeps_continuation_fix_stage_order_and_schedules_controller_ex
     monkeypatch.setattr(automation.recovery_store, 'reconcile', reconcile)
     ports = SimpleNamespace(time=SimpleNamespace(time=lambda: 100), _continuation_scan_at=0,
         active_registered_workflows=lambda: ['wf-1'], _get_store=lambda: store,
+        scan_startup_orphans=lambda: None,
         schedule_workflow_continuations=lambda ids, now: trace.append('continuation'),
         redeliver_pending_fix_loop=lambda wid: trace.append('fix'),
         check_workflow_stage_advance=lambda wid: trace.append('stage'))

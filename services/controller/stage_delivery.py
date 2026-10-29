@@ -3,6 +3,25 @@
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
 
+from herdr.log_throttle import (
+    startup_wait_log_for as _startup_wait_log_for,
+)
+
+
+def _hold_for_startup(ports, workflow_id, startup_record):
+    """Wait while the workflow is not ready; the wait log is rate-limited per workflow."""
+    log = _startup_wait_log_for(ports)
+    if startup_record.get("startup_ready") is False:
+        if log.waiting(workflow_id, ports.time.time()):
+            print(f"[STARTUP WAIT] workflow={workflow_id} "
+                  "queued event held until request is ready")
+        ports.time.sleep(1)
+        return True
+    if log.finished(workflow_id):
+        print(f"[STARTUP READY] workflow={workflow_id} queued event released")
+    return False
+
+
 def _stage_advance_next_attempts(ports, episode):
     last_attempt = float(episode.get("last_attempt_at") or 0)
     if last_attempt > 0 and (ports.time.time() - last_attempt) > ports.liveness.task_stall_after():
@@ -209,6 +228,7 @@ def _handle_stage_advance_item(ports, item):
             # Re-validate on every wait iteration: the workflow may be
             # closed or deregistered while this event sat in the queue.
             if ports.workflow_closed(workflow_id) or not ports.project_for_workflow(workflow_id):
+                _startup_wait_log_for(ports).finished(workflow_id)
                 print(
                     f"[STAGE ADVANCE DROP] "
                     f"workflow={workflow_id} "
@@ -217,12 +237,7 @@ def _handle_stage_advance_item(ports, item):
                 return
 
             startup_record = ports.project_for_workflow(workflow_id) or {}
-            if startup_record.get("startup_ready") is False:
-                print(
-                    f"[STARTUP WAIT] workflow={workflow_id} "
-                    "queued event held until request is ready"
-                )
-                ports.time.sleep(1)
+            if _hold_for_startup(ports, workflow_id, startup_record):
                 continue
 
             status = ports.coordinator_status(workflow_id)
@@ -387,6 +402,7 @@ DEPENDENCIES = {'_stage_advance_next_attempts': ('liveness', 'time'),
  '_handle_stage_advance_item': ('TASK_MANAGER', '_get_store',
                                 '_scheduler_frozen_candidate_identity',
                                 '_scheduler_join_gate_allows', '_stage_advance_next_attempts',
+                                '_startup_wait_log',
                                 'attention_get', 'attention_note', 'build_stage_advance_message',
                                 'clear_stage_advance', 'coordinator_intake_enabled',
                                 'coordinator_pane_for_workflow', 'coordinator_status', 'find_node',
