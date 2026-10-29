@@ -258,6 +258,25 @@ def test_zero_task_startup_failed_does_not_notify_or_auto_close(tmp_path, monkey
     loader.exec_module(notifier)
     assert notifier.workflow_complete([]) is False
 
+    # Real notifier scan path: zero-task startup_failed must emit no notification.
+    tasks_file = tmp_path / "notifier-tasks.json"
+    tasks_file.write_text(json.dumps({
+        "tasks": [{
+            "task_id": "other", "workflow_id": "wf-other",
+            "status": "pending", "project_name": "p1",
+        }],
+    }), encoding="utf-8")
+    state_file = tmp_path / "notifier-state.json"
+    monkeypatch.setattr(notifier, "TASKS_FILE", tasks_file)
+    monkeypatch.setattr(notifier, "STATE_FILE", state_file)
+    notifications = []
+    monkeypatch.setattr(notifier, "notify",
+                        lambda *a, **k: notifications.append((a, k)))
+    notifier.scan({})
+    assert notifications == []
+    assert "wf-consumer" not in notifier.load(
+        state_file, {}).get("completed_workflows", [])
+
     from services.controller import workflow_close
     calls = []
     fake_ports = SimpleNamespace(
@@ -282,7 +301,7 @@ def test_sweep_invokes_watchdog_and_survives_its_failure():
     ports = SimpleNamespace(
         time=SimpleNamespace(time=lambda: 100),
         _continuation_scan_at=0,
-        active_registered_workflows=lambda: [],
+        active_registered_workflows=list,
         _get_store=lambda: None,
         schedule_workflow_continuations=lambda ids, now: None,
         scan_startup_orphans=broken,
@@ -294,6 +313,7 @@ def test_sweep_invokes_watchdog_and_survives_its_failure():
 
 def test_clear_workflow_stage_state_removes_only_target_keys(tmp_path):
     import threading
+
     from services.controller import stage_state
 
     state_file = tmp_path / "stage-state.json"

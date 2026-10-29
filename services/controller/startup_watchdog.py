@@ -8,7 +8,9 @@ records per scan; every reclaim re-reads authoritative fields inside a single
 """
 from herdr.state_store import sync_workflows_projection
 from herdr.workflow_startup import (
-    SOURCE_WATCHDOG, find_startup_orphan_candidates, reclaim_startup_orphan,
+    SOURCE_WATCHDOG,
+    find_startup_orphan_candidates,
+    reclaim_startup_orphan,
     startup_deadline_seconds,
 )
 
@@ -20,7 +22,7 @@ MAX_RECLAIM_PER_SCAN = 20
 def _sync_projection(store) -> bool:
     try:
         return bool(sync_workflows_projection(store=store))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- projection is advisory, never rolls back
         print(f"[STARTUP WATCHDOG PROJECTION WARN] {type(exc).__name__}: {exc}")
         return False
 
@@ -47,7 +49,7 @@ def _advance_cursor(ports, store, candidates, examined) -> None:
         last = candidates[-1]
     try:
         created_at = (store.get_workflow(last) or {}).get("created_at")
-    except Exception:
+    except Exception:  # noqa: BLE001 -- unreadable row resets the cursor, never blocks progress
         created_at = None
     if created_at is None:
         ports._startup_watchdog_cursor = None
@@ -81,7 +83,7 @@ def scan_startup_orphans(ports, now=None):
                 foreign_check=ports.liveness.workflow_is_foreign,
                 source=SOURCE_WATCHDOG,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- one bad row must not block the batch
             print(f"[STARTUP WATCHDOG ERROR] workflow={wid} "
                   f"{type(exc).__name__}: {exc}")
             continue
@@ -96,7 +98,7 @@ def scan_startup_orphans(ports, now=None):
     for wid in reclaimed:
         try:
             ports.clear_workflow_stage_state(wid)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- cleanup is advisory after commit
             print(f"[STARTUP WATCHDOG STAGE CLEANUP WARN] workflow={wid} "
                   f"{type(exc).__name__}: {exc}")
     return reclaimed

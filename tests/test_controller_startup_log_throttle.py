@@ -68,7 +68,7 @@ def test_advancement_closed_after_wait_emits_one_end_line(capsys):
 
 def test_stage_delivery_hold_emits_bounded_lines(capsys):
     log = StartupWaitLog(interval_seconds=600)
-    ticks = iter(range(0, 600))
+    ticks = iter(range(600))
     ports = SimpleNamespace(
         _startup_wait_log=log,
         time=SimpleNamespace(time=lambda: next(ticks), sleep=lambda _s: None),
@@ -106,7 +106,7 @@ def test_terminal_workflow_emits_no_wait_lines(capsys):
     )
     log.waiting("wf", 0)  # simulate a prior wait episode
     capsys.readouterr()
-    for tick in range(0, 300):
+    for tick in range(300):
         advancement.check_workflow_stage_advance(ports, "wf")
     out = capsys.readouterr().out
     assert "[STARTUP WAIT]" not in out

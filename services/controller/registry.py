@@ -9,7 +9,7 @@ def check_all_workflows_stage_advance(ports):
     # that never became ready must be converged before anything waits on it.
     try:
         ports.scan_startup_orphans()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- watchdog failure must not stop the sweep
         print(f"[STARTUP WATCHDOG ERROR] {type(exc).__name__}: {exc}")
 
     now = ports.time.time()
