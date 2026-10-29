@@ -5,6 +5,7 @@ Dependencies are explicit inputs; importing this module creates no runtime state
 
 from herdr.log_throttle import startup_wait_closed, startup_wait_hold
 
+
 def enqueue_stage_advance(ports, task):
     workflow_id = task.get("workflow_id")
     if workflow_id:

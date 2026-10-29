@@ -287,7 +287,7 @@ def test_convergence_failure_prints_manual_guidance(factory, tmp_path, monkeypat
     project = _project(tmp_path)
     _patch_startup_seams(
         monkeypatch, factory, project, _fail(RuntimeError("preflight exploded")))
-    import herdr.workflow_startup as workflow_startup
+    from herdr import workflow_startup
     monkeypatch.setattr(
         workflow_startup, "transition_workflow",
         _fail(sqlite3.OperationalError("disk full")))
@@ -351,7 +351,8 @@ def test_ready_and_reclaim_are_serialized(tmp_path, monkeypatch, first):
     reset_state_store()
     store = _orphan_for_race(db_path)
 
-    from herdr import projects, workflow_startup as ws
+    from herdr import projects
+    from herdr import workflow_startup as ws
     from herdr.projects import mark_workflow_startup_ready
     monkeypatch.setattr(projects, "_get_store", lambda: store)
 
@@ -383,7 +384,7 @@ def test_ready_and_reclaim_are_serialized(tmp_path, monkeypatch, first):
         second_started.set()
         try:
             mark_workflow_startup_ready("wf-race-core", healthy_agents=["codex"])
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 -- capture for assertion in the main thread
             errors["ready"] = exc
 
     def reclaim():
@@ -391,7 +392,7 @@ def test_ready_and_reclaim_are_serialized(tmp_path, monkeypatch, first):
         try:
             results["reclaim"] = ws.reclaim_startup_orphan(
                 store, "wf-race-core", now, 1800, foreign_check=lambda _: False)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 -- capture for assertion in the main thread
             errors["reclaim"] = exc
 
     first_thread = threading.Thread(target=ready if first == "ready" else reclaim)

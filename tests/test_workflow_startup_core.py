@@ -2,9 +2,9 @@
 
 import pytest
 
+from herdr import workflow_startup as ws
 from herdr.state_store import SQLiteStateStore
 from herdr.transitions import InvalidTransitionError
-from herdr import workflow_startup as ws
 
 
 @pytest.fixture(autouse=True)

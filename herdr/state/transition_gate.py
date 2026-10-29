@@ -296,8 +296,8 @@ def update_workflow_metadata(
     updates: Dict[str, Any],
     db_path: Optional[Path] = None,
     conn: Optional[sqlite3.Connection] = None,
-    expected_status: Optional[str] = None,
-    save_workflow_fn: Optional[Any] = None,
+    expected_status: str | None = None,
+    save_workflow_fn: Any | None = None,
 ) -> Dict[str, Any]:
     """Atomically update non-protected metadata fields of a workflow without touching status or identity.
 

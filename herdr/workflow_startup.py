@@ -6,11 +6,13 @@ layer can all depend on it without creating a cycle.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from herdr import state_db
 from herdr.liveness import FIXTURE_NAME_MARKERS, TEMP_PATH_MARKERS
@@ -174,10 +176,8 @@ def converge_startup_failure(
         bounded = bound_startup_reason(reason)
         return _condemn(conn, workflow_id, failed_stage, bounded, source)
     except BaseException:
-        try:
+        with contextlib.suppress(Exception):
             conn.execute("ROLLBACK")
-        except Exception:
-            pass
         raise
     finally:
         conn.close()
@@ -292,10 +292,8 @@ def reclaim_startup_orphan(
         )
         return _condemn(conn, workflow_id, "startup", reason, source)
     except BaseException:
-        try:
+        with contextlib.suppress(Exception):
             conn.execute("ROLLBACK")
-        except Exception:
-            pass
         raise
     finally:
         conn.close()
