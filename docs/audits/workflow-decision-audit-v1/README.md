@@ -88,18 +88,20 @@
 
 ### Q4：现有恢复机制是否存在重复恢复、无限循环或无效重试？
 
-#### 结论：**门禁返工受预算控制良好（无无限重试），但超时恢复与死区重刷存在局部无效空转**。
+#### 结论：**门禁返工受预算控制良好（无无限重试），自动验收失败后存在节流式停滞**。
 
 - **已确认事实**：
   1. **有效受控部分**：[`services/controller/fix_loop.py`](../../../services/controller/fix_loop.py) 设有强约束 `FIX_LOOP_MAX = 3` 与结论指纹去重（`repeat_verdict`），门禁阻断打回在 3 次耗尽后能确定性停止并升级人工，不存在门禁级的无限返工循环；
-  2. **无效空转部分**：
-     - 当任务处于 `agent_done` 且进入 F-01 的旁路后，`registry_watcher` 每 2 秒调用一次 `redeliver_done_event()`，每 2 秒重复打印一次 `[STAGED TASK EVENT BYPASS]`，形成无效的日志刷屏与空转；
-     - `stage-state.json` 文件锁若残留 `notified` 状态，Controller 每 2 秒都会在推进时判定“节点已通知”，跳过所有就绪节点，工作流处于无声假死。
+  2. **重投递节流机制**（[INVALID] 更正旧描述）：
+     - [`services/controller/done_events.py::redeliver_done_event()`](../../../services/controller/done_events.py#L65-L89) 在重新投递前调用 `attention_blocks_retry(key, now)`，由 `herdr/liveness.py` 的 `DEFAULT_ATTENTION_RETRY_INTERVAL = 600.0` 秒节流抑制重复触发。**同一事件在 600 秒内只被实际处理一次**，不存在“每 2 秒无限刷屏”的问题，无需新增重试节流机制；
+     - `stage-state.json` 文件锁若残留 `notified` 状态，Controller 每轮循环都会在推进时判定“节点已通知”，跳过所有就绪节点，工作流处于无声假死。
+  3. **实际停滞本质**：节流机制限制了重复投递频率，但**无法解决自动验收失败后缺少有效返工闭环**的问题——任务在 600 秒节流窗口结束后仍会再次触发旁路并再次停滞，工作流依然无法自主推进，仍需人工介入。
 - **证据**：
-  - 代码位置：[`services/controller/registry.py:240-242`](../../../services/controller/registry.py#L240-L242) 与 [`herdr/fix_loop.py:120-180`](../../../herdr/fix_loop.py#L120-L180)。
+  - 节流代码：[`services/controller/done_events.py:78`](../../../services/controller/done_events.py#L78)、[`herdr/liveness.py`](../../../herdr/liveness.py)（`DEFAULT_ATTENTION_RETRY_INTERVAL = 600.0`）
+  - 旁路死胡同代码：[`services/controller/registry.py:240-242`](../../../services/controller/registry.py#L240-L242) 与 [`herdr/fix_loop.py:120-180`](../../../herdr/fix_loop.py#L120-L180)
 - **未验证的部分**：超长周期（数天）未关闭的历史工作流在磁盘上产生的遗留 `attention.json` 对 Controller 内存占用的长期膨胀率。
 - **建议行动**：
-  对 `redeliver_done_event` 施加最大重试阈值；将 `stage-state.json` 文件锁收敛至 SQLite。
+  核心问题在于**补全自动验收失败后的返工闭环**（见 F-01 最小修复建议），而非新增重试节流（该机制已存在）；将 `stage-state.json` 文件锁收敛至 SQLite。
 
 ---
 

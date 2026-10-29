@@ -67,11 +67,13 @@
    # 绝不调用 ensure_coordinator_running
    ```
    **但该测试没有断言该 Task 之后该如何继续推进**！
-   在真实环境中，由于 Controller 在此处直接 `return`，任务状态依然保持为 `agent_done`。在后续每 2 秒的 `registry_watcher` 循环中：
-   - `redeliver_done_event()` 重新将 `done` 入队；
+   在真实环境中，由于 Controller 在此处直接 `return`，任务状态依然保持为 `agent_done`。在后续 `registry_watcher` 循环中：
+   - `redeliver_done_event()` 尝试重新将 `done` 入队；
    - 入队后再次触发 `_handle_task_event()`；
-   - 再次失败并输出 `[STAGED TASK EVENT BYPASS]` 并 `return`；
-   - 形成无限空转死循环，工作流永远停在当前节点，**必须人工干预执行 `herdr-task set ... completed` 才能解救**。
+   - 再次失败并输出 `[STAGED TASK EVENT BYPASS]` 并 `return`。
+
+   > **[INVALID] 更正**：审计初稿认为此处形成"每 2 秒无限空转"，该描述**不准确**。`services/controller/done_events.py::redeliver_done_event()`（第 78 行）在重投递前调用 `ports.attention_blocks_retry(key, now)`，通过 `herdr/liveness.py` 的 `DEFAULT_ATTENTION_RETRY_INTERVAL = 600.0` 秒节流机制抑制重复触发。即：相同事件在 600 秒内只会被实际处理一次，不存在每 2 秒无限刷屏的问题。
+   > **实际问题**：节流机制解决了重复投递频率，但**无法解决返工闭环缺失**——任务在 600 秒节流窗口结束后仍会再次触发旁路并再次停滞，工作流依然无法自主推进。需要人工介入才能解救。
 4. **对自动执行的影响**：
    这是导致 HAFlow 实际运行中“经常无法自主完成、节点执行结束后无法自动进入下一节点、需要大量人工介入”的**头号核心代码根因**。
 5. **是否已有测试覆盖**：
