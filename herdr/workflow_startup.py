@@ -129,22 +129,17 @@ def _read_startup_row(conn, workflow_id: str):
     return record, task_count
 
 
-def _close_startup_record(conn, workflow_id, failed_stage, reason, source):
-    return transition_workflow(
-        workflow_id,
-        "completed",
-        reason=reason,
-        source=source,
-        metadata=startup_failure_metadata(failed_stage, reason),
-        expected_status="running",
-        conn=conn,
-    )
-
-
 def _condemn(conn, workflow_id, failed_stage, reason, source):
     try:
-        result = _close_startup_record(
-            conn, workflow_id, failed_stage, reason, source)
+        result = transition_workflow(
+            workflow_id,
+            "completed",
+            reason=reason,
+            source=source,
+            metadata=startup_failure_metadata(failed_stage, reason),
+            expected_status="running",
+            conn=conn,
+        )
     except InvalidTransitionError:
         conn.execute("ROLLBACK")
         return {"ok": False, "reason": "state_changed"}

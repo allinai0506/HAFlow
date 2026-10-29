@@ -46,10 +46,6 @@ class StartupWaitLog:
         with self._lock:
             return self._last.pop(workflow_id, None) is not None
 
-    def clear(self, workflow_id: str) -> None:
-        with self._lock:
-            self._last.pop(workflow_id, None)
-
 
 FALLBACK_STARTUP_WAIT_LOG = StartupWaitLog()
 
