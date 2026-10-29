@@ -142,7 +142,7 @@
   ```bash
   herdr-task close-workflow <workflow_id> --abandon
   ```
-- **识别记录**：见 [ops-center §8](../wiki/ops-center.md) 的 SQL；只把 JSON 显式 `false` 视为未就绪，缺失/null/数字 0/字符串 "false" 与损坏 JSON 都不会被回收。
+- **识别记录**：见 [ops-center §8](../../wiki/ops-center.md) 的 SQL；只把 JSON 显式 `false` 视为未就绪，缺失/null/数字 0/字符串 "false" 与损坏 JSON 都不会被回收。
 - **阈值**：`HERDR_WORKFLOW_STARTUP_DEADLINE_SECONDS` 默认 1800；非数字/≤0/≤210/溢出回退默认并只告警一次（`[STARTUP WATCHDOG CONFIG]`）。
 - **看门狗不回收的边界**：记录任意状态已有任务；`startup_ready=true`；`paused/in_progress/closing/failed`；foreign（`workflow_file` 缺失/已删除或位于 `/tmp/`、`pytest-` 路径）；Controller 停机期间。以上场景用人工 `close-workflow --abandon` 兜底。
 - **日志**：`[STARTUP WATCHDOG RECLAIMED]` 表示已自动回收；`[STARTUP WATCHDOG CONFIG]` 表示期限配置被回退；`[WORKFLOW STARTUP CONVERGE FAILED]` 表示 Factory 自身收敛失败（记录保持 `running`，交由看门狗）；`[STARTUP WAIT]` 每 Workflow 首次 1 行、之后每 600s 最多 1 行，不再无限刷屏。
