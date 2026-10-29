@@ -38,14 +38,19 @@ flowchart TD
 - **问题与代码证据**：
   [`services/controller/task_events.py:53-64`](../../../services/controller/task_events.py#L53-L64) 在自动验收失败后仅打印 `[STAGED TASK EVENT BYPASS]` 并直接 `return`。任务永远卡死在 `agent_done`，无法向前推进，也无任何自动修复路径，必须依赖人工干预。
 - **最小修复方案**：
-  在 Staged 流程中，当 `try_auto_accept()` 或 `try_auto_verdict()` 校验失败时，**主动将任务跃迁为 `rework`**（受任务局部重试上限约束，如最多 2 次），并在 Task 元数据中注入具体的拒绝原因（例如：`missing_sections: ['缺少明确可验收标准']`）。
+  在 Staged 流程中，当 `try_auto_accept()` 或 `try_auto_verdict()` 校验失败时，**主动将任务跃迁为 `rework`**（受任务局部重试上限约束，最多 2 次），并在 Task 元数据中注入具体的拒绝原因（例如：`missing_sections: ['缺少明确可验收标准']`）。
+
+  > **字段选择说明**：预算计数字段必须使用 `delivery_rework_attempts`（已在 [`herdr/delivery_rework.py`](../../../herdr/delivery_rework.py) 由 `repair_delivery()` 原子递增并持久化到 SQLite，上限守卫 `attempts >= 3` 返回 `delivery_repair_budget_exhausted`）。`auto_rework_count` 是本轮草案引入的虚构字段，仓库中**无任何写入路径**，`handle_rework()` 也不递增它，使用该字段会导致计数永远读零、无限派发返工，与 HAFlow 确定性执行目标直接冲突，已予以删除。
+
   ```python
   # 最小修改草案 (services/controller/task_events.py)
   # 复用现有 herdr/task_cli_rework.py::handle_rework 编排能力，不虚构未实现的接口
+  # 预算字段：delivery_rework_attempts（herdr/delivery_rework.py::repair_delivery() 原子写入）
   if is_staged_dev_flow_workflow(_wf_cfg):
       _r = locals().get("_defer_reason", event_type)
-      rework_count = int(_task_pre.get("auto_rework_count") or 0)
-      if rework_count < 2 and event_type == "done":
+      # 读取已持久化的返工预算计数（无写入路径的虚构字段已删除）
+      rework_attempts = int(_task_pre.get("delivery_rework_attempts") or 0)
+      if rework_attempts < 2 and event_type == "done":
           from herdr.task_cli_rework import handle_rework
           from types import SimpleNamespace
           import uuid

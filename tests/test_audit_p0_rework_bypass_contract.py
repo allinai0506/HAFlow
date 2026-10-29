@@ -12,6 +12,10 @@ Demonstrates:
    can be directly reused with real SQLiteStateStore persistence to transition agent_done -> rework,
    update task metadata (rework_delivery='delivered', rework_prompt), dispatch prompt to Worker
    transport, and allow downstream completion.
+4. Rework Budget Exhaustion Guard: Verifies that when delivery_rework_attempts reaches budget
+   limit (>= 3), repair_reason() returns 'delivery_repair_budget_exhausted', blocking further
+   auto-rework dispatch. This prevents the infinite-rework loop that would occur when using
+   the non-existent 'auto_rework_count' field (which has no write path in the codebase).
 """
 
 import os
@@ -127,6 +131,93 @@ class TestAuditP0ReworkBypassContract(unittest.TestCase):
 
             final_task = store.get_task("task-audit-p0-1")
             self.assertEqual(final_task["status"], "completed")
+
+
+class TestAuditP0ReworkBudgetExhaustion(unittest.TestCase):
+
+    def test_rework_budget_exhausted_prevents_further_dispatch(self):
+        """Verify delivery_rework_attempts >= 3 causes repair_reason() to return 'delivery_repair_budget_exhausted'.
+
+        This guards against the infinite-rework loop that would occur when using the
+        non-existent 'auto_rework_count' field (which has no write path in the repository:
+        handle_rework() does not increment it, and no other code writes it).
+
+        The correct budget field is 'delivery_rework_attempts', which is atomically
+        incremented and persisted by herdr/delivery_rework.py::repair_delivery().
+        """
+        from herdr.delivery_rework import repair_reason
+
+        task_at_limit = {
+            "task_id": "task-audit-p0-1",
+            "status": "completed",
+            "run_id": "run-01",
+            "execution_id": "exec-01",
+            "workflow_id": "wf-01",
+            # writable_task() requires integration_mode='git' and no context/verifier/review role
+            "integration_mode": "git",
+            "execution_mode": "standard",
+            "dispatch_role": "executor",
+            "delivery_rework_attempts": 3,  # at budget limit: >= 3 must block further dispatch
+            "delivery_failure": {
+                "status": "blocked",
+                "run_id": "run-01",
+                "task_id": "task-audit-p0-1",
+                "workflow_id": "wf-01",
+                "execution_id": "exec-01",
+            },
+            "delivery_contract": {
+                "version": 1,
+                "allowed_paths": ["app.py"],
+                "required_files": [],
+                "checks": [],
+                "auto_rework": True,
+            },
+            "completion_protocol": None,
+        }
+        reason = repair_reason(task_at_limit)
+        self.assertEqual(
+            reason,
+            "delivery_repair_budget_exhausted",
+            f"Expected budget exhausted guard at attempts=3, got: {reason!r}",
+        )
+
+    def test_rework_budget_below_limit_passes_guard(self):
+        """Verify delivery_rework_attempts < 3 does NOT trigger budget exhaustion."""
+        from herdr.delivery_rework import repair_reason
+
+        task_under_limit = {
+            "task_id": "task-audit-p0-1",
+            "status": "completed",
+            "run_id": "run-01",
+            "execution_id": "exec-01",
+            "workflow_id": "wf-01",
+            # writable_task() requires integration_mode='git' and no context/verifier/review role
+            "integration_mode": "git",
+            "execution_mode": "standard",
+            "dispatch_role": "executor",
+            "delivery_rework_attempts": 1,  # below limit
+            "delivery_failure": {
+                "status": "blocked",
+                "run_id": "run-01",
+                "task_id": "task-audit-p0-1",
+                "workflow_id": "wf-01",
+                "execution_id": "exec-01",
+            },
+            "delivery_contract": {
+                "version": 1,
+                "allowed_paths": ["app.py"],
+                "required_files": [],
+                "checks": [],
+                "auto_rework": True,
+            },
+            "completion_protocol": None,
+        }
+        reason = repair_reason(task_under_limit)
+        self.assertNotEqual(
+            reason,
+            "delivery_repair_budget_exhausted",
+            f"Budget should not be exhausted at attempts=1, got: {reason!r}",
+        )
 
 
 if __name__ == "__main__":
