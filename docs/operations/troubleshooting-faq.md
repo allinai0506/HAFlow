@@ -131,3 +131,19 @@
 2. `manager=ad_hoc` 且目标唯一 → `herdr-experience-hub stop --port <port>`；`launchd` → 按 4.4 走 `launchctl`；`unknown` → 不动作，先修复探测；
 3. 仅当该代际尚未部署新工具时，对逐个确认过的 pid 人工 `kill <pid>`；禁止 `kill -9`、禁止 `pkill -f`；
 4. 禁止脚本越界批量清理未经确认的进程。
+
+## 5. Workflow 启动未完成与启动失败
+
+### 5.1 新建 Workflow 被“已有活跃 Workflow”拒绝，且标题/阶段为空、无任务
+- **现象**：同项目新建 Workflow 返回 exit 2，提示“项目 ... 已有活跃 Workflow，拒绝重复创建”；被指向的 Workflow 在 Console 中标题、阶段为空，且没有任何任务。
+- **原因**：Factory 先注册（`status=running`、`startup_ready=false`）后跑 Deep Preflight。注册之后、就绪之前的异常/中断若未被收敛（例如进程被强杀），会留下永久未就绪记录；active guard 只看 `status != completed`，因此持续拦截。
+- **自动处置**：正常失败由 Factory 在抛出原错误前收敛为 `completed + outcome=startup_failed`；进程被强杀的遗留由 Controller 看门狗在超过期限后回收（默认 1800s，每 60s 最多扫描一次、单轮最多回收 20 条）。项目在记录进入终态后即可重新创建。
+- **人工清理**（看门狗不动作或需要立即解除阻塞时）：
+  ```bash
+  herdr-task close-workflow <workflow_id> --abandon
+  ```
+- **识别记录**：见 [ops-center §8](../wiki/ops-center.md) 的 SQL；只把 JSON 显式 `false` 视为未就绪，缺失/null/数字 0/字符串 "false" 与损坏 JSON 都不会被回收。
+- **阈值**：`HERDR_WORKFLOW_STARTUP_DEADLINE_SECONDS` 默认 1800；非数字/≤0/≤210/溢出回退默认并只告警一次（`[STARTUP WATCHDOG CONFIG]`）。
+- **看门狗不回收的边界**：记录任意状态已有任务；`startup_ready=true`；`paused/in_progress/closing/failed`；foreign（`workflow_file` 缺失/已删除或位于 `/tmp/`、`pytest-` 路径）；Controller 停机期间。以上场景用人工 `close-workflow --abandon` 兜底。
+- **日志**：`[STARTUP WATCHDOG RECLAIMED]` 表示已自动回收；`[STARTUP WATCHDOG CONFIG]` 表示期限配置被回退；`[WORKFLOW STARTUP CONVERGE FAILED]` 表示 Factory 自身收敛失败（记录保持 `running`，交由看门狗）；`[STARTUP WAIT]` 每 Workflow 首次 1 行、之后每 600s 最多 1 行，不再无限刷屏。
+- **验证过的消费者行为**：`completed + outcome=startup_failed` 不触发交付校验、不产生完成通知、不触发自动收尾；Controller 不再推进该 Workflow；看板完成数统计口径未变。

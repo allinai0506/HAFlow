@@ -629,17 +629,18 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
 
 def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agents=None):
     store = _get_store()
-    record = store.get_workflow(workflow_id)
-    if not record:
+    if not store.get_workflow(workflow_id):
         raise RuntimeError(f"未找到工作流注册记录: {workflow_id}")
 
-    record["startup_ready"] = True
+    updates = {"startup_ready": True}
     if healthy_agents is not None:
-        record["healthy_agents"] = healthy_agents
+        updates["healthy_agents"] = healthy_agents
     if unhealthy_agents is not None:
-        record["unhealthy_agents"] = unhealthy_agents
+        updates["unhealthy_agents"] = unhealthy_agents
 
-    store.save_workflow(record)
+    # 条件写：终态记录不得被启动窗口的写入改回 running（禁止全量 upsert）。
+    store.update_workflow_metadata(
+        workflow_id, updates, expected_status="running")
 
     try:
         from .state_store import sync_workflows_projection

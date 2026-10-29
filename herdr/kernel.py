@@ -297,10 +297,12 @@ def update_workflow_metadata(
     workflow_id: str,
     updates: dict[str, Any],
     store: StateStore | None = None,
+    expected_status: str | None = None,
 ) -> dict[str, Any]:
     """Atomically update non-protected metadata fields of a workflow without touching status."""
     s = _get_store(store)
-    res = s.update_workflow_metadata(workflow_id, updates)
+    res = s.update_workflow_metadata(
+        workflow_id, updates, expected_status=expected_status)
     sync_workflows_projection(store=s)
     return res
 

@@ -296,8 +296,16 @@ def update_workflow_metadata(
     updates: Dict[str, Any],
     db_path: Optional[Path] = None,
     conn: Optional[sqlite3.Connection] = None,
+    expected_status: Optional[str] = None,
+    save_workflow_fn: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Atomically update non-protected metadata fields of a workflow without touching status or identity."""
+    """Atomically update non-protected metadata fields of a workflow without touching status or identity.
+
+    ``expected_status`` is a compare-and-set guard: the transaction re-reads
+    the authoritative row and refuses to write when the status changed.
+    ``save_workflow_fn`` preserves the store-level writer (and its test
+    failure-injection point) while keeping the same transaction.
+    """
     forbidden = set(updates.keys()) & PROTECTED_WORKFLOW_METADATA_FIELDS
     if forbidden:
         raise ValueError(f"Cannot update protected workflow fields via metadata update: {sorted(forbidden)}")
@@ -315,6 +323,12 @@ def update_workflow_metadata(
         row = cur.fetchone()
         if not row:
             raise ValueError(f"Workflow '{workflow_id}' not found")
+
+        if expected_status is not None and row["status"] != expected_status:
+            raise InvalidTransitionError(
+                f"Workflow '{workflow_id}' changed during metadata update: "
+                f"expected {expected_status}, found {row['status']}"
+            )
 
         now = time.time()
         meta = json.loads(row["metadata_json"] or "{}")
@@ -337,7 +351,10 @@ def update_workflow_metadata(
             else:
                 wf[k] = v
 
-        _facade().save_workflow(wf, db_path=None, conn=conn)
+        if save_workflow_fn is not None:
+            save_workflow_fn(wf, conn=conn)
+        else:
+            _facade().save_workflow(wf, db_path=None, conn=conn)
 
         if should_close:
             conn.execute("COMMIT;")

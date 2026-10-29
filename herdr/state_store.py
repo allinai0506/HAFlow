@@ -36,7 +36,12 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
     os.replace(tmp_path, file_path)
 
 
-def _sync_projection_locked(file_path: Path, export_fn: Any) -> None:
+def _sync_projection_locked(file_path: Path, export_fn: Any) -> bool:
+    """Write the projection under the cross-process lock.
+
+    Returns True when the projection was refreshed, False when it could not be
+    (callers that must not roll back committed state treat it as advisory).
+    """
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = file_path.parent / f".{file_path.name}.lock"
@@ -50,8 +55,9 @@ def _sync_projection_locked(file_path: Path, export_fn: Any) -> None:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
             os.close(lock_fd)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def resolve_tasks_projection_file(
@@ -99,21 +105,21 @@ def resolve_workflows_projection_file(
 def sync_tasks_projection(
     store: StateStore | None = None,
     tasks_file: Path | str | None = None,
-) -> None:
+) -> bool:
     """Safely synchronize SQLite tasks into tasks.json under cross-process lock."""
     s = store or get_state_store()
     target_file = resolve_tasks_projection_file(store=s, tasks_file=tasks_file)
-    _sync_projection_locked(target_file, s.export_tasks_json)
+    return _sync_projection_locked(target_file, s.export_tasks_json)
 
 
 def sync_workflows_projection(
     store: StateStore | None = None,
     wf_file: Path | str | None = None,
-) -> None:
+) -> bool:
     """Safely synchronize SQLite workflows into workflows.json under cross-process lock."""
     s = store or get_state_store()
     target_file = resolve_workflows_projection_file(store=s, wf_file=wf_file)
-    _sync_projection_locked(target_file, s.export_workflows_json)
+    return _sync_projection_locked(target_file, s.export_workflows_json)
 
 
 class StateStore(ABC):
@@ -163,6 +169,7 @@ class StateStore(ABC):
         self,
         workflow_id: str,
         updates: dict[str, Any],
+        expected_status: str | None = None,
     ) -> dict[str, Any]:
         """Atomically update non-protected metadata fields of a workflow without touching status."""
 
@@ -691,11 +698,14 @@ class SQLiteStateStore(StateStore):
         self,
         workflow_id: str,
         updates: dict[str, Any],
+        expected_status: str | None = None,
     ) -> dict[str, Any]:
         return state_db.update_workflow_metadata(
             workflow_id=workflow_id,
             updates=updates,
             db_path=self.db_path,
+            expected_status=expected_status,
+            save_workflow_fn=self.save_workflow,
         )
 
     # Tasks
