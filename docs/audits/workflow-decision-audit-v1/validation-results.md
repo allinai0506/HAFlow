@@ -75,23 +75,26 @@
 
 ---
 
-## 3. 多任务解耦与动态实现派发验证 (SC-07 延伸)
+## 3. 多任务解耦与动态实现派发验证 (SC-07 延伸，规划与门禁单元验证)
 
-在针对 PR #356 新引入的 `plan_parser.py` 进行多任务并发验证时：
+在针对 PR #356 新引入的 `plan_parser.py` 进行多任务拆分与门禁汇流验证时：
 - **测试命令**：
   ```bash
   pytest -v tests/test_software_development_v1_e2e_isolated.py -k test_03_multi_task_decoupled_lifecycle_e2e
   ```
 - **测试结果**：**PASS** (1.52s)
+- **范围澄清**：
+  > [!NOTE]
+  > 此测试为编排规划器与门禁聚合的核心逻辑单进程单元/集成验证（验证 `plan_stage_dispatch()` 任务拆分、路径正交检查及 `evaluate_join_gate()` 聚合流转），**并非**拉起真实工作区/多 Worker 进程并行的全链路 E2E 测试。测试中通过测试替身与受控内存调用验证任务状态演进。
 - **实际执行流转记录**：
-  1. `plan` 阶段提交拆分好的 2 个独立子任务：
+  1. `plan` 阶段提交拆分好的 2 个独立子任务定义：
      - Task 1: 修改 `module_a.py`
      - Task 2: 修改 `module_b.py`
   2. `plan_parser.py` 解析并验证两任务文件集合完全正交（无重叠）；
-  3. `direct_dispatch.py` 成功生成 2 个实现任务：`wf-impl-t1` 与 `wf-impl-t2`；
-  4. 两个 Worker 并发完成代码修改并自测；
-  5. 两个任务依次完成 Git 终化（`commit` 与 `integrate`）；
-  6. 汇流后成功进入 `test` 节点。
+  3. `direct_dispatch.py` 生成 2 个实现任务结构：`wf-impl-t1` 与 `wf-impl-t2`；
+  4. 模拟顺序记录代码修改并标记自测完成；
+  5. 模拟两任务完成提交状态记录；
+  6. `evaluate_join_gate()` 汇流判定通过，成功进入 `test` 节点。
 - **事实结论**：
-  在**严格规避了 F-01（交付物格式偏差）与 F-02（Challenger 并发时序倒挂）的前提下**，HAFlow 的纯代码直接派发与多任务解耦编排逻辑能够正常工作。
-  这反向证明：**当前流程难以稳定自主完成的根本症结不在于 DAG 调度器或并发架构设计本身，而在于边界条件判定过于脆弱、失败后静默弃单以及并发时序竞争。**
+  在**规避了交付物格式偏差与 Challenger 并发时序倒挂的前提下**，HAFlow 的直接派发拆分与汇流门禁评估逻辑在核心层是通畅的。
+  但该测试不能证明真实多 Worker 进程并发落盘、锁竞争和 Git 工作区冲突的鲁棒性。

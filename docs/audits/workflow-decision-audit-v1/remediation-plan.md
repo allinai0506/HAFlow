@@ -10,7 +10,7 @@
 
 ### 审计结论：**不需要**。
 
-在本次系统审计中，我们发现 HAFlow 的核心 DAG 算法（[`herdr/workflow.py`](file:///Users/user/haflow/herdr/workflow.py)）与汇聚门禁纯函数（[`herdr/scheduler.py`](file:///Users/user/haflow/herdr/scheduler.py)）设计非常规范，输入输出明确，具备很高的单元测试覆盖率。
+在本次系统审计中，我们发现 HAFlow 的核心 DAG 算法（[`herdr/workflow.py`](herdr/workflow.py)）与汇聚门禁纯函数（[`herdr/scheduler.py`](herdr/scheduler.py)）设计非常规范，输入输出明确，具备很高的单元测试覆盖率。
 
 阻碍工作流自主执行的核心原因，并非编排引擎缺乏调度能力，而是**边缘集成处的断路死胡同、并发时序竞态以及脆弱的自然语言字符串匹配**。
 
@@ -36,7 +36,7 @@ flowchart TD
 ### P0-1：消除 `task_events.py` 中 Staged 流程自动验收失败的静默死胡同
 
 - **问题与代码证据**：
-  [`services/controller/task_events.py:53-64`](file:///Users/user/haflow/services/controller/task_events.py#L53-L64) 在自动验收失败后仅打印 `[STAGED TASK EVENT BYPASS]` 并直接 `return`。任务永远卡死在 `agent_done`，无法向前推进，也无任何自动修复路径，必须依赖人工干预。
+  [`services/controller/task_events.py:53-64`](services/controller/task_events.py#L53-L64) 在自动验收失败后仅打印 `[STAGED TASK EVENT BYPASS]` 并直接 `return`。任务永远卡死在 `agent_done`，无法向前推进，也无任何自动修复路径，必须依赖人工干预。
 - **最小修复方案**：
   在 Staged 流程中，当 `try_auto_accept()` 或 `try_auto_verdict()` 校验失败时，**主动将任务跃迁为 `rework`**（受任务局部重试上限约束，如最多 2 次），并在 Task 元数据中注入具体的拒绝原因（例如：`missing_sections: ['缺少明确可验收标准']`）。
   ```python
@@ -66,7 +66,7 @@ flowchart TD
 ### P0-2：解决 `plan` 节点 Executor 与 Challenger 的并发时序死锁
 
 - **问题与代码证据**：
-  [`herdr/direct_dispatch.py:898-933`](file:///Users/user/haflow/herdr/direct_dispatch.py#L898-L933) 将 `roles: [executor, challenger]` 作为同一节点的并发任务同时派发；但 [`herdr/plan_parser.py:549-570`](file:///Users/user/haflow/herdr/plan_parser.py#L549-L570) 却要求 Challenger 审查必须携带 `Plan-Ref: <note_id>` 且 `chal_ts >= plan_ts`。两者产生先有鸡还是先有蛋的结构性死锁。
+  [`herdr/direct_dispatch.py:898-933`](herdr/direct_dispatch.py#L898-L933) 将 `roles: [executor, challenger]` 作为同一节点的并发任务同时派发；但 [`herdr/plan_parser.py:549-570`](herdr/plan_parser.py#L549-L570) 却要求 Challenger 审查必须携带 `Plan-Ref: <note_id>` 且 `chal_ts >= plan_ts`。两者产生先有鸡还是先有蛋的结构性死锁。
 - **最小修复方案**：
   **在 `plan` 节点内部引入角色阶段化派发（Role Dependency）**：
   1. `plan` 节点就绪时，派发器先仅派发 `executor` 任务；
@@ -81,8 +81,8 @@ flowchart TD
 ### P0-3：对系统环境调用与文件探测实施严格容错隔离
 
 - **问题与代码证据**：
-  - [`herdr/stage_skills.py:100`](file:///Users/user/haflow/herdr/stage_skills.py#L100)：`p.exists()` 访问权限受限目录抛出未捕获 `PermissionError`；
-  - [`herdr/git_coordination.py:82`](file:///Users/user/haflow/herdr/git_coordination.py#L82)：`subprocess.run(["ps", ...])` 在无权限环境抛出 `PermissionError`。
+  - [`herdr/stage_skills.py:100`](herdr/stage_skills.py#L100)：`p.exists()` 访问权限受限目录抛出未捕获 `PermissionError`；
+  - [`herdr/git_coordination.py:82`](herdr/git_coordination.py#L82)：`subprocess.run(["ps", ...])` 在无权限环境抛出 `PermissionError`。
 - **最小修复方案**：
   ```python
   # 1. herdr/stage_skills.py
@@ -93,10 +93,12 @@ flowchart TD
       continue
 
   # 2. herdr/git_coordination.py
+  # 注意：必须保持 Fail-Closed 安全语义，绝不能在 ps 失败时静默返回空列表绕过独占锁！
   try:
       result = subprocess.run(["ps", "-axo", "pid=,command="], ...)
-  except (OSError, subprocess.SubprocessError):
-      return []
+  except (OSError, subprocess.SubprocessError) as exc:
+      # 抛出明确的可恢复环境异常或返回拒绝锁状态（Fail-Closed），引导操作拒绝而非带病并发执行
+      raise GitCoordinationError(f"Failed to inspect system processes for Git coordination (Fail-Closed): {exc}") from exc
   ```
 - **预期收益**：瞬间修复当前测试套件中失败的 4 项适配测试与 5 项 CLI 派发测试，杜绝因外部环境探测瑕疵导致的硬性崩溃。
 - **回归风险**：零。
@@ -107,7 +109,7 @@ flowchart TD
 ## 4. P1 级稳健性提升方案（短期实施）
 
 ### P1-1：交付物自然语言校验泛化与双语扩展
-- **问题**：[`herdr/stage_skills.py:421-452`](file:///Users/user/haflow/herdr/stage_skills.py#L421-L452) 硬编码中文正则，英文交付物被全盘误杀。
+- **问题**：[`herdr/stage_skills.py:421-452`](herdr/stage_skills.py#L421-L452) 硬编码中文正则，英文交付物被全盘误杀。
 - **改进方案**：为 `_REQ_GOAL_RE`、`_REQ_SCOPE_RE`、`_REQ_AC_RE` 等扩充标准英文词表（`Goal|Objective`, `Scope|Boundary`, `Acceptance|Criteria`, `Verification|Test plan`），同时支持从 YAML frontmatter 中直接读取机器字段。
 
 ### P1-2：淘汰 `stage-state.json` 文件锁，收敛状态至 SQLite
