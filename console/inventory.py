@@ -34,6 +34,10 @@ def _with_subject(w):
         w['requirement_subject']=t
     elif not s:
         w['requirement_subject']=herdr_projects.requirement_subject(w.get('requirement',''))
+    w['startup_ready'] = w.get('startup_ready') is not False
+    w['outcome'] = str(w.get('outcome') or '')
+    w['failed_stage'] = str(w.get('failed_stage') or '')
+    w['startup_failure_reason'] = str(w.get('startup_failure_reason') or '')[:2048]
     return w
 
 def workflows_for_project(pid):

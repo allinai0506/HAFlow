@@ -308,6 +308,9 @@ const fetch = async (url) => ({
   ok: true,
   json: async () => ({slots: [{pane_id: "w1:p1'quote", claimed_by: "task'with'quote-1"}]})
 });
+const workflowStatusLabel = w => w && w.status || '未知';
+const workflowStatusTone = w => 'default';
+const workflowStartupHint = w => '';
 """ + js + r"""
 state.projectId = 'proj-1';
 state.shellView = 'alerts';

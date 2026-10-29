@@ -5,6 +5,7 @@ var {
 } = (function({
   state, saveViewState, toast,
   esc, showTemplateLibrary, workflowSubject,
+  workflowStatusLabel, workflowStatusTone, workflowStartupHint,
   loadWorkflow, clearWorkflow, paintCrumb,
   setWorkspaceMode, openControllerCockpit, returnFromControllerCockpit, showLogs,
   showArchive, stopLogAutoRefresh
@@ -264,13 +265,14 @@ function renderWorkflowTabs(){
     const w=wfMap[wid]||{workflow_id:wid,status:'waiting'};
     const title=workflowSubject(w)||w.title||wid;
     const st=w.status||'waiting';
-    let dotClass='waiting';
-    if(st==='working'||st==='running'||st==='active')dotClass='running';
-    else if(st==='blocked'||st==='decision')dotClass='decision';
-    else if(st==='completed'||st==='cleaned'||st==='archived')dotClass='completed';
+    let dotClass=workflowStatusTone(w);
+    if(dotClass==='default')dotClass='waiting';
+    const statusLabel=workflowStatusLabel(w);
+    const statusHint=workflowStartupHint(w);
     return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('${esc(wid)}')" title="${esc(title)} (${esc(wid)})" role="tab" aria-selected="${isActive}">`+
       `<span class="tab-dot ${dotClass}" aria-hidden="true"></span>`+
       `<span class="tab-title">${esc(title)}</span>`+
+      `<span class="tab-status">${esc(statusLabel)}${statusHint?' · '+esc(statusHint):''}</span>`+
       `<button type="button" class="tab-close" onclick="closeWorkflowTab('${esc(wid)}',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
       `</div>`;
   }).join('');
@@ -284,6 +286,7 @@ return {
 })({
   state, saveViewState, toast,
   esc, showTemplateLibrary, workflowSubject,
+  workflowStatusLabel, workflowStatusTone, workflowStartupHint,
   loadWorkflow, clearWorkflow, paintCrumb:(...args)=>paintCrumb(...args),
   setWorkspaceMode:(...args)=>setWorkspaceMode(...args), openControllerCockpit:(...args)=>openControllerCockpit(...args), returnFromControllerCockpit:(...args)=>returnFromControllerCockpit(...args), showLogs:(...args)=>showLogs(...args),
   showArchive:(...args)=>showArchive(...args), stopLogAutoRefresh:(...args)=>stopLogAutoRefresh(...args)
