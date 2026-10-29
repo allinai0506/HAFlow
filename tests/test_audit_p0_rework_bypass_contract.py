@@ -1,20 +1,31 @@
 """
 Test-first contract verification for P0-1:
-Task events rejection handling in staged workflows.
+Task events rejection handling in staged workflows and rework dispatch feasibility.
 
 Demonstrates:
 1. Current Behavior: When try_auto_accept() and try_auto_verdict() return False,
    task_events._handle_task_event() records an attention_note and immediately returns,
    leaving the task in 'agent_done' indefinitely (no state transition, no retry).
 2. Existing Contract Feasibility: The existing TASK_TRANSITIONS supports transitioning
-   from 'agent_done' to 'rework', which reuses the existing fix_loop / rework machinery
-   without introducing any new state machine or framework.
+   from 'agent_done' to 'rework'.
+3. Real Persistence & Delivery Feasibility: Verifies that existing herdr.task_cli_rework.handle_rework
+   can be directly reused with real SQLiteStateStore persistence to transition agent_done -> rework,
+   update task metadata (rework_delivery='delivered', rework_prompt), dispatch prompt to Worker
+   transport, and allow downstream completion.
 """
 
+import os
+import tempfile
+import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
-from services.controller import task_events
+
+from herdr import kernel, task_resources
+from herdr.state_store import SQLiteStateStore
+from herdr.task_cli_rework import handle_rework
 from herdr.transitions import TASK_TRANSITIONS
+from services.controller import task_events
 
 
 class TestAuditP0ReworkBypassContract(unittest.TestCase):
@@ -55,22 +66,67 @@ class TestAuditP0ReworkBypassContract(unittest.TestCase):
         allowed_targets = TASK_TRANSITIONS["agent_done"]
         self.assertIn("rework", allowed_targets, "TASK_TRANSITIONS must allow agent_done -> rework transition")
 
-    def test_remediation_contract_using_existing_ports(self):
-        """Demonstrate that invoking set_task_status(task_id, 'rework') conforms to existing interfaces."""
-        mock_ports = mock.MagicMock()
-        task_id = "task-audit-p0-1"
-        mock_ports.get_task.return_value = {
-            "task_id": task_id,
-            "status": "agent_done",
-            "fix_loop_count": 0,
-        }
+    def test_rework_dispatch_with_real_sqlite_store_and_transport(self):
+        """Verify end-to-end rework dispatch using existing handle_rework and real SQLite persistence."""
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "state.db")
+            store = SQLiteStateStore(db_path)
+            store.save_workflow({"workflow_id": "wf-dev-01", "name": "dev", "status": "running"})
+            store.save_task({
+                "task_id": "task-audit-p0-1",
+                "workflow_id": "wf-dev-01",
+                "run_id": "run-01",
+                "pane_id": "101",
+                "agent": "codex",
+                "stage": "requirements",
+                "status": "agent_done",
+                "version": 1,
+            })
 
-        # Simulate proposed minimal remediation logic
-        target_status = "rework"
-        self.assertIn(target_status, TASK_TRANSITIONS[mock_ports.get_task(task_id)["status"]])
-        mock_ports.set_task_status(task_id, target_status)
+            sent_prompts = []
 
-        mock_ports.set_task_status.assert_called_once_with(task_id, "rework")
+            def fake_herdr(*args):
+                sent_prompts.append(args)
+                return SimpleNamespace(returncode=0)
+
+            with mock.patch.object(task_resources, "owned_live_pane", return_value=(True, "match")):
+                rework_args = SimpleNamespace(
+                    task_id="task-audit-p0-1",
+                    request_id="req-audit-456",
+                    reason="auto_acceptance_rejected: missing acceptance criteria",
+                    prompt="请补充验收标准段落",
+                    execution_token=None,
+                )
+                handle_rework(
+                    rework_args,
+                    get_store=lambda: store,
+                    herdr=fake_herdr,
+                    is_gate_task=lambda t: False,
+                    recover_unconsumed_gate_cleanup_id=lambda t, s: None,
+                    cleanup_gate_for_rework=lambda t, tok, s: None,
+                    now=time.time,
+                )
+
+            # Assert database state updated
+            updated_task = store.get_task("task-audit-p0-1")
+            self.assertEqual(updated_task["status"], "rework")
+            self.assertEqual(updated_task.get("rework_delivery"), "delivered")
+            self.assertEqual(updated_task.get("rework_request_id"), "req-audit-456")
+
+            # Assert transport prompt delivered to Worker pane
+            self.assertEqual(len(sent_prompts), 1)
+            self.assertEqual(sent_prompts[0][0], "agent")
+            self.assertEqual(sent_prompts[0][1], "prompt")
+            self.assertEqual(sent_prompts[0][2], "101")
+            self.assertIn("请补充验收标准段落", sent_prompts[0][3])
+
+            # Simulate downstream loop completing successfully
+            kernel.transition_task("task-audit-p0-1", "working", reason="worker_repairing", source="agent", store=store)
+            kernel.transition_task("task-audit-p0-1", "agent_done", reason="worker_done", source="agent", store=store)
+            kernel.transition_task("task-audit-p0-1", "completed", reason="auto_accept_pass", source="controller", store=store)
+
+            final_task = store.get_task("task-audit-p0-1")
+            self.assertEqual(final_task["status"], "completed")
 
 
 if __name__ == "__main__":

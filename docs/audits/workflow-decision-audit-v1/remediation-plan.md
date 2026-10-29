@@ -10,7 +10,7 @@
 
 ### 审计结论：**不需要**。
 
-在本次系统审计中，我们发现 HAFlow 的核心 DAG 算法（[`herdr/workflow.py`](herdr/workflow.py)）与汇聚门禁纯函数（[`herdr/scheduler.py`](herdr/scheduler.py)）设计非常规范，输入输出明确，具备很高的单元测试覆盖率。
+在本次系统审计中，我们发现 HAFlow 的核心 DAG 算法（[`herdr/workflow.py`](../../../herdr/workflow.py)）与汇聚门禁纯函数（[`herdr/scheduler.py`](../../../herdr/scheduler.py)）设计非常规范，输入输出明确，具备很高的单元测试覆盖率。
 
 阻碍工作流自主执行的核心原因，并非编排引擎缺乏调度能力，而是**边缘集成处的断路死胡同、并发时序竞态以及脆弱的自然语言字符串匹配**。
 
@@ -36,37 +36,51 @@ flowchart TD
 ### P0-1：消除 `task_events.py` 中 Staged 流程自动验收失败的静默死胡同
 
 - **问题与代码证据**：
-  [`services/controller/task_events.py:53-64`](services/controller/task_events.py#L53-L64) 在自动验收失败后仅打印 `[STAGED TASK EVENT BYPASS]` 并直接 `return`。任务永远卡死在 `agent_done`，无法向前推进，也无任何自动修复路径，必须依赖人工干预。
+  [`services/controller/task_events.py:53-64`](../../../services/controller/task_events.py#L53-L64) 在自动验收失败后仅打印 `[STAGED TASK EVENT BYPASS]` 并直接 `return`。任务永远卡死在 `agent_done`，无法向前推进，也无任何自动修复路径，必须依赖人工干预。
 - **最小修复方案**：
   在 Staged 流程中，当 `try_auto_accept()` 或 `try_auto_verdict()` 校验失败时，**主动将任务跃迁为 `rework`**（受任务局部重试上限约束，如最多 2 次），并在 Task 元数据中注入具体的拒绝原因（例如：`missing_sections: ['缺少明确可验收标准']`）。
   ```python
   # 最小修改草案 (services/controller/task_events.py)
+  # 复用现有 herdr/task_cli_rework.py::handle_rework 编排能力，不虚构未实现的接口
   if is_staged_dev_flow_workflow(_wf_cfg):
       _r = locals().get("_defer_reason", event_type)
-      # 检查任务是否已达到返工上限
       rework_count = int(_task_pre.get("auto_rework_count") or 0)
       if rework_count < 2 and event_type == "done":
-          ports.set_task_status(
-              task_id, "rework",
-              expected_status="agent_done",
-              source="controller:auto-rework",
-              metadata={"auto_rework_count": rework_count + 1, "rework_reason": str(_r)}
+          from herdr.task_cli_rework import handle_rework
+          from types import SimpleNamespace
+          import uuid
+
+          request_id = f"auto-rework-{uuid.uuid4().hex[:12]}"
+          rework_args = SimpleNamespace(
+              task_id=task_id,
+              request_id=request_id,
+              reason=f"auto_acceptance_rejected: {_r}",
+              prompt=f"继续当前任务，就地修正交付物瑕疵：{_r}。修正后重新提交自测结果，不新建 Task。",
+              execution_token=None,
           )
-          # 唤醒或提示 Agent 按要求修正成果
-          ports.prompt_agent_for_rework(task_id, reason=str(_r))
+          # 复用现有 handle_rework 进行原子状态跃迁（agent_done -> rework）、写入 rework 元数据并完成 Agent 提示派发
+          handle_rework(
+              rework_args,
+              get_store=lambda: ports._get_store(),
+              herdr=ports._herdr,
+              is_gate_task=ports._is_gate_task,
+              recover_unconsumed_gate_cleanup_id=ports._recover_unconsumed_gate_cleanup_id,
+              cleanup_gate_for_rework=ports._cleanup_gate_for_rework,
+              now=ports.time.time,
+          )
           return
-      # 超过上限时明确标记为 blocked，进入既有 Fix-Loop 或挂起
+      # 超过上限时记录 attention_note 并标记为 blocked，进入既有 Fix-Loop 或人工挂起
   ```
-- **预期收益**：消灭全流程最大的“卡死点”，使 Agent 在文档或标记不符合约时具备至少 1~2 次自我修正机会，大幅提升无人干预自主完成率。
-- **回归风险**：极低（仅改变原本直接放弃的死胡同路径）。
-- **验收方法**：编写测试：模拟 Agent 输出残缺需求文档，断言任务自动进入 `rework` 并收到修复提示，补充内容后自动流转进入 `completed`。
+- **预期收益**：消灭全流程因交付物瑕疵无后续动作而卡死的确定性死胡同，使 Agent 在文档或标记不符合约时具备至少 1~2 次自我修正机会；直接复用生产现存的 `handle_rework` 交付机制，确保状态机流转与终端 Agent 派发真正闭环。
+- **回归风险**：极低（仅改变原本直接放弃的死胡同路径，且复用经过充分测试验证的既有返工入口）。
+- **验收方法**：编写非侵入性集成验证测试，使用真实 SQLiteStateStore 临时持久化与受控 transport mock，验证 `agent_done -> rework` 真实写入数据库、`rework_prompt` 正确下发给 Worker，且任务能够重新进入可自测推进生命周期。
 
 ---
 
 ### P0-2：解决 `plan` 节点 Executor 与 Challenger 的并发时序死锁
 
 - **问题与代码证据**：
-  [`herdr/direct_dispatch.py:898-933`](herdr/direct_dispatch.py#L898-L933) 将 `roles: [executor, challenger]` 作为同一节点的并发任务同时派发；但 [`herdr/plan_parser.py:549-570`](herdr/plan_parser.py#L549-L570) 却要求 Challenger 审查必须携带 `Plan-Ref: <note_id>` 且 `chal_ts >= plan_ts`。两者产生先有鸡还是先有蛋的结构性死锁。
+  [`herdr/direct_dispatch.py:898-933`](../../../herdr/direct_dispatch.py#L898-L933) 将 `roles: [executor, challenger]` 作为同一节点的并发任务同时派发；但 [`herdr/plan_parser.py:549-570`](../../../herdr/plan_parser.py#L549-L570) 却要求 Challenger 审查必须携带 `Plan-Ref: <note_id>` 且 `chal_ts >= plan_ts`。两者产生先有鸡还是先有蛋的结构性死锁。
 - **最小修复方案**：
   **在 `plan` 节点内部引入角色阶段化派发（Role Dependency）**：
   1. `plan` 节点就绪时，派发器先仅派发 `executor` 任务；
@@ -81,8 +95,8 @@ flowchart TD
 ### P0-3：对系统环境调用与文件探测实施严格容错隔离
 
 - **问题与代码证据**：
-  - [`herdr/stage_skills.py:100`](herdr/stage_skills.py#L100)：`p.exists()` 访问权限受限目录抛出未捕获 `PermissionError`；
-  - [`herdr/git_coordination.py:82`](herdr/git_coordination.py#L82)：`subprocess.run(["ps", ...])` 在无权限环境抛出 `PermissionError`。
+  - [`herdr/stage_skills.py:100`](../../../herdr/stage_skills.py#L100)：`p.exists()` 访问权限受限目录抛出未捕获 `PermissionError`；
+  - [`herdr/git_coordination.py:82`](../../../herdr/git_coordination.py#L82)：`subprocess.run(["ps", ...])` 在无权限环境抛出 `PermissionError`。
 - **最小修复方案**：
   ```python
   # 1. herdr/stage_skills.py
@@ -109,7 +123,7 @@ flowchart TD
 ## 4. P1 级稳健性提升方案（短期实施）
 
 ### P1-1：交付物自然语言校验泛化与双语扩展
-- **问题**：[`herdr/stage_skills.py:421-452`](herdr/stage_skills.py#L421-L452) 硬编码中文正则，英文交付物被全盘误杀。
+- **问题**：[`herdr/stage_skills.py:421-452`](../../../herdr/stage_skills.py#L421-L452) 硬编码中文正则，英文交付物被全盘误杀。
 - **改进方案**：为 `_REQ_GOAL_RE`、`_REQ_SCOPE_RE`、`_REQ_AC_RE` 等扩充标准英文词表（`Goal|Objective`, `Scope|Boundary`, `Acceptance|Criteria`, `Verification|Test plan`），同时支持从 YAML frontmatter 中直接读取机器字段。
 
 ### P1-2：淘汰 `stage-state.json` 文件锁，收敛状态至 SQLite

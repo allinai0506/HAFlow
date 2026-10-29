@@ -25,7 +25,7 @@
 ### F-01：Staged 流程自动验收失败后事件被旁路丢弃，任务永久死锁在 `agent_done` [CONFIRMED / REPRODUCED] (Anti-Pattern B & C)
 
 1. **实际代码路径**：
-   [`services/controller/task_events.py:48-64`](services/controller/task_events.py#L48-L64)
+   [`services/controller/task_events.py:48-64`](../../../services/controller/task_events.py#L48-L64)
    ```python
    # 规则化验收快路径:非门禁节点铁证齐备直接 completed,
    # 门禁节点有唯一结论标记则直接落 verdict;两者都不命中才回落总指挥。
@@ -60,7 +60,7 @@
    - 或 `implementation` 任务的工作区改动未被 `verify-baseline` 检出；
    - 或 `test`/`review` 门禁任务未能在终端或 JSON 中输出标准的 `HERDR_GATE_VERDICT: pass` 标记。
 3. **可复现证据**：
-   在 PR #356 的测试 [`tests/test_software_development_v1_adapter.py:734`](tests/test_software_development_v1_adapter.py#L734) 中明确固化了这一行为：
+   在 PR #356 的测试 [`tests/test_software_development_v1_adapter.py:734`](../../../tests/test_software_development_v1_adapter.py#L734) 中明确固化了这一行为：
    ```python
    # test_29_real_workflow_template_config_recognition_and_task_event_bypass:
    # 验证 auto_acceptance 失败时，写入 attention_note 且直接 return，
@@ -78,7 +78,7 @@
    已有正向测试证明旁路逻辑生效，但缺少故障闭环恢复测试。
 6. **最小修复建议**：
    在 Staged 流程中，当自动验收或裁决失败时，**绝不能无声丢弃事件**。应根据失败类型：
-   - 属于可修复的代码/文档格式缺陷，自动跃迁至 `rework`，向工位注入具体的拒绝原因（如“缺少段落：验收标准”），触发 Agent 补全；
+   - 属于可修复的代码/文档格式缺陷，复用现有的 [`herdr/task_cli_rework.py:handle_rework()`](../../../herdr/task_cli_rework.py) 派发返工，向工位注入具体的拒绝原因（如“缺少段落：验收标准”），完成原子状态跃迁与 Agent 修正提示下发；
    - 属于严重阻断或耗尽重试时，状态跃迁至 `blocked` 或 `failed`，由 Controller 明确报告阻断，停止无意义的空转。
 
 ---
@@ -86,8 +86,8 @@
 ### F-02：计划阶段 `executor` 与 `challenger` 并发派发导致时序倒挂与引用缺失死锁 [CONFIRMED] (Anti-Pattern E & C)
 
 1. **实际代码路径**：
-   - 并发派发：[`herdr/direct_dispatch.py:898-933`](herdr/direct_dispatch.py#L898-L933)
-   - 时序与引用核验：[`herdr/plan_parser.py:549-570`](herdr/plan_parser.py#L549-L570)
+   - 并发派发：[`herdr/direct_dispatch.py:898-933`](../../../herdr/direct_dispatch.py#L898-L933)
+   - 时序与引用核验：[`herdr/plan_parser.py:549-570`](../../../herdr/plan_parser.py#L549-L570)
 2. **触发条件**：
    `requirements` 节点完成后，Controller 推进至 `plan` 节点。
    `plan` 节点配置中声明了两个角色：`roles: [executor, challenger]`。
@@ -98,7 +98,7 @@
    在真实运行时，Challenger 与 Executor 同时启动：
    - 此时 Executor 尚未写完方案，Challenger 在其工作区或 shared notes 中找不到有效方案；
    - 若 Challenger 稍早结束（`chal_ts < plan_ts`），或者 Challenger 未能得知 Executor 最终落盘的 `note_id`，Challenger 输出的审查报告将缺少 `Plan-Ref: <note_id>`；
-   - 当两者均处于 `completed`，后续推进 `implementation` 时，`plan_stage_dispatch` 调用 [`herdr/plan_parser.py:verify_plan_and_challenger()`](herdr/plan_parser.py#L447)：
+   - 当两者均处于 `completed`，后续推进 `implementation` 时，`plan_stage_dispatch` 调用 [`herdr/plan_parser.py:verify_plan_and_challenger()`](../../../herdr/plan_parser.py#L447)：
      ```python
      if plan_ts > chal_ts > 0.0:
          return False, f"challenger_outdated: plan was updated after challenger review...", ...
@@ -119,7 +119,7 @@
 ### F-03：`stage_skills.py` 与 `git_coordination.py` 在受限环境下抛出未捕获 `PermissionError` 导致调度崩溃 [REPRODUCED] (Anti-Pattern D)
 
 1. **实际代码路径**：
-   - 路径 1：[`herdr/stage_skills.py:99-101`](herdr/stage_skills.py#L99-L101)
+   - 路径 1：[`herdr/stage_skills.py:99-101`](../../../herdr/stage_skills.py#L99-L101)
      ```python
      homes = {Path.home(), _get_real_home()}
      for h in homes:
@@ -127,7 +127,7 @@
              if p.exists() and p not in roots:  # 未捕获 PermissionError!
                  roots.append(p)
      ```
-   - 路径 2：[`herdr/git_coordination.py:81-87`](herdr/git_coordination.py#L81-L87)
+   - 路径 2：[`herdr/git_coordination.py:81-87`](../../../herdr/git_coordination.py#L81-L87)
      ```python
      def _default_process_provider():
          result = subprocess.run(
@@ -152,15 +152,15 @@
 5. **是否已有测试覆盖**：
    现有测试未 mock 这两处系统调用，在普通未受限环境正常，在真实权限收紧环境中必然失败。
 6. **最小修复建议**：
-   - `stage_skills.py`：对 `p.exists()` 增加 `try ... except (OSError, PermissionError): continue`；
-   - `git_coordination.py`：对 `subprocess.run(["ps", ...])` 增加 `try ... except (OSError, subprocess.SubprocessError): return []`。
+   - `stage_skills.py`：对 `p.exists()` 增加 `try ... except (OSError, PermissionError): continue`，跳过无权访问路径；
+   - `git_coordination.py`：必须保持 **Fail-Closed** 安全语义！严禁在 `ps` 失败时静默返回 `[]` 绕过独占锁；应捕获 `(OSError, subprocess.SubprocessError)` 并抛出明确的结构化异常（如 `GitCoordinationError`）拒绝并发操作，避免带病执行引发 Git 工作区损坏。
 
 ---
 
 ### F-04：依赖硬编码中文正则做需求与计划交付物合法性裁决 [CONFIRMED] (Anti-Pattern E & F)
 
 1. **实际代码路径**：
-   [`herdr/stage_skills.py:421-446`](herdr/stage_skills.py#L421-L446)
+   [`herdr/stage_skills.py:421-446`](../../../herdr/stage_skills.py#L421-L446)
    ```python
    _REQ_GOAL_RE = re.compile(r"(用户目标|需求目标|需求背景|问题与假设|目标与范围)", re.IGNORECASE)
    _REQ_SCOPE_RE = re.compile(r"(功能范围|需求范围|非目标|业务规则|边界)", re.IGNORECASE)
@@ -185,14 +185,14 @@
 ### F-05：阶段推进资格在 4 个模块、8 个层级中分散裁决，缺少明确主控责任 [POTENTIAL] (Anti-Pattern A)
 
 1. **实际代码路径**：
-   - 扫描层：[`services/controller/registry.py`](services/controller/registry.py)
-   - 评估层：[`services/controller/advancement.py`](services/controller/advancement.py)
-   - 准入层：[`services/controller/stage_delivery.py`](services/controller/stage_delivery.py)
-   - 派发层：[`services/controller/direct_dispatch.py`](services/controller/direct_dispatch.py)
-   - 规划层：[`herdr/direct_dispatch.py`](herdr/direct_dispatch.py)
-   - 解析层：[`herdr/plan_parser.py`](herdr/plan_parser.py)
-   - 终化层：[`services/controller/git_finalize.py`](services/controller/git_finalize.py)
-   - 门禁层：[`services/controller/auto_verdict.py`](services/controller/auto_verdict.py)
+   - 扫描层：[`services/controller/registry.py`](../../../services/controller/registry.py)
+   - 评估层：[`services/controller/advancement.py`](../../../services/controller/advancement.py)
+   - 准入层：[`services/controller/stage_delivery.py`](../../../services/controller/stage_delivery.py)
+   - 派发层：[`services/controller/direct_dispatch.py`](../../../services/controller/direct_dispatch.py)
+   - 规划层：[`herdr/direct_dispatch.py`](../../../herdr/direct_dispatch.py)
+   - 解析层：[`herdr/plan_parser.py`](../../../herdr/plan_parser.py)
+   - 终化层：[`services/controller/git_finalize.py`](../../../services/controller/git_finalize.py)
+   - 门禁层：[`services/controller/auto_verdict.py`](../../../services/controller/auto_verdict.py)
 2. **触发条件**：
    任意一个节点从完成到进入下一节点，需要在上述 8 个不同层级中依次做出“放行”判定。
 3. **对自动执行的影响**：
@@ -203,9 +203,9 @@
 ### F-06：`_scheduler_join_gate_allows()` 连续重复计算 3 次 [POTENTIAL] (Anti-Pattern F)
 
 1. **实际代码路径**：
-   - 第 1 次：[`services/controller/advancement.py:323`](services/controller/advancement.py#L323)
-   - 第 2 次：[`services/controller/stage_delivery.py:64`](services/controller/stage_delivery.py#L64)
-   - 第 3 次：[`services/controller/direct_dispatch.py:81`](services/controller/direct_dispatch.py#L81)
+   - 第 1 次：[`services/controller/advancement.py:323`](../../../services/controller/advancement.py#L323)
+   - 第 2 次：[`services/controller/stage_delivery.py:64`](../../../services/controller/stage_delivery.py#L64)
+   - 第 3 次：[`services/controller/direct_dispatch.py:81`](../../../services/controller/direct_dispatch.py#L81)
 2. **触发条件**：
    任何节点进入推进与派发流程。
 3. **对自动执行的影响**：
@@ -218,7 +218,7 @@
 ### F-07：多事实源（SQLite vs 文件 JSON）引发裂脑与锁残留 [RESOLVED (Historical)] (Anti-Pattern D)
 
 1. **实际代码路径**：
-   [`services/controller/stage_state.py:200-240`](services/controller/stage_state.py#L200-L240): `reconcile_stage_advance_states()`
+   [`services/controller/stage_state.py:200-240`](../../../services/controller/stage_state.py#L200-L240): `reconcile_stage_advance_states()`
 2. **触发条件**：
    Controller 进程在派发过程中发生崩溃、热重启（`kickstart`）或断电。
 3. **事实与代码证据**：
@@ -227,6 +227,6 @@
    `stage-state.json` 是一个无事务保障的文件锁，而 `node_dispatch_operations` 属于 SQLite。一旦两边状态脱节，节点将被永远判定为“已通知总指挥”，排斥在一切调度之外。
 4. **现状核查与状态标记**：
    - **状态**：`RESOLVED (Historical)`
-   - **核查结论**：经核验，针对该历史死锁，系统中已实现了 `reconcile_stage_advance_states()` 恢复机制（[`services/controller/stage_state.py`](services/controller/stage_state.py)），且在 `tests/test_controller_cockpit_automation.py` 中有完整测试保障：在前驱节点回退或状态变更时，会自动解除无效的 `notified` 锁。因此此问题在当前版本中属于已被机制化处理的历史缺陷，不属于当前阻碍自动执行的未决缺陷。
+   - **核查结论**：经核验，针对该历史死锁，系统中已实现了 `reconcile_stage_advance_states()` 恢复机制（[`services/controller/stage_state.py`](../../../services/controller/stage_state.py)），且在 `tests/test_controller_cockpit_automation.py` 中有完整测试保障：在前驱节点回退或状态变更时，会自动解除无效的 `notified` 锁。因此此问题在当前版本中属于已被机制化处理的历史缺陷，不属于当前阻碍自动执行的未决缺陷。
 5. **最小改进建议**：
    长期架构优化可考虑将 `stage-state.json` 的 Advance Lock 收归 SQLite 数据库统一管理以彻底消除跨介质同步，但这属于增强型演进，不作为紧急阻塞修复。
