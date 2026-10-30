@@ -78,6 +78,29 @@ def describe_exception(exc: BaseException) -> str:
     return bound_startup_reason(f"{type(exc).__name__}: {detail}")
 
 
+def registration_receipt_owns(receipt: Mapping[str, Any] | None, workflow_id: str) -> bool:
+    """True only for the receipt returned after this call's registration commit.
+
+    A row that already uses ``workflow_id`` is not ownership. The receipt is the
+    dict ``register_workflow`` returns once its write transaction has committed:
+    ``ok``, the same workflow id, and the ``workflow_created`` event id.
+    """
+    if not isinstance(receipt, Mapping):
+        return False
+    if receipt.get("ok") is not True:
+        return False
+    if receipt.get("workflow_id") != workflow_id:
+        return False
+    event_id = receipt.get("event_id")
+    if isinstance(event_id, bool) or event_id is None:
+        return False
+    if isinstance(event_id, int):
+        return event_id > 0
+    if isinstance(event_id, str):
+        return bool(event_id.strip())
+    return False
+
+
 def startup_failure_metadata(stage: str, reason: str) -> dict[str, Any]:
     return {
         "outcome": "startup_failed",

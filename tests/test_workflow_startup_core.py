@@ -12,6 +12,17 @@ def reset_warning_latch(monkeypatch):
     monkeypatch.setattr(ws, "_warned_invalid_deadline", False, raising=False)
 
 
+def test_registration_receipt_owns_only_this_commit():
+    receipt = {"ok": True, "workflow_id": "wf-owned", "event_id": 7}
+    assert ws.registration_receipt_owns(receipt, "wf-owned")
+    assert not ws.registration_receipt_owns(receipt, "wf-other")
+    assert not ws.registration_receipt_owns({**receipt, "ok": False}, "wf-owned")
+    assert not ws.registration_receipt_owns({**receipt, "event_id": None}, "wf-owned")
+    assert not ws.registration_receipt_owns({**receipt, "event_id": 0}, "wf-owned")
+    assert not ws.registration_receipt_owns(None, "wf-owned")
+    assert not ws.registration_receipt_owns("wf-owned", "wf-owned")
+
+
 def _store(tmp_path):
     return SQLiteStateStore(tmp_path / "state.db")
 

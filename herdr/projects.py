@@ -548,7 +548,10 @@ def freeze_run_definition(workflow_id, definition=None, *, source_file=None):
     return _snapshot_workflow_definition(workflow_id, source)
 
 
-def register_workflow(workflow_id, project, requirement="", title="", execution=None, context=None, workflow_file=None, metadata=None):
+def register_workflow(
+    workflow_id, project, requirement="", title="", execution=None, context=None,
+    workflow_file=None, metadata=None, *, on_committed=None,
+):
     title = (title or "").strip()
     subject = title or requirement_subject(requirement) or "未命名工作流"
     # Single-write contract: workflow_file and metadata are merged into the
@@ -610,16 +613,23 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
         "workflow_file": resolved_workflow_file,
     }
     if hasattr(store, "register_workflow"):
-        store.register_workflow(wf_entry, event_payload=event_payload)
+        receipt = store.register_workflow(wf_entry, event_payload=event_payload)
     else:
         store.save_workflow(wf_entry)
+        recorded = None
         if hasattr(store, "record_event"):
-            store.record_event(
+            recorded = store.record_event(
                 event_type="workflow_created",
                 payload=event_payload,
                 workflow_id=workflow_id,
                 source="register_workflow",
             )
+        event_id = recorded.get("id") if isinstance(recorded, dict) else None
+        receipt = {"ok": True, "workflow_id": workflow_id, "event_id": event_id}
+    # Note ownership only after the registration transaction returns, and
+    # before projection. A projection error must not erase a committed receipt.
+    if callable(on_committed):
+        on_committed(receipt)
     try:
         from .state_store import sync_workflows_projection
     except ImportError:

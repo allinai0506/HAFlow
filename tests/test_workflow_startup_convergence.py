@@ -132,6 +132,118 @@ def test_rejection_does_not_converge_someone_elses_workflow(
     assert _store().get_workflow("wf-active")["startup_ready"] is True
 
 
+def _snapshot(workflow_id):
+    store = _store()
+    return json.loads(json.dumps({
+        "record": store.get_workflow(workflow_id),
+        "events": store.list_events(workflow_id=workflow_id),
+    }, sort_keys=True))
+
+
+def _assert_unchanged(before, workflow_id):
+    after = _snapshot(workflow_id)
+    assert after["record"]["status"] == "running"
+    assert after["record"]["startup_ready"] is False
+    assert after["record"].get("outcome") in (None, "")
+    assert after["record"].get("failed_stage") in (None, "")
+    assert after["record"].get("startup_failure_reason") in (None, "")
+    assert after == before
+    assert not any(
+        event.get("event_type") == "workflow_transition"
+        for event in after["events"]
+    )
+
+
+def _seed_inflight(factory, project, workflow_id="wf-b2-inflight"):
+    factory.register_workflow(workflow_id, project, requirement="进行中的启动")
+    record = _store().get_workflow(workflow_id)
+    assert record["status"] == "running"
+    assert record["startup_ready"] is False
+    assert record.get("outcome") in (None, "")
+    return _snapshot(workflow_id)
+
+
+def test_same_id_active_guard_does_not_converge_inflight(
+        factory, tmp_path, monkeypatch, capsys):
+    """Pre-registration SystemExit(2) must not close an existing not-ready row."""
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "docs"))
+    project = _project(tmp_path)
+    called = {"preflight": 0}
+
+    def preflight(*_a, **_k):
+        called["preflight"] += 1
+        raise AssertionError("preflight must not run before registration")
+
+    _patch_startup_seams(monkeypatch, factory, project, preflight)
+    before = _seed_inflight(factory, project)
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as rejected:
+        factory.start_workflow(
+            "重复", workflow_id="wf-b2-inflight",
+            project_path=project["project_root"])
+    assert rejected.value.code == 2
+    err = capsys.readouterr().err
+    assert "拒绝重复创建" in err
+    assert "[WORKFLOW STARTUP FAILED]" not in err
+    assert "[WORKFLOW STARTUP CONVERGED]" not in err
+    assert "[WORKFLOW STARTUP CONVERGE FAILED]" not in err
+    assert called["preflight"] == 0
+    _assert_unchanged(before, "wf-b2-inflight")
+
+
+def test_definition_rejection_before_commit_does_not_converge_inflight(
+        factory, tmp_path, monkeypatch, capsys):
+    """Lock-internal validation that fails before commit must not close the row."""
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "docs"))
+    project = _project(tmp_path)
+    called = {"preflight": 0}
+
+    def preflight(*_a, **_k):
+        called["preflight"] += 1
+        raise AssertionError("preflight must not run")
+
+    _patch_startup_seams(monkeypatch, factory, project, preflight)
+    before = _seed_inflight(factory, project)
+    Path(project["workflow_file"]).write_text("[]", encoding="utf-8")
+    capsys.readouterr()
+
+    with pytest.raises(ValueError, match="not an object"):
+        factory.start_workflow(
+            "重复", workflow_id="wf-b2-inflight", force=True,
+            project_path=project["project_root"])
+    err = capsys.readouterr().err
+    assert "[WORKFLOW STARTUP FAILED]" not in err
+    assert "[WORKFLOW STARTUP CONVERGE FAILED]" not in err
+    assert called["preflight"] == 0
+    _assert_unchanged(before, "wf-b2-inflight")
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt(), SystemExit(2)])
+def test_preregistration_exception_does_not_converge_inflight(
+        factory, tmp_path, monkeypatch, capsys, exc):
+    """Exceptions raised before register_workflow commits must leave the row."""
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "docs"))
+    project = _project(tmp_path)
+    _patch_startup_seams(
+        monkeypatch, factory, project, _fail(AssertionError("preflight must not run")))
+    before = _seed_inflight(factory, project)
+
+    def reject_before_commit(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr(factory, "register_workflow", reject_before_commit)
+    capsys.readouterr()
+    with pytest.raises(type(exc)):
+        factory.start_workflow(
+            "重复", workflow_id="wf-b2-inflight", force=True,
+            project_path=project["project_root"])
+    err = capsys.readouterr().err
+    assert "[WORKFLOW STARTUP FAILED]" not in err
+    assert "[WORKFLOW STARTUP CONVERGE FAILED]" not in err
+    _assert_unchanged(before, "wf-b2-inflight")
+
+
 def test_registration_committed_then_raises_still_converges(
         factory, tmp_path, monkeypatch, capsys):
     project = _project(tmp_path)
