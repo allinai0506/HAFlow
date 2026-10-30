@@ -26,6 +26,19 @@ def finalize_completed_task(ports, task_id, before_action=None):
     evidence attributes it to this call; the confirmed SHA feeds every
     later guard, and an unattributable result escalates to a human.
     """
+    inflight = getattr(ports, "_finalize_inflight", None)
+    if inflight is not None and isinstance(inflight, set):
+        if task_id in inflight:
+            return {"retryable": True, "kind": "inflight", "reason": "finalize_already_in_progress"}
+        inflight.add(task_id)
+    try:
+        return _finalize_completed_task_body(ports, task_id, before_action=before_action)
+    finally:
+        if inflight is not None and isinstance(inflight, set):
+            inflight.discard(task_id)
+
+
+def _finalize_completed_task_body(ports, task_id, before_action=None):
     task = ports.get_task(task_id)
 
     def guard(action, commit_head=None):
@@ -200,6 +213,10 @@ def finalize_completed_task(ports, task_id, before_action=None):
                     or "does not have a commit checked out" in err_text.lower()
                     or "unable to index file" in err_text.lower()
                     or "fatal: adding files failed" in err_text.lower()
+                    or "pre-commit script failed" in err_text.lower()
+                    or "complexity check failed" in err_text.lower()
+                    or "commit blocked" in err_text.lower()
+                    or "husky - pre-commit" in err_text.lower()
                 )
                 if unrecoverable:
                     ports._escalate_finalize(
@@ -440,6 +457,7 @@ def finalize_completed_task(ports, task_id, before_action=None):
 
 
 DEPENDENCIES = {'finalize_completed_task': ('TASK_MANAGER', '_empty_auto_releasable', '_escalate_finalize',
+                             '_finalize_inflight',
                              '_get_store', '_parse_commit_result', '_parse_integrate_result',
                              '_record_finalize_event', 'enqueue_stage_advance',
                              'ensure_no_git_processes', 'get_task', 'maybe_complete_on_task_done',

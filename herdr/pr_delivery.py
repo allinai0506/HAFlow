@@ -74,8 +74,16 @@ class PullRequestClient:
         return self._request('PUT', {'merge_method': merge_method}, subpath=f'{number}/merge')
 
 
-def _git(repo, *args):
-    result = subprocess.run(['git','-C',str(repo),*args],capture_output=True,text=True,timeout=30)
+def _git(repo, *args, timeout=None):
+    if timeout is None:
+        if args and args[0] == 'push':
+            try:
+                timeout = int(os.environ.get('HERDR_GIT_PUSH_TIMEOUT', 120))
+            except (ValueError, TypeError):
+                timeout = 120
+        else:
+            timeout = 30
+    result = subprocess.run(['git','-C',str(repo),*args],capture_output=True,text=True,timeout=timeout)
     if result.returncode:
         raise ValueError('publication Git operation failed: '+args[0])
     return result.stdout.strip()

@@ -31,6 +31,25 @@ MAX_SECONDS = 120
 # "side-channel diagnostics must not alter execution status" (AGENTS.md §4.10).
 BYPASS_IGNORED_DIRS = frozenset({
     ".codegraph",  # CodeGraph MCP / local index daemon runtime artifacts (db, pid, logs)
+    "node_modules",  # JavaScript / TypeScript package dependencies
+    "dist",  # Frontend / TypeScript build outputs
+    "dist-release",  # Release build outputs
+    "build",  # General build output
+    "target",  # Java / Rust / Maven build outputs
+    ".m2",  # Local Maven artifact cache
+    ".gradle",  # Gradle build cache
+    ".venv",  # Python virtual environments
+    "venv",  # Python virtual environments
+    "__pycache__",  # Python bytecode cache
+    ".pytest_cache",  # Pytest cache
+    ".mypy_cache",  # Mypy type check cache
+    ".ruff_cache",  # Ruff linter cache
+    ".turbo",  # Turborepo build cache
+    ".next",  # Next.js build output
+    ".nuxt",  # Nuxt.js build output
+    ".cache",  # Generic compiler/indexer cache
+    "reports",  # Test/coverage reports
+    "coverage",  # Coverage output
 })
 
 BYPASS_IGNORED_FILE_SUFFIXES = (

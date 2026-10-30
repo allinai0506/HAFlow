@@ -987,7 +987,8 @@ def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
             return data["result"]["agent"]
         except RuntimeError as e:
             last_err = e
-            if "agent_pane_busy" in str(e) and attempt < retries - 1:
+            err_msg = str(e)
+            if ("agent_pane_busy" in err_msg or "agent_not_ready" in err_msg) and attempt < retries - 1:
                 time.sleep(delay)
                 continue
             raise
@@ -1051,12 +1052,16 @@ def _trust_blocked_evidence(text):
     return " | ".join(before + [core] + after)[:400]
 
 
-def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=20):
+def wait_startup_ready(agent_kind, pane_id, started, attempts=None, total_timeout=20):
     """Bounded native identity -> owned transcript -> identity recheck gate."""
     from herdr.agent_adapter import startup_readiness
     deadline = time.monotonic() + total_timeout
     verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "probe_failed"}
-    for attempt in range(attempts):
+    attempt = 0
+    while time.monotonic() < deadline:
+        if attempts is not None and attempt >= attempts:
+            break
+        attempt += 1
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -1094,10 +1099,9 @@ def wait_startup_ready(agent_kind, pane_id, started, attempts=6, total_timeout=2
                     return verdict
         except (RuntimeError, ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
             verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "probe_failed"}
-        if attempt + 1 < attempts:
-            remaining = deadline - time.monotonic()
-            if remaining > 0:
-                time.sleep(min(.5, remaining))
+        remaining = deadline - time.monotonic()
+        if remaining > 0 and (attempts is None or attempt < attempts):
+            time.sleep(min(.5, remaining))
     return verdict
 
 

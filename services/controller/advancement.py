@@ -3,6 +3,9 @@
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
 
+import time
+
+
 def enqueue_stage_advance(ports, task):
     workflow_id = task.get("workflow_id")
     if workflow_id:
@@ -110,7 +113,17 @@ def check_workflow_stage_advance(ports, workflow_id):
     # until Deep Preflight has completed. This prevents the controller from
     # delivering a stage event before the startup request is ready.
     if workflow_record.get("startup_ready") is False:
-        print(f"[STARTUP WAIT] workflow={workflow_id} preflight/request not ready")
+        logged = getattr(ports, "_startup_wait_logged", None)
+        if not isinstance(logged, dict):
+            logged = {}
+            setattr(ports, "_startup_wait_logged", logged)
+        now = time.monotonic()
+        last = logged.get(workflow_id, 0)
+        if not isinstance(last, (int, float)):
+            last = 0
+        if now - last >= 30:
+            logged[workflow_id] = now
+            print(f"[STARTUP WAIT] workflow={workflow_id} preflight/request not ready")
         return
 
     # 已关闭(含 abandoned)的 workflow 不再参与任何推进/回流判定;
@@ -477,6 +490,7 @@ DEPENDENCIES = {'enqueue_stage_advance': ('check_workflow_stage_advance',),
                                   '_reset_reverification_memo', '_scheduler_join_gate_allows',
                                   '_scheduler_resolve_candidate_and_plan',
                                   '_selective_replan_awaiting_redispatch',
+                                  '_startup_wait_logged',
                                   '_workflow_complete_logged', '_workflow_entry',
                                   'attention_blocks_retry', 'attention_clear', 'attention_get', 'attention_note',
                                   'blocked_gate_dependency', 'blocked_verdict_dep',
