@@ -72,9 +72,9 @@ def test_presentation_workflow_labels_escape_reason_and_keep_task_labels(tmp_pat
     start = source.index("/* workflow-status:start */")
     end = source.index("/* workflow-status:end */") + len("/* workflow-status:end */")
     _run_node("const humanStatus = s => ({running:'运行中', completed:'待收尾'})[s] || s;\n" + source[start:end] + """
-const cases = [[{status:'running', startup_ready:false},'启动中（尚未就绪）'],[{status:'completed',outcome:'startup_failed'},'启动失败'],[{status:'completed',outcome:'abandoned'},'已放弃'],[{status:'running',startup_ready:true},'运行中']];
+const cases = [[{status:'running', startup_ready:false},'启动中（尚未就绪）'],[{status:'completed',outcome:'startup_failed'},'启动失败'],[{status:'completed',outcome:'abandoned'},'已放弃'],[{status:'running',startup_ready:true},'运行中'],[{status:'completed'},'已完成'],[{status:'completed',outcome:'delivered'},'已完成']];
 for (const [item, expected] of cases) if (workflowStatusLabel(item) !== expected) process.exit(1);
-if (workflowStatusLabel({status:'completed'}) !== '待收尾') process.exit(2);
+if (workflowStatusLabel({status:'completed'}) !== '已完成') process.exit(2);
 const hint=workflowStartupHint({workflow_id:'wf-x',status:'completed',outcome:'startup_failed',failed_stage:'<x>',startup_failure_reason:'<script>x</script>'});
 if (!hint.includes('<script>x</script>') || hint.includes('&lt;')) process.exit(3);
 if (!hint.includes('herdr-task close-workflow wf-x --abandon')) process.exit(4);
@@ -215,7 +215,7 @@ const workflows=[
   {workflow_id:'wf-failed',status:'completed',outcome:'startup_failed',startup_ready:false,failed_stage:'preflight',startup_failure_reason:payload,title:'失败项'},
   {workflow_id:'wf-abandoned',status:'completed',outcome:'abandoned',startup_ready:false,failed_stage:'plan',startup_failure_reason:'停了',title:'放弃项'},
   {workflow_id:'wf-done',status:'completed',startup_ready:true,outcome:'',title:'正常完成'},
-  {workflow_id:'wf-run',status:'running',startup_ready:true,title:'运行中'}
+  {workflow_id:'wf-run',status:'running',startup_ready:true,title:'普通运行'}
 ];
 state.project={workflows};
 state.openWorkflowTabIds=workflows.map(w=>w.workflow_id);
@@ -227,10 +227,8 @@ const sig=document.getElementById('sidebarWorkflowGroups').dataset.sig||'';
 check(side.includes('启动中（尚未就绪）'),'sidebar pending label');
 check(side.includes('启动失败'),'sidebar failed label');
 check(side.includes('已放弃'),'sidebar abandoned label');
-check(side.includes('待收尾'),'sidebar completed label');
-check(side.includes('运行中'),'sidebar running label');
-check(!side.includes('>就绪<'),'sidebar ready meta');
-check(!side.includes('>已完成<'),'sidebar completed meta');
+check(side.includes('>已完成<'),'sidebar completed label');
+check(side.includes('>就绪<'),'sidebar running meta');
 check(side.includes('status-dot danger')||side.includes('tab-dot danger')||side.includes('danger'),'sidebar danger tone');
 check(side.includes('warning'),'sidebar warning tone');
 check(sig.includes('false')&&sig.includes('startup_failed'),'listSig startup fields: '+sig);
@@ -272,7 +270,7 @@ renderDashboard();
 const pop=document.getElementById('dashLinearList').innerHTML;
 const dashTasks=document.getElementById('tasks').innerHTML;
 check(pop.includes('启动失败')&&pop.includes('已放弃')&&pop.includes('启动中（尚未就绪）'),'dashboard startup pills');
-check(pop.includes('待收尾')&&pop.includes('运行中')&&pop.includes('已完成'),'dashboard normal pills');
+check(pop.includes('运行中')&&pop.includes('已完成')&&!pop.includes('待收尾'),'dashboard normal pills');
 check(dashTasks.includes('已完成'),'dashboard task pill');
 state.dashMode=false;state.opsMode=false;state.shellView='workbench';state.workflowView='flow';
 state.controllerActionsData=null;
@@ -391,3 +389,52 @@ def test_stage_summary_and_ops_overlay_honor_startup_outcome():
     kept = inventory._overlay_startup_fields({"status": "running", "outcome": "kept"}, snap)
     assert kept["status"] == "running"
     assert kept["outcome"] == "kept"
+
+
+def test_flow_canvas_and_graph_mark_startup_states(tmp_path):
+    from herdr.workflow_graph import workflow_graph_projection
+
+    definition = {
+        "workflow_id": "wf-graph",
+        "nodes": [
+            {"id": "plan", "label": "计划", "node_type": "agent", "depends_on": []},
+            {"id": "wrapup", "label": "收尾", "node_type": "agent", "depends_on": ["plan"]},
+        ],
+    }
+    for state in ("startup_failed", "abandoned"):
+        workflow = {**definition, "status": "completed", "outcome": state, "startup_ready": False}
+        projection = workflow_graph_projection(workflow, [], [])
+        assert projection["workflow_startup_state"] == state
+        assert projection["nodes"]
+        assert all(
+            node["status"] == state and node["workflow_startup_state"] == state
+            for node in projection["nodes"]
+        )
+
+    normal = {**definition, "status": "completed", "outcome": "", "startup_ready": True}
+    projection = workflow_graph_projection(normal, [], [])
+    assert projection["workflow_startup_state"] == ""
+    assert all(node["status"] == "completed" for node in projection["nodes"])
+
+    pending = {**definition, "status": "running", "startup_ready": False}
+    projection = workflow_graph_projection(pending, [], [])
+    assert projection["workflow_startup_state"] == "startup_pending"
+    assert all(node["status"] == "startup_pending" for node in projection["nodes"])
+
+    source = (ROOT / "console/static/console/scripts/flow-canvas.js").read_text(encoding="utf-8")
+    start = source.index("function startupNodeLabel(state){")
+    end = source.index("function flowCardInner(n){", start)
+    _run_node(
+        "const recoveryUnavailable=()=>false; const currentRecovery=()=>[];\n"
+        + source[start:end]
+        + r"""
+const expected={startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃'};
+for (const [state,label] of Object.entries(expected)) {
+  const n={status:state,workflow_startup_state:state,task_count:0,agents:[],resource_usage:{task_count:0,active_task_count:0,max_concurrency:1,pane_count:0}};
+  if(flowCardFoot(n)!==label) process.exit(1);
+  if(flowNodeStatus(n,label)!==label) process.exit(2);
+}
+if(flowCardFoot({status:'completed',task_count:0,agents:[]})!=='已完成') process.exit(3);
+""",
+        tmp_path,
+    )

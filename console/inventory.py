@@ -125,7 +125,7 @@ def workflow_graph_for(wid,p,w,ts, *, definition=None, all_tasks=None):
     try:
         payload=dict(definition or {})
         if isinstance(w,dict):
-            for k in ("status","gate_overrides","current_stage","workflow_id"):
+            for k in ("status","gate_overrides","current_stage","workflow_id","outcome","startup_ready","failed_stage"):
                 if w.get(k) is not None:
                     payload[k]=w[k]
         return herdr_workflow_graph.workflow_graph_projection(payload,ts or [],blockers,all_tasks=tasks() if all_tasks is None else all_tasks)

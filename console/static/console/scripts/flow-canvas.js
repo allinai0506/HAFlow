@@ -25,7 +25,11 @@ function flowIconSvg(id){
   const p=paths[id]||paths.requirements;
   return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'+p+'</svg>';
 }
+function startupNodeLabel(state){
+  return ({startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃'})[state]||String(state||'');
+}
 function flowCardFoot(n){
+  if(n.workflow_startup_state)return startupNodeLabel(n.workflow_startup_state);
   const u=n.resource_usage;
   if(u)return '累计任务 '+u.task_count+' / '+(u.max_tasks_per_node??'未设')+' · 运行 '+u.active_task_count+' / '+(u.max_concurrency??'未设')+' · 工位引用 '+u.pane_count+(u.overflow?' · 超限':'');
   if(!n.task_count)return (n.status === 'completed' || n.status === 'cleaned') ? '已完成' : '尚未开始';
@@ -34,6 +38,7 @@ function flowCardFoot(n){
   return agents.length?head+' · '+agents.join(' · '):head;
 }
 function flowNodeStatus(node,fallback){
+  if(node.workflow_startup_state)return startupNodeLabel(node.workflow_startup_state);
   if(recoveryUnavailable())return '状态未确认';
   if(node.status==='completed'||node.status==='cleaned'||fallback==='已完成')return fallback;
   const op=currentRecovery(node.id)[0];
@@ -92,7 +97,10 @@ function flowChecklist(node){
   const issueLabels={required_task_missing:'必需任务缺失',required_task_out_of_workflow:'必需任务属于其他工作流',required_task_out_of_node:'必需任务属于其他节点',required_task_lineage_cycle:'任务替代关系存在循环',required_task_ids_invalid:'必需任务配置无效',workflow_config_invalid:'工作流配置无效',required_task_incomplete:'必需任务尚未完成'};
   (node.completion_issues||[]).forEach(issue=>items.push(['bad',(issueLabels[issue.reason]||issue.reason)+(issue.task_id?' · '+issue.task_id:'')]));
   const agents=(node.agents||[]).filter(Boolean);
-  if(!agents.length){
+  if(node.workflow_startup_state){
+    items.push([node.workflow_startup_state==='startup_pending'?'wait':'bad',startupNodeLabel(node.workflow_startup_state)+' · 工作流未就绪']);
+  }
+  else if(!agents.length){
     if(node.status==='completed')items.push(['ok','阶段已收尾完成']);
     else items.push(['wait','尚未分配执行者']);
   }

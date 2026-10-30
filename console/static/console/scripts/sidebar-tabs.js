@@ -100,7 +100,8 @@ function renderSidebarWorkflows(){
     running.forEach(w => {
       const isActive = w.workflow_id === state.workflowId;
       const title = (typeof workflowSubject==='function'?workflowSubject(w):'') || w.title || w.workflow_id;
-      const meta = w.progress ? `${w.progress}%` : workflowStatusLabel(w);
+      const key = workflowStatusKey(w);
+      const meta = w.progress ? `${w.progress}%` : (key==='startup_pending' ? workflowStatusLabel(w) : '就绪');
       const dot = workflowStatusTone(w);
       html += `
         <div class="sidebar-item ${isActive ? 'active' : ''}" data-wf-id="${esc(w.workflow_id)}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">

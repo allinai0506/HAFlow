@@ -43,7 +43,8 @@ function workflowStatusKey(w){
 }
 function workflowStatusLabel(w){
   const key=workflowStatusKey(w);
-  return ({startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃'})[key]||humanStatus(key);
+  return ({startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃',
+    running:'运行中',completed:'已完成',failed:'失败',paused:'已暂停'})[key]||humanStatus(key);
 }
 function workflowStatusTone(w){
   const key=workflowStatusKey(w);
@@ -69,7 +70,7 @@ function humanReason(value){
   return Object.prototype.hasOwnProperty.call(labels, text)?labels[text]:text;
 }
 function humanNodeStatus(s){
-  return s==='completed'?'已完成':humanStatus(s);
+  return ({startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃'})[s]||(s==='completed'?'已完成':humanStatus(s));
 }
 function badge(s){return `<span class="badge ${esc(s)}">${esc(humanStatus(s))}</span>`}
 function cleanStageLabel(s){
