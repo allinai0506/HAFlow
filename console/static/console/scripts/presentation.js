@@ -7,7 +7,8 @@ var {
   taskDisplayName, visibleAlerts, activeAlerts, isAlertDismissed,
   dismissAlert, dismissAllAlerts, clearDismissedAlerts,
   formatElapsed, opsHealthClass,
-  healthLabel, agentStatusLabel, authHintLabel, taskDrawerNumTs
+  healthLabel, agentStatusLabel, authHintLabel, taskDrawerNumTs,
+  workflowStatusKey, workflowStatusLabel, workflowStatusTone, workflowStartupHint
 } = (function({
   state
 }){
@@ -33,7 +34,6 @@ function humanStatus(s){
   })[s]||s||'未知'
 }
 /* workflow-status:start */
-function workflowEscape(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function workflowStatusKey(w){
   w=w||{};
   if(w.status==='running' && w.startup_ready===false)return 'startup_pending';
@@ -52,10 +52,10 @@ function workflowStatusTone(w){
 function workflowStartupHint(w){
   w=w||{};
   const key=workflowStatusKey(w);
-  if(key!=='startup_pending'&&key!=='startup_failed')return '';
-  const id=workflowEscape(w.workflow_id||'');
-  const stage=workflowEscape(w.failed_stage||'');
-  const reason=workflowEscape(w.startup_failure_reason||'');
+  if(key!=='startup_pending'&&key!=='startup_failed'&&key!=='abandoned')return '';
+  const id=String(w.workflow_id||'');
+  const stage=String(w.failed_stage||'');
+  const reason=String(w.startup_failure_reason||'').slice(0,2048);
   const detail=[stage&&('阶段：'+stage),reason&&('原因：'+reason)].filter(Boolean).join('；');
   const cleanup='人工清理：herdr-task close-workflow '+id+' --abandon';
   return [detail,cleanup].filter(Boolean).join('。');

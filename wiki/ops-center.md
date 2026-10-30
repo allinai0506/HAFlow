@@ -218,9 +218,11 @@ herdr-task close-workflow <workflow_id> --abandon
 
 `FACT` 启动等待日志限频：`[STARTUP WAIT]` 每 Workflow 首次 1 行、之后每 600s 最多 1 行，两个等待入口（推进 sweep 与队列投递）共用同一进程内闩；就绪时最多一条 `[STARTUP READY]`，关闭/回收后最多一条 `[STARTUP WAIT ENDED]`。限频状态不落库，Controller 重启后最多重新打印一次；缓存有界（默认 1024 个 Workflow）。
 
-消费者影响（已用测试锁定）：`completed + outcome=startup_failed` 会被 active guard 排除，同项目可重新创建；不触发交付清单校验（仅 `outcome=delivered` 触发）、不产生完成通知（Notifier 按任务分组，零任务不发“Workflow 完成”）、不触发自动物理收尾；Controller 不再推进该 Workflow。看板“完成数”统计口径本轮未改，`startup_failed` 可能计入完成数，需按 `outcome` 区分。
+消费者影响（已用测试锁定）：`completed + outcome=startup_failed` 会被 active guard 排除，同项目可重新创建；不触发交付清单校验（仅 `outcome=delivered` 触发）、不产生完成通知（Notifier 按任务分组，零任务不发“Workflow 完成”）、不触发自动物理收尾；Controller 不再推进该 Workflow。看板“完成数”统计口径未改，`startup_failed` 可能计入完成数，需按 `outcome` 区分。
 
-`UNKNOWN` 本节点未执行浏览器级 Console 视觉回归；Console 的启动状态字段与标签由 Console 可见性任务负责，本页只描述已通过测试的持久化字段与运维行为。
+`FACT` Console 工作流级标签（2026-10-30）：专业控制台侧栏、页签、横幅、流程图摘要、运维卡片和仪表板药丸区分「启动中（尚未就绪）」「启动失败」「已放弃」。极简工作台对这两种终态显示「查看记录」，打开记录并给出 `failed_stage`、有界原因和 `herdr-task close-workflow <id> --abandon`；正常 `completed/delivered/cleaned` 才显示「查看成果」。Task 级标签不变（任务 `completed` 仍是「执行完成，待收尾」/「待收尾」）。阶段摘要不把 `startup_failed`、`abandoned` 或 `startup_ready=false` 当成已清理。
+
+`UNKNOWN` 本页未重跑浏览器级 Console 视觉回归。流程图节点「已完成」仍由 `herdr/workflow_graph` 决定，不在本次 Console 修复范围。`/api/dashboard` 若不下发 `status/outcome/startup_ready`，仪表板药丸保持原「已完成」。
 
 Evidence:
 - `herdr/workflow_startup.py#startup_deadline_seconds` / `#is_startup_orphan` / `#find_startup_orphan_candidates` / `#converge_startup_failure` / `#reclaim_startup_orphan`

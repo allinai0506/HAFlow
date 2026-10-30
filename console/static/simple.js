@@ -6,7 +6,6 @@ const model = {projects:[], projectId:query.get('project_id') || '', workflowId:
 const labels = {pending:'待开始',running:'执行中',working:'执行中',dispatched:'已派发',blocked:'受阻，等待处理',failed:'执行失败',paused:'已暂停',completed:'执行完成，待收尾',delivered:'已交付',cleaned:'已完成',integrated:'已集成',committed:'已提交',superseded:'已取代',rework:'返工中',unknown:'状态未知',ready:'已就绪',waiting:'等待中'};
 const label = status => labels[status] || status || '状态未知';
 /* workflow-status:start */
-const workflowEsc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function workflowKey(w){
   w=w||{};
   if(w.status==='running'&&w.startup_ready===false)return 'startup_pending';
@@ -15,10 +14,16 @@ function workflowKey(w){
   return String(w.status||'unknown');
 }
 function workflowLabel(w){const key=workflowKey(w);return ({startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃'})[key]||label(key);}
+function startupRecordText(w){
+  w=w||{};
+  const reason=String(w.startup_failure_reason||'').slice(0,2048);
+  const detail=[w.failed_stage&&('阶段：'+w.failed_stage),reason&&('原因：'+reason)].filter(Boolean).join('；');
+  return [detail,'人工清理：herdr-task close-workflow '+(w.workflow_id||'')+' --abandon'].filter(Boolean).join('。');
+}
 function workflowHint(w){
-  const key=workflowKey(w); if(key!=='startup_pending'&&key!=='startup_failed')return '';
-  const detail=[w.failed_stage&&('阶段：'+w.failed_stage),w.startup_failure_reason&&('原因：'+w.startup_failure_reason)].filter(Boolean).join('；');
-  return workflowEsc([detail,'人工清理：herdr-task close-workflow '+(w.workflow_id||'')+' --abandon'].filter(Boolean).join('。'));
+  const key=workflowKey(w);
+  if(key!=='startup_pending'&&key!=='startup_failed')return '';
+  return startupRecordText(w);
 }
 /* workflow-status:end */
 async function api(url, body) {
@@ -83,9 +88,11 @@ function renderWorkflows(workflows) {
     name.onclick=()=>openWorkflow(workflow.workflow_id);
     const status=document.createElement('span'); status.className='requestStatus';status.textContent=workflowLabel(workflow);status.dataset.status=workflow.status || 'unknown';
     const button=document.createElement('button');button.className='requestAction';
-    const finished=['completed','delivered','cleaned'].includes(workflow.status);
-    button.textContent=finished?'查看成果':'查看进度';
-    button.onclick=()=>openWorkflow(workflow.workflow_id,finished);
+    const key=workflowKey(workflow);
+    const mode=key==='startup_failed'||key==='abandoned'?'record':['completed','delivered','cleaned'].includes(workflow.status)?'results':'progress';
+    button.textContent=mode==='record'?'查看记录':mode==='results'?'查看成果':'查看进度';
+    button.dataset.action=mode;
+    button.onclick=()=>openWorkflow(workflow.workflow_id,mode);
     row.append(name,status,button);$('requestList').append(row);
   }
   updateSteps();
@@ -94,12 +101,36 @@ function showResults() {
   $('myRequests').hidden=true;$('results').hidden=false;
   updateSteps(3);$('results').focus();
 }
-async function openWorkflow(wid,results=false) {
+function showStartupRecord(workflow){
+  $('results').hidden=true;
+  let panel=document.getElementById('startupRecord');
+  if(!panel){
+    panel=document.createElement('section');
+    panel.id='startupRecord';
+    const host=$('progressDialog');
+    if(host)host.append(panel);
+  }
+  panel.hidden=false;
+  panel.textContent=startupRecordText(workflow||{});
+  $('progressTitle').textContent='启动记录';
+  $('progressDialog').showModal();
+}
+function hideStartupRecord(){
+  const panel=document.getElementById('startupRecord');
+  if(panel)panel.hidden=true;
+}
+async function openWorkflow(wid,mode=false) {
+  if(mode===true)mode='results';
+  else if(mode===false)mode='progress';
   $('workflow').value=wid;
   await loadWorkflow();
   if(model.workflowId!==wid || $('execution').hidden) return;
-  if(results) showResults();
-  else $('progressDialog').showModal();
+  if(mode==='results'){hideStartupRecord();$('progressDialog').close();showResults();return;}
+  if(mode==='record'){showStartupRecord(model.currentWorkflow);return;}
+  hideStartupRecord();
+  $('results').hidden=true;
+  $('progressTitle').textContent='需求进度';
+  $('progressDialog').showModal();
 }
 async function refreshProjects() {
   try {
@@ -161,6 +192,7 @@ async function loadWorkflow() {
     const d=await api('/api/workflow?id='+encodeURIComponent(wid)+'&lightweight=1');
     if(sequence!==model.sequence) return;
     if(d.workflow.project_id!==model.projectId) throw new Error('工作流项目归属不匹配');
+    model.currentWorkflow=d.workflow;
     if(wid!==$('execution').dataset.workflowId) for(const detail of $('execution').querySelectorAll('details')) detail.open=false;
     $('execution').dataset.workflowId=wid;
     $('execution').hidden=false;

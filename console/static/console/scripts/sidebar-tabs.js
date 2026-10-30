@@ -5,7 +5,7 @@ var {
 } = (function({
   state, saveViewState, toast,
   esc, showTemplateLibrary, workflowSubject,
-  workflowStatusLabel, workflowStatusTone, workflowStartupHint,
+  workflowStatusKey, workflowStatusLabel, workflowStatusTone, workflowStartupHint,
   loadWorkflow, clearWorkflow, paintCrumb,
   setWorkspaceMode, openControllerCockpit, returnFromControllerCockpit, showLogs,
   showArchive, stopLogAutoRefresh
@@ -48,7 +48,7 @@ function renderSidebarWorkflows(){
   const listSig = JSON.stringify([
     Boolean(state.completedExpanded),
     state.completedVisibleLimit || 5,
-    ws.map(w => [w.workflow_id, w.status||'waiting', w.progress||0, workflowSubject(w)||w.workflow_id])
+    ws.map(w => [w.workflow_id, w.status||'waiting', w.startup_ready!==false, w.outcome||'', w.progress||0, workflowSubject(w)||w.workflow_id])
   ]);
   if(container.dataset.sig === listSig) {
     container.querySelectorAll('.sidebar-item[data-wf-id]').forEach(el => {
@@ -64,8 +64,9 @@ function renderSidebarWorkflows(){
   const completed = [];
 
   ws.forEach(w => {
+    const key = workflowStatusKey(w);
     const st = w.status || 'waiting';
-    if(st === 'blocked' || st === 'decision' || st === 'failed'){
+    if(key==='startup_failed' || key==='abandoned' || st === 'blocked' || st === 'decision' || st === 'failed'){
       blocked.push(w);
     } else if(st === 'completed' || st === 'cleaned' || st === 'archived'){
       completed.push(w);
@@ -81,11 +82,15 @@ function renderSidebarWorkflows(){
     blocked.forEach(w => {
       const isActive = w.workflow_id === state.workflowId;
       const title = (typeof workflowSubject==='function'?workflowSubject(w):'') || w.title || w.workflow_id;
+      const key = workflowStatusKey(w);
+      const startup = key==='startup_failed' || key==='abandoned';
+      const meta = startup ? workflowStatusLabel(w) : '需决策';
+      const dot = startup ? workflowStatusTone(w) : 'decision';
       html += `
         <div class="sidebar-item ${isActive ? 'active' : ''}" data-wf-id="${esc(w.workflow_id)}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
-          <span class="status-dot decision"></span>
+          <span class="status-dot ${esc(dot)}"></span>
           <span class="item-text">${esc(title)}</span>
-          <span class="item-meta warning-text">需决策</span>
+          <span class="item-meta${startup ? '' : ' warning-text'}">${esc(meta)}</span>
         </div>`;
     });
   }
@@ -95,10 +100,11 @@ function renderSidebarWorkflows(){
     running.forEach(w => {
       const isActive = w.workflow_id === state.workflowId;
       const title = (typeof workflowSubject==='function'?workflowSubject(w):'') || w.title || w.workflow_id;
-      const meta = w.progress ? `${w.progress}%` : (w.status === 'working' ? '进行中' : '就绪');
+      const meta = w.progress ? `${w.progress}%` : workflowStatusLabel(w);
+      const dot = workflowStatusTone(w);
       html += `
         <div class="sidebar-item ${isActive ? 'active' : ''}" data-wf-id="${esc(w.workflow_id)}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
-          <span class="status-dot running"></span>
+          <span class="status-dot ${esc(dot==='default'?'running':dot)}"></span>
           <span class="item-text">${esc(title)}</span>
           <span class="item-meta tabular-nums">${esc(meta)}</span>
         </div>`;
@@ -139,11 +145,13 @@ function renderSidebarWorkflows(){
     visibleCompleted.forEach(w => {
       const isActive = w.workflow_id === state.workflowId;
       const title = (typeof workflowSubject==='function'?workflowSubject(w):'') || w.title || w.workflow_id;
+      const meta = workflowStatusLabel(w);
+      const dot = workflowStatusTone(w);
       html += `
         <div class="sidebar-item ${isActive ? 'active' : ''}" data-wf-id="${esc(w.workflow_id)}" onclick="openWorkflowTab('${esc(w.workflow_id)}')" title="${esc(title)} (${esc(w.workflow_id)})">
-          <span class="status-dot completed"></span>
+          <span class="status-dot ${esc(dot==='default'?'completed':dot)}"></span>
           <span class="item-text">${esc(title)}</span>
-          <span class="item-meta">已完成</span>
+          <span class="item-meta">${esc(meta)}</span>
         </div>`;
     });
 
@@ -286,7 +294,7 @@ return {
 })({
   state, saveViewState, toast,
   esc, showTemplateLibrary, workflowSubject,
-  workflowStatusLabel, workflowStatusTone, workflowStartupHint,
+  workflowStatusKey, workflowStatusLabel, workflowStatusTone, workflowStartupHint,
   loadWorkflow, clearWorkflow, paintCrumb:(...args)=>paintCrumb(...args),
   setWorkspaceMode:(...args)=>setWorkspaceMode(...args), openControllerCockpit:(...args)=>openControllerCockpit(...args), returnFromControllerCockpit:(...args)=>returnFromControllerCockpit(...args), showLogs:(...args)=>showLogs(...args),
   showArchive:(...args)=>showArchive(...args), stopLogAutoRefresh:(...args)=>stopLogAutoRefresh(...args)

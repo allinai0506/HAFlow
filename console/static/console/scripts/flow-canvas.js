@@ -151,14 +151,18 @@ function renderFlowWorkbench(){
   if(state.shellView&&state.shellView!=='workbench')return;
   if(state.opsMode||state.dashMode||state.workflowId==='__templates__')return;
   const g=flowGraphData();const nodes=g.nodes||[];
+  const wf=state.workflow&&state.workflow.workflow;
+  const wfKey=wf?workflowStatusKey(wf):'';
+  const startup=wfKey==='startup_pending'||wfKey==='startup_failed'||wfKey==='abandoned';
   setWorkspaceMode(state.workflowView);
   const fs=document.getElementById('flowSummary');
   if(fs){
-    if(state.workflowView==='flow'&&nodes.length){
+    if(state.workflowView==='flow'&&(nodes.length||startup)){
       const working=nodes.filter(n=>n.status==='working').length;
       fs.style.display='inline-flex';
       const dotHtml=working>0?'<span class="flow-status-dot" style="background:#5e6ad2;box-shadow:0 0 0 2px rgba(94,106,210,.25)"></span>':'<span class="flow-status-dot"></span>';
-      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span>';
+      const label=wf?esc(workflowStatusLabel(wf)):'';
+      fs.innerHTML=dotHtml+'<span>'+(label?label+' · ':'')+'<b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span>';
     }else{
       fs.style.display='none';
     }
@@ -168,7 +172,10 @@ function renderFlowWorkbench(){
   if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}
   const recoveries=currentRecovery();
   const ticker=document.getElementById('bottomTicker');
-  if(ticker)ticker.textContent=state.controllerActionsData?.pending?'正在读取恢复状态…':recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
+  if(ticker){
+    const hint=wf?workflowStartupHint(wf):'';
+    ticker.textContent=startup&&hint?hint:startup?workflowStatusLabel(wf):state.controllerActionsData?.pending?'正在读取恢复状态…':recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
+  }
   const attnBar=document.getElementById('flowAttnBar');
   if(attnBar){
     if(state.workflowView==='flow'&&state.controllerActionsData?.pending){

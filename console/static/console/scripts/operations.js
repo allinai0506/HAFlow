@@ -271,7 +271,15 @@ function renderOpsCenter(){
     let summaryText='等待调度推进';
     let summaryClass='is-idle';
 
-    if(failedNode||c.tasks.failed>0){
+    const startupKey=workflowStatusKey(c);
+    if(startupKey==='startup_pending'||startupKey==='startup_failed'||startupKey==='abandoned'){
+      const tone=workflowStatusTone(c);
+      statusClass=tone==='danger'?'is-failed':tone==='warning'?'is-blocked':'is-idle';
+      statusText=workflowStatusLabel(c);
+      summaryIcon=startupKey==='startup_pending'?'○':'!';
+      summaryClass=statusClass;
+      summaryText=workflowStartupHint(c)||statusText;
+    }else if(failedNode||c.tasks.failed>0){
       statusClass='is-failed';
       statusText='执行失败';
       summaryIcon='🚨';

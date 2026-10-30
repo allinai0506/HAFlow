@@ -146,4 +146,4 @@
 - **阈值**：`HERDR_WORKFLOW_STARTUP_DEADLINE_SECONDS` 默认 1800；非数字/≤0/≤210/溢出回退默认并只告警一次（`[STARTUP WATCHDOG CONFIG]`）。
 - **看门狗不回收的边界**：记录任意状态已有任务；`startup_ready=true`；`paused/in_progress/closing/failed`；foreign（`workflow_file` 缺失/已删除或位于 `/tmp/`、`pytest-` 路径）；Controller 停机期间。以上场景用人工 `close-workflow --abandon` 兜底。
 - **日志**：`[STARTUP WATCHDOG RECLAIMED]` 表示已自动回收；`[STARTUP WATCHDOG CONFIG]` 表示期限配置被回退；`[WORKFLOW STARTUP CONVERGE FAILED]` 表示 Factory 自身收敛失败（记录保持 `running`，交由看门狗）；`[STARTUP WAIT]` 每 Workflow 首次 1 行、之后每 600s 最多 1 行，不再无限刷屏。
-- **验证过的消费者行为**：`completed + outcome=startup_failed` 不触发交付校验、不产生完成通知、不触发自动收尾；Controller 不再推进该 Workflow；看板完成数统计口径未变。
+- **验证过的消费者行为**：`completed + outcome=startup_failed` 不触发交付校验、不产生完成通知、不触发自动收尾；Controller 不再推进该 Workflow；看板完成数统计口径未变。专业控制台与极简工作台把启动失败、已放弃显示为「启动失败 / 已放弃」和「查看记录」，不显示为已交付或查看成果。
