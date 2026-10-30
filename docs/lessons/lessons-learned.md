@@ -8786,7 +8786,7 @@ pytest -v tests/test_finalize_baseline_and_replacement_closure.py
 | 问题 | 教训 | 规范 |
 |------|------|------|
 | 嵌套 Git 目录导致索引崩溃与 50 分钟无效重试 | 测试产生的子 Git 目录不是业务交付物，绝不可作为普通文件/子模块添加；Git 索引致命错误不可重试 | `task_cli_delivery.py` 排除带有 `.git` 的嵌套目录；`git_finalize.py` 识别 fatal git 错误与 rc=2，立即作为 `retryable: False` 熔断升级 |
-| dispatched 任务产出裁决被漏判并遭 Sentinel 误杀 | Agent 运行速度极快时可能跳过 working 观察窗口直接产出裁决；状态机对账必须包容 dispatched 阶段有效产物 | `task_listener.py` 与 `runtime_reconciliation.py` 在 `dispatched` 状态下同样支持 `gate_verdict_recovery`；Sentinel 派发保险丝在任务已有有效裁决时豁免失败处置 |
+| dispatched 任务产出裁决被漏判并遭 Sentinel 误杀 | Agent 运行速度极快时可能跳过 working 观察窗口直接产出裁决；状态机对账必须包容 dispatched 阶段有效产物，但严禁将终端残留历史文本误判为当前任务结论 | `task_listener.py` 与 `runtime_reconciliation.py` 在 `dispatched` 状态下仅在拥有当前执行新鲜凭证（`_gate_verdict_is_fresh`）时才执行 `gate_verdict_recovery`，严格排除终端残留陈旧文本；Sentinel 派发保险丝在任务已有有效裁决时豁免失败处置 |
 | 模板配置键名多态性（workflow_template vs name） | 数据源存在历史演进与多态键名，严格依赖单一老键名会导致生产环境静默降级 | 统一通过 `workflow_template or template or template_name or name` 获取工作流模板名称 |
 | 实现阶段误套用对抗角色隔离 | 角色互斥隔离仅适用于 plan/review 等具备明确对抗角色（如 executor vs challenger）的节点，不得向实现等协作性工人节点无差别套用 | `agent_router.py` 严格限定角色互斥仅在非 implementation 阶段且明确定义对抗角色时生效，并优化报错提示 |
 | 任务量膨胀导致工作流关闭归档超时 | 关闭超时写死 900 秒无法适配多任务长流程的归档预算，且归档严禁随意剔除 .git 以免丢失未集成历史 | `services/controller/workflow_close.py` 按任务数量动态伸缩关闭超时（`max(900, n*120)`），同时完整保全克隆内历史提交与工作区产物 |

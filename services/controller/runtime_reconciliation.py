@@ -179,11 +179,18 @@ def reconcile_task_state(ports, task_id):
 
     # Agent 曾经进入 working/rework，随后 Controller 重启时发现已经 idle
     if runtime in {"idle", "done"}:
-        if current in {"dispatched", "working"} and getattr(ports, "gate_verdict_ready", lambda t: False)(task):
-            has_done_marker, screen = ports._completion_marker_snapshot(task)
-            if ports._set_observed_status(task, "agent_done", "gate_verdict_recovery"):
-                ports.emit_done_if_allowed(ports.get_task(task_id), report_text=screen)
-            return
+        if current in {"dispatched", "working"}:
+            is_fresh = False
+            if hasattr(ports, "_gate_verdict_is_fresh"):
+                if not ports._gate_verdict_is_fresh(task):
+                    if hasattr(ports, "sync_verdict_from_business_acceptance"):
+                        ports.sync_verdict_from_business_acceptance(task)
+                is_fresh = ports._gate_verdict_is_fresh(task)
+            if is_fresh and getattr(ports, "gate_verdict_ready", lambda t: False)(task):
+                has_done_marker, screen = ports._completion_marker_snapshot(task)
+                if ports._set_observed_status(task, "agent_done", "gate_verdict_recovery"):
+                    ports.emit_done_if_allowed(ports.get_task(task_id), report_text=screen)
+                return
 
     if runtime == "idle":
         if current in {"working", "rework"}:
@@ -201,8 +208,11 @@ def reconcile_task_state(ports, task_id):
 
 
 DEPENDENCIES = {'get_agent_runtime_status': ('json', 'subprocess'),
- 'reconcile_task_state': ('_completion_marker_snapshot', '_record_completion_sample',
-                          '_set_observed_status', 'blocked_event_type', 'emit_done_if_allowed',
-                          'enqueue_coordinator_event', 'gate_verdict_ready', 'get_agent_runtime_status', 'get_task')}
+ 'reconcile_task_state': ('_completion_marker_snapshot', '_gate_verdict_is_fresh',
+                          '_record_completion_sample', '_set_observed_status',
+                          'blocked_event_type', 'emit_done_if_allowed',
+                          'enqueue_coordinator_event', 'gate_verdict_ready',
+                          'get_agent_runtime_status', 'get_task',
+                          'sync_verdict_from_business_acceptance')}
 
 __all__ = tuple(DEPENDENCIES)

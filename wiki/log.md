@@ -3822,3 +3822,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Sentinel看门狗有效产出保全：`services/herdr-sentinel.py` 引入 `_clone_git_progress_at` 与 `_clone_produced_commit`；在计算 idle 时将 Git 提交时间纳入进展基准；在硬超时到期前执行提交探针，对已产出领先于 `baseline_commit` 的任务且 Agent 停止者，自动记录 commit 并安全转入 `agent_done` 触发验收，杜绝将已完成工作的 Agent 误杀为失败。
 - 非门禁实现节点悬挂替代义务收敛：`services/controller/infra_recovery.py` 扩展 `converge_dangling_replacement_obligations`，覆盖无 gate verdict 的实现与执行节点，在节点存在已达成交付终态（`integrated`/`cleanup_ready`/`cleaned`）时，安全清除悬挂任务的 `replacement_pending=True` 并落 `replacement_obligation_auto_resolved` 审计事件，彻底消除僵尸义务。
 - 验证：`tests/test_finalize_baseline_and_replacement_closure.py` 7 项全链路测试全绿；关联回归套件 `test_workflow_finalize.py`、`test_finalize_empty.py`、`test_sentinel_hard_timeout.py`、`test_zombie_obligation_regression.py`、`test_recovery_supply_chain.py`、`test_task_cli_workflow_close.py` 49 项全部通过；`compileall` 与 `git diff --check` clean。教训见 lessons §210。
+
+## [2026-10-30] Fix | wf-haflow-1029-02 卡点收敛：Git提交嵌套目录过滤、状态机门禁凭据真伪校验、多态模板识别、角色隔离精细化与关闭超时弹性伸缩
+- 嵌套 Git 目录过滤与致命提交快速熔断：`herdr/task_cli_delivery.py` 在收集 `task_untracked` 时严格跳过任何包含 `.git` 的子目录，杜绝子仓库索引冲突；`services/controller/git_finalize.py` 识别 rc=2 及致命索引错误，立即作为 `retryable: False` 熔断升级 Attention，消除 50 分钟盲目重试死循环。
+- 门禁状态机当前执行凭据校验与保险丝协同：`services/controller/task_listener.py` 与 `runtime_reconciliation.py` 支持在 `dispatched` 状态下识别门禁结论，但严格要求存在当前执行的新鲜凭据文件（`_gate_verdict_is_fresh`），杜绝终端残留陈旧判决被误采纳；`services/herdr-sentinel.py` 在检测派发超时保险丝时识别真实有效裁决并豁免失败处置。
+- 工作流多态模板识别与收尾模式对齐：`herdr/wrapup_delivery.py` 与 `herdr/agent_router.py` 统一兼容 `workflow_template or template or template_name or name` 多态键名，保证收尾任务按真实配置采用 `worker` 模式。
+- 实现阶段角色解耦与路由避障前置：`herdr/agent_router.py` 限定同阶段角色互斥仅对非 `implementation` 阶段的对抗角色生效，解除非对抗阶段多子任务锁死；重派逻辑将失败 Agent 惩罚设为主要排序准则，彻底打破低负载再次选定崩溃 Agent 的恶性循环；`herdr/task_cli_launch.py` 保持路由调用参数向后兼容。
+- 工作流关闭归档全量保全与弹性超时：`services/controller/workflow_close.py` 按任务数量动态伸缩关闭超时（`max(900, n*120)`），防止大规模工作流物理清理与克隆历史归档超时挂起；完整保全克隆内 Git 历史。
+- 验证：6 项针对性回归测试（`test_wf_1029_fix1_nested_git_commit.py` ~ `test_wf_1029_fix6_auto_redispatch_penalize_agent.py`）及关联 82 项测试全部通过；`compileall` 与 `git diff --check` clean。教训见 lessons §211。

@@ -113,15 +113,19 @@ def resolve_launch_agent(args, node_id, store, *, choose_agent, workflow_config_
             pass
 
     def route():
+        kwargs = {
+            "reservation_key": args.task_id,
+            "run_id": getattr(args, "run_id", None),
+            "dispatch_role": args.dispatch_role,
+        }
+        if penalized:
+            kwargs["penalize_agents"] = penalized
         return choose_agent(
             args.workflow_id,
             node_id,
             args.task_type,
             requested_agent,
-            reservation_key=args.task_id,
-            run_id=getattr(args, "run_id", None),
-            dispatch_role=args.dispatch_role,
-            penalize_agents=penalized or None,
+            **kwargs,
         )
 
     if opt_out:
