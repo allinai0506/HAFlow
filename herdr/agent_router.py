@@ -464,7 +464,8 @@ def _consumes_isolation_budget(task):
 
 
 def _choose_agent_impl(workflow_id, stage, task_type, requested="auto", reservation_key=None,
-                       run_id=None, decided_at=None, dispatch_role="worker", _refresh_budget=1):
+                       run_id=None, decided_at=None, dispatch_role="worker",
+                       penalize_agents=None, _refresh_budget=1):
     ROUTER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(ROUTER_LOCK_FILE, "a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -472,6 +473,7 @@ def _choose_agent_impl(workflow_id, stage, task_type, requested="auto", reservat
             return _choose_agent_locked(workflow_id, stage, task_type, requested=requested,
                                         reservation_key=reservation_key, run_id=run_id,
                                         decided_at=decided_at, dispatch_role=dispatch_role,
+                                        penalize_agents=penalize_agents,
                                         lock=lock, _refresh_budget=_refresh_budget)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -486,6 +488,7 @@ def _choose_agent_locked(
     run_id=None,
     decided_at=None,
     dispatch_role="worker",
+    penalize_agents=None,
     lock=None,
     _refresh_budget=1,
 ):
@@ -528,8 +531,15 @@ def _choose_agent_locked(
     # This delivery contract requires independent fresh gates. Reject reuse at
     # routing admission instead of spending work that publication must refuse.
     from .wrapup_delivery import TEMPLATES, is_current_round
+    template_name = (
+        wf_cfg.get("workflow_template")
+        or wf_cfg.get("template")
+        or wf_cfg.get("template_name")
+        or wf_cfg.get("name")
+        or ""
+    ) if wf_cfg else ""
     strict_wrapup = bool(is_verifier_node_id(wf_cfg, stage) and wf_cfg
-        and wf_cfg.get("name") in TEMPLATES and record.get("candidate_sha")
+        and template_name in TEMPLATES and record.get("candidate_sha")
         and is_current_round(_get_store(), workflow_id, record["candidate_sha"]))
     if strict_wrapup:
         exclusions = node_policy.get("exclude_stage_agents") or node_policy.get("disallow_from_stages") or []
@@ -679,7 +689,12 @@ def _choose_agent_locked(
 
     # Read persisted role ownership inside the same cross-process lock as reservation.
     role_used = set()
-    if dispatch_role:
+    configured_roles = {r.get("name") for r in node_policy.get("roles", []) if isinstance(r, dict)}
+    is_adversarial_stage = stage not in ("implementation", "impl") and (
+        len(configured_roles) > 1
+        or any(k in str(dispatch_role).lower() for k in ("challenger", "adversarial", "review", "audit", "critic"))
+    )
+    if dispatch_role and is_adversarial_stage:
         for item in [*_get_store().list_tasks(), *reservations.get("reservations", {}).values()]:
             if (item.get("workflow_id") == workflow_id
                     and (item.get("node") or item.get("stage")) == stage
@@ -711,6 +726,12 @@ def _choose_agent_locked(
         )
     ]
 
+    penalized_set = set(penalize_agents or ()) if (not requested or requested == "auto") else set()
+    if penalized_set:
+        non_penalized = [a for a in candidates if a not in penalized_set]
+        if non_penalized:
+            candidates = non_penalized + [a for a in candidates if a in penalized_set]
+
     if stage_used_agents:
         _opt_out, _opt_reason = _isolation_opt_out(node_policy)
         if _opt_out:
@@ -724,19 +745,22 @@ def _choose_agent_locked(
         else:
             filtered = [a for a in candidates if a not in stage_used_agents]
             if not filtered:
+                reason_msg = (
+                    f"stage(s) {', '.join(exclude_stages)}"
+                    if exclude_stages
+                    else (f"role(s) {', '.join(sorted(role_used))}" if role_used else "other tasks")
+                )
                 if allow_soft_degrade and candidates:
                     is_degraded = True
                     degrade_reason = (
                         f"soft_degrade_candidate_pool_exhausted: all candidates "
-                        f"{candidates} were used in stage(s) "
-                        f"{', '.join(exclude_stages)}"
+                        f"{candidates} were used in {reason_msg}"
                     )
                 else:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
                     raise RouterIsolationRejection(
                         f"No available Agent for stage '{stage}': all candidates "
-                        f"{candidates} were used in stage(s) "
-                        f"{', '.join(exclude_stages)} "
+                        f"{candidates} were used in {reason_msg} "
                         f"(excluded: {sorted(stage_used_agents)}). "
                         "Isolation is fail-closed; provide explicit opt-out "
                         "(agent_policy.allow_reuse_implementation_agents=true + "
@@ -760,6 +784,7 @@ def _choose_agent_locked(
             return _choose_agent_impl(workflow_id, stage, task_type, requested=requested,
                                       reservation_key=reservation_key, run_id=run_id,
                                       decided_at=decided_at, dispatch_role=dispatch_role,
+                                      penalize_agents=penalize_agents,
                                       _refresh_budget=_refresh_budget - 1)
         verified = set(record.get("healthy_agents", []))
         candidates = [agent for agent in candidates
@@ -816,6 +841,7 @@ def _choose_agent_locked(
     ranked = sorted(
         enumerate(candidates),
         key=lambda item: (
+            1 if item[1] in penalized_set else 0,
             active_loads.get(item[1], 0)
             + reserved_loads.get(item[1], 0),
             item[0],
@@ -1137,6 +1163,7 @@ def choose_agent(
     reservation_key=None,
     run_id=None,
     dispatch_role="worker",
+    penalize_agents=None,
 ):
     """Select the production agent.
 
@@ -1156,6 +1183,7 @@ def choose_agent(
         run_id=run_id,
         decided_at=decided_at,
         dispatch_role=dispatch_role,
+        penalize_agents=penalize_agents,
     )
     canary = shadow_ctx.get("canary_plan")
     if canary is not None:

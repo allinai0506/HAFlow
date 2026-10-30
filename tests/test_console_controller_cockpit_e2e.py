@@ -39,7 +39,13 @@ def collect_cockpit_failure_diagnostics(binary, page_label, script, result):
     selectors = [m.group("sel") for m in re.finditer(r"(?:click|press|fill|waitForFunction|querySelector)\(\s*(?P<q>['\"])(?P<sel>.*?)(?P=q)", script)]
     selectors_json = json.dumps(selectors)
     diag_script = f"""
-    const task=await taskSpace({json.dumps(SPACE)});
+    let task;
+    try {{ task = await taskSpace({json.dumps(SPACE)}); }}
+    catch (e) {{
+        const m = String(e).match(/claimTaskSpace\\((\\d+)\\)/);
+        if (m) {{ task = await claimTaskSpace(Number(m[1])); }}
+        else {{ throw e; }}
+    }}
     const page=task.page({json.dumps(page_label)});
     try {{
         const report = await page.evaluate((selectors) => {{
@@ -122,7 +128,11 @@ def browser(script, *, page_label):
     binary = shutil.which("ego-browser")
     if not binary:
         pytest.skip("real browser E2E requires ego-browser and its local browser service")
-    prelude = f"const task=await taskSpace({json.dumps(SPACE)});"
+    prelude = (
+        f"let task; try {{ task = await taskSpace({json.dumps(SPACE)}); }} "
+        f"catch (e) {{ const m = String(e).match(/claimTaskSpace\\((\\d+)\\)/); "
+        f"if (m) {{ task = await claimTaskSpace(Number(m[1])); }} else {{ throw e; }} }};"
+    )
     if page_label is not None:
         prelude += f"const page=task.page({json.dumps(page_label)});"
     for attempt in range(3):

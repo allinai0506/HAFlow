@@ -136,11 +136,18 @@ def maybe_close_completed_workflow(ports, workflow_id):
     def _run():
         try:
             try:
+                task_count = 0
+                if hasattr(ports, "load_tasks"):
+                    try:
+                        task_count = len([t for t in (ports.load_tasks() or []) if t.get("workflow_id") == workflow_id])
+                    except Exception:
+                        pass
+                close_timeout = max(900, task_count * 120)
                 result = ports.subprocess.run(
                     [ports.TASK_MANAGER, "close-workflow", workflow_id],
                     text=True,
                     capture_output=True,
-                    timeout=900,
+                    timeout=close_timeout,
                 )
             except Exception as exc:
                 print(

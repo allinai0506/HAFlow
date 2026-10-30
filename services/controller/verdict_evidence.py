@@ -61,13 +61,22 @@ def _gate_verdict_file_is_fresh(ports, path, task):
             return False
 
     rework_started = task.get("rework_started_at")
-    if not rework_started:
-        return True
-    try:
-        st = ports.os.stat(path)
-        return st.st_mtime >= (rework_started - 1.0)
-    except OSError:
-        return False
+    if rework_started:
+        try:
+            st = ports.os.stat(path)
+            return st.st_mtime >= (rework_started - 1.0)
+        except OSError:
+            return False
+
+    created_at = task.get("created_at")
+    if created_at:
+        try:
+            st = ports.os.stat(path)
+            return st.st_mtime >= (float(created_at) - 1.0)
+        except (OSError, ValueError, TypeError):
+            return False
+
+    return True
 
 def sync_verdict_from_business_acceptance(ports, task):
     """Restore durable gate-verdict file projection from authoritative business_acceptance_recorded DB event."""

@@ -59,9 +59,10 @@ class ControllerGateVerdictRecoveryTest(unittest.TestCase):
             "version": 4,
         }
 
-        # Mock gate_verdict_ready -> True
+        # Mock gate_verdict_ready -> True and _gate_verdict_is_fresh -> True
         with patch.object(self.ctrl, "get_task", return_value=task), \
              patch.object(self.ctrl, "_completion_marker_snapshot", return_value=(False, "")), \
+             patch.object(self.ctrl, "_gate_verdict_is_fresh", return_value=True), \
              patch.object(self.ctrl, "gate_verdict_ready", return_value=True), \
              patch.object(self.ctrl, "_set_observed_status", return_value=True) as mock_set_status, \
              patch.object(self.ctrl, "emit_done_if_allowed") as mock_emit_done:

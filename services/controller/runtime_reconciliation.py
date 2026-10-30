@@ -178,6 +178,28 @@ def reconcile_task_state(ports, task_id):
         return
 
     # Agent 曾经进入 working/rework，随后 Controller 重启时发现已经 idle
+    if runtime in {"idle", "done"}:
+        if current in {"dispatched", "working"}:
+            has_evidence = False
+            if hasattr(ports, "_gate_verdict_is_fresh"):
+                if not ports._gate_verdict_is_fresh(task):
+                    if hasattr(ports, "sync_verdict_from_business_acceptance"):
+                        ports.sync_verdict_from_business_acceptance(task)
+                has_evidence = ports._gate_verdict_is_fresh(task)
+            if not has_evidence and hasattr(ports, "read_gate_verdict"):
+                try:
+                    v_res = ports.read_gate_verdict(task)
+                    if isinstance(v_res, (tuple, list)) and len(v_res) >= 3:
+                        if v_res[0] in ("pass", "blocked") and v_res[2] in ("file", "file+screen"):
+                            has_evidence = True
+                except Exception:
+                    pass
+            if has_evidence and getattr(ports, "gate_verdict_ready", lambda t: False)(task):
+                has_done_marker, screen = ports._completion_marker_snapshot(task)
+                if ports._set_observed_status(task, "agent_done", "gate_verdict_recovery"):
+                    ports.emit_done_if_allowed(ports.get_task(task_id), report_text=screen)
+                return
+
     if runtime == "idle":
         if current in {"working", "rework"}:
             has_done_marker, _screen = ports._completion_marker_snapshot(task)
@@ -194,8 +216,11 @@ def reconcile_task_state(ports, task_id):
 
 
 DEPENDENCIES = {'get_agent_runtime_status': ('json', 'subprocess'),
- 'reconcile_task_state': ('_completion_marker_snapshot', '_record_completion_sample',
-                          '_set_observed_status', 'blocked_event_type', 'emit_done_if_allowed',
-                          'enqueue_coordinator_event', 'get_agent_runtime_status', 'get_task')}
+ 'reconcile_task_state': ('_completion_marker_snapshot', '_gate_verdict_is_fresh',
+                          '_record_completion_sample', '_set_observed_status',
+                          'blocked_event_type', 'emit_done_if_allowed',
+                          'enqueue_coordinator_event', 'gate_verdict_ready',
+                          'get_agent_runtime_status', 'get_task',
+                          'read_gate_verdict', 'sync_verdict_from_business_acceptance')}
 
 __all__ = tuple(DEPENDENCIES)

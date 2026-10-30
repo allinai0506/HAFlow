@@ -50,14 +50,30 @@ def handle_event(ports, task_id, agent_status):
     elif agent_status in {"idle", "done"}:
         if current_status in {"dispatched", "working", "rework"}:
             has_done_marker, screen = ports._completion_marker_snapshot(task)
-            if agent_status == "idle" and not has_done_marker:
+            if not has_done_marker:
                 # A gate verdict is an explicit machine recovery source for
-                # prose-only gate outputs; it is not a Sentinel completion
-                # sample and still uses the versioned task CAS.
-                if current_status == "working" and ports.gate_verdict_ready(task):
-                    if ports._set_observed_status(task, "agent_done", "gate_verdict_recovery"):
-                        ports.emit_done_if_allowed(ports.get_task(task_id), report_text=screen)
-                    return
+                # prose-only gate outputs, but strictly requires current-execution
+                # evidence (_gate_verdict_is_fresh or file-backed verdict) to prevent
+                # stale terminal screen text from falsely completing unexecuted tasks.
+                if current_status in {"dispatched", "working"}:
+                    has_evidence = False
+                    if hasattr(ports, "_gate_verdict_is_fresh"):
+                        if not ports._gate_verdict_is_fresh(task):
+                            if hasattr(ports, "sync_verdict_from_business_acceptance"):
+                                ports.sync_verdict_from_business_acceptance(task)
+                        has_evidence = ports._gate_verdict_is_fresh(task)
+                    if not has_evidence and hasattr(ports, "read_gate_verdict"):
+                        try:
+                            v_res = ports.read_gate_verdict(task)
+                            if isinstance(v_res, (tuple, list)) and len(v_res) >= 3:
+                                if v_res[0] in ("pass", "blocked") and v_res[2] in ("file", "file+screen"):
+                                    has_evidence = True
+                        except Exception:
+                            pass
+                    if has_evidence and ports.gate_verdict_ready(task):
+                        if ports._set_observed_status(task, "agent_done", "gate_verdict_recovery"):
+                            ports.emit_done_if_allowed(ports.get_task(task_id), report_text=screen)
+                        return
                 # receipt-v1 tasks must strictly go through completion receipt validation
                 # (consume_completion_receipt); only the gate-verdict recovery above is carved out.
                 if task.get("completion_protocol") == "receipt-v1":
@@ -65,7 +81,8 @@ def handle_event(ports, task_id, agent_status):
                 # Rework recovery is allowed only after the existing
                 # verification/retry evidence gates have passed.
                 if (
-                    current_status == "rework"
+                    agent_status == "idle"
+                    and current_status == "rework"
                     and ports.check_task_deliverables_ready(task)
                     and ports._verification_execution_complete_for_rework(task)
                     and ports._retry_execution_complete_for_rework(task)
@@ -251,12 +268,13 @@ def stop_task_listener(ports, task_id):
         )
 
 
-DEPENDENCIES = {'handle_event': ('_completion_marker_snapshot', '_record_completion_sample',
+DEPENDENCIES = {'handle_event': ('_completion_marker_snapshot', '_gate_verdict_is_fresh',
+                  '_record_completion_sample',
                   '_retry_execution_complete_for_rework', '_set_observed_status',
                   '_verification_execution_complete_for_rework', 'blocked_event_type',
                   'check_task_deliverables_ready', 'emit_done_if_allowed',
                   'enqueue_coordinator_event', 'gate_verdict_ready', 'get_task',
-                  'maybe_ack_on_working'),
+                  'maybe_ack_on_working', 'read_gate_verdict', 'sync_verdict_from_business_acceptance'),
  'listen_task': ('SOCKET_PATH', 'get_task', 'handle_event', 'json', 'listeners', 'lock',
                  'reconcile_task_state', 'socket', 'task_sockets'),
  'start_task_listener': ('listen_task', 'listeners', 'lock', 'threading'),

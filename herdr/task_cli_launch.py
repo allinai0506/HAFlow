@@ -101,15 +101,31 @@ def resolve_launch_agent(args, node_id, store, *, choose_agent, workflow_config_
         )
         sys.exit(2)
 
+    penalized = []
+    if getattr(args, "supersedes", None) and (not getattr(args, "agent", None) or args.agent == "auto"):
+        try:
+            pred = store.get_task(args.supersedes)
+            if pred and pred.get("status") in ("failed", "superseded"):
+                pred_agent = pred.get("agent")
+                if pred_agent:
+                    penalized.append(pred_agent)
+        except Exception:
+            pass
+
     def route():
+        kwargs = {
+            "reservation_key": args.task_id,
+            "run_id": getattr(args, "run_id", None),
+            "dispatch_role": args.dispatch_role,
+        }
+        if penalized:
+            kwargs["penalize_agents"] = penalized
         return choose_agent(
             args.workflow_id,
             node_id,
             args.task_type,
             requested_agent,
-            reservation_key=args.task_id,
-            run_id=getattr(args, "run_id", None),
-            dispatch_role=args.dispatch_role,
+            **kwargs,
         )
 
     if opt_out:

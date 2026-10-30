@@ -17,8 +17,15 @@ TEMPLATES = {"software-development-v1", "spec-development-v1"}
 
 def enabled(task, config):
     node = next((n for n in config.get("nodes", []) if n.get("id") == "wrapup"), {})
+    template_name = (
+        config.get("workflow_template")
+        or config.get("template")
+        or config.get("template_name")
+        or config.get("name")
+        or ""
+    )
     return (
-        config.get("name") in TEMPLATES
+        template_name in TEMPLATES
         and node.get("review_closure_required") is True
         and (task.get("node") or task.get("stage")) == "wrapup"
         and task.get("integration_mode") == "none"

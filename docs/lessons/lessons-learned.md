@@ -8767,5 +8767,61 @@ pytest -v tests/test_finalize_baseline_and_replacement_closure.py
 - `services/controller/infra_recovery.py` — 非门禁实现节点悬挂替代义务安全收敛
 - `tests/test_finalize_baseline_and_replacement_closure.py` — 7 项全链路测试验证
 
+---
+
+## §211 全链路故障复盘：wf-haflow-1029-02 卡点阻断根因收敛与闭环治理
+
+### 问题现象与根因剖析
+
+在真实工作流 `wf-haflow-1029-02`（历时约20小时，跨越28个任务）的日志深度分析中，定位出6处严重卡点与阻塞点：
+1. **嵌套 Git 子仓库引发 commit 崩溃与 Finalize 50分钟无效重试**：任务（如 `test-auto-r3`、`test-auto-r6`）在测试中生成了嵌套的 Git 目录（`test-evidence/cli-chain/project/`）。`herdr/task_cli_delivery.py` 在获取 `untracked` 文件时将未检出 commit 的目录传入 `git add`，触发 `error: ... does not have a commit checked out` (exit code 128)。而 `services/controller/git_finalize.py` 将此类致命且不可自愈的 commit 错误作为 `retryable: True` 连续按指数退避重试 5 次（耗时 45-50 分钟），严重拖垮流转。
+2. **门禁任务在 `dispatched` 状态产出裁决无法对账，致使 Sentinel 派发保险丝（30分钟）误杀**：任务快速执行完毕输出门禁裁决后，若未被采样到 `working` 状态而保持在 `dispatched`，`services/controller/task_listener.py` 仅对 `current_status == "working"` 触发 `gate_verdict_recovery`，造成任务永久卡在 `dispatched`；随后 Sentinel 派发保险丝（`dispatch_delivery_fuse`，30分钟超时）因未检测到 `receipt-v1` 完成标记，将已完成并产出结论的任务误判为派发死亡并强行置为 `failed`。
+3. **Wrapup 交付模式由于配置键名不匹配（`workflow_template` vs `name`）导致静默关闭**：`herdr/wrapup_delivery.py` 的 `enabled()` 和 `herdr/agent_router.py` 严格校验 `config.get("name") in TEMPLATES`，但真实项目 `workflow.json` 中模板标识字段为 `workflow_template`。导致 wrapup 交付模式未生效，任务直接走通用提交逻辑并在状态为 `working` 时被拒绝提交（`Task cannot commit from status: working`）。
+4. **Agent Router 在非对抗阶段（`implementation`）将多子任务角色误判为对抗隔离**：`herdr/agent_router.py` 在收集同阶段已用 Agent 时，只要存在 `dispatch_role` 且不同于当前任务（例如 `console-visibility` vs `worker`），就一律加入互斥列表。而在 `implementation` 阶段，多子任务协作或单 Agent 修复本属正常并行的实现工人，却被误当做对抗审查角色排除；且当仅有角色排除生效时，报错信息中的 `used in stage(s) ` 显示为空白。
+5. **`close-workflow` 阶段超时写死 900 秒，面对 28 个克隆归档触发硬超时**：`services/controller/workflow_close.py` 将关闭超时固定为 900 秒，而在包含 28 个任务的大型工作流中，按每个克隆 120 秒标准预算，全流程物理回收与完整 Git 历史归档耗时突破静态上限，触发 Controller 900 秒硬超时中断并挂起 Attention。
+6. **自动恢复重派未将失败 Agent 惩罚前置于负载排序**：`wrapup-auto` 在 `opencode` 上挂起超过 2 小时后被看门狗击毙，`direct_dispatch` 以 `--agent auto` 重新派发。由于问题 Agent 刚被击毙负载为 0，而备选 Agent 存在任务负载，导致负载排序覆盖了候选队列末尾惩罚，相同卡死 Agent 再次被首选。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 嵌套 Git 目录导致索引崩溃与 50 分钟无效重试 | 测试产生的子 Git 目录不是业务交付物，绝不可作为普通文件/子模块添加；Git 索引致命错误不可重试 | `task_cli_delivery.py` 排除带有 `.git` 的嵌套目录；`git_finalize.py` 识别 fatal git 错误与 rc=2，立即作为 `retryable: False` 熔断升级 |
+| dispatched 任务产出裁决被漏判并遭 Sentinel 误杀 | Agent 运行速度极快时可能跳过 working 观察窗口直接产出裁决；状态机对账必须包容 dispatched 阶段有效产物，但严禁将终端残留历史文本误判为当前任务结论 | `task_listener.py` 与 `runtime_reconciliation.py` 在 `dispatched` 状态下仅在拥有当前执行新鲜凭证（`_gate_verdict_is_fresh`）时才执行 `gate_verdict_recovery`，严格排除终端残留陈旧文本；Sentinel 派发保险丝在任务已有有效裁决时豁免失败处置 |
+| 模板配置键名多态性（workflow_template vs name） | 数据源存在历史演进与多态键名，严格依赖单一老键名会导致生产环境静默降级 | 统一通过 `workflow_template or template or template_name or name` 获取工作流模板名称 |
+| 实现阶段误套用对抗角色隔离 | 角色互斥隔离仅适用于 plan/review 等具备明确对抗角色（如 executor vs challenger）的节点，不得向实现等协作性工人节点无差别套用 | `agent_router.py` 严格限定角色互斥仅在非 implementation 阶段且明确定义对抗角色时生效，并优化报错提示 |
+| 任务量膨胀导致工作流关闭归档超时 | 关闭超时写死 900 秒无法适配多任务长流程的归档预算，且归档严禁随意剔除 .git 以免丢失未集成历史 | `services/controller/workflow_close.py` 按任务数量动态伸缩关闭超时（`max(900, n*120)`），同时完整保全克隆内历史提交与工作区产物 |
+| 故障重试因低负载重新分配挂起/崩溃 Agent | 上游任务发生超时挂起或异常崩溃后，同节点自动化重派必须避免再次踩雷，惩罚必须凌驾于负载均衡之上 | `agent_router.py` 将失败前驱 Agent 惩罚作为主排序准则（`1 if in penalized else 0`），确保负载偏置无法逆转避障逻辑 |
+
+### 操作规范
+
+1. **交付索引纯洁性与熔断直达**：提交业务修改前必须自动过滤任何包含 `.git` 的测试临时工作区；若 Git 发生致命索引失败，控制器严禁原地重试，必须即刻亮起 Attention 寻求人工或恢复通道。
+2. **凭据驱动对账与保全**：无论调度状态处于 `dispatched` 还是 `working`，一旦发现持久裁决已落盘，控制器即刻承认并转入 `agent_done`；Sentinel 派发保险丝必须以有效证据为准，禁止盲目杀伤已产生结论的工位。
+3. **隔离边界精准施策**：对抗审查隔离与实现任务多角色必须严格分治，不得混淆；实现阶段允许同一个 Agent 承担修复与补丁任务。
+4. **归档预算弹性与全量保全**：工作流关闭超时必须按任务规模弹性计算，归档完整保留历史 Git 提交，杜绝未集成历史永久流失。
+5. **重派自适应避障**：自动重派机制必须将前驱失败 Agent 惩罚置于首要排序优先级，打破连续在同一环境/模型上超时卡死的恶性循环。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v \
+  tests/test_wf_1029_fix1_nested_git_commit.py \
+  tests/test_wf_1029_fix2_dispatched_gate_verdict.py \
+  tests/test_wf_1029_fix3_wrapup_config_key.py \
+  tests/test_wf_1029_fix4_impl_role_isolation.py \
+  tests/test_wf_1029_fix5_workflow_close_timeout.py \
+  tests/test_wf_1029_fix6_auto_redispatch_penalize_agent.py
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/task_cli_delivery.py` — `commit_task` 嵌套 Git 目录过滤
+- `services/controller/git_finalize.py` — fatal commit 与 rc=2 快速熔断
+- `services/controller/task_listener.py` 与 `runtime_reconciliation.py` — `dispatched` 状态门禁裁决对账
+- `services/herdr-sentinel.py` — `check_dispatch_fuse` 豁免已完成裁决的门禁任务
+- `herdr/wrapup_delivery.py` 与 `herdr/agent_router.py` — 模板名称多态兼容（`workflow_template`）
+- `herdr/agent_router.py` — 实现阶段解除子任务角色互斥，及失败 Agent 惩罚优先于负载排序
+- `herdr/task_cli_launch.py` — `--supersedes` 前驱失败 Agent 探测与惩罚透传
+- `services/controller/workflow_close.py` — 按任务规模动态伸缩关闭超时（120s/task）
+- `tests/test_wf_1029_fix1_nested_git_commit.py` ~ `tests/test_wf_1029_fix6_auto_redispatch_penalize_agent.py` — 6 项专项回归测试套件全绿
 
 ---
