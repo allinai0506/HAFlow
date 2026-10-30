@@ -180,11 +180,12 @@ def finalize_completed_task(ports, task_id, before_action=None):
                 return {"retryable": True, "kind": "wait", "rc": 75}
             elif result.returncode != 0:
                 from herdr.task_delivery import diagnostic_tail
+                err_text = result.stderr.strip() or result.stdout.strip()
                 print(
                     f"[COMMIT ERROR] "
                     f"task={task_id} "
                     f"rc={result.returncode}: "
-                    f"{result.stderr.strip() or result.stdout.strip()}"
+                    f"{err_text}"
                 )
                 ports._record_finalize_event(
                     task,
@@ -194,6 +195,22 @@ def finalize_completed_task(ports, task_id, before_action=None):
                         "detail": diagnostic_tail(result.stdout, result.stderr),
                     },
                 )
+                unrecoverable = (
+                    result.returncode == 2
+                    or "does not have a commit checked out" in err_text.lower()
+                    or "unable to index file" in err_text.lower()
+                    or "fatal: adding files failed" in err_text.lower()
+                )
+                if unrecoverable:
+                    ports._escalate_finalize(
+                        ports.get_task(task_id) or task,
+                        "commit_fatal_error",
+                        {
+                            "rc": result.returncode,
+                            "detail": diagnostic_tail(result.stdout, result.stderr),
+                        },
+                    )
+                    return {"retryable": False, "kind": "error", "rc": result.returncode}
                 return {"retryable": True, "kind": "error", "rc": result.returncode}
             else:
                 if commit_payload.get("task_id") == task_id and commit_payload.get("result") in ("created", "adopted"):

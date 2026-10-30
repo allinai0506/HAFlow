@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-30] fix | 全链路故障复盘：wf-haflow-1029-02 卡点阻断根因收敛与闭环治理
+
+- 背景：真实工作流 `wf-haflow-1029-02` 历时 20 小时、执行 28 个任务，日志复盘发现 6 处阻塞点与性能泥潭：嵌套 Git 导致 commit 崩溃与 Finalize 50 分钟盲目重试；dispatched 门禁裁决对账遗漏致 Sentinel 保险丝误杀；Wrapup 模板键名多态性断链；实现阶段误套用对抗角色互斥致 Grok 等修复任务全量被拒；`close-workflow` 深度遍历 `.git` 对象库触发 900 秒硬超时；自动重派重复分配挂起/崩溃 Agent。
+- 变更：
+  1. `herdr/task_cli_delivery.py`：`commit_task` 自动过滤包含 `.git` 的嵌套子仓库；`services/controller/git_finalize.py`：识别 Git 致命索引错误（`does not have a commit checked out`、`unable to index file`、rc=2），即刻标记 `retryable: False` 并触发 `_escalate_finalize` 快速熔断；
+  2. `services/controller/task_listener.py` 与 `runtime_reconciliation.py`：支持在 `dispatched` 状态下且无完成标记时，通过 `gate_verdict_ready` 触发 `gate_verdict_recovery` 安全转入 `agent_done`；`services/herdr-sentinel.py`：`check_dispatch_fuse` 增加门禁裁决核验，对已有有效结论的任务豁免失败处置并降级为 attention；
+  3. `herdr/wrapup_delivery.py` 与 `herdr/agent_router.py`：统一通过 `workflow_template or template or template_name or name` 获取模板标识，修复生产环境 Wrapup 模式静默关闭与 `working` 状态拒交；
+  4. `herdr/agent_router.py`：限定角色互斥仅在非 `implementation` 节点且存在对抗角色定义时生效，允许实现工位跨子任务/修复任务复用 Agent，并修复报错信息的空白字符串；
+  5. `herdr/clone_archive.py`：将 `.git` 列入 `BYPASS_IGNORED_DIRS`，跳过内部 packfile 与松散对象库的三轮重复哈希与打包，28 个克隆归档耗时从 15+ 分钟降至数秒；
+  6. `herdr/agent_router.py` 与 `herdr/task_cli_launch.py`：`choose_agent` 引入 `penalize_agents` 参数；在 `--agent auto` 且携带 `--supersedes` 时，将前驱失败任务的 Agent 自动移至候选队列末尾，优先尝试其他可用健康 Agent；
+  7. `herdr/git_coordination.py`：包裹 `_default_process_provider` 中 `ps -axo` 的 `OSError` 异常，避免只读沙箱权限受限抛错。
+- 证据：
+  1. 6 个针对性回归测试全绿：`tests/test_wf_1029_fix1_nested_git_commit.py` ~ `tests/test_wf_1029_fix6_auto_redispatch_penalize_agent.py`（11 passed in 1.05s）；
+  2. 既有关联合约套件回归全绿：`test_dispatch_fuse.py` (18 passed)、`test_fix_bug1002_routing.py` (13 passed)、`test_workflow_finalize.py` (40 passed)、`test_finalize_git_index_wait.py` (6 passed)、`test_finalize_empty.py` (12 passed)、`test_workflow_clone_reclaim.py` (46 passed)、`test_wrapup_candidate_delivery.py` (46 passed)；
+  3. 编译与语法检查：`python3 -m compileall -q herdr services bin tests` 零错误通过；`git diff --check` 干净；CLI `--help` 运行正常。教训归档于 lessons §211。
+
 ## [2026-10-30] fix | 终化升级（finalize_escalated）信号接入系统通知与 Ops Center 可观测性闭环
 
 - 背景：任务在 completed 状态进行提交重试超限后触发 `finalize_escalated=True`，因处于准终态、未固定 delivery_contract 无法进入 delivery-repair，同时 notifier 与 ops-center 均未感知该元数据标记，造成静默停滞。

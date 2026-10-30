@@ -230,11 +230,26 @@ def commit_task(
 
     current_untracked = {item for item in result.stdout.split("\0") if item}
 
-    # 只允许提交 Task 新产生的 untracked（内部控制文件不属于业务交付）
+    def _is_nested_git_dir(rel_item: str) -> bool:
+        target = Path(clone) / rel_item
+        if (target / ".git").exists():
+            return True
+        try:
+            cur = target.parent
+            clone_path = Path(clone).resolve()
+            while cur.resolve() != clone_path and cur != cur.parent:
+                if (cur / ".git").exists():
+                    return True
+                cur = cur.parent
+        except Exception:
+            pass
+        return False
+
+    # 只允许提交 Task 新产生的 untracked（内部控制文件与嵌套子仓库不属于业务交付）
     task_untracked = sorted(
         item
         for item in current_untracked - baseline_untracked
-        if not is_internal_untracked(item)
+        if not is_internal_untracked(item) and not _is_nested_git_dir(item)
     )
 
     # tracked 文件在 Task 创建前要求 clean，

@@ -1183,12 +1183,29 @@ def check_dispatch_fuse(tasks, state):
     )
 
     changed = False
+    task_map = {t["task_id"]: t for t in tasks if isinstance(t, dict) and "task_id" in t}
     for breach in breaches:
+        task_id = breach.get("task_id")
         evidence = _pane_delivery_evidence(
-            breach.get("pane_id"), breach.get("task_id")
+            breach.get("pane_id"), task_id
         )
         agent_state = evidence.get("agent_status")
-        dead_delivery = not evidence.get("has_marker") and agent_state != "working"
+
+        has_verdict = False
+        task_obj = task_map.get(task_id)
+        if task_obj and _is_gate_task(task_obj):
+            try:
+                res = _task_has_valid_gate_verdict(task_obj)
+                if res and res[0]:
+                    has_verdict = True
+            except Exception:
+                pass
+
+        dead_delivery = (
+            not evidence.get("has_marker")
+            and agent_state != "working"
+            and not has_verdict
+        )
         can_fail = dead_delivery and breach.get("requeues", 0) < DISPATCH_FUSE_MAX_REQUEUES
 
         breach["action"] = "failed" if can_fail else "attention"

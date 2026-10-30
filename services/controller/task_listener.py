@@ -50,11 +50,11 @@ def handle_event(ports, task_id, agent_status):
     elif agent_status in {"idle", "done"}:
         if current_status in {"dispatched", "working", "rework"}:
             has_done_marker, screen = ports._completion_marker_snapshot(task)
-            if agent_status == "idle" and not has_done_marker:
+            if not has_done_marker:
                 # A gate verdict is an explicit machine recovery source for
                 # prose-only gate outputs; it is not a Sentinel completion
                 # sample and still uses the versioned task CAS.
-                if current_status == "working" and ports.gate_verdict_ready(task):
+                if current_status in {"dispatched", "working"} and ports.gate_verdict_ready(task):
                     if ports._set_observed_status(task, "agent_done", "gate_verdict_recovery"):
                         ports.emit_done_if_allowed(ports.get_task(task_id), report_text=screen)
                     return
@@ -65,7 +65,8 @@ def handle_event(ports, task_id, agent_status):
                 # Rework recovery is allowed only after the existing
                 # verification/retry evidence gates have passed.
                 if (
-                    current_status == "rework"
+                    agent_status == "idle"
+                    and current_status == "rework"
                     and ports.check_task_deliverables_ready(task)
                     and ports._verification_execution_complete_for_rework(task)
                     and ports._retry_execution_complete_for_rework(task)

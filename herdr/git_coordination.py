@@ -79,12 +79,15 @@ def pinned_local_onto_matches(repo, branch: str, candidate_sha: Optional[str]) -
 
 
 def _default_process_provider():
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,command="],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return []
     return [
         tuple(line.strip().split(None, 1))
         for line in result.stdout.splitlines()
