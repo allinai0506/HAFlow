@@ -3800,3 +3800,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 共享文档与文件读取单源统一：抽离 `herdr.plan_parser.read_plan_file_from_dir`，统一支持 `plan.md`、`docs/plan.md` 及 `docs/superpowers/plans/*.md`（单选 mtime 最新文件，杜绝历史文件全量拼接）；`services/controller/auto_acceptance.py` 与 `find_plan_deliverables` 接入该统一函数，消除路径读取分歧。
 - 任务命令行工具环境身份自动补齐：`herdr/task_cli_evidence.py` 在 `note_add` 时自动从 `os.environ.get("HERDR_TASK_ID")` 补齐缺省的 `--task` 参数，并在 `herdr/workflow_docs.py` 与 `herdr/stage_skills.py` 中规范注入 `--task "$HERDR_TASK_ID"` 及 Plan-Ref 提示词契约。
 - 验证：35 项适配器专项测试（含版本版本更新旧审查失效、行首裁决与条件性阻断、superpowers 单源读取与环境变量任务身份补齐）全绿；3 项端到端隔离全生命周期测试、10 项模块化门禁测试、26 项项目契约测试全部通过（共 74 passed）。
+
+## [2026-10-30] Fix | Finalize基线失效快速熔断、Sentinel有效产出保全与非门禁节点僵尸义务闭环
+- Finalize基线缺失熔断与本地回退：`herdr/task_cli_integration.py` 在获取 `base_branch` 遇远端不存在时，先回退检查本地 `main_repo` 分支；若两处均不存在，报明确的 `[INTEGRATE REFUSED] base_ref_missing` 并以 rc=7 退出；`services/controller/git_finalize.py` 捕获 rc=7 与缺失 ref 报错特征，立即作为 `retryable: False` 熔断升级，禁止盲目消耗 5 次重试并引发调度死锁。
+- Sentinel看门狗有效产出保全：`services/herdr-sentinel.py` 引入 `_clone_git_progress_at` 与 `_clone_produced_commit`；在计算 idle 时将 Git 提交时间纳入进展基准；在硬超时到期前执行提交探针，对已产出领先于 `baseline_commit` 的任务且 Agent 停止者，自动记录 commit 并安全转入 `agent_done` 触发验收，杜绝将已完成工作的 Agent 误杀为失败。
+- 非门禁实现节点悬挂替代义务收敛：`services/controller/infra_recovery.py` 扩展 `converge_dangling_replacement_obligations`，覆盖无 gate verdict 的实现与执行节点，在节点存在已达成交付终态（`integrated`/`cleanup_ready`/`cleaned`）时，安全清除悬挂任务的 `replacement_pending=True` 并落 `replacement_obligation_auto_resolved` 审计事件，彻底消除僵尸义务。
+- 验证：`tests/test_finalize_baseline_and_replacement_closure.py` 7 项全链路测试全绿；关联回归套件 `test_workflow_finalize.py`、`test_finalize_empty.py`、`test_sentinel_hard_timeout.py`、`test_zombie_obligation_regression.py`、`test_recovery_supply_chain.py`、`test_task_cli_workflow_close.py` 49 项全部通过；`compileall` 与 `git diff --check` clean。教训见 lessons §210。

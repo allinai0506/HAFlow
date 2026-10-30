@@ -225,8 +225,46 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
             check=True,
         )
     else:
-        base_ref = f"origin/{base_branch}"
-        subprocess.run(["git", "-C", clone, "fetch", "origin", base_branch], check=True)
+        # Try fetching from origin first
+        fetch_origin = subprocess.run(
+            ["git", "-C", clone, "fetch", "origin", base_branch],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if fetch_origin.returncode == 0:
+            base_ref = f"origin/{base_branch}"
+        else:
+            # Check if base_branch exists locally in main_repo
+            check_local = subprocess.run(
+                ["git", "-C", main_repo, "show-ref", "--verify", "--quiet", f"refs/heads/{base_branch}"],
+                check=False,
+            )
+            if check_local.returncode == 0:
+                base_ref = f"refs/herdr/bases/{task_id}"
+                subprocess.run(
+                    ["git", "-C", clone, "fetch", main_repo, f"refs/heads/{base_branch}:{base_ref}"],
+                    check=True,
+                )
+                print(f"[INTEGRATE BASE LOCAL FALLBACK] task={task_id} base={base_branch} fetched from main_repo")
+            else:
+                err_detail = (fetch_origin.stderr.strip() or fetch_origin.stdout.strip())
+                print(f"[INTEGRATE REFUSED] base_ref_missing: couldn't find base ref '{base_branch}' on origin or main_repo", file=sys.stderr)
+                if err_detail:
+                    print(err_detail, file=sys.stderr)
+                print(
+                    "HERDR_INTEGRATE_RESULT="
+                    + json.dumps(
+                        {
+                            "task_id": task_id,
+                            "result": "base_ref_missing",
+                            "base_branch": base_branch,
+                            "detail": err_detail[:500],
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                sys.exit(7)
 
     # FR-8 pre-check: remote task branch equivalence (L-4). Best-effort fetch
     # of the同名远端分支; if it already contains HEAD, the deliverable is

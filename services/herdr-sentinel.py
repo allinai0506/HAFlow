@@ -139,6 +139,55 @@ def _loop_progress_at(task):
     return latest
 
 
+def _clone_git_progress_at(task):
+    """Latest Git commit timestamp in the task's clone; None when unavailable.
+
+    If the agent was actively committing code or tests, that is conclusive proof
+    of real progress that advances the idle basis.
+    """
+    clone = str(task.get("clone_path") or "").strip()
+    if not clone or not os.path.isdir(os.path.join(clone, ".git")):
+        return None
+    try:
+        res = subprocess.run(
+            ["git", "-C", clone, "log", "-1", "--format=%ct"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return float(res.stdout.strip())
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _clone_produced_commit(task):
+    """Check if task clone has produced a committed delivery ahead of baseline_commit."""
+    clone = str(task.get("clone_path") or "").strip()
+    if not clone or not os.path.isdir(os.path.join(clone, ".git")):
+        return None
+    try:
+        res = subprocess.run(
+            ["git", "-C", clone, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if res.returncode == 0:
+            head = res.stdout.strip()
+            baseline = task.get("baseline_commit")
+            if head and baseline and head != baseline:
+                return head
+            if head and not baseline:
+                return head
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 DEFAULT_ORPHAN_PANE_GRACE_SECONDS = 1800.0
 DEFAULT_ORPHAN_PANE_CLOSE_GRACE_SECONDS = 600.0
 
@@ -1232,6 +1281,9 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
         progress_at = _loop_progress_at(task)
         if progress_at is not None and progress_at > updated_at:
             updated_at = progress_at
+        git_progress_at = _clone_git_progress_at(task)
+        if git_progress_at is not None and git_progress_at > updated_at:
+            updated_at = git_progress_at
 
         idle_seconds = now - updated_at
         if idle_seconds < hard_timeout:
@@ -1278,14 +1330,15 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
         # 失败处置(wf-haflow-1022-01 r1/r7 的"watchdog 误杀")。
         alive_multiplier = task_hard_timeout_alive_multiplier()
         agent_alive = False
+        pane_id = task.get("pane_id") or (task.get("runtime") or {}).get("pane_id")
         if (
             hard_timeout_on
             and alive_multiplier > 1.0
             and idle_seconds < hard_timeout * alive_multiplier
-            and task.get("pane_id")
+            and pane_id
         ):
             try:
-                evidence = _pane_delivery_evidence(task.get("pane_id"), tid)
+                evidence = _pane_delivery_evidence(pane_id, tid)
             except Exception:
                 evidence = None
             agent_alive = evidence.get("agent_status") == "working" if evidence else False
@@ -1328,6 +1381,60 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
             continue
 
         store = _get_store()
+        produced_commit = _clone_produced_commit(task)
+        if produced_commit:
+            try:
+                evidence = _pane_delivery_evidence(pane_id, tid) if pane_id else {}
+            except Exception:
+                evidence = {}
+            agent_state = evidence.get("agent_status")
+            if agent_state == "working":
+                entry = timeouts.get(tid) or {}
+                if not entry.get("alive_alerted"):
+                    print(
+                        f"[SENTINEL TIMEOUT COMMITTED] task={tid} status={status} "
+                        f"idle={int(idle_seconds)}s commit={produced_commit[:8]} agent=working — grace granted",
+                        flush=True,
+                    )
+                timeouts[tid] = dict(entry, alive_alerted=True)
+                continue
+
+            # Agent has produced a commit and finished (or idle/stopped)
+            # Salvage the commit into task metadata and transition to agent_done
+            try:
+                store.update_task_metadata(tid, {"commit": produced_commit, "candidate_sha": produced_commit})
+            except Exception:
+                pass
+            print(
+                f"[SENTINEL SALVAGE COMMIT] task={tid} status={status} idle={int(idle_seconds)}s — "
+                f"commit {produced_commit[:8]} produced, transitioning to agent_done",
+                flush=True,
+            )
+            task_ver = task.get("version")
+            ver_map = {tid: task_ver} if task_ver is not None else None
+            if update_statuses(
+                {tid: ("agent_done", "sentinel_salvaged_commit")},
+                expected={tid: status},
+                versions=ver_map,
+            ):
+                changed = True
+                timeouts[tid] = {
+                    "timed_out_at": now,
+                    "idle_seconds": int(idle_seconds),
+                    "updated_at": updated_at,
+                }
+                _record_sentinel_event(
+                    store,
+                    task,
+                    "task_completion_salvaged",
+                    {
+                        "idle_seconds": int(idle_seconds),
+                        "previous_status": status,
+                        "commit": produced_commit,
+                    },
+                )
+                continue
+
         print(
             f"[SENTINEL TIMEOUT] task={tid} status={status} idle={int(idle_seconds)}s — hard timeout exceeded, auto-failing task",
             flush=True,

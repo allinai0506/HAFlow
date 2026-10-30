@@ -158,17 +158,25 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
     import re as _re
     if not _re.fullmatch(r"[0-9a-fA-F]{40}", frozen):
         return False
-    settled_pass = {}
+    settled_nodes = {}
     for task in node_tasks:
-        if (str(task.get("status") or "") in ("cleaned", "completed", "committed",
-                                              "integrated", "cleanup_ready")
-                and str(task.get("stage_verdict") or "") == "pass"):
-            node_id = task.get("node") or task.get("stage")
-            verified = str(task.get("verified_candidate_sha")
-                           or task.get("candidate_sha") or "")
-            if node_id and verified.lower() == frozen.lower():
-                settled_pass.setdefault(node_id, task.get("task_id"))
-    if not settled_pass:
+        st = str(task.get("status") or "")
+        node_id = task.get("node") or task.get("stage")
+        if not node_id:
+            continue
+        if st in ("cleaned", "completed", "committed", "integrated", "cleanup_ready"):
+            verdict = str(task.get("stage_verdict") or "")
+            if verdict in ("pass", "approved"):
+                verified = str(task.get("verified_candidate_sha")
+                               or task.get("candidate_sha") or "")
+                if verified.lower() == frozen.lower():
+                    settled_nodes.setdefault(node_id, (task.get("task_id"), "settled_gate_pass"))
+            elif not verdict:
+                # Non-gate node (e.g. implementation): deliverable settled
+                candidate = str(task.get("candidate_sha") or task.get("integrated_commit") or task.get("commit") or "")
+                if (candidate and candidate.lower() == frozen.lower()) or st in ("integrated", "cleanup_ready", "cleaned"):
+                    settled_nodes.setdefault(node_id, (task.get("task_id"), "settled_node_delivery"))
+    if not settled_nodes:
         return False
     resolved = False
     for task in node_tasks:
@@ -177,9 +185,10 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
                 or task.get("superseded_by")):
             continue
         node_id = task.get("node") or task.get("stage")
-        if node_id not in settled_pass:
+        if node_id not in settled_nodes:
             continue
         task_id = task.get("task_id")
+        resolved_by, settle_reason = settled_nodes[node_id]
         try:
             ports._get_store().update_task_metadata(
                 task_id, {"replacement_pending": False}
@@ -194,11 +203,10 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
                     "workflow_id": workflow_id,
                     "task_id": task_id,
                     "node": node_id,
-                    "resolved_by": settled_pass[node_id],
+                    "resolved_by": resolved_by,
                     "candidate_sha": frozen,
-                    "reason": "dangling replacement obligation (superseded, pending, "
-                              "no successor) converged by a settled PASS on the "
-                              "current frozen candidate",
+                    "reason": f"dangling replacement obligation (superseded, pending, "
+                              f"no successor) converged by {settle_reason}",
                 },
                 workflow_id=workflow_id,
                 task_id=task_id,
@@ -209,7 +217,7 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
         resolved = True
         print(
             f"[OBLIGATION CONVERGED] workflow={workflow_id} node={node_id} "
-            f"task={task_id} -> fulfilled by {settled_pass[node_id]} "
+            f"task={task_id} -> fulfilled by {resolved_by} "
             f"on candidate {frozen[:8]}"
         )
     return resolved

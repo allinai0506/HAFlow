@@ -8729,3 +8729,43 @@ pytest tests/test_herdr_notifier.py tests/test_ops_center_read_path.py tests/tes
 - `tests/test_finalize_empty.py` — `test_escalate_finalize_records_attention_and_notifies`
 
 ---
+
+## §210 Finalize基线失效快速熔断、Sentinel有效产出保全与非门禁节点僵尸义务闭环
+
+### 问题现象与根因剖析
+
+在真实工作流 `wf-haflow-1029-02` 的执行闭环中，暴露了交付全链条的三个核心阻塞：
+1. **Finalize 盲目重试前置缺失**：`implementation-console` 的 `base_branch` 远端 ref 不存在（本地存在），`herdr-task integrate` 抛出 `fatal: couldn't find remote ref`。控制器未能识别此类不可自愈错误，连续盲目重试 5 次耗尽，进入 `finalize_escalated: retry_exhausted` 并创建 Op 348259 处于 `waiting_human`，直接锁定了全节点的调度推进。
+2. **Sentinel 硬超时误杀有效成果**：`implementation-core-qoder` 实际已产出 2000 余行代码、通过 305 项测试并创建了有效提交，但因总耗时达到 3751s，Sentinel 仅依据状态变迁的 `updated_at` 时间差判断超时，未探测 clone 的 Git 活动与提交，直接将任务判为 `failed: hard_timeout_watchdog` 并触发作废，导致有效成果面临丢失。
+3. **替代义务（replacement_pending）在实现节点沦为永久僵尸**：任务被作废后登记了补派操作，但因兄弟任务处于 `finalize_escalated` 导致补派受阻；而原有的 `converge_dangling_replacement_obligations` 仅针对带有 `stage_verdict: pass` 验证当前候选的门禁节点收敛，使得实现节点的替代义务在数学上永远无法自动收敛，造成长达 7 小时的调度死锁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 远端基线 ref 缺失导致 5 次盲目重试 | 静态前置依赖缺失不可自愈，盲目重试只会白白耗尽预算并引发全局死锁 | `herdr/task_cli_integration.py` 遇远端 ref 缺失时先回退检查本地 `main_repo`；均不存在时以 rc=7（`base_ref_missing`）退出；`git_finalize.py` 捕获后立即以 `retryable: False` 熔断升级 |
+| 看门狗仅凭更新时间差误杀有效任务 | Agent 执行大型测试或长推理时状态机不跳变，仅看 `updated_at` 会误杀正产出成果的活跃任务 | `services/herdr-sentinel.py` 将 clone Git 提交时间纳入 idle 计算；硬超时时探测是否领先于 `baseline_commit`，对已完成提交者自动转入 `agent_done` 保全成果 |
+| 非门禁节点悬空替代义务无法收敛 | 仅针对门禁节点 `stage_verdict: pass` 设计的收敛规则会导致实现等非门禁节点遗留永久僵尸义务 | `services/controller/infra_recovery.py` 支持非门禁节点在已有同节点任务完成交付（`integrated`/`cleaned`）时，安全收敛清除 `replacement_pending` 并落审计事件 |
+
+### 操作规范
+
+1. **不可逆前置失败快速熔断**：集成流程发现基线缺失时，严禁进入重试循环，必须在首轮给出明确错误码（rc=7）与结构化上下文并挂起人工。
+2. **超时判死前铁证核验**：看门狗在将任何 working 任务标记为 `failed` 之前，必须执行工作区 Git 探针；凡有已达成提交产物者，绝对禁止无差别击杀。
+3. **责任闭环全阶段覆盖**：`replacement_pending` 必须具备确定性的出口；门禁节点看裁决，实现节点看交付，杜绝任何节点遗留永久孤儿义务。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_finalize_baseline_and_replacement_closure.py
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/task_cli_integration.py` — 本地 `main_repo` 基线回退与 rc=7 快速熔断
+- `services/controller/git_finalize.py` — rc=7 与缺失 ref 不可重试识别
+- `services/herdr-sentinel.py` — `_clone_git_progress_at` 与 `_clone_produced_commit` 成果保全
+- `services/controller/infra_recovery.py` — 非门禁实现节点悬挂替代义务安全收敛
+- `tests/test_finalize_baseline_and_replacement_closure.py` — 7 项全链路测试验证
+
+
+---
