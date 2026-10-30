@@ -164,6 +164,8 @@ async function runOpsAnomalyAction(actType,wid,tid,node,options){
         }
       }else if(actType==='ops_repair'||actType==='retry'||actType==='rework'||actType==='redrive'){
         toast('恢复命令已执行 ('+(res.action_id||actType)+')，已向工位派发');
+      }else if(actType==='clear_escalation'){
+        toast('升级标记已清除，控制器重新尝试终化');
       }else{
         toast('操作成功: '+(res.task_id||res.action_id||'已生效'));
       }
@@ -358,7 +360,8 @@ function renderOpsCenter(){
         </div>
         <div class="ops-anomaly-actions">
           ${a.kind==='FAILED'?`<button class="btn mini primary" onclick="runOpsAnomalyAction('ops_repair','${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}',{expected_version:${a.version!==undefined&&a.version!==null?a.version:'null'},expected_pane_id:'${esc(a.pane_id||'')}',pane_id:'${esc(a.pane_id||'')}'})">一键重试修复</button>`:''}
-          ${isBlocked?`<button class="btn mini warning" onclick="confirmOpsForcePass('${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}',{expected_version:${a.version!==undefined&&a.version!==null?a.version:'null'},expected_pane_id:'${esc(a.pane_id||'')}',pane_id:'${esc(a.pane_id||'')}'})">强制放行推进</button>`:''}
+          ${a.kind==='FINALIZE_ESCALATED'?`<button class="btn mini warning" onclick="runOpsAnomalyAction('clear_escalation','${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}',{expected_version:${a.version!==undefined&&a.version!==null?a.version:'null'},expected_pane_id:'${esc(a.pane_id||'')}',pane_id:'${esc(a.pane_id||'')}'})">清除升级重试</button>`:''}
+          ${isBlocked&&a.kind!=='FINALIZE_ESCALATED'?`<button class="btn mini warning" onclick="confirmOpsForcePass('${esc(a.workflow_id||'')}','${esc(a.task_id||'')}','${esc(a.node||'')}',{expected_version:${a.version!==undefined&&a.version!==null?a.version:'null'},expected_pane_id:'${esc(a.pane_id||'')}',pane_id:'${esc(a.pane_id||'')}'})">强制放行推进</button>`:''}
           ${a.pane_id?`<button class="btn mini" onclick="showPane('${esc(a.pane_id)}')">打开终端</button>`:''}
           ${a.task_id?`<button class="btn mini" onclick="openTaskDrawer('${esc(a.task_id)}')">任务详情</button>`:''}
           <button class="btn mini" onclick="showOpsAnomaly(${JSON.stringify(a).replaceAll('"','&quot;')})">更多处理 ···</button>
@@ -460,15 +463,11 @@ function showOpsAnomaly(a){
   const aOpts=`{expected_version:${a.version!==undefined&&a.version!==null?a.version:'null'},expected_pane_id:'${esc(a.pane_id||'')}',pane_id:'${esc(a.pane_id||'')}'}`;
   const actionsList=(a.actions||[]).map(x=>{
     let clickFn="toast('建议操作："+esc(x)+"')";
-    if(x==='重试'||x==='自动修复'){
-      clickFn="closeModal();runOpsAnomalyAction('ops_repair','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
-    }else if(x==='打开 Pane'&&a.pane_id){
-      clickFn="closeModal();showPane('"+esc(a.pane_id)+"')";
-    }else if(x==='让总指挥处理'){
-      clickFn="closeModal();runOpsAnomalyAction('advance','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
-    }else if(x==='强制放行'||x==='人工放行'){
-      clickFn="closeModal();confirmOpsForcePass('"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
-    }
+    if(x==='重试'||x==='自动修复') clickFn="closeModal();runOpsAnomalyAction('ops_repair','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
+    else if(x==='打开 Pane'&&a.pane_id) clickFn="closeModal();showPane('"+esc(a.pane_id)+"')";
+    else if(x==='让总指挥处理') clickFn="closeModal();runOpsAnomalyAction('advance','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
+    else if(x==='强制放行'||x==='人工放行') clickFn="closeModal();confirmOpsForcePass('"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
+    else if(x==='清除升级标记'||x==='清除升级') clickFn="closeModal();runOpsAnomalyAction('clear_escalation','"+esc(wid)+"','"+esc(tid)+"','"+esc(node)+"',"+aOpts+")";
     return `<button class="btn mini primary" onclick="${clickFn}">${esc(x)}</button>`;
   }).join('');
 
