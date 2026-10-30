@@ -283,22 +283,50 @@ def finalize_completed_task(ports, task_id, before_action=None):
                 )
                 return {"retryable": False, "kind": "refused", "rc": 5, "reason": "integrate_main_dirty"}
 
+            if result.returncode == 7:
+                integrate_payload = ports._parse_integrate_result(result.stdout)
+                reason = "integrate_base_ref_missing"
+                print(
+                    f"[FINALIZE REFUSED] "
+                    f"task={task_id} "
+                    f"reason={reason}"
+                )
+                ports._escalate_finalize(
+                    ports.get_task(task_id) or task,
+                    reason,
+                    integrate_payload,
+                )
+                return {"retryable": False, "kind": "refused", "rc": 7, "reason": reason}
+
             if result.returncode != 0:
+                err_output = (result.stderr.strip() or result.stdout.strip())
+                if "couldn't find remote ref" in err_output.lower() or "base_ref_missing" in err_output.lower():
+                    integrate_payload = ports._parse_integrate_result(result.stdout)
+                    reason = "integrate_base_ref_missing"
+                    print(
+                        f"[FINALIZE REFUSED] "
+                        f"task={task_id} "
+                        f"reason={reason}"
+                    )
+                    ports._escalate_finalize(
+                        ports.get_task(task_id) or task,
+                        reason,
+                        integrate_payload or {"detail": err_output[:500]},
+                    )
+                    return {"retryable": False, "kind": "refused", "rc": result.returncode, "reason": reason}
+
                 print(
                     f"[INTEGRATE ERROR] "
                     f"task={task_id} "
                     f"rc={result.returncode}: "
-                    f"{result.stderr.strip() or result.stdout.strip()}"
+                    f"{err_output}"
                 )
                 ports._record_finalize_event(
                     task,
                     "finalize_integrate_error",
                     {
                         "rc": result.returncode,
-                        "detail": (
-                            result.stderr.strip()
-                            or result.stdout.strip()
-                        )[:500],
+                        "detail": err_output[:500],
                     },
                 )
                 return {"retryable": True, "kind": "error", "rc": result.returncode}
