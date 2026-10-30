@@ -236,8 +236,15 @@ def workflow_graph_projection(
     nodes_def = norm.get("nodes") or []
     node_ids = {str(n.get("id")) for n in nodes_def if n.get("id")}
 
-    wf_status = str((workflow or {}).get("status") or "") if isinstance(workflow, dict) else ""
-    is_wf_completed = wf_status in {"completed", "cleaned", "archived"}
+    wf = workflow if isinstance(workflow, dict) else {}
+    wf_status = str(wf.get("status") or "")
+    wf_outcome = str(wf.get("outcome") or "")
+    startup_state = ""
+    if wf_status == "running" and wf.get("startup_ready") is False:
+        startup_state = "startup_pending"
+    elif wf_status in {"completed", "cleaned", "archived"} and wf_outcome in {"startup_failed", "abandoned"}:
+        startup_state = wf_outcome
+    is_wf_completed = wf_status in {"completed", "cleaned", "archived"} and not startup_state
     gate_overrides = (workflow or {}).get("gate_overrides") if isinstance(workflow, dict) and isinstance((workflow or {}).get("gate_overrides"), dict) else {}
 
     # Group live tasks by node; unknown-node tasks are ignored (never invent nodes).
@@ -272,7 +279,11 @@ def workflow_graph_projection(
         gate_override = gate_overrides.get(nid) or {}
         gate_passed = is_gate_override_valid(gate_override, live)
 
-        if is_wf_completed:
+        if startup_state:
+            status = startup_state
+            active_count = 0
+            has_attention = startup_state in {"startup_failed", "abandoned"}
+        elif is_wf_completed:
             status = "completed"
             active_count = 0
             has_attention = False
@@ -310,6 +321,7 @@ def workflow_graph_projection(
                 "depends_on": depends_on,
                 "purpose": purpose,
                 "status": status,
+                "workflow_startup_state": startup_state,
                 "resource_usage": node_usage(n, tasks or [], (workflow or {}).get("workflow_id")),
                 "task_count": len(live),
                 "active_task_count": active_count,
@@ -339,6 +351,7 @@ def workflow_graph_projection(
     ready = [n["id"] for n in nodes if n["status"] == "waiting" and all(d in completed_nodes for d in n["depends_on"])]
     frontier = current or ready
     return {"nodes": nodes, "edges": edges, "context": _context_ids(norm),
+            "workflow_startup_state": startup_state,
             "current_nodes":current,"ready_nodes":ready,
             "current_stage":frontier[0] if len(frontier)==1 else "",
             "current_stage_source":"derived_nodes"}

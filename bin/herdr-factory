@@ -38,6 +38,13 @@ try:
         execution_mode,
         parse_context_binding_args,
     )
+    from herdr.workflow_startup import (
+        SOURCE_FACTORY,
+        bound_startup_reason,
+        converge_startup_failure,
+        describe_exception,
+        registration_receipt_owns,
+    )
     from herdr import kernel
 except ImportError:
     from herdr_pane_pool import list_slots_for_project, bind_pane, unbind_pane
@@ -64,6 +71,13 @@ except ImportError:
         get_ready_nodes,
         execution_mode,
         parse_context_binding_args,
+    )
+    from herdr.workflow_startup import (
+        SOURCE_FACTORY,
+        bound_startup_reason,
+        converge_startup_failure,
+        describe_exception,
+        registration_receipt_owns,
     )
 
 HOME = Path.home()
@@ -275,6 +289,105 @@ def doctor():
     return 1 if failed else 0
 
 
+def _safe_bound(value):
+    try:
+        return bound_startup_reason(value)
+    except Exception:
+        return type(value).__name__ if isinstance(value, BaseException) else "unknown"
+
+
+def _converge_startup_failure(workflow_id, failed_stage, exc):
+    """Converge a workflow this start already registered. Never replaces the caller's error.
+
+    Returns True only when the record is now terminal (converged here or already
+    terminal). Call only when this start holds a registration receipt. An id
+    that was never registered (not_found) is a silent no-op.
+    """
+    try:
+        reason = describe_exception(exc)
+    except Exception:
+        reason = type(exc).__name__
+    store = _get_store()
+    try:
+        result = converge_startup_failure(
+            store, workflow_id, failed_stage, reason,
+            source=SOURCE_FACTORY,
+        )
+    except BaseException as converge_exc:
+        result = {"ok": False, "reason": _safe_bound(converge_exc)}
+
+    if result.get("ok"):
+        try:
+            from herdr.state_store import sync_workflows_projection
+        except ImportError:
+            from herdr_state_store import sync_workflows_projection
+        try:
+            sync_workflows_projection(store=store)
+        except Exception as projection_exc:
+            print(
+                f"[WORKFLOW STARTUP PROJECTION WARN] {_safe_bound(projection_exc)}",
+                file=sys.stderr,
+            )
+        print(
+            f"[WORKFLOW STARTUP FAILED] workflow_id={workflow_id} "
+            f"stage={failed_stage} converged=completed outcome=startup_failed",
+            file=sys.stderr,
+        )
+        print(
+            f"  next: 记录已自动收敛（completed+startup_failed），可直接重新创建；"
+            f"如仍被拦截请运行 herdr-task close-workflow {workflow_id} --abandon",
+            file=sys.stderr,
+        )
+        return True
+
+    if result.get("reason") == "not_found":
+        # Nothing of ours was registered under this id; do not touch any other record.
+        return False
+
+    try:
+        current = (store.get_workflow(workflow_id) or {}).get("status")
+    except Exception:
+        current = None
+    if current == "completed":
+        print(
+            f"[WORKFLOW STARTUP CONVERGED] workflow_id={workflow_id} "
+            "already_terminal=completed",
+            file=sys.stderr,
+        )
+        return True
+
+    print(
+        f"[WORKFLOW STARTUP CONVERGE FAILED] workflow_id={workflow_id} "
+        f"stage={failed_stage} error={result.get('reason', 'unknown')}",
+        file=sys.stderr,
+    )
+    print(
+        f"  manual: herdr-task close-workflow {workflow_id} --abandon",
+        file=sys.stderr,
+    )
+    return False
+
+
+class _RegistrationClaim:
+    """In-process receipt for the registration this start committed.
+
+    Not a second store: the event id already lives on the workflow_created
+    event written in the registration transaction. A pre-existing row with
+    the same workflow id does not produce a receipt.
+    """
+
+    def __init__(self, workflow_id):
+        self.workflow_id = workflow_id
+        self.receipt = None
+
+    def note(self, receipt):
+        if registration_receipt_owns(receipt, self.workflow_id):
+            self.receipt = receipt
+
+    def owns(self):
+        return self.receipt is not None
+
+
 def run_workflow_preflight(project, workflow_id, agent=None):
     """Run Deep Preflight once and store a workflow-scoped healthy Agent set."""
     script = HERDR_ROOT / "bin" / "herdr-deep-preflight"
@@ -328,29 +441,25 @@ def run_workflow_preflight(project, workflow_id, agent=None):
             "Deep Preflight 未发现任何 READY Agent，拒绝启动 Workflow"
         )
 
-    store = None
-    record = None
-    try:
-        store = _get_store()
-        record = store.get_workflow(workflow_id)
-    except Exception:
-        pass
-
-    if record is None:
-        wf_fallback = Path(os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
-        data = load_json(wf_fallback, {"workflows": {}})
-        record = data.setdefault("workflows", {}).get(workflow_id)
-        if record is None:
-            raise RuntimeError(f"Workflow registry missing: {workflow_id}")
-
-    record["preflight_identities"] = {item["agent"]: item["preflight_identity"]
-                                      for item in agents if item.get("preflight_identity") and item.get("final_status") == "READY"}
-    record["healthy_agents"] = healthy
-    record["unhealthy_agents"] = unhealthy
-    record["preflight_checked_at"] = datetime.now().isoformat(timespec="seconds")
-
     store = _get_store()
-    store.save_workflow(record)
+    if store.get_workflow(workflow_id) is None:
+        # 单一事实源：不再回退读写 WORKFLOWS_FILE / 全量 upsert（会复活终态记录）。
+        raise RuntimeError(f"Workflow registry missing in StateStore: {workflow_id}")
+    store.update_workflow_metadata(
+        workflow_id,
+        {
+            "preflight_identities": {
+                item["agent"]: item["preflight_identity"]
+                for item in agents
+                if item.get("preflight_identity")
+                and item.get("final_status") == "READY"
+            },
+            "healthy_agents": healthy,
+            "unhealthy_agents": unhealthy,
+            "preflight_checked_at": datetime.now().isoformat(timespec="seconds"),
+        },
+        expected_status="running",
+    )
 
     # 投影必须经 StateStore 同步(环境变量感知)，严禁直写硬编码路径，
     # 否则测试/沙盒写入会覆盖线上 workflows.json。
@@ -422,45 +531,58 @@ def start_workflow(
         prefix = "e2e" if e2e else "wf"
         workflow_id = generate_workflow_id(project, prefix=prefix)
 
-    # 检查与注册必须持同一把进程锁，否则两个并发创建都能通过活跃检查。
-    with workflow_creation_lock(project["project_id"]):
-        _reject_if_active_workflow(project, force=force or e2e)
-        register_workflow(
-            workflow_id,
-            project,
-            requirement=requirement,
-            title=title or "",
-            execution=({"mode": "context"} | (project.get("execution") or {}))
-            if mode == "context" else None,
-            context=context_bindings if mode == "context" else None,
-        )
-
+    # 注册事务提交后才记回执。之后的投影或预检失败仍要收敛；
+    # 注册前的拒绝、校验失败和中断没有回执，不得按 workflow_id 关既有记录。
+    claim = _RegistrationClaim(workflow_id)
+    failed_stage = "startup"
     try:
-        from herdr.workspace_trust import ensure_controller_env_trust
-        ensure_controller_env_trust(project.get("project_root"))
-    except Exception as trust_exc:
-        print(f"[FACTORY TRUST WARN] {trust_exc}")
-
-    ensure_pool_for_project(project["project_id"])
-    healthy_agents, unhealthy_agents = run_workflow_preflight(
-        project,
-        workflow_id,
-        agent=agent_override if agent_override and agent_override != "auto" else None,
-    )
-
-    if agent_override and agent_override != "auto":
-        if agent_override not in healthy_agents:
-            status = unhealthy_agents.get(agent_override, "NOT_READY")
-            raise RuntimeError(
-                f"指定 Agent '{agent_override}' 未通过 Deep Preflight: {status}"
+        # 检查与注册必须持同一把进程锁，否则两个并发创建都能通过活跃检查。
+        # 收敛在锁退出之后调用，且不在注册事务内跑预检或投影。
+        with workflow_creation_lock(project["project_id"]):
+            _reject_if_active_workflow(project, force=force or e2e)
+            register_workflow(
+                workflow_id,
+                project,
+                requirement=requirement,
+                title=title or "",
+                execution=({"mode": "context"} | (project.get("execution") or {}))
+                if mode == "context" else None,
+                context=context_bindings if mode == "context" else None,
+                on_committed=claim.note,
             )
 
-    set_workflow_agent_override(workflow_id, agent_override)
-    mark_workflow_startup_ready(
-        workflow_id,
-        healthy_agents=healthy_agents,
-        unhealthy_agents=unhealthy_agents,
-    )
+        try:
+            from herdr.workspace_trust import ensure_controller_env_trust
+            ensure_controller_env_trust(project.get("project_root"))
+        except Exception as trust_exc:
+            print(f"[FACTORY TRUST WARN] {trust_exc}")
+
+        ensure_pool_for_project(project["project_id"])
+        failed_stage = "preflight"
+        healthy_agents, unhealthy_agents = run_workflow_preflight(
+            project,
+            workflow_id,
+            agent=agent_override if agent_override and agent_override != "auto" else None,
+        )
+        failed_stage = "startup"
+
+        if agent_override and agent_override != "auto":
+            if agent_override not in healthy_agents:
+                status = unhealthy_agents.get(agent_override, "NOT_READY")
+                raise RuntimeError(
+                    f"指定 Agent '{agent_override}' 未通过 Deep Preflight: {status}"
+                )
+
+        set_workflow_agent_override(workflow_id, agent_override)
+        mark_workflow_startup_ready(
+            workflow_id,
+            healthy_agents=healthy_agents,
+            unhealthy_agents=unhealthy_agents,
+        )
+    except BaseException as exc:
+        if claim.owns():
+            _converge_startup_failure(workflow_id, failed_stage, exc)
+        raise
 
     wf_cfg = workflow_config_for(workflow_id) or {}
     nodes = wf_cfg.get("nodes", [])

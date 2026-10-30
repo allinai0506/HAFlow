@@ -7,9 +7,32 @@ from herdr.kernel import state_db_path
 from herdr import controller_actions as herdr_controller_actions
 from console import common
 
+_STARTUP_CARD_FIELDS = ("status", "startup_ready", "outcome", "failed_stage", "startup_failure_reason")
+
+def _overlay_startup_fields(card, snapshot):
+    if not isinstance(card, dict) or not isinstance(snapshot, dict):
+        return card
+    for key in _STARTUP_CARD_FIELDS:
+        if key in card or key not in snapshot:
+            continue
+        value = snapshot.get(key)
+        if key == "startup_failure_reason":
+            value = str(value or "")[:2048]
+        card[key] = value
+    return card
+
 def ops_center(workflow_id=None,include_tasks=False):
     from herdr.ops_center import build_ops_center_payload
-    return build_ops_center_payload(workflow_id,include_tasks,db_path=state_db_path())
+    payload = build_ops_center_payload(workflow_id, include_tasks, db_path=state_db_path())
+    cards = payload.get("workflow_cards") if isinstance(payload, dict) else None
+    if not isinstance(cards, list):
+        return payload
+    for card in cards:
+        if not isinstance(card, dict) or not card.get("workflow_id"):
+            continue
+        snap = workflow_by_id(card.get("workflow_id")) or {}
+        _overlay_startup_fields(card, snap if isinstance(snap, dict) else {})
+    return payload
 
 def projects():return list(common.load_json(common.PROJECTS_FILE,{'projects':{}}).get('projects',{}).values())
 
@@ -34,6 +57,10 @@ def _with_subject(w):
         w['requirement_subject']=t
     elif not s:
         w['requirement_subject']=herdr_projects.requirement_subject(w.get('requirement',''))
+    w['startup_ready'] = w.get('startup_ready') is not False
+    w['outcome'] = str(w.get('outcome') or '')
+    w['failed_stage'] = str(w.get('failed_stage') or '')
+    w['startup_failure_reason'] = str(w.get('startup_failure_reason') or '')[:2048]
     return w
 
 def workflows_for_project(pid):
@@ -98,7 +125,7 @@ def workflow_graph_for(wid,p,w,ts, *, definition=None, all_tasks=None):
     try:
         payload=dict(definition or {})
         if isinstance(w,dict):
-            for k in ("status","gate_overrides","current_stage","workflow_id"):
+            for k in ("status","gate_overrides","current_stage","workflow_id","outcome","startup_ready","failed_stage"):
                 if w.get(k) is not None:
                     payload[k]=w[k]
         return herdr_workflow_graph.workflow_graph_projection(payload,ts or [],blockers,all_tasks=tasks() if all_tasks is None else all_tasks)
@@ -109,11 +136,19 @@ def enrich_workflow_tasks(wid,p,ts):
     node_types=workflow_node_types(wid,p)
     return [{**t,'node_type':t.get('node_type') or node_types.get(t.get('node') or t.get('stage'))} for t in ts]
 
+def _workflow_counts_as_finished(workflow):
+    if not isinstance(workflow, dict):
+        return False
+    if str(workflow.get("outcome") or "") in {"startup_failed", "abandoned"}:
+        return False
+    if workflow.get("startup_ready") is False:
+        return False
+    return workflow.get("status") in {"completed", "cleaned", "archived"}
+
 def stage_summary(ts,key,workflow=None):
     xs=[t for t in ts if t.get('stage')==key]
     live=[t for t in xs if t.get('status')!='superseded' and not t.get('superseded_by')]
-    wf_status=(workflow or {}).get('status') if isinstance(workflow,dict) else ''
-    is_wf_completed=wf_status in {'completed','cleaned','archived'}
+    is_wf_completed=_workflow_counts_as_finished(workflow)
     gate_override = ((workflow or {}).get('gate_overrides') or {}).get(key) or {}
     gate_passed = herdr_workflow_graph.is_gate_override_valid(gate_override, live)
 

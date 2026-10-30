@@ -138,7 +138,13 @@ function renderLinearPopoverList(){
       let pills = '';
       if(w.active > 0) pills += `<span class="badge-pill active">${w.active} 活跃</span>`;
       if(w.attention > 0) pills += `<span class="badge-pill attention">${w.attention} 需决策</span>`;
-      if(!pills) pills = `<span class="badge-pill completed">已完成</span>`;
+      if(!pills){
+        if(w.status||w.outcome||w.startup_ready===false){
+          const tone=workflowStatusTone(w);
+          const cls=tone==='danger'||tone==='warning'?'attention':tone==='running'?'active':'completed';
+          pills=`<span class="badge-pill ${cls}">${esc(workflowStatusLabel(w))}</span>`;
+        }else pills=`<span class="badge-pill completed">已完成</span>`;
+      }
 
       function hl(txt){
         if(!kw || !txt) return esc(txt);

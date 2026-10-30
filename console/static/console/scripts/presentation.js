@@ -7,7 +7,8 @@ var {
   taskDisplayName, visibleAlerts, activeAlerts, isAlertDismissed,
   dismissAlert, dismissAllAlerts, clearDismissedAlerts,
   formatElapsed, opsHealthClass,
-  healthLabel, agentStatusLabel, authHintLabel, taskDrawerNumTs
+  healthLabel, agentStatusLabel, authHintLabel, taskDrawerNumTs,
+  workflowStatusKey, workflowStatusLabel, workflowStatusTone, workflowStartupHint
 } = (function({
   state
 }){
@@ -32,6 +33,35 @@ function humanStatus(s){
     finalizing:'收尾中',mixed:'处理中',active:'运行中'
   })[s]||s||'未知'
 }
+/* workflow-status:start */
+function workflowStatusKey(w){
+  w=w||{};
+  if(w.status==='running' && w.startup_ready===false)return 'startup_pending';
+  if(w.status==='completed' && w.outcome==='startup_failed')return 'startup_failed';
+  if(w.status==='completed' && w.outcome==='abandoned')return 'abandoned';
+  return String(w.status||'unknown');
+}
+function workflowStatusLabel(w){
+  const key=workflowStatusKey(w);
+  return ({startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃',
+    running:'运行中',completed:'已完成',failed:'失败',paused:'已暂停'})[key]||humanStatus(key);
+}
+function workflowStatusTone(w){
+  const key=workflowStatusKey(w);
+  return key==='startup_failed'||key==='abandoned'?'danger':key==='startup_pending'?'warning':key==='completed'?'completed':key==='running'?'running':'default';
+}
+function workflowStartupHint(w){
+  w=w||{};
+  const key=workflowStatusKey(w);
+  if(key!=='startup_pending'&&key!=='startup_failed'&&key!=='abandoned')return '';
+  const id=String(w.workflow_id||'');
+  const stage=String(w.failed_stage||'');
+  const reason=String(w.startup_failure_reason||'').slice(0,2048);
+  const detail=[stage&&('阶段：'+stage),reason&&('原因：'+reason)].filter(Boolean).join('；');
+  const cleanup='人工清理：herdr-task close-workflow '+id+' --abandon';
+  return [detail,cleanup].filter(Boolean).join('。');
+}
+/* workflow-status:end */
 function humanReason(value){
   const text=String(value??'').trim();
   const labels={
@@ -40,7 +70,7 @@ function humanReason(value){
   return Object.prototype.hasOwnProperty.call(labels, text)?labels[text]:text;
 }
 function humanNodeStatus(s){
-  return s==='completed'?'已完成':humanStatus(s);
+  return ({startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃'})[s]||(s==='completed'?'已完成':humanStatus(s));
 }
 function badge(s){return `<span class="badge ${esc(s)}">${esc(humanStatus(s))}</span>`}
 function cleanStageLabel(s){
@@ -220,7 +250,7 @@ function authHintLabel(s){
 function taskDrawerNumTs(v){const n=parseFloat(v);return Number.isFinite(n)?n:null}
 
 return {
-  esc, jsArg, humanStatus, humanReason,
+  esc, jsArg, humanStatus, workflowStatusKey, workflowStatusLabel, workflowStatusTone, workflowStartupHint, humanReason,
   humanNodeStatus, badge, cleanStageLabel, deliveryOf,
   deliveryReason, deliveryOverridesStatus, taskStatusLabel, taskBadge,
   deliveryWaitHtml, deliveryPipelineLine, relationText, relationClass,

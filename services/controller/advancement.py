@@ -3,6 +3,9 @@
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
 
+from herdr.log_throttle import startup_wait_closed, startup_wait_hold
+
+
 def enqueue_stage_advance(ports, task):
     workflow_id = task.get("workflow_id")
     if workflow_id:
@@ -82,6 +85,7 @@ def check_workflow_stage_advance(ports, workflow_id):
     # Closed workflows must never advance: a zero-task closed workflow is
     # vacuously "complete" at every stage and would ghost-advance forever.
     if ports.workflow_closed(workflow_id):
+        startup_wait_closed(ports, workflow_id)
         return
 
     # Discovery precedes Pane lookup and DAG readiness. Recovery execution runs
@@ -109,8 +113,8 @@ def check_workflow_stage_advance(ports, workflow_id):
     # New factory starts persist the requirement and keep this gate closed
     # until Deep Preflight has completed. This prevents the controller from
     # delivering a stage event before the startup request is ready.
-    if workflow_record.get("startup_ready") is False:
-        print(f"[STARTUP WAIT] workflow={workflow_id} preflight/request not ready")
+    if startup_wait_hold(ports, workflow_id, workflow_record,
+                         "preflight/request not ready"):
         return
 
     # 已关闭(含 abandoned)的 workflow 不再参与任何推进/回流判定;
@@ -477,6 +481,7 @@ DEPENDENCIES = {'enqueue_stage_advance': ('check_workflow_stage_advance',),
                                   '_reset_reverification_memo', '_scheduler_join_gate_allows',
                                   '_scheduler_resolve_candidate_and_plan',
                                   '_selective_replan_awaiting_redispatch',
+                                  '_startup_wait_log',
                                   '_workflow_complete_logged', '_workflow_entry',
                                   'attention_blocks_retry', 'attention_clear', 'attention_get', 'attention_note',
                                   'blocked_gate_dependency', 'blocked_verdict_dep',
