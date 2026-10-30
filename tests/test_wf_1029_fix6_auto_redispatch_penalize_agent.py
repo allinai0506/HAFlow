@@ -69,6 +69,31 @@ def test_penalize_agent_deprioritizes_failed_agent(routing_env, monkeypatch):
     assert pick2 == "codex"
 
 
+def test_penalize_agent_ranks_before_load_based_ranking(routing_env, monkeypatch):
+    monkeypatch.setattr(ar, "preflight_snapshot_fresh", lambda *a, **kw: True)
+    monkeypatch.setattr(ar, "workflow_config_for", lambda _: {
+        "nodes": [
+            {
+                "id": "wrapup",
+                "agent_policy": {"preferred": ["opencode", "codex", "claude"]},
+            }
+        ]
+    })
+    # Mock active loads: opencode has 0 load (failed), codex and claude each have 1 load
+    monkeypatch.setattr(ar, "_active_agent_loads", lambda pid: {"codex": 1, "claude": 1, "opencode": 0})
+
+    # Even though opencode has lower load (0 vs 1), penalized opencode must NOT be chosen!
+    pick = ar.choose_agent(
+        "wf-penalize-test",
+        "wrapup",
+        "docs",
+        requested="auto",
+        penalize_agents=["opencode"],
+        reservation_key="t-load-test",
+    )
+    assert pick == "codex"
+
+
 def test_penalize_agent_preserves_explicit_request(routing_env, monkeypatch):
     monkeypatch.setattr(ar, "preflight_snapshot_fresh", lambda *a, **kw: True)
     monkeypatch.setattr(ar, "workflow_config_for", lambda _: {

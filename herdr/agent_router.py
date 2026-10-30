@@ -726,8 +726,8 @@ def _choose_agent_locked(
         )
     ]
 
-    if penalize_agents and (not requested or requested == "auto"):
-        penalized_set = set(penalize_agents)
+    penalized_set = set(penalize_agents or ()) if (not requested or requested == "auto") else set()
+    if penalized_set:
         non_penalized = [a for a in candidates if a not in penalized_set]
         if non_penalized:
             candidates = non_penalized + [a for a in candidates if a in penalized_set]
@@ -841,6 +841,7 @@ def _choose_agent_locked(
     ranked = sorted(
         enumerate(candidates),
         key=lambda item: (
+            1 if item[1] in penalized_set else 0,
             active_loads.get(item[1], 0)
             + reserved_loads.get(item[1], 0),
             item[0],

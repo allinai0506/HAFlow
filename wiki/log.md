@@ -16,8 +16,8 @@
   2. `services/controller/task_listener.py` 与 `runtime_reconciliation.py`：支持在 `dispatched` 状态下且无完成标记时，通过 `gate_verdict_ready` 触发 `gate_verdict_recovery` 安全转入 `agent_done`；`services/herdr-sentinel.py`：`check_dispatch_fuse` 增加门禁裁决核验，对已有有效结论的任务豁免失败处置并降级为 attention；
   3. `herdr/wrapup_delivery.py` 与 `herdr/agent_router.py`：统一通过 `workflow_template or template or template_name or name` 获取模板标识，修复生产环境 Wrapup 模式静默关闭与 `working` 状态拒交；
   4. `herdr/agent_router.py`：限定角色互斥仅在非 `implementation` 节点且存在对抗角色定义时生效，允许实现工位跨子任务/修复任务复用 Agent，并修复报错信息的空白字符串；
-  5. `herdr/clone_archive.py`：将 `.git` 列入 `BYPASS_IGNORED_DIRS`，跳过内部 packfile 与松散对象库的三轮重复哈希与打包，28 个克隆归档耗时从 15+ 分钟降至数秒；
-  6. `herdr/agent_router.py` 与 `herdr/task_cli_launch.py`：`choose_agent` 引入 `penalize_agents` 参数；在 `--agent auto` 且携带 `--supersedes` 时，将前驱失败任务的 Agent 自动移至候选队列末尾，优先尝试其他可用健康 Agent；
+  5. `services/controller/workflow_close.py`：按任务数量动态伸缩关闭超时（`max(900, n*120)`），确保大任务量工作流回收不被静态超时中断，同时完整保留克隆内 Git 历史记录；
+  6. `herdr/agent_router.py` 与 `herdr/task_cli_launch.py`：`choose_agent` 引入 `penalize_agents` 参数并在负载排序前作为首要优先级生效；在 `--agent auto` 且携带 `--supersedes` 时，将前驱失败任务的 Agent 实施惩罚，即使其因闲置负载为零也无法凌驾于备选健康 Agent 之上；
   7. `herdr/git_coordination.py`：包裹 `_default_process_provider` 中 `ps -axo` 的 `OSError` 异常，避免只读沙箱权限受限抛错。
 - 证据：
   1. 6 个针对性回归测试全绿：`tests/test_wf_1029_fix1_nested_git_commit.py` ~ `tests/test_wf_1029_fix6_auto_redispatch_penalize_agent.py`（11 passed in 1.05s）；

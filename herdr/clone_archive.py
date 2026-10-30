@@ -31,7 +31,6 @@ MAX_SECONDS = 120
 # "side-channel diagnostics must not alter execution status" (AGENTS.md §4.10).
 BYPASS_IGNORED_DIRS = frozenset({
     ".codegraph",  # CodeGraph MCP / local index daemon runtime artifacts (db, pid, logs)
-    ".git",  # Git repository internal object database; history lives in main repo
 })
 
 BYPASS_IGNORED_FILE_SUFFIXES = (
