@@ -48,8 +48,6 @@ BYPASS_IGNORED_DIRS = frozenset({
     ".next",  # Next.js build output
     ".nuxt",  # Nuxt.js build output
     ".cache",  # Generic compiler/indexer cache
-    "reports",  # Test/coverage reports
-    "coverage",  # Coverage output
 })
 
 BYPASS_IGNORED_FILE_SUFFIXES = (
@@ -137,28 +135,57 @@ def _root(task, clone_root):
     return root
 
 
-def _inventory(root):
+def _declared_deliverable_rel_paths(task: dict | None) -> set[str]:
+    """Collect relative paths of all declared artifacts/deliverables on a task."""
+    if not isinstance(task, dict):
+        return set()
+    declared = set()
+    for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
+        for item in task.get(key) or []:
+            if isinstance(item, str):
+                p = item.strip().replace("\\", "/").removeprefix("./")
+                if p:
+                    declared.add(p)
+            elif isinstance(item, dict):
+                p = str(item.get("path") or item.get("rel_path") or "").strip().replace("\\", "/").removeprefix("./")
+                if p:
+                    declared.add(p)
+    return declared
+
+
+def _inventory(root, task=None):
     entries = {}
     total = 0
     deadline = time.monotonic() + MAX_SECONDS
+    declared = _declared_deliverable_rel_paths(task)
 
     def failed(error):
         raise error
 
     for current, dirs, files in os.walk(root, followlinks=False, onerror=failed):
-        dirs[:] = [d for d in dirs if d not in BYPASS_IGNORED_DIRS]
+        rel_current = Path(current).relative_to(root).as_posix()
+        dirs[:] = [
+            d for d in dirs
+            if d not in BYPASS_IGNORED_DIRS
+            or any(
+                p == (d if rel_current == "." else f"{rel_current}/{d}")
+                or p.startswith((d if rel_current == "." else f"{rel_current}/{d}") + "/")
+                for p in declared
+            )
+        ]
         for name in sorted(dirs + files):
             path = Path(current) / name
             info = path.lstat()
-            if (
+            rel = path.relative_to(root).as_posix()
+            is_declared = rel in declared or any(p.startswith(rel + "/") for p in declared)
+            if not is_declared and (
                 stat.S_ISSOCK(info.st_mode)
                 or name.endswith(".sock")
                 or name in BYPASS_IGNORED_FILE_NAMES
                 or name in BYPASS_IGNORED_DIRS
             ):
                 continue  # Live IPC endpoint, external indexer, or transient metadata.
-            rel = path.relative_to(root).as_posix()
-            if is_bypass_rel_path(rel):
+            if not is_declared and is_bypass_rel_path(rel):
                 continue
             if len(entries) >= MAX_ENTRIES or time.monotonic() > deadline:
                 raise ValueError("archive inventory budget exceeded")
@@ -201,7 +228,7 @@ def preserve_clone(task, clone_root):
         verify_source(task, clone_root, task["clone_archive"])
         return task["clone_archive"]
     info = root.stat()
-    entries = _inventory(root)
+    entries = _inventory(root, task=task)
     manifest = {
         "task_id": task["task_id"],
         "workflow_id": task["workflow_id"],
@@ -245,7 +272,7 @@ def preserve_clone(task, clone_root):
                     not member.issym() or member.linkname != expected["target"]
                 ):
                     raise ValueError("archive link verification failed")
-        if _inventory(root) != entries or (root.stat().st_dev, root.stat().st_ino) != (
+        if _inventory(root, task=task) != entries or (root.stat().st_dev, root.stat().st_ino) != (
             info.st_dev,
             info.st_ino,
         ):
@@ -318,9 +345,10 @@ def verify_source(task, clone_root, archive):
         if not is_residual_clone_shell(root):
             raise ValueError("clone instance changed")
     manifest = archive_manifest(dict(task, clone_archive=archive))
-    current = _inventory(root)
+    current = _inventory(root, task=task)
+    declared = _declared_deliverable_rel_paths(task)
     manifest_entries = {
-        k: v for k, v in manifest["entries"].items() if not is_bypass_rel_path(k)
+        k: v for k, v in manifest["entries"].items() if k in declared or not is_bypass_rel_path(k)
     }
     deleting = task.get("clone_reclaim_started") == archive["manifest_sha256"]
     if current != manifest_entries and not (

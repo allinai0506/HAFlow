@@ -116,7 +116,10 @@ def check_workflow_stage_advance(ports, workflow_id):
         logged = getattr(ports, "_startup_wait_logged", None)
         if not isinstance(logged, dict):
             logged = {}
-            setattr(ports, "_startup_wait_logged", logged)
+            try:
+                setattr(ports, "_startup_wait_logged", logged)
+            except AttributeError:
+                pass
         now = time.monotonic()
         last = logged.get(workflow_id, 0)
         if not isinstance(last, (int, float)):
@@ -452,58 +455,43 @@ def check_workflow_stage_advance(ports, workflow_id):
             latch_key = f"{workflow_id}:{stage_key}"
             if latch_key not in ports._fix_latch_logged:
                 ports._fix_latch_logged.add(latch_key)
-                print(
-                    f"[FIX LOOP LATCH] "
-                    f"workflow={workflow_id} "
-                    f"{next_stage} waits for redo of {stage_key}"
-                )
+                print(f"[FIX LOOP LATCH] workflow={workflow_id} {next_stage} waits for redo of {stage_key}")
             continue
 
         if not ports.mark_stage_advance_queued(workflow_id, next_stage):
             continue
 
-        ports.coordinator_queue.put(
-            {
-                "kind": "stage_advance",
-                "workflow_id": workflow_id,
-                "stage": stage_key,
-                "next_stage": next_stage,
-                "stage_label": stage.get("label", stage_key),
-            }
-        )
+        ports.coordinator_queue.put({
+            "kind": "stage_advance", "workflow_id": workflow_id,
+            "stage": stage_key, "next_stage": next_stage,
+            "stage_label": stage.get("label", stage_key),
+        })
 
-        print(
-            f"[STAGE ADVANCE QUEUED] "
-            f"workflow={workflow_id} "
-            f"{stage_key} -> {next_stage}"
-        )
+        print(f"[STAGE ADVANCE QUEUED] workflow={workflow_id} {stage_key} -> {next_stage}")
 
 
-DEPENDENCIES = {'enqueue_stage_advance': ('check_workflow_stage_advance',),
- '_scheduler_resolve_candidate_and_plan': ('_get_store', 'reconcile_node_dispatches', '_reverification_episode_settled',
-                                           '_reverification_plan_for_rotation',
-                                           '_scheduler_freeze_candidate',
-                                           '_scheduler_previous_candidate_sha', 'is_node_complete',
-                                           'project_for_workflow', 'scheduler_core',
-                                           'scheduler_facts_store'),
- 'check_workflow_stage_advance': ('_fix_latch_logged', '_fix_loop_latch_blocks', '_get_store',
-                                  '_reset_reverification_memo', '_scheduler_join_gate_allows',
-                                  '_scheduler_resolve_candidate_and_plan',
-                                  '_selective_replan_awaiting_redispatch',
-                                  '_startup_wait_logged',
-                                  '_workflow_complete_logged', '_workflow_entry',
-                                  'attention_blocks_retry', 'attention_clear', 'attention_get', 'attention_note',
-                                  'blocked_gate_dependency', 'blocked_verdict_dep',
-                                  'clear_stage_advance', 'coordinator_intake_enabled',
-                                  'coordinator_queue',
-                                  'gate_verdict', 'get_ready_nodes', 'handle_fix_loop',
-                                  'is_node_complete', 'is_workflow_completed', 'liveness',
-                                  'load_tasks', 'mark_stage_advance_queued',
-                                  'maybe_close_completed_workflow', 'notify_attention',
-                                  'apply_node_acceptance', 'project_for_workflow',
-                                  'reconcile_node_dispatches',
-                                  'reconcile_stage_advance_states', 'resolve_gate_config',
-                                  'selective_replan_core', 'time', 'workflow_closed',
-                                  'workflow_config_for')}
+DEPENDENCIES = {
+    'enqueue_stage_advance': ('check_workflow_stage_advance',),
+    '_scheduler_resolve_candidate_and_plan': (
+        '_get_store', 'reconcile_node_dispatches', '_reverification_episode_settled',
+        '_reverification_plan_for_rotation', '_scheduler_freeze_candidate',
+        '_scheduler_previous_candidate_sha', 'is_node_complete', 'project_for_workflow',
+        'scheduler_core', 'scheduler_facts_store',
+    ),
+    'check_workflow_stage_advance': (
+        '_fix_latch_logged', '_fix_loop_latch_blocks', '_get_store',
+        '_reset_reverification_memo', '_scheduler_join_gate_allows',
+        '_scheduler_resolve_candidate_and_plan', '_selective_replan_awaiting_redispatch',
+        '_startup_wait_logged', '_workflow_complete_logged', '_workflow_entry',
+        'attention_blocks_retry', 'attention_clear', 'attention_get', 'attention_note',
+        'blocked_gate_dependency', 'blocked_verdict_dep', 'clear_stage_advance',
+        'coordinator_intake_enabled', 'coordinator_queue', 'gate_verdict',
+        'get_ready_nodes', 'handle_fix_loop', 'is_node_complete', 'is_workflow_completed',
+        'liveness', 'load_tasks', 'mark_stage_advance_queued', 'maybe_close_completed_workflow',
+        'notify_attention', 'apply_node_acceptance', 'project_for_workflow',
+        'reconcile_node_dispatches', 'reconcile_stage_advance_states', 'resolve_gate_config',
+        'selective_replan_core', 'time', 'workflow_closed', 'workflow_config_for',
+    ),
+}
 
 __all__ = tuple(DEPENDENCIES)

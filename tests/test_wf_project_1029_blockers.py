@@ -49,23 +49,35 @@ def test_clone_archive_ignores_node_modules_and_build_dirs(tmp_path):
     (root / ".venv" / "bin").mkdir(parents=True)
     (root / ".venv" / "bin" / "python").write_text("py")
 
+    # Regular project report deliverable must NEVER be treated as bypass
+    (root / "reports").mkdir()
+    (root / "reports" / "analysis.md").write_text("# Report Analysis")
+
     assert clone_archive.is_bypass_rel_path("node_modules/pkg/index.js")
     assert clone_archive.is_bypass_rel_path("dist-release/bundle.js")
     assert clone_archive.is_bypass_rel_path("target/classes/App.class")
     assert clone_archive.is_bypass_rel_path(".m2/repository/lib.jar")
     assert clone_archive.is_bypass_rel_path(".venv/bin/python")
+    assert not clone_archive.is_bypass_rel_path("reports/analysis.md")
 
     inv = clone_archive._inventory(root)
-    # Only src/index.ts, src, and README.md should be in inventory
     inv_keys = set(inv.keys())
     assert "src" in inv_keys
     assert "src/index.ts" in inv_keys
     assert "README.md" in inv_keys
+    assert "reports/analysis.md" in inv_keys
     assert not any(k.startswith("node_modules") for k in inv_keys)
     assert not any(k.startswith("dist-release") for k in inv_keys)
     assert not any(k.startswith("target") for k in inv_keys)
     assert not any(k.startswith(".m2") for k in inv_keys)
     assert not any(k.startswith(".venv") for k in inv_keys)
+
+    # Even within a bypass dir, an explicitly declared deliverable on the task is preserved
+    (root / "dist").mkdir()
+    (root / "dist" / "declared_artifact.pdf").write_text("pdf bytes")
+    task_with_decl = {"artifacts": ["dist/declared_artifact.pdf"]}
+    inv_with_decl = clone_archive._inventory(root, task=task_with_decl)
+    assert "dist/declared_artifact.pdf" in inv_with_decl
 
 
 def test_business_scope_and_key_normalizes_closing_status():

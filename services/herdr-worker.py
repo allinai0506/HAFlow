@@ -1052,9 +1052,14 @@ def _trust_blocked_evidence(text):
     return " | ".join(before + [core] + after)[:400]
 
 
-def wait_startup_ready(agent_kind, pane_id, started, attempts=None, total_timeout=20):
+def wait_startup_ready(agent_kind, pane_id, started, attempts=None, total_timeout=None):
     """Bounded native identity -> owned transcript -> identity recheck gate."""
     from herdr.agent_adapter import startup_readiness
+    if total_timeout is None:
+        try:
+            total_timeout = float(os.environ.get("HERDR_WORKER_STARTUP_TIMEOUT", 8.0))
+        except (ValueError, TypeError):
+            total_timeout = 8.0
     deadline = time.monotonic() + total_timeout
     verdict = {"status": "UNKNOWN", "interactive_ready": False, "reason": "probe_failed"}
     attempt = 0
