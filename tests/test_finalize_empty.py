@@ -233,6 +233,25 @@ class FinalizeRetryReachabilityTest(unittest.TestCase):
 
         self.assertEqual(pending, ["t-ok", "t-cm"])
 
+    def test_escalate_finalize_records_attention_and_notifies(self):
+        task = _task(task_id="t-esc-note")
+        with patch.object(ctrl, "attention_note") as mock_attn, \
+             patch.object(ctrl, "notify_attention") as mock_notify, \
+             patch.object(ctrl, "_record_finalize_event"), \
+             patch("herdr.kernel.update_task_metadata"):
+            ctrl._escalate_finalize(task, "retry_exhausted", {"detail": "fail"})
+            mock_attn.assert_called_once_with(
+                "t-esc-note:finalize",
+                task,
+                "finalize_escalated",
+                "retry_exhausted",
+                detail={"reason": "retry_exhausted", "status": "completed", "detail": {"detail": "fail"}},
+            )
+            mock_notify.assert_called_once()
+            args = mock_notify.call_args[0]
+            self.assertEqual(args[0], "Herdr Factory · 终化升级（需人工）")
+            self.assertEqual(args[1], task)
+
 
 if __name__ == "__main__":
     unittest.main()

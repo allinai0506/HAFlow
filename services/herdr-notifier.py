@@ -135,12 +135,14 @@ def scan(state):
         state = {
             "initialized": True,
             "last_status": {t["task_id"]: t.get("status") for t in tasks if t.get("task_id")},
+            "last_escalated": {t["task_id"]: True for t in tasks if t.get("task_id") and t.get("finalize_escalated")},
             "completed_workflows": [wf for wf, ts in groups.items() if workflow_complete(ts)],
         }
         save(STATE_FILE, state)
         return state
 
     last = state.setdefault("last_status", {})
+    last_escalated = state.setdefault("last_escalated", {})
     completed = set(state.setdefault("completed_workflows", []))
 
     for t in tasks:
@@ -169,6 +171,24 @@ def scan(state):
             )
 
         last[tid] = cur
+
+        is_escalated = bool(t.get("finalize_escalated"))
+        was_escalated = bool(last_escalated.get(tid))
+        if is_escalated and not was_escalated:
+            wf_id = t.get("workflow_id")
+            url = build_console_url(workflow_id=wf_id, task_id=tid)
+            esc_reason = t.get("finalize_escalate_reason") or "retry_exhausted"
+            notify(
+                "Herdr Factory · 终化升级（需人工）",
+                f"{project(t)} · {tid}",
+                f"Workflow: {t.get('workflow_id','unknown')}\n"
+                f"Agent: {t.get('agent','unknown')} · Pane: {t.get('pane_id','unknown')}\n"
+                f"交付终化提交失败已升级，需要人工裁决: {esc_reason}",
+                url=url,
+            )
+            last_escalated[tid] = True
+        elif not is_escalated and was_escalated:
+            last_escalated.pop(tid, None)
 
     groups = {}
     for t in tasks:
@@ -207,7 +227,7 @@ def main():
         print("TEST_NOTIFICATION_SENT")
         return
 
-    state = load(STATE_FILE, {"initialized":False,"last_status":{},"completed_workflows":[]})
+    state = load(STATE_FILE, {"initialized":False,"last_status":{},"last_escalated":{},"completed_workflows":[]})
 
     if args.once:
         scan(state)

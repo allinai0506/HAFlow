@@ -328,6 +328,29 @@ def _escalate_finalize(ports, task, reason, detail=None):
              ports.subprocess.SubprocessError) as exc:
         print(f"[FINALIZE ESCALATE ERROR] task={task_id}: {exc}")
 
+    try:
+        ports.attention_note(
+            f"{task_id}:finalize",
+            task or {},
+            "finalize_escalated",
+            reason,
+            detail=payload,
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError,
+             ports.subprocess.SubprocessError) as exc:
+        print(f"[FINALIZE ATTENTION NOTE ERROR] task={task_id}: {exc}")
+
+    try:
+        ports.notify_attention(
+            "Herdr Factory · 终化升级（需人工）",
+            task or {},
+            f"Workflow: {(task or {}).get('workflow_id', 'unknown')}\nTask 交付提交失败超限，需人工处理: {reason}",
+            reason,
+        )
+    except (OSError, ValueError, RuntimeError, AttributeError,
+             ports.subprocess.SubprocessError) as exc:
+        print(f"[FINALIZE NOTIFY ERROR] task={task_id}: {exc}")
+
 def _empty_auto_releasable(ports, task):
     """H-3: anchored empties never auto-release; legacy time empties may.
 
@@ -377,7 +400,8 @@ DEPENDENCIES = {'maybe_complete_on_task_done': ('collaboration_enabled',),
  '_parse_commit_result': ('json',),
  '_parse_integrate_result': ('json',),
  '_record_finalize_event': ('_get_store', 'subprocess'),
- '_escalate_finalize': ('_get_store', '_record_finalize_event', 'subprocess'),
+ '_escalate_finalize': ('_get_store', '_record_finalize_event', 'subprocess',
+                         'attention_note', 'notify_attention'),
  '_empty_auto_releasable': (),
  'clear_finalize_escalation': ('_finalize_retry_exhausted_logged', '_get_store', 'attention_clear',
                                'get_task', 'subprocess')}

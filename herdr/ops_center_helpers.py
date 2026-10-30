@@ -13,6 +13,7 @@ from herdr.transitions import (
 KNOWN_AGENTS = [agent for agent in DEFAULT_ALLOWED if agent]
 
 ANOMALY_ACTIONS = {
+    "FINALIZE_ESCALATED": ["打开 Pane", "清除升级标记", "重试", "让总指挥处理", "自动修复"],
     "BLOCKED": ["打开 Pane", "重试", "换 Agent", "禁用 Agent", "让总指挥处理", "自动修复"],
     "FAILED": ["打开 Pane", "重试", "换 Agent", "禁用 Agent", "让总指挥处理", "自动修复"],
     "AUTH_REQUIRED": ["打开 Pane", "换 Agent", "禁用 Agent", "让总指挥处理"],
@@ -160,13 +161,15 @@ def _node_task_status_counts(tasks_for_node):
             counts["superseded"] += 1
             continue
         counts["total"] += 1
-        if status in ACTIVE_TASK_STATUSES or (status in ("pending",)):
+        if task.get("finalize_escalated"):
+            counts["blocked"] += 1
+        elif status in ACTIVE_TASK_STATUSES or (status in ("pending",)):
             counts["active"] += 1
-        if status == "blocked":
+        if status == "blocked" and not task.get("finalize_escalated"):
             counts["blocked"] += 1
         if status == "failed":
             counts["failed"] += 1
-        if status in COMPLETED_TASK_STATUSES:
+        if status in COMPLETED_TASK_STATUSES and not task.get("finalize_escalated"):
             counts["completed"] += 1
 
     return counts
@@ -310,6 +313,9 @@ def _classify_task_anomalies(task, runtime_status, now):
     reason_text = _anomaly_reason_text(task)
     anomalies = []
 
+    if task.get("finalize_escalated"):
+        anomalies.append("FINALIZE_ESCALATED")
+
     if status == "blocked":
         anomalies.append("BLOCKED")
     if status == "failed":
@@ -388,6 +394,7 @@ def _classify_task_anomalies(task, runtime_status, now):
 
     seen = []
     ordered = [
+        "FINALIZE_ESCALATED",
         "BLOCKED",
         "FAILED",
         "AUTH_REQUIRED",
@@ -413,6 +420,7 @@ def _suggested_actions_for_anomaly(kind, task):
         "open_pane": f"herdr pane read {pane_id} --source visible" if pane_id else None,
         "open_logs": f"herdr pane read {pane_id} --source logfile" if pane_id else None,
         "retry_task": f"herdr-task dispatch {task_id} --prompt \"<重新下发 prompt>\"" if task_id else None,
+        "clear_escalation": f"herdr-task clear-escalation {task_id}" if task_id and task.get("finalize_escalated") else None,
     }
 
     return {

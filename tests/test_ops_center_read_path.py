@@ -249,3 +249,38 @@ def test_projection_fallback_loads_workflow_from_state_store(tmp_path, monkeypat
     cards = _build_workflow_cards({"wf-a-0": [t for t in tasks if t["workflow_id"] == "wf-a-0"]}, 100)
     assert cards[0]["workflow_label"] == "authoritative"
     assert cards[0]["nodes"][0]["status"] == "completed"
+
+
+def test_finalize_escalated_surfaces_as_blocked_and_anomaly():
+    from herdr.ops_center_helpers import (
+        _classify_task_anomalies,
+        _node_task_status_counts,
+        _suggested_actions_for_anomaly,
+    )
+    from herdr.ops_center_projection import _build_boss_summary
+
+    task = {
+        "task_id": "t-esc",
+        "workflow_id": "wf-esc",
+        "status": "completed",
+        "finalize_escalated": True,
+        "finalize_escalate_reason": "retry_exhausted",
+        "pane_id": "w1:p1",
+    }
+
+    # 1. Classified as FINALIZE_ESCALATED anomaly with clear-escalation link
+    anomalies = _classify_task_anomalies(task, "idle", 100)
+    assert "FINALIZE_ESCALATED" in anomalies
+
+    actions = _suggested_actions_for_anomaly("FINALIZE_ESCALATED", task)
+    assert actions["links"]["clear_escalation"] == "herdr-task clear-escalation t-esc"
+
+    # 2. Node counts count it as blocked, not completed
+    counts = _node_task_status_counts([task])
+    assert counts["blocked"] == 1
+    assert counts["completed"] == 0
+
+    # 3. Boss summary includes wf-esc in blocked_workflows and counts attention
+    boss = _build_boss_summary([task], {"wf-esc": [task]}, [{"kind": "FINALIZE_ESCALATED"}])
+    assert "wf-esc" in boss["blocked_workflows"]
+    assert boss["attention_required"] == 1

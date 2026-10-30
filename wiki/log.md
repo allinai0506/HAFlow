@@ -8,6 +8,15 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-30] fix | 终化升级（finalize_escalated）信号接入系统通知与 Ops Center 可观测性闭环
+
+- 背景：任务在 completed 状态进行提交重试超限后触发 `finalize_escalated=True`，因处于准终态、未固定 delivery_contract 无法进入 delivery-repair，同时 notifier 与 ops-center 均未感知该元数据标记，造成静默停滞。
+- 变更：
+  1. `services/herdr-notifier.py`：新增 `last_escalated` 追踪，对 `finalize_escalated=True` 触发 macOS 弹窗与控制台直达链接，并严格幂等去重；
+  2. `services/controller/finalize_support.py`：`_escalate_finalize` 同步写入全局 Attention 账本（`task_id:finalize`）并发送即时通知；
+  3. `herdr/ops_center_helpers.py` 与 `herdr/ops_center_projection.py`：`_node_task_status_counts` 将 `finalize_escalated` 计入 `blocked` 避免“假绿”，`_classify_task_anomalies` 产出 `FINALIZE_ESCALATED` 异常并附带一键清理升级快捷链接，`_build_boss_summary` 纳入阻塞工作流统计。
+- 证据：`tests/test_herdr_notifier.py`、`tests/test_ops_center_read_path.py`、`tests/test_finalize_empty.py` 专项全通过（40 passed）。
+
 ## [2026-10-27] fix | 规划产物文件版本绑定、任务身份精准匹配、严格终态裁决与完整实现约束透传
 
 - 背景：PR #356 代码复核指出：文件交付（如 `challenger-review.md`）绕过了版本与 `Plan-Ref` 强校验；同 Agent 无归属 note 覆盖了当前任务显式 BLOCKED；正文模糊包含“通过”放行了非终态（PENDING/未完成）审查；已审计划中的任务范围（Scope）、独立验收（Acceptance）及完整任务块在派发给实现工位时丢失；Worker 启动链缺少 `HERDR_TASK_ID` 环境变量注入。
