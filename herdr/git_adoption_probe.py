@@ -32,7 +32,7 @@ def git_is_ancestor(clone, baseline, head):
 
 
 def git_log_commits(clone, rev, limit=None, first_parent=False):
-    cmd = ["git", "-C", clone, "log", "--format=%H%x1f%P%x1f%at%x1f%ct"]
+    cmd = ["git", "-C", clone, "log", "--format=%H%x1f%P%x1f%at%x1f%ct%x1f%an%x1f%ae"]
     if first_parent:
         cmd.append("--first-parent")
     if limit is not None:
@@ -46,9 +46,9 @@ def git_log_commits(clone, rev, limit=None, first_parent=False):
         if not line.strip():
             continue
         parts = line.split("\x1f")
-        if len(parts) != 4:
+        if len(parts) < 4:
             continue
-        sha, raw_parents, raw_at, raw_ct = parts
+        sha, raw_parents, raw_at, raw_ct = parts[:4]
         sha = sha.strip()
         if not sha:
             continue
@@ -58,8 +58,16 @@ def git_log_commits(clone, rev, limit=None, first_parent=False):
             committer_ts = float(raw_ct.strip())
         except ValueError:
             continue
-        commits.append({"sha": sha, "author_ts": author_ts,
-                        "committer_ts": committer_ts, "parents": parents})
+        author_name = parts[4].strip() if len(parts) > 4 else ""
+        author_email = parts[5].strip() if len(parts) > 5 else ""
+        commits.append({
+            "sha": sha,
+            "author_ts": author_ts,
+            "committer_ts": committer_ts,
+            "parents": parents,
+            "author_name": author_name,
+            "author_email": author_email,
+        })
     return commits
 
 

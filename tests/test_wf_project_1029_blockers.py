@@ -13,7 +13,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -275,6 +275,87 @@ def test_finalize_completed_task_escalates_on_precommit_hook_failure():
     mock_ports._escalate_finalize.assert_called_once()
     escalate_reason = mock_ports._escalate_finalize.call_args[0][1]
     assert escalate_reason == "commit_fatal_error"
+
+
+def test_finalize_completed_task_escalates_on_candidate_blocked():
+    from services.controller import git_finalize
+
+    mock_ports = MagicMock()
+    mock_ports._finalize_inflight = set()
+    task = {
+        "task_id": "t-cand-blocked",
+        "workflow_id": "wf-test",
+        "status": "completed",
+        "integration_mode": "git",
+        "commit": "sha-deadbeef",
+    }
+    mock_ports.get_task.return_value = task
+    verifier = {
+        "task_id": "verifier-1",
+        "status": "completed",
+        "stage_verdict": "blocked",
+        "candidate_sha": "sha-deadbeef",
+    }
+    mock_store = MagicMock()
+    mock_store.list_tasks.return_value = [verifier]
+    mock_ports._get_store.return_value = mock_store
+
+    res = git_finalize.finalize_completed_task(mock_ports, "t-cand-blocked")
+    assert res["retryable"] is False
+    assert res["kind"] == "candidate_blocked"
+    mock_ports._record_finalize_event.assert_called_once()
+    assert mock_ports._record_finalize_event.call_args[0][1] == "finalize_candidate_blocked"
+    mock_ports._escalate_finalize.assert_called_once()
+    assert mock_ports._escalate_finalize.call_args[0][1] == "candidate_blocked"
+
+
+def test_finalize_completed_task_escalates_on_integrate_result_unverified():
+    from services.controller import git_finalize
+
+    mock_ports = MagicMock()
+    mock_ports._finalize_inflight = set()
+    task = {
+        "task_id": "t-unverified",
+        "workflow_id": "wf-test",
+        "status": "committed",
+        "integration_mode": "git",
+        "commit": "sha-cand",
+        "branch": "agent/opencode/feat-t-unverified",
+    }
+    mock_ports.get_task.return_value = task
+    mock_store = MagicMock()
+    mock_store.list_tasks.return_value = []
+    mock_ports._get_store.return_value = mock_store
+    mock_ports.maybe_complete_on_task_done.return_value = []
+
+    # Mock integrate to succeed to 'integrated' status
+    integrated_task = dict(task)
+    integrated_task["status"] = "integrated"
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        res = MagicMock()
+        res.returncode = 0
+        res.stdout = "integrated"
+        return res
+
+    mock_ports.subprocess.run.side_effect = fake_subprocess_run
+    mock_ports.get_task.side_effect = [task, integrated_task, integrated_task]
+
+    with patch("services.controller.git_finalize._settle_integration_result", return_value=None):
+        res = git_finalize.finalize_completed_task(mock_ports, "t-unverified")
+
+    assert res["retryable"] is False
+    assert res["reason"] == "integrate_result_unverified"
+    mock_ports._record_finalize_event.assert_called_with(
+        integrated_task,
+        "finalize_integrate_result_unverified",
+        ANY,
+    )
+    mock_ports._escalate_finalize.assert_called_with(
+        integrated_task,
+        "integrate_result_unverified",
+        ANY,
+    )
 
 
 def test_pr_delivery_push_uses_extended_timeout():

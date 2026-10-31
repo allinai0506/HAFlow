@@ -5,8 +5,33 @@ Dependencies are explicit inputs; importing this module creates no runtime state
 
 def _blocked_episode_matches_task(ports, episode, task):
     """Return whether a persisted SLA episode belongs to this task epoch."""
-    if not isinstance(episode, dict) or not episode:
+    if not isinstance(episode, dict) or not episode or not isinstance(task, dict) or not task:
         return False
+    from herdr import blocked_sla as _sla
+
+    # Explicit human intervention invalidates the episode
+    if episode.get("human_touch") != task.get("human_touch"):
+        return False
+
+    episode_run = episode.get("run_id")
+    task_run = task.get("run_id")
+    same_run = not episode_run or str(episode_run) == str(task_run)
+    episode_workflow = episode.get("workflow_id")
+    task_workflow = task.get("workflow_id")
+    same_workflow = not episode_workflow or str(episode_workflow) == str(task_workflow)
+    if not (same_run and same_workflow):
+        return False
+
+    # Check status entry timestamp first to avoid resetting SLA on benign heartbeat/metadata touches
+    task_stable_entry = _sla.task_blocked_entry_ts(task)
+    ep_stable_entry = episode.get("entry_status_updated_at")
+    if ep_stable_entry is not None and task_stable_entry is not None:
+        try:
+            return abs(float(ep_stable_entry) - float(task_stable_entry)) < 0.001
+        except (TypeError, ValueError):
+            return False
+
+    # Fallback for legacy episodes without entry_status_updated_at
     try:
         same_entry = float(episode.get("entry_updated_at")) == float(task.get("updated_at"))
     except (TypeError, ValueError):
@@ -15,13 +40,7 @@ def _blocked_episode_matches_task(ports, episode, task):
         same_version = int(episode.get("entry_version")) == int(task.get("version"))
     except (TypeError, ValueError):
         same_version = episode.get("entry_version") is None and task.get("version") is None
-    episode_run = episode.get("run_id")
-    task_run = task.get("run_id")
-    same_run = not episode_run or str(episode_run) == str(task_run)
-    episode_workflow = episode.get("workflow_id")
-    task_workflow = task.get("workflow_id")
-    same_workflow = not episode_workflow or str(episode_workflow) == str(task_workflow)
-    return same_entry and same_version and same_run and same_workflow
+    return same_entry and same_version
 
 def _claim_blocked_sla_action(ports, task, now, poll_seconds=3.0):
     """Atomically advance and claim one SLA side effect for an episode.
