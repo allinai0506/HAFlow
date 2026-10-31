@@ -246,10 +246,12 @@ class TestReplacementObligationConvergence(unittest.TestCase):
         from services.controller import infra_recovery
 
         wf_id = "wf-impl-1"
+        # PR #339 评审遗留：证据与义务都必须绑定当前 execution。
         self.store.save_workflow({
             "workflow_id": wf_id,
             "status": "running",
             "candidate_sha": "a" * 40,
+            "execution_id": "exec-impl-1",
         })
 
         # Old superseded task with dangling replacement_pending=True
@@ -261,6 +263,7 @@ class TestReplacementObligationConvergence(unittest.TestCase):
             "status": "superseded",
             "replacement_pending": True,
             "superseded_by": None,
+            "execution_id": "exec-impl-1",
         })
 
         # Another task in the same implementation node reached integrated/cleaned
@@ -271,6 +274,7 @@ class TestReplacementObligationConvergence(unittest.TestCase):
             "stage": "implementation",
             "status": "cleaned",
             "candidate_sha": "a" * 40,
+            "execution_id": "exec-impl-1",
         })
 
         ports = MagicMock()
@@ -294,7 +298,8 @@ class TestReplacementObligationConvergence(unittest.TestCase):
         from services.controller import infra_recovery
 
         wf_id = "wf-impl-2"
-        self.store.save_workflow({"workflow_id": wf_id, "status": "running"})
+        self.store.save_workflow({"workflow_id": wf_id, "status": "running",
+                                  "execution_id": "exec-impl-2"})
 
         self.store.save_task({
             "task_id": "impl-old",
@@ -304,10 +309,12 @@ class TestReplacementObligationConvergence(unittest.TestCase):
             "status": "superseded",
             "replacement_pending": True,
             "superseded_by": None,
+            "execution_id": "exec-impl-2",
         })
         # 旧的 cleaned 交付落在另一个 candidate 上：它不能替新义务完成交付
         self.store.save_task({
             "task_id": "impl-settled",
+            "execution_id": "exec-impl-2",
             "workflow_id": wf_id,
             "node": "implementation",
             "stage": "implementation",

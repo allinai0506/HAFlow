@@ -991,7 +991,10 @@ class DanglingObligationConvergenceTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.tmp_dir = Path(self.tmp.name)
         self.store = SQLiteStateStore(self.tmp_dir / "state.db")
-        self.store.save_workflow({"workflow_id": "wf-g1", "status": "running"})
+        # PR #339 评审遗留：义务收敛要求 workflow 带当前 execution，
+        # 证据与义务任务都必须绑定它（缺失身份不得授权自动收敛）。
+        self.store.save_workflow({"workflow_id": "wf-g1", "status": "running",
+                                  "execution_id": "exec-g1"})
         # r1: 悬空义务(superseded + pending + 无接替)
         self.store.save_task({
             "task_id": "t-r1", "workflow_id": "wf-g1", "node": "test",

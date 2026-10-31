@@ -6,6 +6,45 @@ import subprocess
 import sys
 
 
+def resolve_integration_base_ref(clone, main_repo, base_branch, task_id):
+    """Resolve the integration base ref; distinguish permanent vs transient failure.
+
+    Returns ``(base_ref, error)``. ``error`` is ``None``、``'base_ref_missing'``
+    （远端经 ls-remote 确认缺失，永久）或 ``'base_fetch_transient'``（网络/
+    认证/服务类失败，可重试，PR #360 评审遗留）。
+    """
+    fetch_origin = subprocess.run(
+        ["git", "-C", clone, "fetch", "origin", base_branch],
+        capture_output=True, text=True, check=False,
+    )
+    if fetch_origin.returncode == 0:
+        return f"origin/{base_branch}", None
+    check_local = subprocess.run(
+        ["git", "-C", main_repo, "show-ref", "--verify", "--quiet",
+         f"refs/heads/{base_branch}"],
+        check=False,
+    )
+    if check_local.returncode == 0:
+        base_ref = f"refs/herdr/bases/{task_id}"
+        fallback = subprocess.run(
+            ["git", "-C", clone, "fetch", main_repo, f"refs/heads/{base_branch}:{base_ref}"],
+            capture_output=True, text=True, check=False,
+        )
+        if fallback.returncode != 0:
+            return None, "base_fetch_transient"
+        return base_ref, None
+    # 只有 ls-remote 成功且确认远端没有该分支才是永久前置缺失；网络/认证
+    # 失败必须保持可重试，否则 finalize 会把瞬时故障立即升级。
+    probe = subprocess.run(
+        ["git", "-C", clone, "ls-remote", "--exit-code", "origin",
+         f"refs/heads/{base_branch}"],
+        capture_output=True, text=True, check=False,
+    )
+    if probe.returncode == 2:
+        return None, "base_ref_missing"
+    return None, "base_fetch_transient"
+
+
 def integrate_task(task_id, *, load_tasks, find_task, get_store,
                    ensure_branch_available, branch_ownership_error, set_status,
                    clear_finalize_escalation, publish_integrated_task,
@@ -225,46 +264,40 @@ def integrate_task(task_id, *, load_tasks, find_task, get_store,
             check=True,
         )
     else:
-        # Try fetching from origin first
-        fetch_origin = subprocess.run(
-            ["git", "-C", clone, "fetch", "origin", base_branch],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if fetch_origin.returncode == 0:
-            base_ref = f"origin/{base_branch}"
-        else:
-            # Check if base_branch exists locally in main_repo
-            check_local = subprocess.run(
-                ["git", "-C", main_repo, "show-ref", "--verify", "--quiet", f"refs/heads/{base_branch}"],
-                check=False,
+        base_ref, base_err = resolve_integration_base_ref(clone, main_repo, base_branch, task_id)
+        if base_err == "base_ref_missing":
+            print(f"[INTEGRATE REFUSED] base_ref_missing: couldn't find base ref '{base_branch}' on origin or main_repo", file=sys.stderr)
+            print(
+                "HERDR_INTEGRATE_RESULT="
+                + json.dumps(
+                    {
+                        "task_id": task_id,
+                        "result": "base_ref_missing",
+                        "base_branch": base_branch,
+                        "detail": "remote ref confirmed missing via ls-remote",
+                    },
+                    ensure_ascii=False,
+                )
             )
-            if check_local.returncode == 0:
-                base_ref = f"refs/herdr/bases/{task_id}"
-                subprocess.run(
-                    ["git", "-C", clone, "fetch", main_repo, f"refs/heads/{base_branch}:{base_ref}"],
-                    check=True,
+            sys.exit(7)
+        if base_err == "base_fetch_transient":
+            # 网络/认证类失败必须保持可重试（rc=75），不得按永久缺陷立即升级
+            print(f"[INTEGRATE RETRYABLE] base_fetch_transient: fetch of '{base_branch}' failed transiently", file=sys.stderr)
+            print(
+                "HERDR_INTEGRATE_RESULT="
+                + json.dumps(
+                    {
+                        "task_id": task_id,
+                        "result": "base_fetch_transient",
+                        "base_branch": base_branch,
+                        "detail": "origin unreachable or fetch failed; retry later",
+                    },
+                    ensure_ascii=False,
                 )
-                print(f"[INTEGRATE BASE LOCAL FALLBACK] task={task_id} base={base_branch} fetched from main_repo")
-            else:
-                err_detail = (fetch_origin.stderr.strip() or fetch_origin.stdout.strip())
-                print(f"[INTEGRATE REFUSED] base_ref_missing: couldn't find base ref '{base_branch}' on origin or main_repo", file=sys.stderr)
-                if err_detail:
-                    print(err_detail, file=sys.stderr)
-                print(
-                    "HERDR_INTEGRATE_RESULT="
-                    + json.dumps(
-                        {
-                            "task_id": task_id,
-                            "result": "base_ref_missing",
-                            "base_branch": base_branch,
-                            "detail": err_detail[:500],
-                        },
-                        ensure_ascii=False,
-                    )
-                )
-                sys.exit(7)
+            )
+            sys.exit(75)
+        if base_ref.startswith("refs/herdr/bases/"):
+            print(f"[INTEGRATE BASE LOCAL FALLBACK] task={task_id} base={base_branch} fetched from main_repo")
 
     # FR-8 pre-check: remote task branch equivalence (L-4). Best-effort fetch
     # of the同名远端分支; if it already contains HEAD, the deliverable is

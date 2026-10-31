@@ -158,17 +158,34 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
     import re as _re
     if not _re.fullmatch(r"[0-9a-fA-F]{40}", frozen):
         return False
+    # 证据与义务都必须绑定当前 execution（PR #339 评审遗留）：跨 execution
+    # 的 PASS 或缺失身份的任务不得授权自动收敛。
+    try:
+        current_execution = str((ports._get_store().get_workflow(workflow_id) or {})
+                                .get("execution_id") or "")
+    except (OSError, RuntimeError, ValueError, AttributeError):
+        current_execution = ""
+
+    def _current_execution(task):
+        execution = str(task.get("execution_id") or "")
+        return bool(current_execution) and execution == current_execution
+
     settled_nodes = {}
     for task in node_tasks:
         st = str(task.get("status") or "")
         node_id = task.get("node") or task.get("stage")
         if not node_id:
             continue
+        if not _current_execution(task):
+            continue
         if st in ("cleaned", "completed", "committed", "integrated", "cleanup_ready"):
             verdict = str(task.get("stage_verdict") or "")
             if verdict in ("pass", "approved"):
-                verified = str(task.get("verified_candidate_sha")
-                               or task.get("candidate_sha") or "")
+                # 完成证据走权威 resolver：verified_candidate_sha 是裁决时
+                # 从 live clone 回读的证据；candidate_sha 只是派发声明，
+                # 不得作为清账依据（PR #339 评审遗留）。
+                from herdr.scheduler import extract_task_verified_sha
+                verified = str(extract_task_verified_sha(task) or "")
                 if verified.lower() == frozen.lower():
                     settled_nodes.setdefault(node_id, (task.get("task_id"), "settled_gate_pass"))
             elif not verdict:
@@ -186,6 +203,8 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
         if (task.get("status") != "superseded"
                 or task.get("replacement_pending") is not True
                 or task.get("superseded_by")):
+            continue
+        if not _current_execution(task):
             continue
         node_id = task.get("node") or task.get("stage")
         if node_id not in settled_nodes:

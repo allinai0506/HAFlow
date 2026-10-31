@@ -1387,7 +1387,10 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
                 evidence = _pane_delivery_evidence(pane_id, tid)
             except Exception:
                 evidence = None
-            agent_alive = evidence.get("agent_status") == "working" if evidence else False
+            # 存活豁免必须证明"本任务"仍在这块 pane 上工作：陈旧/复用的
+            # pane_id 里别的 agent 在 working 不是豁免依据 (PR #336 评审遗留)。
+            agent_alive = (bool(evidence.get("has_marker"))
+                           and evidence.get("agent_status") == "working") if evidence else False
             if agent_alive:
                 entry = timeouts.get(tid) or {}
                 if not entry.get("alive_alerted"):
