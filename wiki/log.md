@@ -3832,10 +3832,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 验证：6 项针对性回归测试（`test_wf_1029_fix1_nested_git_commit.py` ~ `test_wf_1029_fix6_auto_redispatch_penalize_agent.py`）及关联 82 项测试全部通过；`compileall` 与 `git diff --check` clean。教训见 lessons §211。
 
 ## [2026-10-31] Fix | wf-project-1029-01 卡点收敛：大仓归档依赖黑名单豁免、closing状态凭据哈希对齐、pre-commit门禁快速熔断、Worker冷启动超时与并发终化互斥
-- 物理归档依赖与产物过滤与成果保全：`herdr/clone_archive.py` 的 `BYPASS_IGNORED_DIRS` 增补 `node_modules`、`dist`、`dist-release`、`build`、`target`、`.m2`、`.gradle`、`.venv`、`__pycache__` 等依赖与编译目录（排除 reports/coverage 等常规目录），并在 `_inventory` 与 `verify_source` 中复用 `deliverables._RECORDED_KEYS` 与 `_ref_rel` 强化显式声明及 observation-backed 交付物与祖先目录的强保全逻辑，严格豁免 `.git` 内部元数据，防止大仓（如 nexusarchive 1.4GB 依赖产物）突破 1GB / 120s 归档预算导致 `close-workflow` 陷入 13 次退避重试死循环。
+- 物理归档依赖与产物过滤与成果保全：`herdr/clone_archive.py` 的 `BYPASS_IGNORED_DIRS` 增补 `node_modules`、`dist`、`dist-release`、`build`、`target`、`.m2`、`.gradle`、`.venv`、`__pycache__` 等依赖与编译目录（排除 reports/coverage 等常规目录），并在 `_inventory` 与 `verify_source` 中复用 `deliverables._RECORDED_KEYS` 与 `_ref_rel` 强化显式声明及 observation-backed 交付物与祖先目录的强保全逻辑，防止大仓（如 nexusarchive 1.4GB 依赖产物）突破 1GB / 120s 归档预算导致 `close-workflow` 陷入 13 次退避重试死循环。
 - 关闭收尾状态业务范围哈希对齐：`herdr/task_checkpoint.py` 的 `_business_scope` 与 `herdr/business_gate.py` 的 `_workflow_key` 将 `closing` 状态向 `running` 归一化计算哈希，彻底解决关闭归档重试时因状态变更为 `closing` 导致已签署业务凭据失效而触发 `[CLOSE ABORT]` 的问题。
 - Pre-commit 与复杂度静态门禁失败快速熔断：`services/controller/git_finalize.py` 识别 pre-commit hook、husky 及 complexity check 失败关键词，判定为 `unrecoverable = True` 立即熔断升级，杜绝代码拒绝被误判为瞬态错误而无效重试 50 分钟（整夜挂死）。
 - Worker 启动就绪检测超时与错误退避修复：`services/herdr-worker.py` 的 `wait_startup_ready` 以 `deadline = time.monotonic() + total_timeout` 为基准轮询（默认 8.0s 并支持环境变量 `HERDR_WORKER_STARTUP_TIMEOUT` 弹性调节，兼容 CI 12s 上限），为冷启动 Agent 提供充裕时间；`start_agent` 增加对 `agent_not_ready` 的退避重试，防止偶发准备中导致工位误回滚。
 - Controller 终化并发调用互斥与行数架构治理：`services/controller/git_finalize.py` 引入 `_finalize_inflight` 集合并作为标准依赖注册到 `services/herdr-controller.py` 与 `DEPENDENCIES`，实现单任务终化互斥，消除 `git_busy (75)` 竞争；`services/controller/finalize_retry.py` 将 inflight 识别为非预算扣减等待，防止重复终化跳过引发虚假升级；`services/controller/advancement.py` 引入 30 秒节流窗口消除 Deep Preflight 刷屏，并精简至 497 行符合模块化门禁（<= 500 行）。
 - PR 交付推送超时弹性配置：`herdr/pr_delivery.py` 的 `_git` 针对 `push` 操作放宽超时至 120 秒，并支持 `HERDR_GIT_PUSH_TIMEOUT` 环境变量配置。
-- 验证：11 项全链路卡点专项回归测试（`tests/test_wf_project_1029_blockers.py`）及全量 CI 检查全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §212。
+- 验证：10 项全链路卡点专项回归测试（`tests/test_wf_project_1029_blockers.py`）及全量 CI 检查全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §212。
+
+## [2026-10-31] Fix | 物理归档严格豁免 Git 仓库内部元数据与活体 Socket 旁路隔离
+- Git 元数据豁免与分支指针保全：`herdr/clone_archive.py` 的 `is_bypass_rel_path` 与 `_inventory` 遍历中增加 `.git` 路径严格豁免，杜绝名为 `build`、`dist` 等匹配构建目录名称的松散分支引用（如 `.git/refs/heads/build`）被误判为构建产物剔除，确保归档恢复后的 Git 仓库能正常解析 HEAD 与分支指针。
+- 活体 Socket 旁路隔离防御：明确 Unix-domain socket（`.sock` / `stat.S_ISSOCK`）属于运行时 IPC 终端，不受 Git 元数据豁免影响，始终在物理归档中被跳过（如 `.git/fsmonitor.sock`），符合 `AGENTS.md` §4.10 旁路隔离约束，杜绝触发非预期 `unsupported sandbox special file` 异常导致工作流收尾失败。
+- 验证：更新 `test_git_metadata_preserved_even_when_named_build_or_dist` 回归测试，覆盖松散分支保全与 `.git/fsmonitor.sock` 活体 socket 自动旁路隔离；全量 11 项卡点专项测试全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §212。

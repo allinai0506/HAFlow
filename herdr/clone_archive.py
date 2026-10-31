@@ -62,6 +62,10 @@ BYPASS_IGNORED_FILE_NAMES = frozenset({
 def is_bypass_rel_path(rel: str | Path) -> bool:
     """Check if a relative path belongs to known external indexers or bypass artifacts."""
     parts = Path(rel).parts
+    if parts:
+        name = parts[-1]
+        if any(name.endswith(suffix) for suffix in BYPASS_IGNORED_FILE_SUFFIXES):
+            return True
     if parts and parts[0] == ".git":
         return False
     for part in parts[:-1]:
@@ -70,8 +74,6 @@ def is_bypass_rel_path(rel: str | Path) -> bool:
     if parts:
         name = parts[-1]
         if name in BYPASS_IGNORED_DIRS or name in BYPASS_IGNORED_FILE_NAMES:
-            return True
-        if any(name.endswith(suffix) for suffix in BYPASS_IGNORED_FILE_SUFFIXES):
             return True
     return False
 
@@ -242,13 +244,13 @@ def _inventory(root, task=None):
             info = path.lstat()
             rel = path.relative_to(root).as_posix()
             is_declared = _is_declared_or_ancestor(rel, declared)
+            if stat.S_ISSOCK(info.st_mode) or name.endswith(".sock"):
+                continue  # Live IPC endpoint, socket placeholder, or external daemon endpoint.
             if not in_git and not is_declared and (
-                stat.S_ISSOCK(info.st_mode)
-                or name.endswith(".sock")
-                or name in BYPASS_IGNORED_FILE_NAMES
+                name in BYPASS_IGNORED_FILE_NAMES
                 or name in BYPASS_IGNORED_DIRS
             ):
-                continue  # Live IPC endpoint, external indexer, or transient metadata.
+                continue  # External indexer or transient metadata.
             if not is_declared and is_bypass_rel_path(rel):
                 continue
             if len(entries) >= MAX_ENTRIES or time.monotonic() > deadline:
