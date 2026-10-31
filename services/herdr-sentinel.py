@@ -182,7 +182,21 @@ def _clone_produced_commit(task):
             if head and baseline and head != baseline:
                 return head
             if head and not baseline:
-                return head
+                # 无 baseline 的遗留任务：继承的预派发 HEAD 不是交付证据，
+                # 复用 git_adoption 的创建时间归属；证据不可得按未知处理
+                # (PR #360 评审遗留)。
+                created_at = task.get("created_at")
+                if created_at is None:
+                    return None
+                try:
+                    from herdr.git_adoption import adoption_skew_seconds
+                    cutoff = float(created_at) - adoption_skew_seconds()
+                except (OSError, ValueError, TypeError):
+                    return None
+                commit_ts = _clone_git_progress_at(task)
+                if commit_ts is not None and commit_ts >= cutoff:
+                    return head
+                return None
     except (OSError, subprocess.SubprocessError):
         pass
     return None
@@ -497,6 +511,17 @@ def _task_has_valid_gate_verdict(task):
                         continue
                 except OSError:
                     continue
+            if not rework_started:
+                # 无 rework 界限时对齐 Controller _gate_verdict_file_is_fresh
+                # 的 created_at 新鲜度界限：上一轮执行遗留的 verdict 不得
+                # 通过当前执行校验 (PR #361 评审遗留)。
+                created_at = task.get("created_at")
+                if created_at:
+                    try:
+                        if st.st_mtime < (float(created_at) - 1.0):
+                            continue
+                    except (OSError, ValueError, TypeError):
+                        continue
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             if isinstance(payload, dict):
@@ -654,7 +679,7 @@ def _get_store():
     return get_state_store()
 
 
-def update_statuses(changes, expected=None, epochs=None, versions=None):
+def update_statuses(changes, expected=None, epochs=None, versions=None, metadata=None):
     """Apply legacy Sentinel changes through one atomic status/version CAS.
 
     The read above the call is only used to build an audit snapshot.  The
@@ -670,6 +695,7 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
     expected = expected or {}
     epochs = epochs or {}
     versions = versions or {}
+    metadata = metadata or {}
 
     for task_id, (new_status, reason) in changes.items():
         authoritative = store.get_task(task_id)
@@ -710,6 +736,9 @@ def update_statuses(changes, expected=None, epochs=None, versions=None):
             "sentinel_reason": reason,
             "sentinel_updated_at": int(time.time()),
         }
+        # 同一原子转换携带附加元数据（如 salvage 的 commit），避免先写
+        # metadata 自增 version 导致后续 CAS 全部被拒 (PR #360 评审遗留)。
+        meta.update(metadata.get(task_id) or {})
         if new_status == "failed":
             meta["failure_reason"] = reason
             meta["failure_detail"] = f"sentinel watchdog: {reason}"
@@ -1406,22 +1435,30 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
                 evidence = {}
             agent_state = evidence.get("agent_status")
             if agent_state == "working":
-                entry = timeouts.get(tid) or {}
-                if not entry.get("alive_alerted"):
-                    print(
-                        f"[SENTINEL TIMEOUT COMMITTED] task={tid} status={status} "
-                        f"idle={int(idle_seconds)}s commit={produced_commit[:8]} agent=working — grace granted",
-                        flush=True,
-                    )
-                timeouts[tid] = dict(entry, alive_alerted=True)
-                continue
+                # committed-but-working 的宽限必须有界：仅当提交在 alive 窗口内
+                # 仍新鲜才续期；一次提交后挂死的任务必须能进入恢复
+                # (PR #360 评审遗留)。
+                commit_ts = _clone_git_progress_at(task)
+                if commit_ts is not None and (now - commit_ts) < hard_timeout * alive_multiplier:
+                    entry = timeouts.get(tid) or {}
+                    if not entry.get("alive_alerted"):
+                        print(
+                            f"[SENTINEL TIMEOUT COMMITTED] task={tid} status={status} "
+                            f"idle={int(idle_seconds)}s commit={produced_commit[:8]} agent=working — grace granted",
+                            flush=True,
+                        )
+                    timeouts[tid] = dict(entry, alive_alerted=True)
+                    continue
+                print(
+                    f"[SENTINEL TIMEOUT COMMIT STALE] task={tid} status={status} "
+                    f"idle={int(idle_seconds)}s commit={produced_commit[:8]} agent=working — "
+                    "no fresh commit progress, entering recovery",
+                    flush=True,
+                )
 
-            # Agent has produced a commit and finished (or idle/stopped)
-            # Salvage the commit into task metadata and transition to agent_done
-            try:
-                store.update_task_metadata(tid, {"commit": produced_commit, "candidate_sha": produced_commit})
-            except Exception:
-                pass
+            # Agent has produced a commit and finished (or is stuck past the
+            # fresh-commit window). Salvage the commit through the same atomic
+            # status transition instead of a pre-write (PR #360 评审遗留)。
             print(
                 f"[SENTINEL SALVAGE COMMIT] task={tid} status={status} idle={int(idle_seconds)}s — "
                 f"commit {produced_commit[:8]} produced, transitioning to agent_done",
@@ -1433,6 +1470,7 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
                 {tid: ("agent_done", "sentinel_salvaged_commit")},
                 expected={tid: status},
                 versions=ver_map,
+                metadata={tid: {"commit": produced_commit, "candidate_sha": produced_commit}},
             ):
                 changed = True
                 timeouts[tid] = {
