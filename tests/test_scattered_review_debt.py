@@ -119,6 +119,38 @@ def test_launcher_owned_distinguishes_symlink_skills_from_real_content(tmp_path)
     assert is_launcher_owned("src/main.py", tmp_path) is True
 
 
+def test_manifest_records_only_actually_installed_skills(tmp_path):
+    """Codex #376 二轮：clone 已有同名真实目录且 unlink 失败时，该技能
+    不得记入 manifest（否则任务自建内容被当 launcher 拥有物排除）。"""
+    from herdr.stage_skills import (
+        LAUNCHER_MANAGED_MANIFEST, stage_skills_into_workspace,
+    )
+    import herdr.stage_skills as ss
+    clone = tmp_path / "clone"
+    target = clone / ".agents" / "skills"
+    target.mkdir(parents=True)
+    # clone 已有同名真实目录（含任务内容），unlink 会失败
+    (target / "six-step-finish").mkdir()
+    (target / "six-step-finish" / "task-content.md").write_text("task 的\n")
+    # 让 resolve_stage_skill 找到可解析的同名技能（repo 内置技能）
+    installed = stage_skills_into_workspace(str(clone), ["six-step-finish"])
+    manifest = target / LAUNCHER_MANAGED_MANIFEST
+    if manifest.exists():
+        managed = json.loads(manifest.read_text())
+        assert "six-step-finish" not in managed, managed
+    # 任务内容不被吞（is_launcher_owned 判定为非 launcher 拥有）
+    from herdr.repo_hygiene import is_launcher_owned
+    assert is_launcher_owned(".agents/skills/six-step-finish/task-content.md", clone) is False
+
+
+def test_manifest_file_itself_is_launcher_owned(tmp_path):
+    """Codex #376 二轮：manifest 文件自身不得被当业务交付提交。"""
+    from herdr.repo_hygiene import is_launcher_owned
+    (tmp_path / ".agents" / "skills").mkdir(parents=True)
+    (tmp_path / ".agents" / "skills" / ".herdr-launcher-managed.json").write_text("[]")
+    assert is_launcher_owned(".agents/skills/.herdr-launcher-managed.json", tmp_path) is True
+
+
 def test_launcher_copied_skills_owned_via_manifest(tmp_path):
     """Codex 二轮：复制回退（cross-volume）的场景——manifest 是所有权权威来源。"""
     import json as _json

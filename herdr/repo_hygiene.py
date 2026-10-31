@@ -25,6 +25,9 @@ def is_internal_untracked(path: str) -> bool:
     return text.startswith(INTERNAL_PREFIXES)
 
 
+LAUNCHER_MANAGED_MANIFEST = ".herdr-launcher-managed.json"
+
+
 def is_launcher_owned(path: str, root: str | os.PathLike = "") -> bool:
     """True 当该 .agents/ 路径属于 launcher 拥有的基础设施（PR #355 评审遗留）。
 
@@ -39,10 +42,14 @@ def is_launcher_owned(path: str, root: str | os.PathLike = "") -> bool:
         return True
     idx = parts.index(".agents")
     rest = parts[idx + 1:]
-    if not rest or rest[0] != "skills" or len(rest) < 2:
+    if not rest or rest[0] != "skills":
         return True  # .agents 顶层与其他子路径维持排除
+    if len(rest) >= 2 and rest[1] == LAUNCHER_MANAGED_MANIFEST:
+        return True  # manifest 自身是 launcher 基础设施（PR #376 二轮评审）
+    if len(rest) < 2:
+        return True
     base = Path(root) if root else Path()
-    manifest = base / ".agents" / "skills" / ".herdr-launcher-managed.json"
+    manifest = base / ".agents" / "skills" / LAUNCHER_MANAGED_MANIFEST
     try:
         if manifest.exists():
             managed = json.loads(manifest.read_text(encoding="utf-8"))
