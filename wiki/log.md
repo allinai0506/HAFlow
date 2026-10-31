@@ -7,6 +7,18 @@
 > *Human + Agent, in Flow*  
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
+## [2026-10-31] fix | 评审欠账清零：三批次修复 18 条 + 二轮/三轮收敛，0 未解决线程
+
+- 背景：2026-10-31 审计发现 #312–#362 各 PR 的未解决评审线程共 67 条（含误挂 docs 分支丢失后重落地的 #359 自带欠账）。经三批次修复 + Codex 二轮/三轮对修复本身的复核，全部闭环，受审 PR 未解决线程归零。
+- 变更：
+  1. 批次① PR #373（cockpit ×5）：行预算二段可收缩、增补段 envelope 预算、自动化 read_state 门、cockpitTargetLookup 导出、Controller 版本读自发布证据；
+  2. 批次② PR #374（恢复链 ×6）：waiting-human 通知可重试退避、宽限需 has_marker、义务收敛走 verified 证据 + execution 绑定、瞬时 fetch 可重试、accepted-with-limits 回归走真实 CLI close；
+  3. 批次③ PR #375（零散 ×7）：gate 声明 v2 + pre-marker 兼容、残壳 declared 感知、is_launcher_owned、stage 契约按适配流门控、topology 正向归属、hub exit5 契约、运行级 delivery_ceiling；
+  4. 批次④ PR #376 + #379（Codex 二轮/三轮对修复的复核 ×6）：版本缓存按证据文件失效、JS 探针走 stdin、门控改用 pinned 配置、launcher manifest 所有权（仅记录实际安装、manifest 自身排除）。
+- 事故沉淀：#359 base 误挂 docs 分支致内容丢失（lessons §213）；共享检出串台致 #373 混入外来提交（worktree 重建 + 祖先核验检测配方，memory 归档）。
+- 挂账：issue #377 跟踪 4 条 P2 backlog（experience collection 三缺陷 + sentinel marker 可见性），对应线程已按 backlog 引用解决。
+- 验证：各批次 RED-first 守卫测试 + 相关专项全绿（cockpit 119 / 恢复链 116 / 零散 281 / 二轮 265）；CI 全量绿后合并。
+
 
 ## [2026-10-31] fix | 重落地 PR #359：启动失败收敛与 Console 启动标签恢复（base 误挂 docs 分支致 main 缺失），并修复其评审欠账
 
