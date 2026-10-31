@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import os
 import pwd
+
+from herdr.repo_hygiene import LAUNCHER_MANAGED_MANIFEST
 import re
 import sqlite3
 from pathlib import Path
@@ -195,9 +197,6 @@ def stage_skills_for_node(node_id: str, configured_skills: Optional[List[str]] =
     return list(STAGE_SKILL_BINDINGS.get(node_id, []))
 
 
-LAUNCHER_MANAGED_MANIFEST = ".herdr-launcher-managed.json"
-
-
 def _record_launcher_managed(target_skills_dir: Path, staged: List[str]) -> None:
     """记录 launcher 拥有的技能名（符号链接或复制皆算，PR #375 二轮评审）。
 
@@ -233,22 +232,29 @@ def stage_skills_into_workspace(clone_path: str | Path, skill_names: List[str]) 
         resolved_skills.append(resolved)
         skill_src = Path(resolved["skill_dir"])
         skill_dst = target_skills_dir / skill_name
+        installed = False
         if os.path.islink(skill_dst) or os.path.lexists(skill_dst):
             try:
                 if skill_dst.resolve() == skill_src.resolve():
+                    # 已是本 launcher 的链接：视为已安装
                     staged_names.append(skill_name)
+                    installed = True
                     continue
                 os.unlink(skill_dst)
             except OSError:
-                pass
+                pass  # unlink 失败（如 clone 已有同名真实目录）：未安装，
+                # 不得记入 manifest（PR #376 二轮评审）
         if not skill_dst.exists():
             try:
                 os.symlink(skill_src, skill_dst)
+                installed = True
             except OSError:
                 # Fallback to directory copy if symlinks fail (e.g. cross-volume on Windows)
                 import shutil
                 shutil.copytree(skill_src, skill_dst)
-        staged_names.append(skill_name)
+                installed = True
+        if installed:
+            staged_names.append(skill_name)
     _record_launcher_managed(target_skills_dir, staged_names)
 
     return resolved_skills
