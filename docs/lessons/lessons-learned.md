@@ -8851,7 +8851,7 @@ pytest -v \
 | 控制器单模块行数超限 | 职责拆分与模块化架构测试强制每个子模块代码行数 <= 500 行，新增逻辑不得随意突破行数预算 | `advancement.py` 精简内部依赖映射与打印格式，控制在 497 行（<= 500 行），符合架构守卫门禁 |
 | 终化并发调用竞争 Git 工作区 | 同一任务终化过程包含 Git 索引操作与状态写，多线程同时执行必然踩锁；且在飞跳过不得扣减重试预算 | 控制器通过 `_finalize_inflight` 集合按 task_id 实现线程安全互斥；`finalize_retry.py` 将 inflight 识别为非消耗预算的 wait，杜绝虚假升级 |
 | 大仓推送 30 秒超时导致 PR 交付停滞 | 网络推送耗时取决于网络带宽与远端负载，大仓需放宽推送超时限制 | `pr_delivery.py` 推送操作支持 `HERDR_GIT_PUSH_TIMEOUT` 环境变量（默认 120 秒） |
-| preflight 期间启动日志频繁刷屏 | 调度轮询每秒执行，缺乏节流会淹没关键排错日志 | `advancement.py` 针对未就绪启动日志按 30 秒窗口实施最小节流 |
+| preflight 期间启动日志频繁刷屏 | 调度轮询每秒执行，缺乏节流会淹没关键排错日志 | `advancement.py` 接入 `herdr/log_throttle.py#StartupWaitLog` 对未就绪启动日志限频（PR #359 重落地后取代 §212 当时的 30 秒窗口内联节流） |
 
 ### 操作规范
 
@@ -8873,7 +8873,54 @@ pytest -v tests/test_wf_project_1029_blockers.py
 - `services/controller/git_finalize.py` — pre-commit/husky/complexity 失败快速熔断与 `_finalize_inflight` 并发互斥
 - `services/herdr-worker.py` — `wait_startup_ready` 按真实 deadline 轮询与 `start_agent` 捕获 `agent_not_ready`
 - `herdr/pr_delivery.py` — push 超时延长至 120 秒
-- `services/controller/advancement.py` 与 `services/herdr-controller.py` — `_startup_wait_logged` 启动日志 30 秒节流
+- `services/controller/advancement.py` 与 `services/herdr-controller.py` — 启动等待日志限频（现由 `herdr/log_throttle.py#StartupWaitLog` 承担，见 §213 重落地）
 - `tests/test_wf_project_1029_blockers.py` — 11 项全链路卡点专项回归测试
+
+---
+
+## §213 已合并 PR 内容从 main 丢失：main 两次回退与重落地基线校验（PR #359）
+
+### 问题现象与根因剖析
+
+2026-10-31 例行评审欠账核验发现：PR #359（wf-1029 启动失败收敛 + Console 启动标签）在 GitHub 显示 MERGED，但其内容不在 main（eb8d054）历史中——`herdr/workflow_startup.py`、`services/controller/startup_watchdog.py` 与约 900 行启动收敛测试整体缺失。取证还原的时间线：
+
+1. 10-30 09:34 #358 合并（main=3c97080）；随后 main 被回退到 c97f302（#358 的合并提交被丢弃）。
+2. 10-30 16:44 #359 合并（4262830，基于回退后的 c97f302，故不含 #358 内容）。
+3. main 再次被回退到 3c97080（丢弃 #359，恢复 #358），#360/#361 随后合并到这条不含 #359 的主线。
+
+两个主线（main 含 #358/#360/#361，4262830 含 #357/#359）从 c97f302 分叉、互不含对方内容。GitHub Events API 在 10-30 当天对 4 次 PR 合并只记录了 PullRequestEvent、没有任何 PushEvent，与正常的合并事件模式相悖；结合合并提交的父子代关系，唯一自洽的解释是 main ref 经历了两次重写（force-push），来源最可能是本地 stale main 的强制推送（Events API 不记录重写者，仓库无审计日志可查）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| PR MERGED ≠ 内容在 main | main ref 可以被回退，合并状态标记不会纠正基线丢失 | 每次合并后对已合并 PR 的 merge commit 执行 `git merge-base --is-ancestor <merge_sha> main` 校验；发现 NOT in main 立即按本节流程重落地 |
+| Events API 无 PushEvent 是异常信号 | 正常合并会产生 PushEvent；只有 PullRequestEvent 而无 PushEvent 说明写入路径异常 | 结合 merge commit 父子代拓扑与双线内容差集取证，不依赖单一事件源下结论 |
+| 重落地应 merge 原合并提交而非重做补丁 | merge 使丢失的合并提交重新成为 main 祖先，未来来自相关分支的合并不会再次冲突；cherry-pick 会留下永久分叉 | `git merge <丢失的 merge commit>`，冲突按文件级语义收敛（本次仅 advancement.py 与 wiki/log.md 真冲突） |
+| 行数门禁与哈希基线是合并雷区 | 双线各自演进后，500 行模块门禁与 console-ui fixture 哈希会被合并打破 | 合并后必跑 `test_controller_modularity` 与 `test_console_ui_modules`；fixture 哈希按 §350 先例只做原位替换，禁止整文件重排版 |
+| 重落地要顺带清偿该 PR 的评审欠账 | 丢失的 PR 自带未解决评审线程，原样恢复等于把已知缺陷再合并一次 | 本次随重落地修复了 #359 的 2 条 P2（dedup 回执所有权、零任务工作流卡片）并补齐卡片状态字段缺口 |
+
+### 操作规范
+
+1. **祖先核验**：CI 合并后由合并执行者校验 `merge-base --is-ancestor`，防止"标记已合并、内容丢失"静默发生。
+2. **主干保护**：为 main 开启 GitHub branch protection 禁止 force-push（本仓库为个人仓库未开启，属负责人操作项）。
+3. **重落地验收**：merge 冲突解决后必须跑受影响专项（启动收敛、行数门禁、console 模块基线、回归套件），并对该 PR 的未解决评审线程逐条处置或修复。
+
+### 验证命令 / 守护测试
+
+```bash
+git merge-base --is-ancestor 4262830 main  # 重落地合入后必须为真
+pytest -q tests/test_workflow_startup_core.py tests/test_workflow_startup_convergence.py \
+  tests/test_startup_watchdog.py tests/test_controller_startup_log_throttle.py \
+  tests/test_ops_center_read_path.py tests/test_controller_modularity.py tests/test_console_ui_modules.py
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/workflow_startup.py` / `services/controller/startup_watchdog.py` / `herdr/log_throttle.py` — 重落地的启动收敛三件套；`registration_receipt_owns` 增加 deduplicated/from_status 守卫
+- `herdr/ops_center.py` 与 `herdr/ops_center_projection.py` — 零任务工作流纳入卡片清单并携带启动状态字段
+- `herdr/state/transition_gate.py` — `update_workflow_metadata` 新增 `expected_status` CAS 参数（随 #359 重落地）
+- `tests/fixtures/console-ui-baseline.json` — 7 个标签统一函数哈希原位替换
+- wiki/log.md [2026-10-31] 条目 — 本次重落地与取证摘要
 
 ---

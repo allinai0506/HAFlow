@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-31] fix | 重落地被 main 回退吞掉的 PR #359：启动失败收敛与 Console 启动标签恢复，并修复其评审欠账
+
+- 背景：例行核验发现 PR #359 在 GitHub 显示 MERGED，但 main（eb8d054）经两次 force-push 回退后不含其内容——启动收敛三件套（`workflow_startup.py`、`startup_watchdog.py`、`log_throttle.py` 增量）、Factory 启动流程改造、Console 启动标签与约 900 行测试整体缺失，且与 #360/#361 形成自 c97f302 分叉的双线。取证与教训归档于 lessons §213。
+- 变更：隔离分支 `git merge 4262830` 重落地（恢复祖先关系），解决 advancement.py（#360 内联节流让位 `StartupWaitLog`，行数门禁内收敛）与 wiki/log.md（双条目并存）冲突；顺带清偿 #359 评审欠账——`registration_receipt_owns` 拒绝 deduplicated/from_status 非 pending 回执，ops 卡片纳入零任务工作流并携带 `status/startup_ready/outcome/startup_failure_reason`（原实现该分支读不到字段，属死代码）；`startup_wait_log_for` 加类型守卫并以日志自身时钟节流；operations.js 行数预算内收敛；console-ui 基线 7 个标签统一函数哈希原位替换。
+- 证据：专项 176 项（启动收敛/看门狗/节流/ops/console/行数门禁/卡点回归）+ 关联回归 248 项全绿；`compileall`、`git diff --check` clean；重落地合入后 `git merge-base --is-ancestor 4262830 main` 为真（待 PR 合并后生效）。
+
 ## [2026-10-30] fix | 全链路故障复盘：wf-haflow-1029-02 卡点阻断根因收敛与闭环治理
 
 - 背景：真实工作流 `wf-haflow-1029-02` 历时 20 小时、执行 28 个任务，日志复盘发现 6 处阻塞点与性能泥潭：嵌套 Git 导致 commit 崩溃与 Finalize 50 分钟盲目重试；dispatched 门禁裁决对账遗漏致 Sentinel 保险丝误杀；Wrapup 模板键名多态性断链；实现阶段误套用对抗角色互斥致 Grok 等修复任务全量被拒；`close-workflow` 深度遍历 `.git` 对象库触发 900 秒硬超时；自动重派重复分配挂起/崩溃 Agent。
