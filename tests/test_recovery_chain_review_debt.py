@@ -80,7 +80,12 @@ def test_waiting_human_notification_is_retryable_with_backoff(monkeypatch):
 # ---------------------------------------------------------------- sentinel
 
 def test_watchdog_grace_requires_pane_task_marker(monkeypatch, tmp_path):
-    """Codex PR #336 P2：复用/陈旧 pane 的 working 状态不得豁免看门狗超时。"""
+    """Codex PR #336 P2：复用/陈旧 pane 的 working 状态不得豁免看门狗超时。
+
+    PR #374 评审后宽限增加实例所有权兜底（owned_live_pane）；本用例钉住
+    "标记缺失且所有权也未证明 → 仍不豁免"。所有权探测显式替换为未证明，
+    避免单测触达生产 herdr daemon。
+    """
     from tests.test_sentinel_review_debt import (
         _make_clone, _persist, _state, _task)
     import importlib as _importlib
@@ -92,13 +97,15 @@ def test_watchdog_grace_requires_pane_task_marker(monkeypatch, tmp_path):
     store = _Store(tmp_path / 'state.db')
     stored = _persist(store, _task(clone, baseline_commit=shas[0]), idle=100.0, now=now)
     monkeypatch.setattr(sentinel, '_get_store', lambda: store)
+    monkeypatch.setattr(sentinel, '_owned_pane',
+                        lambda task: (False, 'fixture_not_owned'))
 
     with __import__('unittest.mock', fromlist=['patch']).patch.object(
             sentinel, '_pane_delivery_evidence',
             return_value={'has_marker': False, 'agent_status': 'working'}):
         sentinel.check_task_stalls([stored], _state(),
                                    notify_fn=lambda *a: None, now=now)
-    # 无任务标记（所有权未证明）→ 不得豁免：任务必须进入失败处置
+    # 无任务标记且所有权未证明 → 不得豁免：任务必须进入失败处置
     assert store.get_task('t-sentinel')['status'] == 'failed'
 
 
