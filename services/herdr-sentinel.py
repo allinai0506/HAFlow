@@ -1164,6 +1164,17 @@ def _pane_delivery_evidence(pane_id, task_id):
     }
 
 
+def _owned_pane(task):
+    """存活宽限的实例所有权证据：pane 上的 agent 会话与本任务持久化身份一致。
+
+    惰性导入由测试替换；probe 失败按 owned_live_pane 语义降级为非 owned，
+    绝不因探测失败放行。
+    """
+    from herdr.task_resources import owned_live_pane
+
+    return owned_live_pane(task)
+
+
 def reap_terminal_completion_samples(db_module=None):
     """Delete durable completion samples of tasks that reached a terminal status.
 
@@ -1387,10 +1398,23 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
                 evidence = _pane_delivery_evidence(pane_id, tid)
             except Exception:
                 evidence = None
-            # 存活豁免必须证明"本任务"仍在这块 pane 上工作：陈旧/复用的
-            # pane_id 里别的 agent 在 working 不是豁免依据 (PR #336 评审遗留)。
-            agent_alive = (bool(evidence.get("has_marker"))
-                           and evidence.get("agent_status") == "working") if evidence else False
+            # 存活豁免必须证明"本任务"仍在这块 pane 上工作：屏幕内的任务
+            # 编排标记，或实例所有权（owned_live_pane 的 identity_match——
+            # pane 上的 agent 会话与本任务持久化身份一致）。陈旧/复用的
+            # pane_id 里别的 agent 在 working 两者皆不满足，不是豁免依据
+            # (PR #336 评审遗留)；初始 prompt 滚出可见屏/屏幕读取失败
+            # ≠ 任务不在此 pane (PR #374 评审遗留)。所有权探测惰性：
+            # 仅 working-无标记时触发。
+            agent_alive = False
+            if evidence and evidence.get("agent_status") == "working":
+                if evidence.get("has_marker"):
+                    agent_alive = True
+                else:
+                    try:
+                        owned, _owned_reason = _owned_pane(task)
+                    except Exception:
+                        owned = False
+                    agent_alive = bool(owned)
             if agent_alive:
                 entry = timeouts.get(tid) or {}
                 if not entry.get("alive_alerted"):
