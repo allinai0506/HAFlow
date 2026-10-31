@@ -9009,3 +9009,45 @@ PYTHONPATH=/tmp/xdist-deps python3 -m pytest -q -n auto tests/
 - PR #368 run 1 的 `pytest-log-368` artifact — 仅 3 条 stage-state 失败；run 2 级联出 hub 失败，佐证"同签名对照"必要性
 
 ---
+
+## §216 工作流收尾经验提炼通道闭环：SQL 字段解耦、凭据自动回退与 Fail-open 收尾挂载
+
+### 问题现象与根因剖析
+
+排查发现最近提交的多个工作流（如 `wf-haflow-1029-02`、`wf-project-1029-01` 等）结束后均未生成任何经验资产，本地收集器与经验中心记录停滞：
+1. **SQL 字段误用**：`herdr/experience/collector.py` 的 `collect_workflow_tasks` 错误执行 `SELECT task_id, status, run_id FROM tasks`，而 `tasks` 表无物理 `run_id` 列（存于 `payload_json`），触发 `sqlite3.OperationalError: no such column: run_id` 致使收集器静默抛错并终止提炼。
+2. **凭据回退缺失导致 401**：`herdr/experience/client.py` 在未设置 `HERDR_HUB_TOKEN` 环境变量时，未回退读取本地安全存储凭据（`state_db.get_user_token`），向 Experience Hub 发起的请求全量被拒（HTTP 401 Unauthorized）。
+3. **收尾物理链路未挂载提炼钩子**：`herdr/task_cli_workflow_close.py` 的 `close_workflow_owned` 物理收尾完成后仅打印人工沉淀提示，未自动调用经验收集与教训同步。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 数据库物理列与 JSON 载荷混淆 | 不能凭直觉把业务语义字段当作 SQL 物理列；查询前核对实际 schema | 查询 SQLite 表时严禁猜测列名；必要字段解析 `payload_json` 或复用 `state_db.list_tasks` |
+| 凭据加载依赖单一环境变量 | 单纯依赖 `os.environ` 会导致后台守护进程或本地 CLI 因环境缺失而静默降级 | 优先使用环境变量，缺省时自动回退读取安全存储文件（`state_db.get_user_token`） |
+| 终化收尾链路未形成闭环 | 流程收尾只打印“请执行下一步”而无机器自动收敛，导致流程资产永远流失 | 工作流物理收尾成功后，以 100% fail-open 方式自动触发教训提炼与经验同步 |
+| 经验提炼严守不变量约束 | 提炼规则必须依赖真实人工纠偏证据（`steers`/`decisions`/返工目标），不能虚构经验 | 自动化无人工介入通过的工作流属于正常 `no_human_intervention`，严禁无证据凭空捏造 |
+
+### 操作规范
+
+1. **SQL 查询对齐 Schema**：`tasks` 表查询只请求真实存在的列名（如 `task_id`, `status`），`run_id` 统一通过 `payload_json` 解析或 `state_db.get_task` 获取。
+2. **凭据安全双轨制**：`ExperienceClient` 保持 `HERDR_HUB_TOKEN` 优先级最高，为空时回退读取 `credentials/experience-hub-admin.token`，并支持 `HERDR_CREDENTIALS_DIR` 隔离。
+3. **Fail-Open 挂载**：在 `close_workflow_owned` 成功收尾分支中自动调用 `collect_and_sync_lessons`、`collect_workflow_tasks` 与 `recover_and_sync`，外层包裹异常捕获，确保经验同步失败绝不影响工作流收口。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_workflow_experience_closeout.py
+pytest -q tests/test_experience_collector.py tests/test_experience_integration.py
+pytest -q tests/test_experience_pr211*.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/experience/collector.py` — `collect_workflow_tasks` 修正 SQL 物理列查询，消除 `run_id` 列缺失异常
+- `herdr/experience/client.py` — `ExperienceClient` 增加凭据安全回退逻辑（优先 state_db 及 credentials 目录回退，严守 `herdr/state/` 架构冻结锁）
+- `herdr/task_cli_workflow_close.py` — `close_workflow_owned` 挂载 fail-open 经验提炼与恢复同步
+- `tests/test_workflow_experience_closeout.py` — 包含 Schema 兼容、凭据回退与收尾自动触发 3 项全链路守护用例
+---

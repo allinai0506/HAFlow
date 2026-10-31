@@ -14,6 +14,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .models import BusinessRuleExperience
@@ -85,6 +86,34 @@ class ExperienceClient:
         self.base_url = raw_url.rstrip("/")
         if allow_env_token:
             self.token = token or os.environ.get("HERDR_HUB_TOKEN") or ""
+            if not self.token:
+                try:
+                    from herdr import state_db
+                    self.token = (
+                        state_db.get_user_token("admin", "experience_hub")
+                        or state_db.get_user_token("local-console-reviewer", "experience_hub")
+                        or ""
+                    )
+                except Exception:
+                    self.token = ""
+            if not self.token:
+                cred_base = os.environ.get("HERDR_CREDENTIALS_DIR")
+                cred_dir = Path(cred_base) if cred_base else (Path.home() / ".herdr-controller" / "credentials")
+                for candidate_name in (
+                    "experience-hub-admin.token",
+                    "experience-console-reviewer.token",
+                    "admin_experience_hub.token",
+                    "local-console-reviewer_experience_hub.token",
+                ):
+                    candidate_file = cred_dir / candidate_name
+                    if candidate_file.is_file():
+                        try:
+                            val = candidate_file.read_text(encoding="utf-8").strip()
+                            if val:
+                                self.token = val
+                                break
+                        except Exception:
+                            pass
         else:
             # Explicit caller identity only: empty stays empty, never inherits
             # server-side env credentials (used by Console per-request path).
