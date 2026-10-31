@@ -180,10 +180,18 @@ def resolve_stage_skill(
     }
 
 
-def stage_skills_for_node(node_id: str, configured_skills: Optional[List[str]] = None) -> List[str]:
-    """Get the skill names for a node, using template configured skills if provided, falling back to defaults."""
+def stage_skills_for_node(node_id: str, configured_skills: Optional[List[str]] = None,
+                          workflow_config: Any = None) -> List[str]:
+    """Get the skill names for a node, using template configured skills if provided, falling back to defaults.
+
+    默认绑定只属于 software-development-v1 适配流：显式配置的 skills 恒被
+    尊重；未配置时仅当 ``workflow_config`` 缺省（兼容旧调用）或命中
+    ``is_staged_dev_flow_workflow`` 才回退默认绑定（PR #355 评审遗留）。
+    """
     if configured_skills:
         return [str(s).strip() for s in configured_skills if str(s).strip()]
+    if workflow_config is not None and not is_staged_dev_flow_workflow(workflow_config):
+        return []
     return list(STAGE_SKILL_BINDINGS.get(node_id, []))
 
 

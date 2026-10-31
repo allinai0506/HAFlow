@@ -181,8 +181,9 @@ def _choose_anchor(pool, cached_id):
     return chosen["pane_id"], False
 
 
-def _close_idle_panes(workspace_id, tab_id, project_root, victims):
+def _close_idle_panes(workspace_id, tab_id, project_root, victims, managed_ids=None):
     """Re-list under the lifecycle lock. Never close the last pane."""
+    managed_ids = set(managed_ids or ())
     with _lifecycle_lock():
         fresh = [
             pane for pane in _panes(workspace_id)
@@ -194,6 +195,7 @@ def _close_idle_panes(workspace_id, tab_id, project_root, victims):
         still = [
             pane for pane in fresh
             if pane.get("pane_id") in victim_ids
+            and pane.get("pane_id") in managed_ids
             and _is_idle_root_shell(pane, project_root)
         ]
         survivor_ids = {
@@ -244,6 +246,19 @@ def _resolve_or_create_anchor(
 
     idle = [pane for pane in panes if _is_idle_root_shell(pane, project_root)]
     busy = [pane for pane in panes if pane not in idle]
+    # 正向归属（PR #334 评审遗留）：只有能被权威记录认领的 pane 才可回收
+    # ——stage anchor 记录或任务注册表的 pane_id。agentless 探针只证明
+    # "无 Agent"，用户自己的 root-cwd shell 不在记录里，不得据此关闭。
+    managed_ids = {cached_id} if cached_id else set()
+    try:
+        from herdr.state_store import get_state_store
+        for record in get_state_store().list_tasks() or []:
+            pane_of_task = str(record.get("pane_id") or "").strip()
+            if pane_of_task:
+                managed_ids.add(pane_of_task)
+    except (OSError, RuntimeError, ValueError):
+        pass
+    idle = [pane for pane in idle if pane.get("pane_id") in managed_ids]
     if busy:
         victims, pool = idle, list(busy)
     elif len(idle) > 1:
@@ -262,6 +277,7 @@ def _resolve_or_create_anchor(
     if victims:
         pool, changed = _close_idle_panes(
             workspace_id, tab_id, project_root, victims,
+            managed_ids=managed_ids,
         )
     pane_id, choose_changed = _choose_anchor(pool, cached_id)
     if pane_id is None:

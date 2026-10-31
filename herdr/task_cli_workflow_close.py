@@ -474,6 +474,8 @@ def close_workflow_owned(
 
     if not dry_run:
         from herdr.clone_archive import (
+            _declared_deliverable_rel_paths,
+            _root as _clone_root_of,
             is_residual_clone_shell,
             delete_residual_clone_shell,
         )
@@ -483,8 +485,15 @@ def close_workflow_owned(
             clone = task.get("clone_path")
             if clone and os.path.lexists(os.path.expanduser(clone)):
                 path = Path(clone).expanduser()
-                if task.get("clone_archive") and is_residual_clone_shell(path):
-                    if delete_residual_clone_shell(path, clone_root=clone_root):
+                try:
+                    declared = frozenset(_declared_deliverable_rel_paths(task, _clone_root_of(task, clone_root)))
+                except (OSError, ValueError, KeyError):
+                    # 声明集合不可计算时禁止回收（fail-closed）：回收可能
+                    # 销毁唯一副本 (PR #362 评审遗留)。
+                    remaining.append(task["task_id"])
+                    continue
+                if task.get("clone_archive") and is_residual_clone_shell(path, declared=declared):
+                    if delete_residual_clone_shell(path, clone_root=clone_root, declared=declared):
                         if not os.path.lexists(path):
                             continue
                 remaining.append(task["task_id"])

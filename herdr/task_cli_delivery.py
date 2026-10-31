@@ -7,6 +7,12 @@ import sys
 from pathlib import Path
 
 
+def _default_is_launcher_owned(clone):
+    """未注入时的默认 launcher-owned 判定（clone 相对路径）。"""
+    from herdr.repo_hygiene import is_launcher_owned
+    return lambda item: is_launcher_owned(item, clone)
+
+
 def commit_task(
     task_id,
     message=None,
@@ -16,6 +22,7 @@ def commit_task(
     find_task,
     get_store,
     is_internal_untracked,
+    is_launcher_owned=None,
     adopt_head_if_attributable,
     set_status,
     run_commit_index_command,
@@ -245,11 +252,13 @@ def commit_task(
             pass
         return False
 
+    launcher_owned = is_launcher_owned or _default_is_launcher_owned(clone)
     # 只允许提交 Task 新产生的 untracked（内部控制文件与嵌套子仓库不属于业务交付）
     task_untracked = sorted(
         item
         for item in current_untracked - baseline_untracked
-        if not is_internal_untracked(item) and not _is_nested_git_dir(item)
+        if not (is_internal_untracked(item) and launcher_owned(item))
+        and not _is_nested_git_dir(item)
     )
 
     # tracked 文件在 Task 创建前要求 clean，

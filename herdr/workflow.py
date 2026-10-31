@@ -391,16 +391,14 @@ def _gate_was_declared(node: Dict[str, Any]) -> bool:
         return False
     if node.get("gate_declared"):
         return True
+    # 占位的唯一信号是归一化器打的 gate_placeholder_normalized 标记
+    # (PR #334 评审遗留)：作者显式写下的 gate:{}（即使同时写全
+    # worker_policy/default_integration_mode）是声明，不得被启发式吞掉。
+    if node.get("gate_placeholder_normalized"):
+        return False
     if "gate" not in node:
         return False
-    gate = node.get("gate")
-    placeholder = (
-        isinstance(gate, dict)
-        and not gate
-        and "worker_policy" in node
-        and "default_integration_mode" in node
-    )
-    return not placeholder
+    return True
 
 
 def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
@@ -438,6 +436,11 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            if "gate" not in node or node.get("gate_placeholder_normalized"):
+                # 无 gate 键的节点由本次规范化合成占位（打标）；已有标记
+                # 的占位在重建时必须保留——marker 是占位的唯一信号
+                # (PR #334 评审遗留)。
+                norm_node["gate_placeholder_normalized"] = True
             if _gate_was_declared(node):
                 norm_node["gate_declared"] = True
             for field in ("control_mode", "confirm_before", "required_executions"):
@@ -547,6 +550,10 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(policy.get("rules") or []),
                 "gate": dict(policy.get("gate") or {}),
             }
+            if "gate" not in policy or policy.get("gate_placeholder_normalized"):
+                norm_node["gate_placeholder_normalized"] = True
+            if _gate_was_declared(policy):
+                norm_node["gate_declared"] = True
             for field in ("control_mode", "confirm_before", "required_executions"):
                 if field in policy:
                     norm_node[field] = policy[field]

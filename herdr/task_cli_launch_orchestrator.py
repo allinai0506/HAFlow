@@ -486,9 +486,15 @@ def launch_task_orchestrated(args, *, deps):
             stage_skills_into_workspace,
             SkillCapabilityGap,
         )
+        wf_cfg = {}
+        try:
+            wf_cfg = (store.get_workflow(args.workflow_id) or {})
+        except Exception:
+            wf_cfg = {}
         node_skills = stage_skills_for_node(
             node_id,
             getattr(node, "get", lambda k, d=None: d)("skills") if isinstance(node, dict) else None,
+            workflow_config=wf_cfg,
         )
         if node_skills and clone_path:
             stage_skills_into_workspace(clone_path, node_skills)
