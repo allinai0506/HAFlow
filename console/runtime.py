@@ -84,7 +84,13 @@ def slots(p, p_panes=None, claimed=None):
 _controller_version=None
 
 def controller_version():
-    """Attested release sha of the running code; unknown stays explicitly unknown.
+    """Controller 自发布运行证据里的 attested sha；证据缺失保持 unknown。
+
+    Controller 启动时向自身 stdout（launchd 落盘到
+    ``~/.herdr-controller/logs/controller.out.log``）打印
+    ``HERDR_RUNTIME_FINGERPRINT={...}``。Console 进程此前误读自己的
+    指纹冒充 Controller 版本（PR #343 评审遗留）——这里只读 Controller
+    的证据文件，读不到就显式 unknown。
 
     Memoized per process: the running code does not change under a live
     interpreter, and an attested snapshot re-hash is too costly per request.
@@ -92,8 +98,21 @@ def controller_version():
     global _controller_version
     if _controller_version is None:
         try:
-            from herdr import service_release
-            _controller_version=service_release.runtime_fingerprint()['running_sha'] or ''
+            import os
+            log_path=os.environ.get('HERDR_CONTROLLER_LOG') or os.path.expanduser(
+                '~/.herdr-controller/logs/controller.out.log')
+            marker='HERDR_RUNTIME_FINGERPRINT='
+            line=''
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as handle:
+                for raw in handle:
+                    if raw.startswith(marker):
+                        line=raw[len(marker):].strip()
+            payload=json.loads(line) if line else None
+            sha=str((payload or {}).get('running_sha') or '').strip()
+            if sha and sha != 'unknown':
+                _controller_version=sha
+            else:
+                _controller_version=''
         except Exception:
             _controller_version=''
     return _controller_version or None

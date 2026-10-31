@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from herdr import recovery_store, state_db
 from herdr.controller_actions import collect_workflow_actions, controller_action_type
-from herdr.controller_cockpit import build_cockpit_projection
+from herdr.controller_cockpit import _bound_shell_sections, build_cockpit_projection
 from herdr.controller_receipts import _receipt, classify_receipt
 from herdr.controller_workflow_actions import workflow_control_actions
 from herdr.workflow_graph import workflow_graph_projection
@@ -39,10 +39,7 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
         epoch = conn.execute("SELECT id FROM events WHERE workflow_id=? AND event_type='workflow_transition' AND json_valid(payload_json) "
                              "AND json_extract(payload_json,'$.to_status')=? ORDER BY timestamp DESC,id DESC LIMIT 1",
                              (workflow_id, workflow['status'])).fetchone()
-        operations = ([recovery_store._decode(row) for row in conn.execute(
-            'SELECT * FROM workflow_recovery_operations WHERE workflow_id=? '
-            'ORDER BY CASE WHEN status IN (\'resolved\',\'superseded\') THEN 1 ELSE 0 END,id DESC LIMIT 101',
-            (workflow_id,))] if _has_table(conn, 'workflow_recovery_operations') else [])
+        operations = ([recovery_store._decode(row) for row in conn.execute('SELECT * FROM workflow_recovery_operations WHERE workflow_id=? ORDER BY CASE WHEN status IN (\'resolved\',\'superseded\') THEN 1 ELSE 0 END,id DESC LIMIT 101', (workflow_id,))] if _has_table(conn, 'workflow_recovery_operations') else [])
         events = []
         for row in conn.execute('SELECT id,workflow_id,node_id,task_id,event_type,timestamp,source,'
                                 'substr(payload_json,1,16384) AS payload_json FROM events '
@@ -79,8 +76,7 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
         try:
             controller = controller()
         except Exception:
-            controller = {'status': 'unknown'}
-            errors['controller'] = 'runtime_unavailable'
+            controller, errors['controller'] = {'status': 'unknown'}, 'runtime_unavailable'
     actions = collect_workflow_actions(tasks, workflow, project_root=workflow.get('project_root') or '',
                                        workflow_paused=workflow.get('status') == 'paused')
     actions.extend(workflow_control_actions(workflow, config, tasks, operations, checkpoints,
@@ -93,8 +89,7 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
                                       controller=controller, events=events, errors=errors, action_id=action_id, target_task_id=target_task_id)
     for action in result['actions']:
         action['effect'] = action.get('effect') or action.get('description') or action.get('title') or action['action_id']
-        automatic = (action['automation']['mode'] == 'automatic'
-                     and controller_action_type(action) in default_handlers(store))
+        automatic = (action['automation']['mode'] == 'automatic' and controller_action_type(action) in default_handlers(store))
         action['execution'] = {'mode': 'automatic' if automatic else 'manual',
             'reason': '' if automatic or action['automation']['mode'] != 'automatic' else 'automatic_handler_unavailable'}
     from herdr.controller_actions import resolve_workflow_blockers
@@ -102,7 +97,8 @@ def read_cockpit(store, workflow_id, *, controller=None, errors=None, action_id=
     result['workflow_id'] = workflow_id
     result['receipts'] = receipts
     result['workflow_status_epoch'] = epoch['id'] if epoch else 0
-    return result
+
+    return _bound_shell_sections(result)
 
 
 def _schema(conn):
@@ -375,6 +371,10 @@ def execute_action(payload, *, deps, automatic=False):
     expected = payload.get('expected_identity')
     if not isinstance(expected, dict) or expected != action.get('expected_identity'):
         return reject('identity_changed')
+    # 预算失败/未知投影不得驱动自动化：fail-closed 边界必须覆盖后台执行，
+    # 而不只是渲染层（PR #343 评审遗留）。人工执行不受此门限制。
+    if automatic and before.get('read_state') != 'confirmed':
+        return reject('read_state_unknown')
     if (action.get('automation') or {}).get('mode') == 'blocked':
         return reject((action.get('automation') or {}).get('reason') or 'identity_unknown')
     if action['automation']['mode'] == 'confirmation_required' and payload.get('confirmed') is not True:
