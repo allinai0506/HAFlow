@@ -77,7 +77,7 @@ def _finalize_completed_task_body(ports, task_id, before_action=None):
                 print(f"[FINALIZE BLOCKED] task={task_id} candidate={failed_sha} blocked by verifier={verifier.get('task_id')}")
                 ports._record_finalize_event(task, "finalize_candidate_blocked", payload)
                 ports._escalate_finalize(task, "candidate_blocked", payload)
-                return {'retryable': False, 'kind': 'candidate_blocked', 'reason': 'candidate_blocked'}
+                return {'retryable': False, 'kind': 'candidate_blocked'}
 
     # Collaboration accelerator: authoritative task completion closes the
     # handoffs targeting it, so handoff latency metrics stay trustworthy.
