@@ -125,7 +125,7 @@ def extract_verify_command(chunk: str) -> str:
                         return next_clean
 
     cb_m = re.search(
-        r"```(?:bash|sh|shell)?\n\s*([^\n]+(?:pytest|python3|npm|pnpm|cargo|go|make)[^\n]*)\n```",
+        r"```(?:bash|sh|shell)?\n\s*([^\n]*(?:pytest|python3|npm|pnpm|cargo|go|make)[^\n]*)\n```",
         chunk,
         re.IGNORECASE,
     )
@@ -307,9 +307,17 @@ def find_plan_deliverables(
     ]
     candidate_tasks = active_plan_tasks if active_plan_tasks else plan_tasks
 
+    # 显式角色元数据优先；task_id 关键字推断仅在显式角色缺失时使用，
+    # 避免 workflow ID 含 review 时把 executor 误判为 challenger
+    # (PR #356 评审遗留)。
+    challenger_pattern = r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])"
     for t in candidate_tasks:
-        role = " ".join(str(t.get(k) or "").lower() for k in ("dispatch_role", "agent_role", "role", "task_id"))
-        if re.search(r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])", role):
+        explicit_role = " ".join(str(t.get(k) or "") for k in ("dispatch_role", "agent_role", "role")).strip().lower()
+        if explicit_role:
+            is_challenger = bool(re.search(challenger_pattern, explicit_role))
+        else:
+            is_challenger = bool(re.search(challenger_pattern, str(t.get("task_id") or "").lower()))
+        if is_challenger:
             challenger_task = t
         else:
             executor_task = t
@@ -619,6 +627,10 @@ def parse_plan_tasks(
 
     if header_indices:
         # 多任务或显式编号任务
+        # 首个任务头之前的计划级共享约束（架构约束/共享验收）必须随每个
+        # 任务进入实现提示词：implementation clone（integration_mode: none）
+        # 无法找回原文 (PR #356 评审遗留)。
+        plan_preamble = "\n".join(lines[:header_indices[0][0]]).strip()
         for i, (start_idx, t_num, t_title) in enumerate(header_indices):
             end_idx = header_indices[i + 1][0] if i + 1 < len(header_indices) else len(lines)
             chunk = "\n".join(lines[start_idx:end_idx])
@@ -677,6 +689,7 @@ def parse_plan_tasks(
                 "verify_command": verify_cmd,
                 "dependencies": deps,
                 "raw_chunk": chunk,
+                "plan_preamble": plan_preamble,
                 "duplicate_index": has_duplicate_index and t_num == duplicate_num,
             })
     else:

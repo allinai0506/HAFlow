@@ -51,6 +51,25 @@ def _handle_task_event(ports, item):
             _wf_cfg = ports.workflow_config_for(_wf_id) or {} if _wf_id else {}
             from herdr.stage_skills import is_staged_dev_flow_workflow
             if is_staged_dev_flow_workflow(_wf_cfg):
+                # 与下方主循环相同的失效守卫必须先于 attention 落笔：
+                # 已推进任务的排队事件不得写成假干预 (PR #356 评审遗留)。
+                _staged_status = str(_task_pre.get("status") or "")
+                if event_type == "attention" and _staged_status not in ("interrupted", "paused"):
+                    print(
+                        f"[QUEUE STALE] "
+                        f"task={task_id} "
+                        f"attention resolved actual={_staged_status}"
+                    )
+                    ports.attention_clear(key)
+                    return
+                if expected_status is not None and _staged_status != expected_status:
+                    print(
+                        f"[QUEUE STALE] "
+                        f"task={task_id} "
+                        f"expected={expected_status} "
+                        f"actual={_staged_status}"
+                    )
+                    return
                 _r = locals().get("_defer_reason", event_type)
                 ports.attention_note(
                     key,

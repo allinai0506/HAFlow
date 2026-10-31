@@ -819,6 +819,9 @@ def plan_stage_dispatch(
                     t_scope_text = str(t.get("scope") or "").strip()
                     t_ac_text = str(t.get("acceptance") or "").strip()
                     t_chunk = str(t.get("raw_chunk") or "").strip()
+                    t_preamble = str(t.get("plan_preamble") or "").strip()
+                    if t_preamble:
+                        t_chunk = f"{t_preamble}\n\n{t_chunk}" if t_chunk else t_preamble
 
                     t_goal = f"{normalized['label']} ({t_name}): {t_goal_text or normalized['purpose']}"
                     if t_files:
