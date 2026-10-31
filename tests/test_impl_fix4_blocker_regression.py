@@ -689,3 +689,53 @@ def test_fr6_empty_review_pool_has_real_cli_to_store_lifecycle(tmp_path, monkeyp
     assert workflow["last_dispatch_failure"].get("result") == "failed"
     assert workflow["last_dispatch_failure"].get("task_id") == "task-empty-review"
     reset_state_store()
+
+
+def test_fr2_benign_metadata_update_preserves_blocked_episode_and_repushes(tmp_path):
+    """FR-2: Sentinel or heartbeat updating task.updated_at must not reset episode or clear repushes."""
+    controller = load_script("herdr_controller_fr2_preserve_fix4", "services/herdr-controller.py")
+    store = SQLiteStateStore(tmp_path / "state.db")
+    store.save_workflow({"workflow_id": "wf-fix4", "status": "running"})
+    seed_task(store, "task-preserve", status="working")
+    # Transition to blocked so blocked_status_timestamp is properly initialized
+    res = store.transition_task("task-preserve", "blocked", "test_blocked_reason")
+    assert res.get("ok") is True
+
+    task = store.get_task("task-preserve")
+    entry_ts = float(task.get("blocked_status_timestamp") or task["updated_at"])
+    episode_path = tmp_path / "attention.json"
+    episode_store = liveness.EpisodeStore(episode_path)
+
+    # Seed an active episode with repushes=1 and active_seconds=900
+    episode_store.upsert("task-preserve:blocked_sla", {
+        "task_id": task["task_id"],
+        "workflow_id": task["workflow_id"],
+        "run_id": task.get("run_id"),
+        "entry_updated_at": entry_ts,
+        "entry_status_updated_at": entry_ts,
+        "active_seconds": 900.0,
+        "last_tick_at": entry_ts,
+        "repushes": 1,
+        "human_escalations": 0,
+        "last_action_at": entry_ts,
+        "episode_id": f"task-preserve:{int(entry_ts)}:{task.get('version')}",
+    })
+
+    # Simulate a sentinel / ops heartbeat touch updating task metadata (bumping task.updated_at)
+    time.sleep(0.01)
+    store.update_task_metadata(task["task_id"], {"sentinel_heartbeat_at": entry_ts + 50.0})
+    updated_task = store.get_task(task["task_id"])
+    assert float(updated_task["updated_at"]) > entry_ts
+
+    # Controller sweep with the updated task
+    with patch.object(controller, "_attention_store", episode_store), patch.object(
+        controller, "_get_store", return_value=store
+    ), patch.object(controller, "enqueue_coordinator_event"):
+        decision = controller.process_blocked_sla_task(
+            updated_task, now=entry_ts + 100.0,
+        )
+
+    # Episode must be preserved, NOT reset to 0
+    ep = episode_store.get("task-preserve:blocked_sla")
+    assert ep["repushes"] == 1
+    assert ep["active_seconds"] >= 900.0

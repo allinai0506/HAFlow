@@ -438,7 +438,7 @@ def _record_router_opt_out(
                 raise RuntimeError("router opt-out audit was not durably recorded")
         return True
     except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error) as exc:
-        raise RuntimeError(
+        raise RouterIsolationRejection(
             "FR-6 isolation opt-out audit persistence failed; refusing "
             f"agent reuse ({type(exc).__name__}: {exc})"
         ) from exc

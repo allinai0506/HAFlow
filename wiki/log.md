@@ -20,6 +20,27 @@
 - 验证：各批次 RED-first 守卫测试 + 相关专项全绿（cockpit 119 / 恢复链 116 / 零散 281 / 二轮 265）；CI 全量绿后合并。
 
 
+## [2026-10-31] fix | 历史技术债四工作流阻断根因治理与全量测试闭环 (#7–#10)
+
+- 背景：针对真实流水线 `wf-haflow-0923-02`、`wf-haflow-0924-01`、`wf-nexusarchive-1005-01` 与 `wf-project-1003-01` 历史暴露的 4 处技术债卡点（编号 7–10）实施系统性根因修复、代码实现与自动化防护测试闭环。
+- 落地实现与治理矩阵：
+  1. 卡点 7（`wf-haflow-0923-02`）：`git_adoption_probe.py` 补充 `%an%x1f%ae` 作者与邮箱解析；`git_adoption.py` 增加 `_check_author`，在锚点路径与时间戳路径对非受管 Agent/外部作者提交 fail-closed 拒交（`REFUSED: foreign_author`）；`git_finalize.py` 对 `candidate_blocked` 与 `integrate_result_unverified` 路径补齐 `ports._record_finalize_event` 与 `ports._escalate_finalize`，拒绝静默空转；
+  2. 卡点 8（`wf-haflow-0924-01`）：`transition_task.py` 在跃迁为 `blocked` 时记录持久状态时戳 `blocked_status_timestamp` 与 `status_updated_at`；`blocked_sla.py` 与 `blocked_claims.py` 改用状态机跃迁历史时戳 `task_blocked_entry_ts` 判定同一 blocked episode，彻底杜绝 Sentinel/心跳微调更新 `task.updated_at` 导致 episode 重置与 `repushes` 归零的问题；`agent_router.py` 在 `_record_router_opt_out` 审计落盘失败时严守 fail-closed，抛出 `RouterIsolationRejection` 阻止无审计执行；
+  3. 卡点 9（`wf-nexusarchive-1005-01`）：全宗与平台安全体系严格分离，Java 端已固化 `methodSecurityExpressionHandler` 注入 `RoleHierarchy`，并在复盘报告中梳理门禁 AST/精确断言演进规范；
+  4. 卡点 10（`wf-project-1003-01`）：执行方案 A + B 组合治理：方案 A（`launch_baseline.py` 与 `task_cli_launch_preflight.py`）在任务派发前执行 `merge-base --is-ancestor dev <claim>`，基线陈旧即刻 0 秒 Fail-fast；方案 B（`services/herdr-worker.py`）在 `create_task_branch` 中拉取 `origin/{base_branch}` 后，同步通过 `update-ref` 将沙箱内的本地跟踪分支 `refs/heads/{base_branch}`（及 `dev`）刷新对齐至最新远端基线，彻底根除陈旧工位继承残留引发的本地 hook 误判。
+- 验收结果：
+  - `tests/test_dispatch_baseline_failfast.py` (12 passed)
+  - `tests/test_herdr_worker.py` (16 passed，含本地跟踪分支同步新增测试)
+  - `tests/test_git_adoption.py` (25 passed，含 foreign_author 拒交与合规测试)
+  - `tests/test_wf_project_1029_blockers.py` (13 passed，含 candidate_blocked 与 unverified 升级测试)
+  - `tests/test_impl_fix4_blocker_regression.py` (16 passed，含心跳更新不重置 blocked episode 回归测试)
+  - `tests/test_impl_fix4_regression.py` (23 passed)
+  - `tests/test_finalize_*.py` (41 passed)
+  - `python3 -m compileall -q herdr services bin tests`（0 错误）
+  - `git diff --check`（Clean）
+- 交付产物：代码修复 + 测试闭环 + 深度复盘报告 `docs/reports/workflow-blockers-report.md`。
+
+
 ## [2026-10-31] fix | 重落地 PR #359：启动失败收敛与 Console 启动标签恢复（base 误挂 docs 分支致 main 缺失），并修复其评审欠账
 
 - 背景：例行核验发现 PR #359 在 GitHub 显示 MERGED，但 main 不含其内容——启动收敛三件套（`workflow_startup.py`、`startup_watchdog.py`、`log_throttle.py` 增量）、Factory 启动流程改造、Console 启动标签与约 900 行测试整体缺失。**根因（初诊有误，已更正）**：该 PR 的 base 是遗留工作分支 `docs/workflow-decision-audit-v1`（head 恰为 c97f302），合并落在该分支上产生 4262830，main 从未收到；不存在 force-push 回退（main 的 `non_fast_forward` 规则自 10-15 有效且未被违反）。取证与教训归档于 lessons §213。

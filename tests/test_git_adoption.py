@@ -303,6 +303,54 @@ class ClassifyByTimeTest(unittest.TestCase):
         self.assertEqual(verdict, REFUSED)
         self.assertEqual(detail["reason"], "missing_created_at")
 
+    def test_foreign_author_refused_anchored(self):
+        # Commits from an unexpected external author must refuse (R7 fail-closed)
+        commit = _commit("c1", 1100, paths=["src/a.py"])
+        commit["author_name"] = "Alice Mallory"
+        commit["author_email"] = "mallory@attacker.test"
+        verdict, detail = classify_commit_state(
+            baseline_commit="base",
+            head="c1",
+            created_at=1000,
+            interval_commits=[commit],
+            expected_agent="opencode",
+            **_branch_kwargs("t1"),
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "foreign_author")
+        self.assertEqual(detail["offending"], ["c1"])
+
+    def test_expected_agent_author_accepted_anchored(self):
+        commit = _commit("c1", 1100, paths=["src/a.py"])
+        commit["author_name"] = "OpenCode Agent"
+        commit["author_email"] = "agent/opencode@haflow.local"
+        verdict, detail = classify_commit_state(
+            baseline_commit="base",
+            head="c1",
+            created_at=1000,
+            interval_commits=[commit],
+            expected_agent="opencode",
+            **_branch_kwargs("t1"),
+        )
+        self.assertEqual(verdict, ADOPT)
+        self.assertEqual(detail["reason"], "attributable_commits")
+
+    def test_foreign_author_refused_time_basis(self):
+        commit = _commit("c1", 1100, paths=["src/a.py"])
+        commit["author_name"] = "Random Hacker"
+        commit["author_email"] = "hacker@evil.test"
+        verdict, detail = classify_commit_state(
+            head="c1",
+            branch="agent/opencode/feat-t1",
+            task_id="t1",
+            created_at=1000,
+            head_history=[commit, _commit("old", 500)],
+            current_branch="agent/opencode/feat-t1",
+            allowed_authors=["opencode@haflow.local"],
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "foreign_author")
+
 
 class AdoptionHelperTest(unittest.TestCase):
     def test_skew_env_override(self):

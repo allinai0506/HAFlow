@@ -318,6 +318,38 @@ def should_escalate_human(
     return True
 
 
+def task_blocked_entry_ts(task: dict | None) -> float | None:
+    """Return the stable timestamp when the task entered blocked status."""
+    if not isinstance(task, dict) or not task:
+        return None
+    if task.get("blocked_status_timestamp") is not None:
+        try:
+            return float(task["blocked_status_timestamp"])
+        except (TypeError, ValueError):
+            pass
+    if task.get("status_updated_at") is not None and task.get("status") == "blocked":
+        try:
+            return float(task["status_updated_at"])
+        except (TypeError, ValueError):
+            pass
+    if task.get("blocked_at") is not None:
+        try:
+            return float(task["blocked_at"])
+        except (TypeError, ValueError):
+            pass
+    history = task.get("status_history") or []
+    if isinstance(history, list):
+        for entry in reversed(history):
+            if isinstance(entry, dict) and entry.get("to") == "blocked":
+                ts = entry.get("timestamp")
+                if ts is not None:
+                    try:
+                        return float(ts)
+                    except (TypeError, ValueError):
+                        pass
+    return None
+
+
 def new_episode(task: dict | None, now: float) -> dict:
     """Create the durable episode shell used by the Controller."""
     task = task or {}
@@ -326,11 +358,15 @@ def new_episode(task: dict | None, now: float) -> dict:
     except (TypeError, ValueError):
         entry = float(now)
     version = task.get("version")
+    stable_entry = task_blocked_entry_ts(task)
+    entry_status = stable_entry if stable_entry is not None else entry
     return {
         "task_id": str(task.get("task_id") or ""),
         "workflow_id": task.get("workflow_id"),
         "run_id": task.get("run_id"),
         "entry_updated_at": entry,
+        "entry_status_updated_at": entry_status,
+        "human_touch": task.get("human_touch"),
         "entry_version": version,
         "episode_id": blocked_episode_id(
             str(task.get("task_id") or ""), entry, version

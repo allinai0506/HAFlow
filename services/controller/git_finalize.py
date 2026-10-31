@@ -69,7 +69,15 @@ def _finalize_completed_task_body(ports, task_id, before_action=None):
             if (verifier.get('status') != 'superseded' and not verifier.get('superseded_by')
                     and verifier.get('stage_verdict') == 'blocked'
                     and verifier.get('candidate_sha') == failed_sha):
-                return {'retryable': False, 'kind': 'candidate_blocked'}
+                payload = {
+                    "failed_sha": failed_sha,
+                    "verifier_task_id": verifier.get("task_id"),
+                    "stage_verdict": "blocked",
+                }
+                print(f"[FINALIZE BLOCKED] task={task_id} candidate={failed_sha} blocked by verifier={verifier.get('task_id')}")
+                ports._record_finalize_event(task, "finalize_candidate_blocked", payload)
+                ports._escalate_finalize(task, "candidate_blocked", payload)
+                return {'retryable': False, 'kind': 'candidate_blocked', 'reason': 'candidate_blocked'}
 
     # Collaboration accelerator: authoritative task completion closes the
     # handoffs targeting it, so handoff latency metrics stay trustworthy.
@@ -380,6 +388,14 @@ def _finalize_completed_task_body(ports, task_id, before_action=None):
             confirmed_head = _settle_integration_result(
                 ports, task, authorized_input, entry_identity)
             if not confirmed_head:
+                payload = {
+                    "task_id": task_id,
+                    "authorized_input": authorized_input,
+                    "reason": "integrate_result_unverified",
+                }
+                print(f"[FINALIZE REFUSED] task={task_id} integrate_result_unverified")
+                ports._record_finalize_event(task, "finalize_integrate_result_unverified", payload)
+                ports._escalate_finalize(task, "integrate_result_unverified", payload)
                 return {"retryable": False, "kind": "refused",
                         "reason": "integrate_result_unverified"}
             own_head = confirmed_head
