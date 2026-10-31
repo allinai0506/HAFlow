@@ -146,7 +146,13 @@ def transition_task(
 
         task_dict["status"] = to_status
         task_dict["updated_at"] = now
+        task_dict["status_updated_at"] = now
         task_dict["last_activity_at"] = now
+
+        if to_status == "blocked" and old_status != "blocked":
+            task_dict["blocked_status_timestamp"] = now
+        elif to_status != "blocked":
+            task_dict.pop("blocked_status_timestamp", None)
 
         if to_status in ACTIVE_TASK_STATUSES and not task_dict.get("started_at"):
             task_dict["started_at"] = now

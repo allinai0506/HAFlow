@@ -141,6 +141,8 @@ def classify_commit_state(
     remote_probe_failed=False,
     current_branch=None,
     allow_rebase=False,
+    allowed_authors=None,
+    expected_agent=None,
 ):
     """Classify an empty-index commit attempt.
 
@@ -220,6 +222,8 @@ def classify_commit_state(
             onto_branch=onto_branch,
             current_branch=current_branch,
             allow_rebase=effective_allow_rebase,
+            allowed_authors=allowed_authors,
+            expected_agent=expected_agent,
         )
     return _classify_by_time(
         head=head,
@@ -233,6 +237,8 @@ def classify_commit_state(
         remote_probe_failed=remote_probe_failed,
         current_branch=current_branch,
         allow_rebase=effective_allow_rebase,
+        allowed_authors=allowed_authors,
+        expected_agent=expected_agent,
     )
 
 
@@ -340,6 +346,42 @@ def _noop_commits(commits):
     ]
 
 
+def _check_author(commits, allowed_authors=None, expected_agent=None):
+    """Refuse commits authored by foreign users/agents (R7 fail-closed)."""
+    if not allowed_authors and not expected_agent:
+        return None
+    allowed = set()
+    if allowed_authors:
+        if isinstance(allowed_authors, (list, tuple, set)):
+            allowed = {str(a).strip().lower() for a in allowed_authors if str(a).strip()}
+        elif isinstance(allowed_authors, str) and allowed_authors.strip():
+            allowed = {allowed_authors.strip().lower()}
+    agent = str(expected_agent or "").strip().lower()
+
+    for item in commits or []:
+        author_name = str((item or {}).get("author_name") or "").strip().lower()
+        author_email = str((item or {}).get("author_email") or "").strip().lower()
+        if not author_name and not author_email:
+            # Synthetic or mock test commits without author fields
+            continue
+
+        matched = False
+        if allowed:
+            if author_email in allowed or author_name in allowed:
+                matched = True
+        if not matched and agent:
+            if agent in author_name or agent in author_email:
+                matched = True
+            elif author_email.startswith(f"{agent}@") or f"agent/{agent}" in author_name:
+                matched = True
+            elif "haflow" in author_name or "haflow" in author_email:
+                matched = True
+
+        if not matched:
+            return (item or {}).get("sha")
+    return None
+
+
 def _classify_with_anchor(
     *,
     baseline_commit,
@@ -355,6 +397,8 @@ def _classify_with_anchor(
     onto_branch=None,
     current_branch=None,
     allow_rebase=False,
+    allowed_authors=None,
+    expected_agent=None,
 ):
     if not _valid_sha(head):
         return REFUSED, {
@@ -519,6 +563,17 @@ def _classify_with_anchor(
             "noop_commits": noops,
             "changed_paths": changed,
         }
+    foreign_author = _check_author(commits, allowed_authors=allowed_authors, expected_agent=expected_agent)
+    if foreign_author:
+        return REFUSED, {
+            "reason": "foreign_author",
+            "commits": len(commits),
+            "baseline": baseline_commit,
+            "basis": "baseline_commit",
+            "offending": [foreign_author],
+            "noop_commits": noops,
+            "changed_paths": changed,
+        }
     return ADOPT, {
         "reason": "attributable_commits",
         "commits": len(commits),
@@ -532,7 +587,8 @@ def _classify_with_anchor(
 def _classify_by_time(
     *, head, onto_branch, branch, task_id, cutoff, head_history,
     remote_shas=None, enumeration_failed=False, remote_probe_failed=False,
-    current_branch=None, allow_rebase=False,
+    current_branch=None, allow_rebase=False, allowed_authors=None,
+    expected_agent=None,
 ):
     if not is_task_branch(branch, task_id):
         return REFUSED, {
@@ -703,6 +759,17 @@ def _classify_by_time(
             "baseline": implicit.get("sha"),
             "basis": "time",
             "offending": stale,
+            "noop_commits": noops,
+            "changed_paths": changed,
+        }
+    foreign_author = _check_author(attributable, allowed_authors=allowed_authors, expected_agent=expected_agent)
+    if foreign_author:
+        return REFUSED, {
+            "reason": "foreign_author",
+            "commits": len(attributable),
+            "baseline": implicit.get("sha"),
+            "basis": "time",
+            "offending": [foreign_author],
             "noop_commits": noops,
             "changed_paths": changed,
         }

@@ -377,6 +377,36 @@ class TestCleanSandbox(unittest.TestCase):
                 self.assertTrue((clone / ".git").exists())
 
 
+    def test_create_task_branch_synchronizes_local_tracking_branch(self):
+        worker = load_worker()
+        clone_root = Path(self.temp_dir) / "clones"
+        clone_root.mkdir()
+        origin_repo = Path(self.temp_dir) / "origin_sync"
+        subprocess.run(["git", "clone", "--bare", str(self.source_repo), str(origin_repo)], check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", str(origin_repo)], cwd=self.source_repo, check=True, capture_output=True)
+
+        with patch.object(worker, "CLONE_ROOT", clone_root):
+            clone = worker.create_clone(str(self.source_repo), "test-sync-task")
+            # Advance origin/main with a new commit while local main in clone is at old commit
+            advance_work = Path(self.temp_dir) / "advance_work"
+            subprocess.run(["git", "clone", str(origin_repo), str(advance_work)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(advance_work), "checkout", "main"], check=True, capture_output=True)
+            (advance_work / "advance.txt").write_text("advance\n")
+            subprocess.run(["git", "-C", str(advance_work), "add", "advance.txt"], check=True)
+            subprocess.run(["git", "-C", str(advance_work), "-c", "user.name=Test", "-c", "user.email=t@test.com", "commit", "-m", "origin advance"], check=True)
+            subprocess.run(["git", "-C", str(advance_work), "push", "origin", "main"], check=True)
+            new_tip = subprocess.check_output(["git", "-C", str(advance_work), "rev-parse", "HEAD"], text=True).strip()
+
+            # Ensure local main in clone is currently behind
+            old_tip = subprocess.check_output(["git", "-C", str(clone), "rev-parse", "refs/heads/main"], text=True).strip()
+            self.assertNotEqual(old_tip, new_tip)
+
+            # create_task_branch should fetch origin/main, switch to task branch, and update refs/heads/main
+            worker.create_task_branch(clone, "test-sync-task", "codex", "feat", "main")
+            synced_tip = subprocess.check_output(["git", "-C", str(clone), "rev-parse", "refs/heads/main"], text=True).strip()
+            self.assertEqual(synced_tip, new_tip)
+
+
 if __name__ == "__main__":
     unittest.main()
 

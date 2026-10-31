@@ -317,6 +317,23 @@ def create_task_branch(clone, task_id, agent, task_type, base_branch, *, launch_
 
         if fetch.returncode == 0 and remote_exists:
             base_ref = f"origin/{base_branch}"
+            # Scheme B: Synchronize local tracking branch to fresh origin/{base_branch}
+            # so pre-commit hooks and local git merge-base checks are not poisoned by
+            # stale worktrees (e.g. *-init).
+            subprocess.run(
+                ["git", "-C", str(clone), "update-ref", f"refs/heads/{base_branch}", f"refs/remotes/origin/{base_branch}"],
+                capture_output=True, check=False,
+            )
+            if base_branch != "dev":
+                has_remote_dev = subprocess.run(
+                    ["git", "-C", str(clone), "rev-parse", "--verify", "--quiet", "refs/remotes/origin/dev"],
+                    capture_output=True, check=False,
+                ).returncode == 0
+                if has_remote_dev:
+                    subprocess.run(
+                        ["git", "-C", str(clone), "update-ref", "refs/heads/dev", "refs/remotes/origin/dev"],
+                        capture_output=True, check=False,
+                    )
         elif local_exists:
             base_ref = base_branch
         else:
