@@ -889,6 +889,9 @@ class IdentityCheck:
     holds_cmdline: bool
     holds_registry: bool
     reasons: tuple[str, ...] = ()
+    # 探测层不可验证（lsof 缺失/超时/不可解析）≠ 身份确认不符（B6/PR #338）：
+    # 前者必须以 exit 5 unverifiable 呈现，不得冒充 foreign。
+    unverifiable: bool = False
 
     @property
     def ok(self) -> bool:
@@ -1292,9 +1295,13 @@ def stop_endpoint(
     check = verify()
     if not getattr(check, "ok", False):
         reasons = ", ".join(getattr(check, "reasons", ()) or ())
+        unverifiable = bool(getattr(check, "unverifiable", False))
+        # 探测不可验证与确认的身份不符是两种事实（PR #338 评审遗留）：
+        # 前者保持 exit 5/unverifiable 契约，不得在 pre-signal recheck 处
+        # 被折叠成 exit 4/foreign。
         return StopOutcome(
-            exit_code=EXIT_AMBIGUOUS,
-            state=STATE_FOREIGN,
+            exit_code=EXIT_UNVERIFIABLE if unverifiable else EXIT_AMBIGUOUS,
+            state=STATE_UNVERIFIABLE if unverifiable else STATE_FOREIGN,
             message=f"identity recheck failed; no signal sent ({reasons or 'unknown'})",
             signaled=False,
         )

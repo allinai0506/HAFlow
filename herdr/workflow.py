@@ -391,8 +391,14 @@ def _gate_was_declared(node: Dict[str, Any]) -> bool:
         return False
     if node.get("gate_declared"):
         return True
+    if node.get("gate_placeholder_normalized"):
+        return False
     if "gate" not in node:
         return False
+    # 兼容 pre-marker 存量配置（Codex P1）：归一化产物携带
+    # worker_policy/default_integration_mode 且无标记，仍按占位处理；
+    # 原始模板作者只写 gate:{}（不带这两键）视为声明。归一化器从现在
+    # 起为合成占位写入标记，存量配置在下次规范化时完成迁移。
     gate = node.get("gate")
     placeholder = (
         isinstance(gate, dict)
@@ -438,8 +444,13 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
             }
+            # marker 收敛规则（Codex #375 P1）：非声明的空 gate 一律落
+            # marker——无论来自合成、pre-marker 存量启发式还是已有标记，
+            # 迁移在首次规范化后即完成。
             if _gate_was_declared(node):
                 norm_node["gate_declared"] = True
+            elif isinstance(norm_node["gate"], dict) and not norm_node["gate"]:
+                norm_node["gate_placeholder_normalized"] = True
             for field in ("control_mode", "confirm_before", "required_executions"):
                 if field in node:
                     norm_node[field] = node[field]
@@ -547,6 +558,10 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "rules": list(policy.get("rules") or []),
                 "gate": dict(policy.get("gate") or {}),
             }
+            if _gate_was_declared(policy):
+                norm_node["gate_declared"] = True
+            elif isinstance(norm_node["gate"], dict) and not norm_node["gate"]:
+                norm_node["gate_placeholder_normalized"] = True
             for field in ("control_mode", "confirm_before", "required_executions"):
                 if field in policy:
                     norm_node[field] = policy[field]

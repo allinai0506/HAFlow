@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import os
+from pathlib import Path
 
 MAX_LISTED_FILES = 10
 INTERNAL_EXACT = frozenset({".agent-task-context", ".herdr-launch-identity.json", ".herdr-loop", ".herdr", ".agents"})
@@ -21,6 +22,28 @@ def is_internal_untracked(path: str) -> bool:
     if text in INTERNAL_EXACT:
         return True
     return text.startswith(INTERNAL_PREFIXES)
+
+
+def is_launcher_owned(path: str, root: str | os.PathLike = "") -> bool:
+    """True 当该 .agents/ 路径属于 launcher 拥有的基础设施（PR #355 评审遗留）。
+
+    launcher 通过符号链接把 universal skills 挂进 ``.agents/skills/<name>``；
+    任务自己创建的真实（非符号链接）技能内容是业务交付物，不得被
+    ``.agents/`` 全树排除吞掉。``root`` 为 clone 根，用于解析相对路径。
+    """
+    parts = Path(str(path or "")).parts
+    if ".agents" not in parts:
+        return True
+    idx = parts.index(".agents")
+    rest = parts[idx + 1:]
+    if not rest or rest[0] != "skills" or len(rest) < 2:
+        return True  # .agents 顶层与其他子路径维持排除
+    base = Path(root) if root else Path()
+    skill_entry = base.joinpath(*parts[: idx + 3])
+    try:
+        return os.path.islink(str(skill_entry))
+    except OSError:
+        return True
 
 
 def _decode_git_path(value: str) -> str:

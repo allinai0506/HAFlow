@@ -478,7 +478,16 @@ def _prompt(
         node_id = str(node.get("id") or "").strip()
         wf_id = str(node.get("workflow_id") or "").strip()
         configured_skills = node.get("skills")
-        if configured_skills or node_id in stage_skills.STAGE_SKILL_BINDINGS:
+        # 默认 stage 契约只属于 software-development-v1 适配流（PR #355 评
+        # 审遗留）：其他工作流命中同名节点 ID 时不得注入默认技能与限制。
+        wf_cfg = {}
+        try:
+            from herdr.projects import workflow_config_for
+            wf_cfg = workflow_config_for(wf_id) or {}
+        except Exception:
+            wf_cfg = {}
+        adapted = stage_skills.is_staged_dev_flow_workflow(wf_cfg)
+        if (configured_skills or node_id in stage_skills.STAGE_SKILL_BINDINGS) and (adapted or configured_skills):
             ctx = stage_skills.assemble_stage_context(
                 workflow_id=wf_id,
                 task_id=task_id or "",

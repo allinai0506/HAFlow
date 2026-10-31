@@ -78,12 +78,22 @@ def is_bypass_rel_path(rel: str | Path) -> bool:
     return False
 
 
-def is_residual_clone_shell(root: Path) -> bool:
-    """Check if a clone directory contains only external bypass artifacts (no actual workspace)."""
+def is_residual_clone_shell(root: Path, declared: frozenset[str] | set[str] | None = None) -> bool:
+    """Check if a clone directory contains only external bypass artifacts (no actual workspace).
+
+    ``declared``：任务声明的交付物相对路径集合——其中任何一个仍存在于 clone
+    内即说明这不是残壳，回收会销毁唯一副本（PR #362 评审遗留）。
+    """
     if not root.is_dir() or root.is_symlink():
         return False
     if (root / ".git").exists() or (root / ".herdr-launch-identity.json").exists():
         return False
+    for rel in declared or ():
+        try:
+            if (root / rel).exists():
+                return False
+        except OSError:
+            return False
     deadline = time.monotonic() + 5
     count = 0
     try:
@@ -408,7 +418,8 @@ def verify_source(task, clone_root, archive):
     root = _root(task, clone_root)
     info = root.stat()
     if (info.st_dev, info.st_ino) != (archive["device"], archive["inode"]):
-        if not is_residual_clone_shell(root):
+        if not is_residual_clone_shell(root,
+                                       declared=_declared_deliverable_rel_paths(task, root)):
             raise ValueError("clone instance changed")
     manifest = archive_manifest(dict(task, clone_archive=archive))
     current = _inventory(root, task=task)
@@ -418,7 +429,7 @@ def verify_source(task, clone_root, archive):
     }
     deleting = task.get("clone_reclaim_started") == archive["manifest_sha256"]
     if current != manifest_entries and not (
-        is_residual_clone_shell(root)
+        is_residual_clone_shell(root, declared=declared)
         or (
             deleting
             and all(manifest_entries.get(rel) == item for rel, item in current.items())
@@ -466,7 +477,8 @@ def plan_clone(task, clone_root):
     }
 
 
-def delete_residual_clone_shell(root: str | Path, *, clone_root: str | Path | None = None) -> bool:
+def delete_residual_clone_shell(root: str | Path, *, clone_root: str | Path | None = None,
+                                declared: frozenset[str] | set[str] | None = None) -> bool:
     """Safely reclaim a residual clone shell with atomic claim and boundary revalidation.
 
     Prevents race conditions where a concurrent process or external indexer
@@ -490,7 +502,7 @@ def delete_residual_clone_shell(root: str | Path, *, clone_root: str | Path | No
         if common != real_clone_root or str(root_path) == real_clone_root:
             return False
 
-    if not is_residual_clone_shell(root_path):
+    if not is_residual_clone_shell(root_path, declared=declared):
         return False
 
     staged = root_path.parent / f"{root_path.name}.reclaim-{os.getpid()}-{time.time_ns()}"
@@ -499,7 +511,7 @@ def delete_residual_clone_shell(root: str | Path, *, clone_root: str | Path | No
     except OSError:
         return False
 
-    if not is_residual_clone_shell(staged):
+    if not is_residual_clone_shell(staged, declared=declared):
         try:
             staged.rename(root_path)
         except OSError:

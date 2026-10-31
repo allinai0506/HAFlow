@@ -576,7 +576,8 @@ def _verify_target(target_pid: int, selector, port: int, registry):
             holds_endpoint=False,
             holds_cmdline=False,
             holds_registry=False,
-            reasons=("endpoint cannot be verified",),
+            reasons=(f"endpoint probe unverifiable ({getattr(outcome, 'detail', '')})",),
+            unverifiable=True,
         )
     fresh_listeners = lifecycle.select_listeners(outcome.listeners, selector.host)
     fresh_process = lifecycle.run_ps(target_pid)

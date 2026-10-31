@@ -774,6 +774,19 @@ def _closure_demanded(config: Any) -> bool:
     return not _workspace_ceiling(_recorded_ceiling(config))
 
 
+def _run_level_ceiling(workflow: Any) -> str:
+    """本次运行显式记录的交付上限（PR #334 评审遗留）。
+
+    读取 workflow 元数据 ``delivery_ceiling``（requirements/wrapup 经
+    ``herdr-task`` 元数据写入的运行级授权），优先级高于模板
+    ``delivery_ceiling_default``。
+    """
+    if not isinstance(workflow, dict):
+        return ""
+    value = workflow.get("delivery_ceiling")
+    return str(value or "").strip()
+
+
 def closure_required(store, task: Any) -> bool:
     """True when the workflow's pinned configuration opts into the contract.
 
@@ -781,6 +794,9 @@ def closure_required(store, task: Any) -> bool:
     ``config`` snapshot); the task's pinned config file only as fallback when
     no snapshot exists. An existing-but-unreadable configuration fails
     closed; a verified absent capability keeps the previous behaviour.
+
+    运行级 ``delivery_ceiling`` 元数据优先于模板默认：用户在本次运行
+    显式授权 PR 交付时，工作区默认不得把收尾门禁静默关掉。
     """
     task = task or {}
     workflow_id = str(task.get("workflow_id") or "").strip()
@@ -790,6 +806,10 @@ def closure_required(store, task: Any) -> bool:
         workflow = store.get_workflow(workflow_id) or {}
     except Exception:
         return True  # authoritative snapshot unreadable → fail closed
+    run_ceiling = _run_level_ceiling(workflow)
+    if run_ceiling:
+        if _wrapup_flag(workflow.get("config") if isinstance(workflow.get("config"), dict) else {}):
+            return not _workspace_ceiling(run_ceiling)
     config = workflow.get("config")
     if isinstance(config, dict) and config.get("nodes"):
         return _closure_demanded(config)
