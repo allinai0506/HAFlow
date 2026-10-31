@@ -225,3 +225,15 @@ def _git_is_ancestor(source_repo, ancestor, descendant):
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         return None
     return probe.returncode == 0
+
+
+def refresh_remote_base(source_repo, base, timeout=10):
+    """Best-effort 刷新 origin/<base> 远程跟踪引用，供冻结前的新鲜度判定使用。
+
+    与上方 freshness probe 的 fetch 同源：离线、无 origin 或 fetch 失败
+    返回 False，调用方按既有 `origin/<base>` -> `<base>` 解析回退，
+    不视为致命错误。
+    """
+    if not base:
+        return False
+    return _git(source_repo, "fetch", "origin", base, timeout=timeout) is not None

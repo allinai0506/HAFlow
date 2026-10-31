@@ -284,3 +284,22 @@ def test_finalize_escalated_surfaces_as_blocked_and_anomaly():
     boss = _build_boss_summary([task], {"wf-esc": [task]}, [{"kind": "FINALIZE_ESCALATED"}])
     assert "wf-esc" in boss["blocked_workflows"]
     assert boss["attention_required"] == 1
+
+
+def test_inventory_resolves_latest_invalidation_like_snapshot(tmp_path):
+    """失效事件后 Console 库存不得继续展示陈旧冻结 SHA（#313）。"""
+    from herdr.console_queries import read_inventory
+    from herdr.recovery_store import read_snapshot
+    db = tmp_path / "state.db"
+    seed(db)
+    state_db.save_workflow({"workflow_id": "wf-a-0", "created_at": 10,
+        "reopened_at": 100, "candidate_sha": "stale-metadata"}, db_path=db)
+    for event_type, timestamp in [("candidate_frozen", 110), ("candidate_invalidated", 130)]:
+        state_db.record_event({"workflow_id": "wf-a-0", "timestamp": timestamp,
+            "source": "critical-path-scheduler", "event_type": event_type,
+            "payload": {"candidate_sha": "current"}}, db_path=db)
+    _, workflows = read_inventory(db)
+    authoritative = read_snapshot(db, "wf-a-0")[0]
+    assert workflows["wf-a-0"]["candidate_sha"] is None
+    assert workflows["wf-a-0"]["candidate_episode_id"] \
+        == authoritative["candidate_episode_id"] > 0

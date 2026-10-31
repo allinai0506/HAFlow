@@ -911,6 +911,24 @@ class FrozenIdentityFallbackWiringTest(unittest.TestCase):
         self.assertEqual(sha, sha_a)
         self.assertEqual(branch, "agent/x/feat-a")
 
+    def test_identity_ignores_invalidated_candidate(self):
+        """失效事件后回落不得透传已清除的冻结身份（PR #313 评审遗留）。"""
+        from herdr.recovery_store import read_snapshot
+        from herdr import state_db
+
+        self._freeze("a" * 40, branch="agent/x/feat-a")
+        invalidated = state_db.record_event({
+            "workflow_id": "wf-fb-1", "event_type": "candidate_invalidated",
+            "source": "critical-path-scheduler",
+            "payload": {"candidate_sha": "a" * 40, "reason": "base_advanced"}},
+            db_path=self.db)
+        snapshot = read_snapshot(self.db, "wf-fb-1")[0]
+        self.assertIsNone(snapshot["candidate_sha"])
+        self.assertEqual(snapshot["candidate_episode_id"], invalidated["id"])
+        sha, branch = _ctl._scheduler_frozen_candidate_identity("wf-fb-1", {}, [])
+        self.assertEqual(sha, "")
+        self.assertEqual(branch, "")
+
     def test_frozen_lookup_error_fails_closed(self):
         """P1 回归:查询 frozen 失败 != 从未冻结,必须 fail-closed。
 

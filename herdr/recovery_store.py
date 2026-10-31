@@ -57,8 +57,10 @@ def _workflow_snapshot(conn, workflow_id):
         workflow['candidate_source_node'] = frozen_payload.get('source_node')
     else:
         workflow['candidate_sha'] = None
-        workflow['candidate_episode_id'] = 0
         workflow['candidate_source_node'] = None
+        # 失效事件同样推进 episode 计数：下一次发布必须以它为 expected_episode_id，
+        # 归零会让 base advance 后的再冻结永远被 CAS 拒绝（PR #313 评审遗留）。
+        workflow['candidate_episode_id'] = latest['id'] if latest else 0
     workflow['config'] = config
     if workflow['status'] == 'paused':
         transition = conn.execute("SELECT event_type,payload_json FROM events WHERE workflow_id=? "

@@ -166,6 +166,7 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
         return ""
     # Activity and delivery-note edits are not candidate publication events.
     from herdr import recovery_store, state_db
+    from herdr.launch_baseline import refresh_remote_base
     store = ports._get_store()
     workflow, _, delivery_tasks = recovery_store.read_snapshot(store.db_path, workflow_id)
     epoch = max(float(workflow.get('created_at') or 0), float(workflow.get('reopened_at') or 0))
@@ -196,6 +197,7 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
                                      allow_merge=publication_current)
             if sha == workflow.get('candidate_sha'):
                 return sha
+            refresh_remote_base(project_root, workflow.get('base_branch'))
             res = ports.scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
                 db_path=store.db_path, expected_episode_id=workflow.get('candidate_episode_id') or 0,
                 delivery_inventory=inventory, publication_event_id=publication['id'],
@@ -216,6 +218,7 @@ def _scheduler_freeze_candidate(ports, workflow_id, project_root, source_node, d
     if ports.scheduler_core.resolve_candidate_sha_for_branch(project_root, f'{sha}^{{commit}}') != sha:
         return ''
     try:
+        refresh_remote_base(project_root, workflow.get('base_branch'))
         res = ports.scheduler_facts_store.record_candidate_frozen(workflow_id, sha, source_node=source_node,
             db_path=store.db_path, expected_episode_id=ports.json.loads(publication['payload_json']).get('expected_episode_id'),
             publication_event_id=publication['id'],
@@ -261,17 +264,26 @@ def _scheduler_frozen_candidate_identity(ports, workflow_id, project_ctx, dep_id
     if ports.scheduler_facts_store is None:
         return "", ""
     try:
+        from herdr import recovery_store
+        workflow, _, _ = recovery_store.read_snapshot(ports._get_store().db_path, workflow_id)
+        current_sha = str(workflow.get("candidate_sha") or "").strip()
+        if not current_sha:
+            # 失效（candidate_invalidated）后 candidate_sha 已被 snapshot 清空，
+            # 回落不得再透传旧身份（PR #313 评审遗留）。
+            return "", ""
+        episode_id = workflow.get("candidate_episode_id") or 0
         events = ports.scheduler_facts_store.list_candidate_frozen_events(workflow_id)
+        payload = next(((e.get("payload") or {}) for e in events
+                        if e.get("id") == episode_id), None)
+        if payload is None:
+            return "", ""
+        return (
+            str(payload.get("candidate_sha") or "").strip(),
+            str(payload.get("delivery_branch") or "").strip(),
+        )
     except Exception as exc:
         print(f"[SCHEDULER FROZEN IDENTITY WARN] workflow={workflow_id}: {exc}")
         return "", ""
-    if not events:
-        return "", ""
-    payload = (events[-1].get("payload") or {})
-    return (
-        str(payload.get("candidate_sha") or "").strip(),
-        str(payload.get("delivery_branch") or "").strip(),
-    )
 
 
 DEPENDENCIES = {'_scheduler_current_frozen_candidate_sha': ('scheduler_facts_store',),
@@ -283,6 +295,6 @@ DEPENDENCIES = {'_scheduler_current_frozen_candidate_sha': ('scheduler_facts_sto
  '_scheduler_freeze_candidate': ('_get_store', 'json', 'scheduler_core', 'scheduler_facts_store',
                                  'subprocess'),
  '_scheduler_previous_candidate_sha': ('scheduler_facts_store',),
- '_scheduler_frozen_candidate_identity': ('scheduler_facts_store',)}
+ '_scheduler_frozen_candidate_identity': ('scheduler_facts_store', '_get_store')}
 
 __all__ = tuple(DEPENDENCIES)
