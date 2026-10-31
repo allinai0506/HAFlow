@@ -24,18 +24,33 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------- gate v2
 
-def test_authored_empty_gate_with_full_keys_is_declared():
-    """Codex PR #334：作者显式写全三键的 gate:{} 是声明（修复占位启发式误吞）。"""
+def test_gate_declaration_authored_vs_legacy_compat():
+    """Codex PR #334 + #375 P1 双向守卫：
+
+    - 作者只写 gate:{}（模板常规形态）→ 声明，不被吞（#334）；
+    - pre-marker 存量（gate:{} + worker_policy + default_integration_mode，
+      旧归一化产物）→ 占位，迁移期不误翻成门禁（#375 P1）；
+    - 合成占位带 marker → 永远占位；规范化幂等。
+    """
     from herdr.workflow import normalize_workflow
     from herdr.node_acceptance import node_uses_gate_loop
     normalized = normalize_workflow({"nodes": [
-        {"id": "audit", "node_type": "agent", "gate": {},
+        {"id": "audit", "node_type": "agent", "gate": {}},
+        {"id": "audit-full", "node_type": "agent", "gate": {},
          "worker_policy": {"preferred": ["codex"]},
          "default_integration_mode": "none"},
+        {"id": "requirements", "node_type": "agent"},
     ]})
-    node = normalized["nodes"][0]
-    assert node.get("gate_declared") is True
-    assert node_uses_gate_loop(node, "audit")
+    audit, audit_full, requirements = normalized["nodes"]
+    assert audit.get("gate_declared") is True
+    assert node_uses_gate_loop(audit, "audit")
+    # pre-marker 存量形态：占位，标记写入后完成迁移
+    assert "gate_declared" not in audit_full
+    assert audit_full.get("gate_placeholder_normalized") is True
+    assert not node_uses_gate_loop(audit_full, "audit-full")
+    assert requirements.get("gate_placeholder_normalized") is True
+    again = normalize_workflow(normalized)
+    assert again["nodes"] == normalized["nodes"]
 
 
 def test_gate_normalization_is_idempotent_and_marks_synthetics():
