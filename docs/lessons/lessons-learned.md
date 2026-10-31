@@ -8878,38 +8878,42 @@ pytest -v tests/test_wf_project_1029_blockers.py
 
 ---
 
-## §213 已合并 PR 内容从 main 丢失：main 两次回退与重落地基线校验（PR #359）
+## §213 已合并 PR 内容不在 main：PR base 误挂工作分支与合并基线核验（PR #359 重落地）
 
 ### 问题现象与根因剖析
 
-2026-10-31 例行评审欠账核验发现：PR #359（wf-1029 启动失败收敛 + Console 启动标签）在 GitHub 显示 MERGED，但其内容不在 main（eb8d054）历史中——`herdr/workflow_startup.py`、`services/controller/startup_watchdog.py` 与约 900 行启动收敛测试整体缺失。取证还原的时间线：
+2026-10-31 例行评审欠账核验发现：PR #359（wf-1029 启动失败收敛 + Console 启动标签）在 GitHub 显示 MERGED，但其内容不在 main——`herdr/workflow_startup.py`、`services/controller/startup_watchdog.py` 与约 900 行启动收敛测试整体缺失。
 
-1. 10-30 09:34 #358 合并（main=3c97080）；随后 main 被回退到 c97f302（#358 的合并提交被丢弃）。
-2. 10-30 16:44 #359 合并（4262830，基于回退后的 c97f302，故不含 #358 内容）。
-3. main 再次被回退到 3c97080（丢弃 #359，恢复 #358），#360/#361 随后合并到这条不含 #359 的主线。
+**根因（初诊有误，已更正）**：PR #359 的 base 是工作分支 `docs/workflow-decision-audit-v1`（#357 的遗留工作分支，head 恰为 c97f302），不是 main。合并执行在该分支上产生 4262830，GitHub 随即把 PR 标记为 MERGED——但 main 从未收到这次合并。初诊由"merge commit 第一父代是 c97f302 而 #358 合并提交是其后代"反推出"main 被两次 force-push 回退"，漏查了 baseRefName；main 的 ruleset（2026-10-15 起，`non_fast_forward` + `deletion`，无 bypass）自始至终有效、从未被违反——不存在任何 ref 重写。
 
-两个主线（main 含 #358/#360/#361，4262830 含 #357/#359）从 c97f302 分叉、互不含对方内容。GitHub Events API 在 10-30 当天对 4 次 PR 合并只记录了 PullRequestEvent、没有任何 PushEvent，与正常的合并事件模式相悖；结合合并提交的父子代关系，唯一自洽的解释是 main ref 经历了两次重写（force-push），来源最可能是本地 stale main 的强制推送（Events API 不记录重写者，仓库无审计日志可查）。
+时间线（更正后）：
+1. 10-30 09:34 #358 以 base=main 合并，main=3c97080。
+2. 10-30 16:44 #359 以 base=docs/workflow-decision-audit-v1（c97f302）合并，产生 4262830；main 不变。
+3. #360–#363 全部 base=main，依次合并，均不含 #359。
 
 ### 经验教训
 
 | 问题 | 教训 | 规范 |
 |------|------|------|
-| PR MERGED ≠ 内容在 main | main ref 可以被回退，合并状态标记不会纠正基线丢失 | 每次合并后对已合并 PR 的 merge commit 执行 `git merge-base --is-ancestor <merge_sha> main` 校验；发现 NOT in main 立即按本节流程重落地 |
-| Events API 无 PushEvent 是异常信号 | 正常合并会产生 PushEvent；只有 PullRequestEvent 而无 PushEvent 说明写入路径异常 | 结合 merge commit 父子代拓扑与双线内容差集取证，不依赖单一事件源下结论 |
-| 重落地应 merge 原合并提交而非重做补丁 | merge 使丢失的合并提交重新成为 main 祖先，未来来自相关分支的合并不会再次冲突；cherry-pick 会留下永久分叉 | `git merge <丢失的 merge commit>`，冲突按文件级语义收敛（本次仅 advancement.py 与 wiki/log.md 真冲突） |
-| 行数门禁与哈希基线是合并雷区 | 双线各自演进后，500 行模块门禁与 console-ui fixture 哈希会被合并打破 | 合并后必跑 `test_controller_modularity` 与 `test_console_ui_modules`；fixture 哈希按 §350 先例只做原位替换，禁止整文件重排版 |
-| 重落地要顺带清偿该 PR 的评审欠账 | 丢失的 PR 自带未解决评审线程，原样恢复等于把已知缺陷再合并一次 | 本次随重落地修复了 #359 的 2 条 P2（dedup 回执所有权、零任务工作流卡片）并补齐卡片状态字段缺口 |
+| PR MERGED ≠ 内容在 main | PR 可以合并进任意 base 分支并显示 MERGED；默认分支视角的"已交付"必须另行证明 | 每次合并后对 merge commit 执行 `git merge-base --is-ancestor <merge_sha> origin/main`；NOT ancestor 即按本节流程重落地 |
+| base 选错无护栏可拦 | ruleset 管 ref 写入规则，管不住"PR 挂错 base"；长期留存的工作分支会成为误挂目标 | 开 PR 后、合并前核对 `baseRefName == "main"`；工作分支合并后及时删除远端分支，压缩误挂面 |
+| 取证结论必须过反证 | "第一父代异常"存在多种解释（回退、base 非 main），只验证其一就会错判 | 下结论前核对事件全链（baseRefName、merge commit 双父、既有规则集约束）；与护栏矛盾时优先怀疑诊断而非护栏失效 |
+| 初诊错误要就地更正 | 错误根因写入 lessons/PR 会误导后续处置（本次初诊的 force-push 结论与 10-15 起的 non_fast_forward 规则直接矛盾） | 发现矛盾立即更正原文并标注"初诊有误，已更正"，不静默改写 |
+| 重落地应 merge 原合并提交而非重做补丁 | merge 使丢失的合并提交重新成为 main 祖先，未来来自相关分支的合并不再冲突 | `git merge <丢失的 merge commit>`，冲突按文件级语义收敛（本次仅 advancement.py 与 wiki/log.md 真冲突） |
+| 行数门禁与哈希基线是合并雷区 | 双线各自演进后，500 行模块门禁与 console-ui fixture 哈希会被合并打破 | 合并后必跑 `test_controller_modularity` 与 `test_console_ui_modules`；fixture 哈希按 §350 先例只做原位替换 |
 
 ### 操作规范
 
-1. **祖先核验**：CI 合并后由合并执行者校验 `merge-base --is-ancestor`，防止"标记已合并、内容丢失"静默发生。
-2. **主干保护**：为 main 开启 GitHub branch protection 禁止 force-push（本仓库为个人仓库未开启，属负责人操作项）。
-3. **重落地验收**：merge 冲突解决后必须跑受影响专项（启动收敛、行数门禁、console 模块基线、回归套件），并对该 PR 的未解决评审线程逐条处置或修复。
+1. **祖先核验**：合并 PR 后由合并执行者校验 `git merge-base --is-ancestor <merge_sha> origin/main`，防止"标记已合并、内容丢失"静默发生（本次正是靠该核验发现）。
+2. **base 核对**：创建 PR 时显式确认 `baseRefName`；对 base≠main 的 PR，合并前必须说明目标基线与用途。
+3. **main 防护现状**：main 的 force-push/deletion 防护由 ruleset "main"（2026-10-15 起，无 bypass）承担，无需重复配置，不得移除；规则集 "保护分支"（空 ref 条件）为无效配置、不产生任何约束，留待负责人清理。
+4. **重落地验收**：merge 冲突解决后必须跑受影响专项（启动收敛、行数门禁、console 模块基线、回归套件），并对该 PR 的未解决评审线程逐条处置或修复。
 
 ### 验证命令 / 守护测试
 
 ```bash
-git merge-base --is-ancestor 4262830 main  # 重落地合入后必须为真
+git merge-base --is-ancestor 4262830 main  # PR #364 合并后必须为真
+gh pr view <n> --json baseRefName          # 开 PR / 合并前核对 base
 pytest -q tests/test_workflow_startup_core.py tests/test_workflow_startup_convergence.py \
   tests/test_startup_watchdog.py tests/test_controller_startup_log_throttle.py \
   tests/test_ops_center_read_path.py tests/test_controller_modularity.py tests/test_console_ui_modules.py
@@ -8921,6 +8925,6 @@ pytest -q tests/test_workflow_startup_core.py tests/test_workflow_startup_conver
 - `herdr/ops_center.py` 与 `herdr/ops_center_projection.py` — 零任务工作流纳入卡片清单并携带启动状态字段
 - `herdr/state/transition_gate.py` — `update_workflow_metadata` 新增 `expected_status` CAS 参数（随 #359 重落地）
 - `tests/fixtures/console-ui-baseline.json` — 7 个标签统一函数哈希原位替换
-- wiki/log.md [2026-10-31] 条目 — 本次重落地与取证摘要
-
+- GitHub ruleset "main"（id 25126777）— `non_fast_forward`/`deletion` 自 2026-10-15 生效；本次事故与其无冲突，佐证初诊 force-push 结论不成立
+- `origin/docs/workflow-decision-audit-v1` — 指向 4262830，#359 实际落点；合并 PR #364 后该分支应删除以免再被误挂
 ---

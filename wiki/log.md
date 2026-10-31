@@ -8,9 +8,9 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
-## [2026-10-31] fix | 重落地被 main 回退吞掉的 PR #359：启动失败收敛与 Console 启动标签恢复，并修复其评审欠账
+## [2026-10-31] fix | 重落地 PR #359：启动失败收敛与 Console 启动标签恢复（base 误挂 docs 分支致 main 缺失），并修复其评审欠账
 
-- 背景：例行核验发现 PR #359 在 GitHub 显示 MERGED，但 main（eb8d054）经两次 force-push 回退后不含其内容——启动收敛三件套（`workflow_startup.py`、`startup_watchdog.py`、`log_throttle.py` 增量）、Factory 启动流程改造、Console 启动标签与约 900 行测试整体缺失，且与 #360/#361 形成自 c97f302 分叉的双线。取证与教训归档于 lessons §213。
+- 背景：例行核验发现 PR #359 在 GitHub 显示 MERGED，但 main 不含其内容——启动收敛三件套（`workflow_startup.py`、`startup_watchdog.py`、`log_throttle.py` 增量）、Factory 启动流程改造、Console 启动标签与约 900 行测试整体缺失。**根因（初诊有误，已更正）**：该 PR 的 base 是遗留工作分支 `docs/workflow-decision-audit-v1`（head 恰为 c97f302），合并落在该分支上产生 4262830，main 从未收到；不存在 force-push 回退（main 的 `non_fast_forward` 规则自 10-15 有效且未被违反）。取证与教训归档于 lessons §213。
 - 变更：隔离分支 `git merge 4262830` 重落地（恢复祖先关系），解决 advancement.py（#360 内联节流让位 `StartupWaitLog`，行数门禁内收敛）与 wiki/log.md（双条目并存）冲突；顺带清偿 #359 评审欠账——`registration_receipt_owns` 拒绝 deduplicated/from_status 非 pending 回执，ops 卡片纳入零任务工作流并携带 `status/startup_ready/outcome/startup_failure_reason`（原实现该分支读不到字段，属死代码）；`startup_wait_log_for` 加类型守卫并以日志自身时钟节流；operations.js 行数预算内收敛；console-ui 基线 7 个标签统一函数哈希原位替换。
 - 证据：专项 176 项（启动收敛/看门狗/节流/ops/console/行数门禁/卡点回归）+ 关联回归 248 项全绿；`compileall`、`git diff --check` clean；重落地合入后 `git merge-base --is-ancestor 4262830 main` 为真（待 PR 合并后生效）。
 
