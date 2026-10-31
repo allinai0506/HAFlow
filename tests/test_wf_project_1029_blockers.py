@@ -80,6 +80,28 @@ def test_clone_archive_ignores_node_modules_and_build_dirs(tmp_path):
     assert "dist/declared_artifact.pdf" in inv_with_decl
 
 
+def test_preserve_clone_and_verify_source_with_declared_artifact_in_excluded_dir(tmp_path):
+    repo = tmp_path / "clones" / "t-decl"
+    repo.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "index.js").write_text("console.log('hi');")
+    (repo / "dist").mkdir()
+    (repo / "dist" / "analysis.md").write_text("# Deliverable Analysis")
+
+    task = {
+        "task_id": "t-decl",
+        "workflow_id": "wf-decl",
+        "run_id": "r-decl",
+        "clone_path": str(repo),
+        "artifacts": ["dist/analysis.md"],
+    }
+    archive = clone_archive.preserve_clone(task, tmp_path / "clones")
+    assert archive is not None
+    # Immediate verify_source must succeed and not raise 'clone output changed after archive'
+    clone_archive.verify_source(task, tmp_path / "clones", archive)
+
+
 def test_business_scope_and_key_normalizes_closing_status():
     wf_running = {
         "workflow_id": "wf-1",

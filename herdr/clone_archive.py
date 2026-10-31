@@ -153,6 +153,14 @@ def _declared_deliverable_rel_paths(task: dict | None) -> set[str]:
     return declared
 
 
+def _is_declared_or_ancestor(rel: str, declared: set[str]) -> bool:
+    """Check if rel is an explicitly declared path or an ancestor directory of one."""
+    if not declared:
+        return False
+    norm = rel.rstrip("/") + "/"
+    return rel in declared or any(p.startswith(norm) for p in declared)
+
+
 def _inventory(root, task=None):
     entries = {}
     total = 0
@@ -167,17 +175,13 @@ def _inventory(root, task=None):
         dirs[:] = [
             d for d in dirs
             if d not in BYPASS_IGNORED_DIRS
-            or any(
-                p == (d if rel_current == "." else f"{rel_current}/{d}")
-                or p.startswith((d if rel_current == "." else f"{rel_current}/{d}") + "/")
-                for p in declared
-            )
+            or _is_declared_or_ancestor(d if rel_current == "." else f"{rel_current}/{d}", declared)
         ]
         for name in sorted(dirs + files):
             path = Path(current) / name
             info = path.lstat()
             rel = path.relative_to(root).as_posix()
-            is_declared = rel in declared or any(p.startswith(rel + "/") for p in declared)
+            is_declared = _is_declared_or_ancestor(rel, declared)
             if not is_declared and (
                 stat.S_ISSOCK(info.st_mode)
                 or name.endswith(".sock")
@@ -348,7 +352,7 @@ def verify_source(task, clone_root, archive):
     current = _inventory(root, task=task)
     declared = _declared_deliverable_rel_paths(task)
     manifest_entries = {
-        k: v for k, v in manifest["entries"].items() if k in declared or not is_bypass_rel_path(k)
+        k: v for k, v in manifest["entries"].items() if _is_declared_or_ancestor(k, declared) or not is_bypass_rel_path(k)
     }
     deleting = task.get("clone_reclaim_started") == archive["manifest_sha256"]
     if current != manifest_entries and not (
