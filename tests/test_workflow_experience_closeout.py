@@ -85,16 +85,19 @@ def test_close_workflow_owned_triggers_experience_collector(tmp_path: Path):
     sync_calls = []
 
     class MockCollector:
-        def collect_and_sync_lessons(self):
-            sync_calls.append("lessons")
+        # PR #377 新契约：close 本地持久化（sync_to_hub=False），上传走后台 drain
+        def __init__(self, db_path=None, hub_client=None):
+            sync_calls.append(f"collector-db:{db_path}")
 
-        def collect_workflow_tasks(self, wid):
+        def collect_and_sync_lessons(self, sync_to_hub=True):
+            sync_calls.append("lessons-local" if not sync_to_hub else "lessons-sync")
+
+        def collect_workflow_tasks(self, wid, state_db_path=None):
             sync_calls.append(f"tasks:{wid}")
 
-        def recover_and_sync(self):
-            sync_calls.append("recover")
-
-    with patch("herdr.experience.collector.ExperienceCollector", return_value=MockCollector()):
+    with patch("herdr.experience.collector.ExperienceCollector", MockCollector), \
+         patch("herdr.experience.collector.trigger_background_sync",
+               lambda state_db_path=None: sync_calls.append(f"drain:{state_db_path}")):
         close_workflow_owned(
             "wf-close-exp",
             load_tasks=lambda: {"tasks": [store.get_task("wrap")]},
@@ -114,7 +117,9 @@ def test_close_workflow_owned_triggers_experience_collector(tmp_path: Path):
             teardown_blocking_statuses=ACTIVE_TASK_STATUSES,
         )
 
-    assert "lessons" in sync_calls
+    assert "lessons-local" in sync_calls, "close 本地持久化 lessons（不再同步上传）"
     assert "tasks:wf-close-exp" in sync_calls
-    assert "recover" in sync_calls
+    assert f"collector-db:{store.db_path}" in sync_calls, "采集绑定 close 所用库"
+    assert f"drain:{store.db_path}" in sync_calls, "上传由同库后台 drain 承接"
+    assert "lessons-sync" not in sync_calls and "recover" not in sync_calls
 

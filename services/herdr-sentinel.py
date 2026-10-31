@@ -647,6 +647,26 @@ def pane_visible(pane_id):
         return ""
 
 
+def pane_recent(pane_id, lines=2000):
+    """Return one bounded scrollback capture (recent-unwrapped); "" on failure.
+
+    交付证据的读取源（PR #377）：初始 prompt 的编排标记会随长任务滚出
+    可见屏，visible 源丢宽限；recent-unwrapped 在有界行数内保留历史，
+    子进程数不变（每任务每 sweep 仍一次 pane read）。
+    """
+    try:
+        r = run(
+            ["herdr", "pane", "read", pane_id, "--source", "recent-unwrapped",
+             "--lines", str(max(1, int(lines)))],
+            timeout=10,
+        )
+        if r.returncode != 0:
+            return ""
+        return (r.stdout or "") + "\n" + (r.stderr or "")
+    except Exception:
+        return ""
+
+
 def agent_status(pane_id):
     try:
         r = run(["herdr", "agent", "get", pane_id], timeout=10)
@@ -1157,7 +1177,7 @@ def _pane_delivery_evidence(pane_id, task_id):
 
     from herdr.completion import ORCH_MARKER_PREFIX, marker_present
 
-    screen = pane_visible(pane_id)
+    screen = pane_recent(pane_id)
     return {
         "has_marker": marker_present(screen, task_id, ORCH_MARKER_PREFIX),
         "agent_status": agent_status(pane_id),
