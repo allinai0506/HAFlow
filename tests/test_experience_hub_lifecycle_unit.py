@@ -303,9 +303,32 @@ def test_manager_other_pid_is_ad_hoc():
     assert probe.manager == lifecycle.MANAGER_AD_HOC
 
 
-def test_manager_command_failed_is_unknown_and_stop_refuses():
+def test_manager_label_not_loaded_is_ad_hoc_and_stop_signals():
+    """label 未加载是探针的确定性回答（目标必非该 label 托管），归 ad_hoc。
+
+    新版 macOS 对未加载 label 返回 rc=113（旧版 rc=3），语义不变；
+    真实探针失败（超时/无工具/权限/空输出）仍归 unknown 拒发信号。
+    """
     probe = lifecycle.classify_manager("", returncode=113, target_pid=80677,
                                        stderr="Could not find service in domain for port")
+    assert probe.manager == lifecycle.MANAGER_AD_HOC
+
+    classification = lifecycle.classify(
+        operation="stop",
+        selector=selector(),
+        listeners=(listener(pid=80677),),
+        registry=None,
+        registry_state="absent",
+        manager=probe.manager,
+    )
+    assert classification.exit_code == lifecycle.EXIT_OK
+    assert classification.action == lifecycle.ACTION_SIGNAL
+
+
+def test_manager_command_failed_is_unknown_and_stop_refuses():
+    """真实探针失败（权限拒绝，非确定性回答）必须 fail-closed 拒发信号。"""
+    probe = lifecycle.classify_manager("", returncode=113, target_pid=80677,
+                                       stderr="procinfo requires root privileges")
     assert probe.manager == lifecycle.MANAGER_UNKNOWN
 
     classification = lifecycle.classify(

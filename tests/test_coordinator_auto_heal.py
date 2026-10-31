@@ -1,6 +1,8 @@
 """Tests for coordinator auto-heal and fallback dispatch mechanisms."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from herdr import projects
@@ -86,6 +88,17 @@ class CoordinatorIntakeFallbackTestCase(unittest.TestCase):
     def setUp(self):
         import importlib
         self.controller = importlib.import_module("services.herdr-controller")
+        # stage-state 写入逐用例隔离：不得依赖同 worker 其他用例先创建
+        # <home>/.herdr-controller（xdist 分布随测试文件集合变化，否则
+        # save_stage_state 报 FileNotFoundError）。
+        tmp_state = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp_state.cleanup)
+        state_patcher = patch.object(
+            self.controller, "STAGE_STATE_FILE",
+            str(Path(tmp_state.name) / "stage-state.json"),
+        )
+        state_patcher.start()
+        self.addCleanup(state_patcher.stop)
 
     def test_direct_dispatch_precedes_stale_coordinator_attention(self):
         """A deterministic launch does not wait on historical coordinator attention."""
