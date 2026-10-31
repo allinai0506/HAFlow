@@ -36,6 +36,10 @@ class TestSidebarCompletedFolding(unittest.TestCase):
         script = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL).group(1)
         start = script.index("function renderSidebarWorkflows(){")
         end = script.index("function openWorkflowTab(", start)
+        # 重落地后的侧栏函数调用 presentation.js 的启动状态助手（workflowStatusKey/
+        # Label/Tone 等），真实页面里它们先于本段加载；harness 从同一 bundle 注入
+        # humanStatus..humanReason 连续切片，保持与生产作用域一致。
+        helpers = script[script.index("function humanStatus("):script.index("function humanReason(")]
 
         harness = r"""
 const container = {dataset: {}, innerHTML: '', querySelectorAll: () => []};
@@ -61,7 +65,7 @@ let state = {
   completedVisibleLimit: 5,
   project: { workflows: workflows }
 };
-""" + script[start:end] + r"""
+""" + helpers + script[start:end] + r"""
 
 // 1. Initial render: collapsed by default, displays only 5 items plus toggle button
 renderSidebarWorkflows();
