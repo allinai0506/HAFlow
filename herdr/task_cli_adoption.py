@@ -126,7 +126,7 @@ def adopt_head_if_attributable(
         current_branch=current_branch,
         allow_rebase=effective_allow_rebase,
         allowed_authors=task.get("allowed_authors"),
-        expected_agent=task.get("agent"),
+        expected_agent=task.get("expected_agent"),
     )
     basis = detail.get("basis") or "none"
     reason = detail.get("reason") or "unknown"
