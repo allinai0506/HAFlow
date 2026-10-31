@@ -209,7 +209,8 @@ def test_default_automatic_work_is_bounded_per_tick(store):
     action = automation.read_cockpit(store, 'wf-1', controller={'status': 'running'})['actions'][0]
     actions = [{**deepcopy(action), 'action_id': f'resume-{i}'} for i in range(9)]
     def project(wid):
-        return {'workflow': store.get_workflow(wid), 'tasks': [], 'recovery': [], 'actions': actions}
+        # 生产投影恒带 read_state（build_cockpit_projection），替身同样遵守投影契约
+        return {'workflow': store.get_workflow(wid), 'tasks': [], 'recovery': [], 'actions': actions, 'read_state': 'confirmed'}
     def effect(action):
         store.record_event('test.side_effect', {'action_id': action['action_id']}, workflow_id='wf-1')
         return {'ok': True}

@@ -59,20 +59,24 @@ def _bounded_copy(record, protected, field_limit, row_limit):
             sizes[key] = _utf8_len(json.dumps(value, ensure_ascii=False, default=str))
 
     def shrink(key, keep):
+        # sizes[key] 始终是该字段“当前剩余字节”：字段级截断后行预算二段
+        # 仍能继续收缩同一字段（PR #343 评审遗留：归零会让 3×100KB 字段
+        # 组出 12.5KB 的行）。omitted 从截断前尺寸累计，保证标记如实。
         original = row[key]
         if isinstance(original, str):
             row[key] = original.encode("utf-8")[:keep].decode("utf-8", "ignore")
-            omitted = sizes[key] - keep
+            omitted = max(0, sizes[key] - keep)
+            sizes[key] = _utf8_len(row[key])
         else:
             row[key] = {"truncated": True, "omitted_bytes": sizes[key]}
             omitted = sizes[key]
+            sizes[key] = 0
         entry = truncated.get(key)
         if entry is None:
             entry = {"field": key, "omitted_bytes": 0}
             truncated[key] = entry
             row["_truncated_fields"] = sorted(truncated.values(), key=lambda item: item["field"])
         entry["omitted_bytes"] += omitted
-        sizes[key] = 0
 
     for key in sorted(sizes, key=sizes.get, reverse=True):
         if sizes[key] <= field_limit:
@@ -115,6 +119,29 @@ def _bounded_response(result):
             node["tasks"] = []
         sheds.append("node_task_rows")
     return sheds
+
+def _bound_shell_sections(result):
+    """Envelope 预算同样约束 read_cockpit 后置追加的 shell 段（PR #343 评审遗留）。
+
+    blockers/receipts 在 build_cockpit_projection 的预算检查之后拼装：超大
+    persisted receipts 可让 2MB+ 响应仍报 confirmed。先按最旧优先丢弃
+    receipts（append 时 DESC 序，pop 即最旧），仍超限则与投影尾部同口径
+    fail-closed。
+    """
+    sheds = []
+
+    def envelope_size():
+        return _utf8_len(json.dumps(result, ensure_ascii=False, default=str))
+
+    while envelope_size() > MAX_RESPONSE_BYTES and result.get("receipts"):
+        result["receipts"].pop()
+        sheds.append("receipts")
+    if sheds:
+        result["response_shed"] = [*(result.get("response_shed") or []), *sheds]
+    if envelope_size() > MAX_RESPONSE_BYTES:
+        result["read_state"] = "unknown"
+        result["errors"] = {**result["errors"], "response_budget": "exceeded"}
+    return result
 
 
 def _owned(record, workflow_id):

@@ -1,7 +1,7 @@
 /* Selected workflow reads, request coalescing and projection identity checks. */
 var {
   workflowSubject, workflowDisplayName, copyWorkflowId, editWorkflowTitle,
-  renderWorkflowSwitcher, loadWorkflow, loadControllerCockpit, clearWorkflow
+  renderWorkflowSwitcher, loadWorkflow, loadControllerCockpit, cockpitTargetLookup, clearWorkflow
 } = (function({
   state, toast, showPromptModal,
   api, renderWorkflowTabs, renderSidebarWorkflows,
