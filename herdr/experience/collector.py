@@ -735,6 +735,7 @@ class ExperienceCollector:
         self,
         lessons_path: Optional[Path] = None,
         min_lesson_num: int = 160,
+        sync_to_hub: bool = True,
     ) -> Dict[str, Any]:
         """Extract and sync corporate business rules from lessons-learned.md."""
         if lessons_path:
@@ -750,10 +751,20 @@ class ExperienceCollector:
             candidates = extract_candidates_from_lessons(content, contributor=self.contributor, min_lesson_num=min_lesson_num)
             uploaded = 0
             failed = 0
+            skipped = 0
             now = time.time()
             conn = _get_collector_db(self.db_path)
             try:
                 for exp in candidates:
+                    # 已上传去重（PR #377）：DB 行 status='uploaded' 的候选
+                    # 不再重复提交——旧行为每次调用全量重发（50 requests）。
+                    existing = conn.execute(
+                        "SELECT status FROM local_collector_records WHERE task_id = ? AND run_id = ?",
+                        (exp.source.task_id, exp.source.run_id),
+                    ).fetchone()
+                    if existing and existing["status"] == "uploaded":
+                        skipped += 1
+                        continue
                     cand_json = json.dumps(exp.to_dict(), ensure_ascii=False)
                     with conn:
                         conn.execute("""
@@ -765,7 +776,10 @@ class ExperienceCollector:
                                 updated_at = excluded.updated_at
                             WHERE local_collector_records.status != 'uploaded'
                         """, (exp.source.task_id, exp.source.run_id, exp.experience_id, cand_json, now, now))
-                    if self.hub_client:
+                    # close 路径 local-only（sync_to_hub=False）：只本地持久化
+                    # pending，Hub 上传交给后台单飞 drain（Hub 不可达时 close
+                    # 不被 8s×N 请求超时拖住）。
+                    if self.hub_client and sync_to_hub:
                         try:
                             res = self.hub_client.submit_candidate(exp)
                             if isinstance(res, dict) and res.get("ok"):
@@ -784,7 +798,8 @@ class ExperienceCollector:
                             failed += 1
             finally:
                 conn.close()
-            return {"ok": True, "total": len(candidates), "uploaded": uploaded, "failed": failed}
+            return {"ok": True, "total": len(candidates), "uploaded": uploaded,
+                    "failed": failed, "skipped": skipped}
         except Exception as exc:
             LOGGER.error("collect_and_sync_lessons failed: %s", exc)
             return {"ok": False, "reason": str(exc)}
