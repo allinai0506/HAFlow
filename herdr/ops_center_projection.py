@@ -110,6 +110,14 @@ def _build_workflow_cards(workflows_tasks, now, all_tasks=None, workflow_lookup=
             "runtime_bucket": _trajectory_bucket(runtime),
             "nodes": nodes,
         }
+        # Startup surfaces (PR #359 ops labels) read the workflow record's
+        # lifecycle fields off the card; task-count aggregation alone cannot
+        # express startup_pending/startup_failed, and zero-task rows would
+        # render as generic idle cards.
+        if isinstance(workflow, dict):
+            for key in ("status", "startup_ready", "outcome", "startup_failure_reason"):
+                if workflow.get(key) is not None:
+                    card[key] = workflow.get(key)
         cards.append(card)
 
     return cards
@@ -328,7 +336,8 @@ def _build_boss_summary(tasks, workflows, anomalies):
     }
 
 def _ops_center_payload(workflow_id=None, now=None, include_tasks=False, *,
-                        snapshot_tasks=None, workflow_lookup=None, runtime_probe=None):
+                        snapshot_tasks=None, workflow_lookup=None, runtime_probe=None,
+                        registered_workflow_ids=None):
     now = _now() if now is None else float(now)
     all_tasks = snapshot_tasks or []
     if workflow_id:
@@ -336,7 +345,12 @@ def _ops_center_payload(workflow_id=None, now=None, include_tasks=False, *,
         tasks = [task for task in all_tasks if task.get("workflow_id") == workflow_id]
     else:
         tasks = all_tasks
+        # Cards must also cover registered zero-task workflows: pending startups
+        # never spawn tasks, and startup-failure convergence explicitly requires
+        # zero tasks, so deriving IDs from tasks alone hides exactly the rows the
+        # startup labels exist for.
         workflow_ids = {task.get("workflow_id") for task in tasks if task.get("workflow_id")}
+        workflow_ids.update(str(wid) for wid in (registered_workflow_ids or ()))
 
     # 确保当前查询范围中至少有工作流分组，避免前端无法渲染卡片。
     if workflow_id and workflow_id not in workflow_ids:

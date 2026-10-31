@@ -157,11 +157,8 @@ async function runOpsAnomalyAction(actType,wid,tid,node,options){
       toast('人工豁免已写入但推进失败: '+(res.advance_error||res.error||'后续推进未完成'),true);
     }else if(res.ok){
       if(actType==='force_pass'||actType==='force_pass_advance'){
-        if(res.advanced){
-          toast('门禁已豁免，工作流推进至: '+((res.advanced&&res.advanced.next_stage)||'下一阶段'));
-        }else{
-          toast('人工豁免记录已写入，等待调度推进');
-        }
+        if(res.advanced)toast('门禁已豁免，工作流推进至: '+((res.advanced&&res.advanced.next_stage)||'下一阶段'));
+        else toast('人工豁免记录已写入，等待调度推进');
       }else if(actType==='ops_repair'||actType==='retry'||actType==='rework'||actType==='redrive'){
         toast('恢复命令已执行 ('+(res.action_id||actType)+')，已向工位派发');
       }else if(actType==='clear_escalation'){
@@ -169,9 +166,7 @@ async function runOpsAnomalyAction(actType,wid,tid,node,options){
       }else{
         toast('操作成功: '+(res.task_id||res.action_id||'已生效'));
       }
-    }else{
-      toast('操作未完成: '+(res.error||'执行未生效'),true);
-    }
+    }else toast('操作未完成: '+(res.error||'执行未生效'),true);
     await loadOpsCenter();
   }catch(e){
     toast('操作失败: '+e.message,true);
@@ -276,11 +271,8 @@ function renderOpsCenter(){
     const startupKey=workflowStatusKey(c);
     if(startupKey==='startup_pending'||startupKey==='startup_failed'||startupKey==='abandoned'){
       const tone=workflowStatusTone(c);
-      statusClass=tone==='danger'?'is-failed':tone==='warning'?'is-blocked':'is-idle';
-      statusText=workflowStatusLabel(c);
-      summaryIcon=startupKey==='startup_pending'?'○':'!';
-      summaryClass=statusClass;
-      summaryText=workflowStartupHint(c)||statusText;
+      statusClass=summaryClass=tone==='danger'?'is-failed':tone==='warning'?'is-blocked':'is-idle';
+      statusText=workflowStatusLabel(c);summaryIcon=startupKey==='startup_pending'?'○':'!';summaryText=workflowStartupHint(c)||statusText;
     }else if(failedNode||c.tasks.failed>0){
       statusClass='is-failed';
       statusText='执行失败';

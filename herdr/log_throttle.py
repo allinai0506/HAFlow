@@ -51,7 +51,12 @@ FALLBACK_STARTUP_WAIT_LOG = StartupWaitLog()
 
 
 def startup_wait_log_for(ports):
-    return getattr(ports, "_startup_wait_log", None) or FALLBACK_STARTUP_WAIT_LOG
+    log = getattr(ports, "_startup_wait_log", None)
+    # 类型守卫：绑定视图或测试替身上的异质对象一律回退进程级实例，
+    # 节流语义不因 ports 注入对象的形状而失效。
+    if isinstance(log, StartupWaitLog):
+        return log
+    return FALLBACK_STARTUP_WAIT_LOG
 
 
 def startup_wait_hold(ports, workflow_id, workflow_record, message=""):
@@ -61,7 +66,9 @@ def startup_wait_hold(ports, workflow_id, workflow_record, message=""):
         if log.finished(workflow_id):
             print(f"[STARTUP READY] workflow={workflow_id}")
         return False
-    if log.waiting(workflow_id, ports.time.time()):
+    # 时间取自 log 自身可注入时钟：ports.time 只是其余链路的注入点，
+    # 节流不依赖它，避免替身对象进入 float() 运算。
+    if log.waiting(workflow_id):
         suffix = f" {message}" if message else ""
         print(f"[STARTUP WAIT] workflow={workflow_id}{suffix}")
     return True

@@ -12,7 +12,8 @@ def _hold_for_startup(ports, workflow_id, startup_record):
     """Wait while the workflow is not ready; the wait log is rate-limited per workflow."""
     log = _startup_wait_log_for(ports)
     if startup_record.get("startup_ready") is False:
-        if log.waiting(workflow_id, ports.time.time()):
+        # 时间取自 log 自身可注入时钟，节流不依赖 ports.time 注入点。
+        if log.waiting(workflow_id):
             print(f"[STARTUP WAIT] workflow={workflow_id} "
                   "queued event held until request is ready")
         ports.time.sleep(1)

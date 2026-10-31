@@ -143,9 +143,6 @@ _foreign_workflows_logged = set()
 # 完成日志闩：close 失败也不得每 sweep 重刷 [WORKFLOW COMPLETE]。
 _workflow_complete_logged = set()
 
-# 启动就绪等待日志节流：workflow_id -> 上次打印时间戳
-_startup_wait_logged = {}
-
 # 正在执行终化的任务集合，防止并发调用冲突
 _finalize_inflight = set()
 

@@ -23,6 +23,23 @@ def test_registration_receipt_owns_only_this_commit():
     assert not ws.registration_receipt_owns("wf-owned", "wf-owned")
 
 
+def test_registration_receipt_rejects_deduplicated_replay():
+    """Codex PR #359 P2: a force retry replaying an existing running registration
+    gets a deduplicated receipt; it must never count as ownership, or a later
+    preflight failure converges someone else's live startup to startup_failed."""
+    replay = {"ok": True, "workflow_id": "wf-owned", "event_id": 7,
+              "from_status": "running", "deduplicated": True}
+    assert not ws.registration_receipt_owns(replay, "wf-owned")
+    # 回执含 from_status='running' 但未带 deduplicated 标志的旧形态也必须拒绝：
+    # 全新注册的提交不可能来自已处于 running 的既有行。
+    legacy = {"ok": True, "workflow_id": "wf-owned", "event_id": 7,
+              "from_status": "running"}
+    assert not ws.registration_receipt_owns(legacy, "wf-owned")
+    assert ws.registration_receipt_owns(
+        {"ok": True, "workflow_id": "wf-owned", "event_id": 9,
+         "from_status": "pending", "deduplicated": False}, "wf-owned")
+
+
 def _store(tmp_path):
     return SQLiteStateStore(tmp_path / "state.db")
 

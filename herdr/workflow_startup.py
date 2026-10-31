@@ -83,13 +83,24 @@ def registration_receipt_owns(receipt: Mapping[str, Any] | None, workflow_id: st
 
     A row that already uses ``workflow_id`` is not ownership. The receipt is the
     dict ``register_workflow`` returns once its write transaction has committed:
-    ``ok``, the same workflow id, and the ``workflow_created`` event id.
+    ``ok``, the same workflow id, and the ``workflow_created`` event id. Two
+    replay shapes describe pre-existing registrations and are rejected: a
+    ``deduplicated`` receipt replays an existing creation event, and a
+    ``from_status`` of anything but fresh/pending means the row already lived
+    before this call (legacy rows may lack the creation event). Accepting
+    either would let a force retry claim — and on preflight failure converge —
+    someone else's live startup.
     """
     if not isinstance(receipt, Mapping):
         return False
     if receipt.get("ok") is not True:
         return False
     if receipt.get("workflow_id") != workflow_id:
+        return False
+    if receipt.get("deduplicated") is True:
+        return False
+    from_status = receipt.get("from_status")
+    if isinstance(from_status, str) and from_status.strip() not in ("", "pending"):
         return False
     event_id = receipt.get("event_id")
     if isinstance(event_id, bool) or event_id is None:
