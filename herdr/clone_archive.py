@@ -135,21 +135,77 @@ def _root(task, clone_root):
     return root
 
 
-def _declared_deliverable_rel_paths(task: dict | None) -> set[str]:
+def _declared_deliverable_rel_paths(task: dict | None, root: Path | str | None = None) -> set[str]:
     """Collect relative paths of all declared artifacts/deliverables on a task."""
     if not isinstance(task, dict):
         return set()
+    from herdr.deliverables import _ref_rel
+
+    workspaces: list[Path] = []
+    if root is not None:
+        try:
+            workspaces.append(Path(root))
+        except Exception:
+            pass
+    if task.get("workspace"):
+        try:
+            ws_path = Path(task["workspace"])
+            if ws_path not in workspaces:
+                workspaces.append(ws_path)
+        except Exception:
+            pass
+
     declared = set()
     for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
         for item in task.get(key) or []:
+            matched = False
+            for ws in workspaces:
+                rel = _ref_rel(item, ws)
+                if rel:
+                    declared.add(rel)
+                    matched = True
+                    break
+            if matched:
+                continue
+
+            candidates: list[str] = []
             if isinstance(item, str):
-                p = item.strip().replace("\\", "/").removeprefix("./")
-                if p:
-                    declared.add(p)
+                candidates.append(item)
             elif isinstance(item, dict):
-                p = str(item.get("path") or item.get("rel_path") or "").strip().replace("\\", "/").removeprefix("./")
-                if p:
-                    declared.add(p)
+                for f in ("rel_path", "path", "ref", "artifact_path", "content_ref"):
+                    val = item.get(f)
+                    if val:
+                        candidates.append(str(val))
+                meta = item.get("metadata")
+                if isinstance(meta, dict):
+                    for f in ("artifact_path", "path", "rel_path"):
+                        val = meta.get(f)
+                        if val:
+                            candidates.append(str(val))
+                if not candidates and item.get("name"):
+                    candidates.append(str(item.get("name")))
+
+            for raw in candidates:
+                text = str(raw or "").strip().replace("\\", "/")
+                if text.startswith("./"):
+                    text = text[2:]
+                if not text or any(ch.isspace() for ch in text) or ".." in Path(text).parts:
+                    continue
+                if not text.startswith("/"):
+                    declared.add(text)
+                    break
+                raw_path = Path(text).expanduser()
+                for ws in workspaces:
+                    try:
+                        resolved = raw_path.resolve()
+                        ws_res = ws.resolve()
+                        if ws_res in resolved.parents and resolved != ws_res:
+                            rel_p = resolved.relative_to(ws_res).as_posix()
+                            if rel_p and ".." not in Path(rel_p).parts:
+                                declared.add(rel_p)
+                                break
+                    except (OSError, ValueError):
+                        continue
     return declared
 
 
@@ -165,7 +221,7 @@ def _inventory(root, task=None):
     entries = {}
     total = 0
     deadline = time.monotonic() + MAX_SECONDS
-    declared = _declared_deliverable_rel_paths(task)
+    declared = _declared_deliverable_rel_paths(task, root)
 
     def failed(error):
         raise error
@@ -350,7 +406,7 @@ def verify_source(task, clone_root, archive):
             raise ValueError("clone instance changed")
     manifest = archive_manifest(dict(task, clone_archive=archive))
     current = _inventory(root, task=task)
-    declared = _declared_deliverable_rel_paths(task)
+    declared = _declared_deliverable_rel_paths(task, root)
     manifest_entries = {
         k: v for k, v in manifest["entries"].items() if _is_declared_or_ancestor(k, declared) or not is_bypass_rel_path(k)
     }

@@ -89,17 +89,29 @@ def test_preserve_clone_and_verify_source_with_declared_artifact_in_excluded_dir
     (repo / "dist").mkdir()
     (repo / "dist" / "analysis.md").write_text("# Deliverable Analysis")
 
-    task = {
-        "task_id": "t-decl",
-        "workflow_id": "wf-decl",
-        "run_id": "r-decl",
-        "clone_path": str(repo),
-        "artifacts": ["dist/analysis.md"],
-    }
-    archive = clone_archive.preserve_clone(task, tmp_path / "clones")
-    assert archive is not None
-    # Immediate verify_source must succeed and not raise 'clone output changed after archive'
-    clone_archive.verify_source(task, tmp_path / "clones", archive)
+    # Verify that supported deliverable reference forms (dict artifact_path, absolute paths)
+    # are properly normalized and preserved in the manifest and inventory.
+    for artifact_ref in [
+        "dist/analysis.md",
+        {"artifact_path": "dist/analysis.md"},
+        str(repo / "dist/analysis.md"),
+        {"artifact_path": str(repo / "dist/analysis.md")},
+    ]:
+        task = {
+            "task_id": "t-decl",
+            "workflow_id": "wf-decl",
+            "run_id": "r-decl",
+            "clone_path": str(repo),
+            "workspace": str(repo),
+            "artifacts": [artifact_ref],
+        }
+        archive = clone_archive.preserve_clone(task, tmp_path / "clones")
+        assert archive is not None
+        manifest = clone_archive.archive_manifest(dict(task, clone_archive=archive))
+        assert "dist/analysis.md" in manifest["entries"]
+        assert "dist" in manifest["entries"]
+        # Immediate verify_source must succeed and not raise 'clone output changed after archive'
+        clone_archive.verify_source(task, tmp_path / "clones", archive)
 
 
 def test_business_scope_and_key_normalizes_closing_status():
