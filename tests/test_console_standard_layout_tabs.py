@@ -119,6 +119,7 @@ function clearWorkflow() {{
   state.workflowId = null;
   renderWorkflowTabs();
 }}
+{self.js[self.js.index("function humanStatus("):self.js.index("function humanReason(")]}
 {re.search(r'function openWorkflowTab\(id\)\{.*?\n\}', self.js, re.DOTALL).group(0)}
 {re.search(r'function closeWorkflowTab\(id,e\)\{.*?\n\}', self.js, re.DOTALL).group(0)}
 {re.search(r'function renderWorkflowTabs\(\)\{.*?\n\}', self.js, re.DOTALL).group(0)}

@@ -52,6 +52,37 @@ def test_ops_reads_single_snapshot_and_deduplicates_probes(tmp_path):
     assert not any("WHERE workflow_id" in s for s in statements)
 
 
+def test_ops_cards_include_registered_zero_task_workflows(tmp_path):
+    """Codex PR #359 P2: the unscoped ops payload once derived cards from tasks
+    only, hiding exactly the zero-task rows the startup labels exist for
+    (pending startups spawn no tasks; startup-failure convergence requires zero)."""
+    from herdr.ops_center import build_ops_center_payload
+    db = tmp_path / "state.db"
+    seed(db)
+    state_db.save_workflow({"workflow_id": "wf-start-pending", "title": "启动中",
+        "status": "running", "startup_ready": False, "created_at": 2,
+        "config": {"name": "wf-start-pending", "nodes": [{"id": "plan"}]}}, db_path=db)
+    state_db.save_workflow({"workflow_id": "wf-start-failed", "title": "启动失败",
+        "status": "completed", "outcome": "startup_failed",
+        "startup_failure_reason": "preflight boom", "created_at": 3,
+        "config": {"name": "wf-start-failed", "nodes": [{"id": "plan"}]}}, db_path=db)
+    with patch.object(state_db, "init_db", side_effect=AssertionError("DDL on read")):
+        result = build_ops_center_payload(db_path=db, now=100,
+                                          runtime_probe=lambda _: "working")
+    cards = {c["workflow_id"]: c for c in result["workflow_cards"]}
+    assert "wf-start-pending" in cards and "wf-start-failed" in cards
+    assert cards["wf-start-pending"]["tasks"]["total"] == 0
+    assert cards["wf-start-pending"]["status"] == "running"
+    assert cards["wf-start-pending"]["startup_ready"] is False
+    assert cards["wf-start-failed"]["outcome"] == "startup_failed"
+    assert cards["wf-start-failed"]["startup_failure_reason"] == "preflight boom"
+    # Scoped requests keep working off the same card builder.
+    scoped = build_ops_center_payload("wf-start-pending", db_path=db, now=100,
+                                      runtime_probe=lambda _: "working")
+    assert [c["workflow_id"] for c in scoped["workflow_cards"]] == ["wf-start-pending"]
+    assert scoped["workflow_cards"][0]["startup_ready"] is False
+
+
 def test_ops_concurrent_scopes_do_not_share_snapshot(tmp_path):
     from herdr.ops_center import build_ops_center_payload
     a, b = tmp_path / "a.db", tmp_path / "b.db"

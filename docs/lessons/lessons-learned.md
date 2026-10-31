@@ -8851,7 +8851,7 @@ pytest -v \
 | 控制器单模块行数超限 | 职责拆分与模块化架构测试强制每个子模块代码行数 <= 500 行，新增逻辑不得随意突破行数预算 | `advancement.py` 精简内部依赖映射与打印格式，控制在 497 行（<= 500 行），符合架构守卫门禁 |
 | 终化并发调用竞争 Git 工作区 | 同一任务终化过程包含 Git 索引操作与状态写，多线程同时执行必然踩锁；且在飞跳过不得扣减重试预算 | 控制器通过 `_finalize_inflight` 集合按 task_id 实现线程安全互斥；`finalize_retry.py` 将 inflight 识别为非消耗预算的 wait，杜绝虚假升级 |
 | 大仓推送 30 秒超时导致 PR 交付停滞 | 网络推送耗时取决于网络带宽与远端负载，大仓需放宽推送超时限制 | `pr_delivery.py` 推送操作支持 `HERDR_GIT_PUSH_TIMEOUT` 环境变量（默认 120 秒） |
-| preflight 期间启动日志频繁刷屏 | 调度轮询每秒执行，缺乏节流会淹没关键排错日志 | `advancement.py` 针对未就绪启动日志按 30 秒窗口实施最小节流 |
+| preflight 期间启动日志频繁刷屏 | 调度轮询每秒执行，缺乏节流会淹没关键排错日志 | `advancement.py` 接入 `herdr/log_throttle.py#StartupWaitLog` 对未就绪启动日志限频（PR #359 重落地后取代 §212 当时的 30 秒窗口内联节流） |
 
 ### 操作规范
 
@@ -8873,7 +8873,58 @@ pytest -v tests/test_wf_project_1029_blockers.py
 - `services/controller/git_finalize.py` — pre-commit/husky/complexity 失败快速熔断与 `_finalize_inflight` 并发互斥
 - `services/herdr-worker.py` — `wait_startup_ready` 按真实 deadline 轮询与 `start_agent` 捕获 `agent_not_ready`
 - `herdr/pr_delivery.py` — push 超时延长至 120 秒
-- `services/controller/advancement.py` 与 `services/herdr-controller.py` — `_startup_wait_logged` 启动日志 30 秒节流
+- `services/controller/advancement.py` 与 `services/herdr-controller.py` — 启动等待日志限频（现由 `herdr/log_throttle.py#StartupWaitLog` 承担，见 §213 重落地）
 - `tests/test_wf_project_1029_blockers.py` — 11 项全链路卡点专项回归测试
 
+---
+
+## §213 已合并 PR 内容不在 main：PR base 误挂工作分支与合并基线核验（PR #359 重落地）
+
+### 问题现象与根因剖析
+
+2026-10-31 例行评审欠账核验发现：PR #359（wf-1029 启动失败收敛 + Console 启动标签）在 GitHub 显示 MERGED，但其内容不在 main——`herdr/workflow_startup.py`、`services/controller/startup_watchdog.py` 与约 900 行启动收敛测试整体缺失。
+
+**根因（初诊有误，已更正）**：PR #359 的 base 是工作分支 `docs/workflow-decision-audit-v1`（#357 的遗留工作分支，head 恰为 c97f302），不是 main。合并执行在该分支上产生 4262830，GitHub 随即把 PR 标记为 MERGED——但 main 从未收到这次合并。初诊由"merge commit 第一父代是 c97f302 而 #358 合并提交是其后代"反推出"main 被两次 force-push 回退"，漏查了 baseRefName；main 的 ruleset（2026-10-15 起，`non_fast_forward` + `deletion`，无 bypass）自始至终有效、从未被违反——不存在任何 ref 重写。
+
+时间线（更正后）：
+1. 10-30 09:34 #358 以 base=main 合并，main=3c97080。
+2. 10-30 16:44 #359 以 base=docs/workflow-decision-audit-v1（c97f302）合并，产生 4262830；main 不变。
+3. #360–#363 全部 base=main，依次合并，均不含 #359。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| PR MERGED ≠ 内容在 main | PR 可以合并进任意 base 分支并显示 MERGED；默认分支视角的"已交付"必须另行证明 | 每次合并后对 merge commit 执行 `git merge-base --is-ancestor <merge_sha> origin/main`；NOT ancestor 即按本节流程重落地 |
+| base 选错无护栏可拦 | ruleset 管 ref 写入规则，管不住"PR 挂错 base"；长期留存的工作分支会成为误挂目标 | 开 PR 后、合并前核对 `baseRefName == "main"`；工作分支合并后及时删除远端分支，压缩误挂面 |
+| 取证结论必须过反证 | "第一父代异常"存在多种解释（回退、base 非 main），只验证其一就会错判 | 下结论前核对事件全链（baseRefName、merge commit 双父、既有规则集约束）；与护栏矛盾时优先怀疑诊断而非护栏失效 |
+| 初诊错误要就地更正 | 错误根因写入 lessons/PR 会误导后续处置（本次初诊的 force-push 结论与 10-15 起的 non_fast_forward 规则直接矛盾） | 发现矛盾立即更正原文并标注"初诊有误，已更正"，不静默改写 |
+| 重落地应 merge 原合并提交而非重做补丁 | merge 使丢失的合并提交重新成为 main 祖先，未来来自相关分支的合并不再冲突 | `git merge <丢失的 merge commit>`，冲突按文件级语义收敛（本次仅 advancement.py 与 wiki/log.md 真冲突） |
+| 行数门禁与哈希基线是合并雷区 | 双线各自演进后，500 行模块门禁与 console-ui fixture 哈希会被合并打破 | 合并后必跑 `test_controller_modularity` 与 `test_console_ui_modules`；fixture 哈希按 §350 先例只做原位替换 |
+
+### 操作规范
+
+1. **祖先核验**：合并 PR 后由合并执行者校验 `git merge-base --is-ancestor <merge_sha> origin/main`，防止"标记已合并、内容丢失"静默发生（本次正是靠该核验发现）。
+2. **base 核对**：创建 PR 时显式确认 `baseRefName`；对 base≠main 的 PR，合并前必须说明目标基线与用途。
+3. **main 防护现状**：main 的 force-push/deletion 防护由 ruleset "main"（2026-10-15 起，无 bypass）承担，无需重复配置，不得移除；规则集 "保护分支"（空 ref 条件）为无效配置、不产生任何约束，留待负责人清理。
+4. **重落地验收**：merge 冲突解决后必须跑受影响专项（启动收敛、行数门禁、console 模块基线、回归套件），并对该 PR 的未解决评审线程逐条处置或修复。
+
+### 验证命令 / 守护测试
+
+```bash
+git merge-base --is-ancestor 4262830 main  # PR #364 合并后必须为真
+gh pr view <n> --json baseRefName          # 开 PR / 合并前核对 base
+pytest -q tests/test_workflow_startup_core.py tests/test_workflow_startup_convergence.py \
+  tests/test_startup_watchdog.py tests/test_controller_startup_log_throttle.py \
+  tests/test_ops_center_read_path.py tests/test_controller_modularity.py tests/test_console_ui_modules.py
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/workflow_startup.py` / `services/controller/startup_watchdog.py` / `herdr/log_throttle.py` — 重落地的启动收敛三件套；`registration_receipt_owns` 增加 deduplicated/from_status 守卫
+- `herdr/ops_center.py` 与 `herdr/ops_center_projection.py` — 零任务工作流纳入卡片清单并携带启动状态字段
+- `herdr/state/transition_gate.py` — `update_workflow_metadata` 新增 `expected_status` CAS 参数（随 #359 重落地）
+- `tests/fixtures/console-ui-baseline.json` — 7 个标签统一函数哈希原位替换
+- GitHub ruleset "main"（id 25126777）— `non_fast_forward`/`deletion` 自 2026-10-15 生效；本次事故与其无冲突，佐证初诊 force-push 结论不成立
+- `origin/docs/workflow-decision-audit-v1` — 指向 4262830，#359 实际落点；合并 PR #364 后该分支应删除以免再被误挂
 ---

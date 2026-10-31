@@ -43,6 +43,7 @@ try:
         record_observation_created,
         record_trajectory_event,
     )
+    from herdr.log_throttle import StartupWaitLog
     from herdr import liveness
 except ImportError:
     from herdr_projects import (
@@ -58,6 +59,7 @@ except ImportError:
         record_observation_created,
         record_trajectory_event,
     )
+    from herdr.log_throttle import StartupWaitLog
     from herdr import liveness
 
 
@@ -140,9 +142,6 @@ _foreign_workflows_logged = set()
 
 # 完成日志闩：close 失败也不得每 sweep 重刷 [WORKFLOW COMPLETE]。
 _workflow_complete_logged = set()
-
-# 启动就绪等待日志节流：workflow_id -> 上次打印时间戳
-_startup_wait_logged = {}
 
 # 正在执行终化的任务集合，防止并发调用冲突
 _finalize_inflight = set()
@@ -297,6 +296,12 @@ _fix_latch_logged = set()
 _CONTINUATION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="continuation")
 _continuation_scan_lock = threading.Lock()
 _continuation_scan_at = 0.0
+
+# Startup watchdog (60s-throttled) + bounded startup-wait logging.
+_startup_watchdog_scan_at = 0.0
+_startup_watchdog_cursor = None
+_startup_projection_stale = False
+_startup_wait_log = StartupWaitLog()
 
 
 # 总指挥上下文卫生 & 效率纪律
@@ -465,6 +470,7 @@ install_modules(globals(), (
     "selective_plan",
     "stage_delivery",
     "stage_state",
+    "startup_watchdog",
     "supervisor_actions",
     "supervisor_checkpoints",
     "supervisor_evidence",

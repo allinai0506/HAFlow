@@ -176,3 +176,59 @@ Evidence:
 - `herdr/ops_center.py#build_ops_center_payload`
 - `tests/test_ops_center_read_path.py`
 - `tests/test_console_page_latency.py`
+
+## 8. Workflow 启动未完成记录识别与回收（2026-10-29）
+
+`FACT` Factory 注册先于就绪：`register_workflow` 写入 `status=running` 与 `startup_ready=false`，Deep Preflight 成功后才置 `startup_ready=true`。注册后到就绪前的失败由 Factory 收敛；进程被强杀等无法执行清理的路径由 Controller 的启动看门狗回收。
+
+`FACT` 自动终态固定为 `status=completed` + `outcome=startup_failed`，并保留 `startup_ready=false` 与有界脱敏原因（`failed_stage` 为 `preflight` 或 `startup`，`startup_failure_reason` ≤2048 UTF-8 bytes）。不新增 Workflow 状态，不修改 `TERMINAL_WORKFLOW_STATUSES`，人工 `close-workflow --abandon` 仍产生 `outcome=abandoned`。
+
+识别启动未完成的记录（SQLite `state.db`；只把 JSON 显式 `false` 视为未就绪，缺失/null/数字 0/字符串 "false" 与损坏 JSON 均保守排除）：
+
+```sql
+SELECT workflow_id, created_at,
+       json_extract(metadata_json, '$.failed_stage') AS failed_stage,
+       json_extract(metadata_json, '$.startup_failure_reason') AS reason
+FROM workflows AS w
+WHERE status = 'running'
+  AND CASE WHEN json_valid(metadata_json)
+           THEN json_type(metadata_json, '$.startup_ready') END = 'false'
+  AND NOT EXISTS (SELECT 1 FROM tasks AS t WHERE t.workflow_id = w.workflow_id);
+```
+
+`FACT` 自动回收条件（全部满足才动作）：`status=running`、`startup_ready` 为 JSON `false`、该 Workflow 任务数为 0（任何状态的任务都算“有任务”）、`created_at` 严格早于 `now - HERDR_WORKFLOW_STARTUP_DEADLINE_SECONDS`、且非 foreign 记录。`paused/in_progress/closing/failed`、已就绪记录、损坏 JSON 一律不动作。
+
+`FACT` 期限与节流：
+
+- `HERDR_WORKFLOW_STARTUP_DEADLINE_SECONDS` 默认 `1800`（必须大于 Deep Preflight 的 210s 子进程超时）；非数字、≤0、≤210、`inf`/溢出均回退 1800，并只打印一次 `[STARTUP WATCHDOG CONFIG] invalid ...`。
+- Controller sweep 每 60s 最多扫描一次；单次最多取 100 个候选、最多成功回收 20 条，按 `created_at` 升序。
+- 候选查询在 SQLite 层过滤（`status`、`json_type(startup_ready)`、`created_at`、`NOT EXISTS(tasks)`、已知夹具路径），并用有界 keyset 游标推进；最老的 foreign 记录不会永久饿死其后出现的有效孤儿。
+- 单条回收在单个 `BEGIN IMMEDIATE` 事务内重读并复核全部条件，再迁移到终态；重复扫描不产生第二条迁移事件。
+- 提交后同步 `workflows.json` 投影并清理该 Workflow 的 stage-state 键；投影/清理失败只告警，不回滚已提交的 DB 终态，投影在下一次扫描时重试。
+
+`FACT` 延迟边界：Controller 存活时，单条超期孤儿的回收延迟上界约为“期限 + 60s 扫描间隔 + 单轮批量排队”；积压 N 条有效候选时，每轮最多 20 条、轮间隔 60s。Controller 停机期间不承诺墙钟回收，重启后由 sweep 继续。若真实孤儿的 `workflow_file` 缺失/已删除或位于 `/tmp/`、`pytest-` 路径，会被判为 foreign 而不自动回收，保留人工清理。
+
+人工清理（唯一人工兜底，不会自动执行）：
+
+```bash
+herdr-task close-workflow <workflow_id> --abandon
+```
+
+日志标记：Factory 失败收敛输出 `[WORKFLOW STARTUP FAILED] workflow_id=... stage=... converged=completed outcome=startup_failed` 与 `next:` 指引；已由他方终态时输出 `[WORKFLOW STARTUP CONVERGED] ... already_terminal=completed`；收敛失败输出 `[WORKFLOW STARTUP CONVERGE FAILED]` 与 `manual: herdr-task close-workflow <id> --abandon`。看门狗输出 `[STARTUP WATCHDOG RECLAIMED]`、`[STARTUP WATCHDOG ERROR]`、`[STARTUP WATCHDOG PROJECTION WARN]`、`[STARTUP WATCHDOG STAGE CLEANUP WARN]`。
+
+`FACT` 启动等待日志限频：`[STARTUP WAIT]` 每 Workflow 首次 1 行、之后每 600s 最多 1 行，两个等待入口（推进 sweep 与队列投递）共用同一进程内闩；就绪时最多一条 `[STARTUP READY]`，关闭/回收后最多一条 `[STARTUP WAIT ENDED]`。限频状态不落库，Controller 重启后最多重新打印一次；缓存有界（默认 1024 个 Workflow）。
+
+消费者影响（已用测试锁定）：`completed + outcome=startup_failed` 会被 active guard 排除，同项目可重新创建；不触发交付清单校验（仅 `outcome=delivered` 触发）、不产生完成通知（Notifier 按任务分组，零任务不发“Workflow 完成”）、不触发自动物理收尾；Controller 不再推进该 Workflow。看板“完成数”统计口径未改，`startup_failed` 可能计入完成数，需按 `outcome` 区分。
+
+`FACT` Console 工作流级标签（2026-10-30）：专业控制台侧栏、页签、横幅、流程图摘要、运维卡片和仪表板药丸区分「启动中（尚未就绪）」「启动失败」「已放弃」。极简工作台对这两种终态显示「查看记录」，打开记录并给出 `failed_stage`、有界原因和 `herdr-task close-workflow <id> --abandon`；正常 `completed/delivered/cleaned` 才显示「查看成果」。Task 级标签不变（任务 `completed` 仍是「执行完成，待收尾」/「待收尾」）。阶段摘要不把 `startup_failed`、`abandoned` 或 `startup_ready=false` 当成已清理。
+
+`UNKNOWN` 本页未重跑浏览器级 Console 视觉回归。流程图节点「已完成」仍由 `herdr/workflow_graph` 决定，不在本次 Console 修复范围。`/api/dashboard` 若不下发 `status/outcome/startup_ready`，仪表板药丸保持原「已完成」。
+
+Evidence:
+- `herdr/workflow_startup.py#startup_deadline_seconds` / `#is_startup_orphan` / `#find_startup_orphan_candidates` / `#converge_startup_failure` / `#reclaim_startup_orphan`
+- `herdr/state/transition_gate.py#update_workflow_metadata`
+- `bin/herdr-factory#_converge_startup_failure`
+- `services/controller/startup_watchdog.py#scan_startup_orphans`
+- `services/controller/stage_state.py#clear_workflow_stage_state`
+- `herdr/log_throttle.py#StartupWaitLog`
+- `tests/test_workflow_startup_core.py` / `tests/test_workflow_startup_convergence.py` / `tests/test_startup_watchdog.py` / `tests/test_controller_startup_log_throttle.py`

@@ -42,13 +42,18 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
         script = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL).group(1)
         start = script.index("function renderSidebarWorkflows(){")
         end = script.index("function openWorkflowTab(", start)
+        presentation = (ROOT / "console/static/console/scripts/presentation.js").read_text(encoding="utf-8")
+        helpers = presentation[
+            presentation.index("/* workflow-status:start */"):presentation.index("/* workflow-status:end */")
+        ]
         harness = r"""
 const container = {dataset: {}, innerHTML: '', querySelectorAll: () => []};
 const document = {getElementById: id => id === 'sidebarWorkflowGroups' ? container : {textContent: ''}};
 const state = {workflowId: 'wf-title', project: {workflows: [{workflow_id: 'wf-title', title: '原始名称', status: 'running'}]}};
 const workflowSubject = w => w.title || w.requirement_subject || '';
 const esc = value => String(value);
-""" + script[start:end] + r"""
+const humanStatus = s => ({running:'运行中', completed:'待收尾'})[s] || s;
+""" + helpers + "\n" + script[start:end] + r"""
 renderSidebarWorkflows();
 if (!container.innerHTML.includes('原始名称')) process.exit(1);
 state.project.workflows[0].title = '改名后的完整需求';

@@ -254,6 +254,30 @@ def test_checkpoint_lifecycle_via_store(store_env):
     assert restored_wf["title"] == "快照测试"
 
 
+def test_workflow_metadata_update_cas_guard(store_env):
+    """PR #359 re-land: update_workflow_metadata(expected_status=...) refuses to
+    write when the authoritative row's status changed — the guard that keeps a
+    startup-window metadata write from resurrecting a terminal workflow."""
+    from herdr.transitions import InvalidTransitionError
+
+    store = SQLiteStateStore(db_path=store_env["db_file"])
+    store.save_workflow({"workflow_id": "wf-cas", "title": "CAS", "status": "running"})
+
+    updated = store.update_workflow_metadata(
+        "wf-cas", {"agent_override": "codex"}, expected_status="running")
+    assert updated["agent_override"] == "codex"
+    assert store.get_workflow("wf-cas")["agent_override"] == "codex"
+
+    try:
+        store.update_workflow_metadata(
+            "wf-cas", {"agent_override": "auto"}, expected_status="paused")
+        raise AssertionError("expected InvalidTransitionError on status mismatch")
+    except InvalidTransitionError:
+        pass
+    # 拒绝后不得产生任何写入。
+    assert store.get_workflow("wf-cas")["agent_override"] == "codex"
+
+
 def test_json_export_and_migration(store_env):
     store = SQLiteStateStore(db_path=store_env["db_file"], auto_migrate_json=False)
 

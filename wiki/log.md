@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-10-31] fix | 重落地 PR #359：启动失败收敛与 Console 启动标签恢复（base 误挂 docs 分支致 main 缺失），并修复其评审欠账
+
+- 背景：例行核验发现 PR #359 在 GitHub 显示 MERGED，但 main 不含其内容——启动收敛三件套（`workflow_startup.py`、`startup_watchdog.py`、`log_throttle.py` 增量）、Factory 启动流程改造、Console 启动标签与约 900 行测试整体缺失。**根因（初诊有误，已更正）**：该 PR 的 base 是遗留工作分支 `docs/workflow-decision-audit-v1`（head 恰为 c97f302），合并落在该分支上产生 4262830，main 从未收到；不存在 force-push 回退（main 的 `non_fast_forward` 规则自 10-15 有效且未被违反）。取证与教训归档于 lessons §213。
+- 变更：隔离分支 `git merge 4262830` 重落地（恢复祖先关系），解决 advancement.py（#360 内联节流让位 `StartupWaitLog`，行数门禁内收敛）与 wiki/log.md（双条目并存）冲突；顺带清偿 #359 评审欠账——`registration_receipt_owns` 拒绝 deduplicated/from_status 非 pending 回执，ops 卡片纳入零任务工作流并携带 `status/startup_ready/outcome/startup_failure_reason`（原实现该分支读不到字段，属死代码）；`startup_wait_log_for` 加类型守卫并以日志自身时钟节流；operations.js 行数预算内收敛；console-ui 基线 7 个标签统一函数哈希原位替换。
+- 证据：专项 176 项（启动收敛/看门狗/节流/ops/console/行数门禁/卡点回归）+ 关联回归 248 项全绿；`compileall`、`git diff --check` clean；重落地合入后 `git merge-base --is-ancestor 4262830 main` 为真（待 PR 合并后生效）。
+
 ## [2026-10-30] fix | 全链路故障复盘：wf-haflow-1029-02 卡点阻断根因收敛与闭环治理
 
 - 背景：真实工作流 `wf-haflow-1029-02` 历时 20 小时、执行 28 个任务，日志复盘发现 6 处阻塞点与性能泥潭：嵌套 Git 导致 commit 崩溃与 Finalize 50 分钟盲目重试；dispatched 门禁裁决对账遗漏致 Sentinel 保险丝误杀；Wrapup 模板键名多态性断链；实现阶段误套用对抗角色互斥致 Grok 等修复任务全量被拒；`close-workflow` 深度遍历 `.git` 对象库触发 900 秒硬超时；自动重派重复分配挂起/崩溃 Agent。
@@ -32,6 +38,12 @@
   2. `services/controller/finalize_support.py`：`_escalate_finalize` 同步写入全局 Attention 账本（`task_id:finalize`）并发送即时通知；
   3. `herdr/ops_center_helpers.py` 与 `herdr/ops_center_projection.py`：`_node_task_status_counts` 将 `finalize_escalated` 计入 `blocked` 避免“假绿”，`_classify_task_anomalies` 产出 `FINALIZE_ESCALATED` 异常并附带一键清理升级快捷链接，`_build_boss_summary` 纳入阻塞工作流统计。
 - 证据：`tests/test_herdr_notifier.py`、`tests/test_ops_center_read_path.py`、`tests/test_finalize_empty.py` 专项全通过（40 passed）。
+
+## [2026-10-30] fix | Console 区分工作流启动失败与已交付
+
+- 背景：专业控制台初始化时读不到 `workflowStatusLabel`，侧栏停在「空间工作流 0」。极简工作台把 `startup_failed` / `abandoned` 显示成「查看成果」，失败原因被转义两次。工作流级表面把这两种终态写成已完成、已交付或就绪。
+- 变更：启动状态四个函数进入 `presentation.js` 外层作用域。极简工作台对启动失败和已放弃显示「查看记录」，原因按原文写入。侧栏、横幅、流程图摘要、运维卡片、仪表板药丸和阶段摘要改用同一套工作流标签。任务 `completed` 仍是「待收尾」或「执行完成，待收尾」。看板完成数口径未改。
+- 证据：`tests/test_console_workflow_startup_visibility.py` 覆盖真实脚本初始化、按钮与点击目标、各表面标签。见 [[ops-center]] §8。
 
 ## [2026-10-27] fix | 规划产物文件版本绑定、任务身份精准匹配、严格终态裁决与完整实现约束透传
 
@@ -3816,6 +3828,14 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 共享文档与文件读取单源统一：抽离 `herdr.plan_parser.read_plan_file_from_dir`，统一支持 `plan.md`、`docs/plan.md` 及 `docs/superpowers/plans/*.md`（单选 mtime 最新文件，杜绝历史文件全量拼接）；`services/controller/auto_acceptance.py` 与 `find_plan_deliverables` 接入该统一函数，消除路径读取分歧。
 - 任务命令行工具环境身份自动补齐：`herdr/task_cli_evidence.py` 在 `note_add` 时自动从 `os.environ.get("HERDR_TASK_ID")` 补齐缺省的 `--task` 参数，并在 `herdr/workflow_docs.py` 与 `herdr/stage_skills.py` 中规范注入 `--task "$HERDR_TASK_ID"` 及 Plan-Ref 提示词契约。
 - 验证：35 项适配器专项测试（含版本版本更新旧审查失效、行首裁决与条件性阻断、superpowers 单源读取与环境变量任务身份补齐）全绿；3 项端到端隔离全生命周期测试、10 项模块化门禁测试、26 项项目契约测试全部通过（共 74 passed）。
+
+## [2026-10-29] Fix | Workflow 启动失败收敛、孤儿启动回收与启动等待日志限频
+- 启动失败收敛（Factory）：`bin/herdr-factory` 将注册调用到 `mark_workflow_startup_ready` 成功前的整段包进 `try/except BaseException`；失败先调用 `herdr.workflow_startup.converge_startup_failure`（`running` + `startup_ready=false` + 0 任务的条件写）收敛为 `completed + outcome=startup_failed`，再原样抛出原异常（含 `KeyboardInterrupt`/`SystemExit`）。收敛自身失败打印 `[WORKFLOW STARTUP CONVERGE FAILED]` 与 `herdr-task close-workflow <id> --abandon`；已由他方终态时打印 `[WORKFLOW STARTUP CONVERGED] ... already_terminal=completed`；active guard 拒绝的未注册 ID 不触碰任何他人记录。
+- 终态不可复活：`mark_workflow_startup_ready`、`set_workflow_agent_override` 与预检身份写回全部改为 `update_workflow_metadata(..., expected_status="running")` 条件元数据写；移除预检尾部的 `WORKFLOWS_FILE` 全量 upsert 回退（无记录时 fail-closed）。`update_workflow_metadata` 新增 `expected_status`/`save_workflow_fn`，沿 `state_store` 与 `kernel` 透传并保留既有失败注入点。
+- Controller 看门狗：新增 `services/controller/startup_watchdog.py`，在 sweep 前 60s 节流扫描；SQL 层按 `status`、`json_type(startup_ready)='false'`、`created_at` 严格超期、`NOT EXISTS(tasks)` 与夹具路径过滤，候选上限 100、单轮回收 20、keyset 游标防止 foreign 积压饿死有效孤儿；单条在 `BEGIN IMMEDIATE` 内 CAS 到 `completed + outcome=startup_failed`，提交后同步投影、清理 stage-state 键；投影失败只告警并在下次扫描重试。
+- 日志有界：新增 `herdr/log_throttle.py#StartupWaitLog`（可注入时钟、线程安全、缓存有界），推进 sweep 与队列投递的 `[STARTUP WAIT]` 每 Workflow 首次 1 行、之后每 600s 最多 1 行，就绪/关闭各最多一条结束提示；`sync_workflows_projection` 返回刷新成功与否，供看门狗补偿。
+- 文档：`wiki/ops-center.md` 新增 §8（识别 SQL、阈值、节流、延迟边界、消费者影响）；`docs/operations/troubleshooting-faq.md` 新增 §5.1 排障条目；本条目只追加。
+- 验证：新增 `tests/test_workflow_startup_core.py`（16）、`tests/test_workflow_startup_convergence.py`（17，含双线程 ready/reclaim 竞态）、`tests/test_startup_watchdog.py`（28）、`tests/test_controller_startup_log_throttle.py`（7）；定向回归 `test_state_transition_gateway`/`test_state_store`/`test_worker_readiness_contract`/`test_controller_modularity`/`test_controller_cockpit_automation`/`test_workflow_lifecycle_matrix`/`test_scheduler_dispatch_e2e`/`test_workflow_stall_regressions`/`test_workflow_start_sync`/`test_task_cli_workflow_close`/`test_supersede_escalation_abandon` 全部通过；`compileall`、`bin/herdr-factory` AST 解析、`git diff --check` 通过。未执行 Console 浏览器级视觉回归（由 Console 可见性任务承担），未 push/PR/合并/部署，未写生产 state.db。
 
 ## [2026-10-30] Fix | Finalize基线失效快速熔断、Sentinel有效产出保全与非门禁节点僵尸义务闭环
 - Finalize基线缺失熔断与本地回退：`herdr/task_cli_integration.py` 在获取 `base_branch` 遇远端不存在时，先回退检查本地 `main_repo` 分支；若两处均不存在，报明确的 `[INTEGRATE REFUSED] base_ref_missing` 并以 rc=7 退出；`services/controller/git_finalize.py` 捕获 rc=7 与缺失 ref 报错特征，立即作为 `retryable: False` 熔断升级，禁止盲目消耗 5 次重试并引发调度死锁。

@@ -44,9 +44,18 @@ def build_ops_center_payload(workflow_id=None, include_tasks=False, *, db_path=N
                 except OSError:
                     pass
             config = validate_required_task_scope(normalize_workflow(config), wid, store=SnapshotTasks())
+            # Lifecycle fields ride along for the card builder: startup labels
+            # read them off the card (status/startup_ready/outcome/reason).
+            for key in ("status", "startup_ready", "outcome", "startup_failure_reason"):
+                if record.get(key) is not None and config.get(key) is None:
+                    config[key] = record[key]
             return config, label or config.get("name") or wid
         except Exception:
-            return {"configuration_error": "workflow_config_invalid"}, label or wid
+            failure = {"configuration_error": "workflow_config_invalid"}
+            for key in ("status", "startup_ready", "outcome", "startup_failure_reason"):
+                if record.get(key) is not None:
+                    failure[key] = record[key]
+            return failure, label or wid
 
     relevant = [t for t in tasks if not workflow_id or t.get("workflow_id") == workflow_id]
     panes = sorted({t.get("pane_id") for t in relevant
@@ -77,7 +86,8 @@ def build_ops_center_payload(workflow_id=None, include_tasks=False, *, db_path=N
     runtimes = {pane: future.result() for pane, future in futures.items()}
     payload = _ops_center_payload(
         workflow_id, now, include_tasks, snapshot_tasks=tasks,
-        workflow_lookup=lookup, runtime_probe=runtimes.get)
+        workflow_lookup=lookup, runtime_probe=runtimes.get,
+        registered_workflow_ids=workflows.keys())
     payload["runtime_sampling"] = {"sampled": len(runtimes), "omitted": len(panes) - len(runtimes)}
     return payload
 
