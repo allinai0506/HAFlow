@@ -3864,3 +3864,13 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Git 元数据豁免与分支指针保全：`herdr/clone_archive.py` 的 `is_bypass_rel_path` 与 `_inventory` 遍历中增加 `.git` 路径严格豁免，杜绝名为 `build`、`dist` 等匹配构建目录名称的松散分支引用（如 `.git/refs/heads/build`）被误判为构建产物剔除，确保归档恢复后的 Git 仓库能正常解析 HEAD 与分支指针。
 - 活体 Socket 旁路隔离防御：明确 Unix-domain socket（`.sock` / `stat.S_ISSOCK`）属于运行时 IPC 终端，不受 Git 元数据豁免影响，始终在物理归档中被跳过（如 `.git/fsmonitor.sock`），符合 `AGENTS.md` §4.10 旁路隔离约束，杜绝触发非预期 `unsupported sandbox special file` 异常导致工作流收尾失败。
 - 验证：更新 `test_git_metadata_preserved_even_when_named_build_or_dist` 回归测试，覆盖松散分支保全与 `.git/fsmonitor.sock` 活体 socket 自动旁路隔离；全量 11 项卡点专项测试全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §212。
+
+## [2026-10-31] Fix | 评审遗留五批次收敛：scheduler_facts/sentinel/recovery/console/plan-dispatch（PR #365–#369 + #368 第二轮）
+- 候选失效一致性（#365）：`candidate_invalidated` 后 `_workflow_snapshot` 保留失效事件 id 作为下一 episode CAS token（原归零致 base advance 后再冻结被 CAS 拒绝、工作流卡死无候选）；`read_inventory` 与总指挥回落身份读取同口径解析 freeze-or-invalidation；`record_candidate_frozen` 失效写入移到 inventory/publication 校验之后；新增 `launch_baseline.refresh_remote_base`（freeze 前 best-effort 刷新 `origin/<base>`）。
+- Sentinel/watchdog（#366）：salvage 的 commit/candidate_sha 经 `update_statuses` 新增 metadata 参数随同一原子 CAS 落库（原预写 version+1 使带版本任务 salvage 从未成功）；committed-but-working 宽限有界化（提交须在 hard_timeout×alive_multiplier 窗口内新鲜）；无 baseline 任务 HEAD 按创建时间归属（复用 git_adoption skew 基）；`_task_has_valid_gate_verdict` 补 created_at 新鲜度对齐 Controller。
+- 恢复链（#367）：`converge_dangling_replacement_obligations` 非 gate 分支删除 status-only 接受，历史交付 candidate 必须等于当前冻结候选。
+- Console/Ops（#368）：`maybe_close_completed_workflow` DEPENDENCIES 补声明 load_tasks（bindings 限制视图下 hasattr 恒 False→大工作流 close 固定 900s）；startup 卡片五字段（含 failed_stage）由同一 read_inventory 投影携带并删除 per-card snapshot overlay（超大 config 不再使整页失败）。
+- Plan/Dispatch（#369）：显式 dispatch_role 优先于 task_id 推断（wf ID 含 review 误判）；围栏起始命令可解析；多任务计划共享 preamble 随每任务进实现提示词；staged 工作流失效事件不再写成假干预 attention。
+- CI 阻塞根因（#368 第二轮）：macOS 26 上 `launchctl list <未加载label>` rc=113 被归探针失败 → ad-hoc hub 无法 stop（产品缺陷）；classify_manager 区分确定性否定与探针失败（详见 lessons §214）。xdist 顺序依赖的 stage-state 测试隔离（复现方法见 lessons §215）。
+- 验证：五 PR CI 全绿；#368 第二轮 CI 同款 `-n auto` 本地全量 6712 passed；23 条评审线程回复+Resolve（含 4 条经三层证据核验的"已在 main 修复"引证）；独立对抗评审逐批 MERGE_READY（fail-closed 边界逐路径核对）。
+- 教训见 lessons §214/§215。
