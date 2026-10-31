@@ -115,6 +115,32 @@ def test_preserve_clone_and_verify_source_with_declared_artifact_in_excluded_dir
         clone_archive.verify_source(task, tmp_path / "clones", archive)
 
 
+def test_git_metadata_preserved_even_when_named_build_or_dist(tmp_path):
+    repo = tmp_path / "clones" / "t-git-meta"
+    repo.mkdir(parents=True)
+    git_dir = repo / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/build\n")
+    refs_heads = git_dir / "refs" / "heads"
+    refs_heads.mkdir(parents=True)
+    (refs_heads / "build").write_text("0123456789abcdef0123456789abcdef01234567\n")
+    (refs_heads / "dist").write_text("0123456789abcdef0123456789abcdef01234567\n")
+
+    task = {
+        "task_id": "t-git-meta",
+        "workflow_id": "wf-git-meta",
+        "run_id": "r-git-meta",
+        "clone_path": str(repo),
+        "workspace": str(repo),
+    }
+    archive = clone_archive.preserve_clone(task, tmp_path / "clones")
+    assert archive is not None
+    manifest = clone_archive.archive_manifest(dict(task, clone_archive=archive))
+    assert ".git/refs/heads/build" in manifest["entries"]
+    assert ".git/refs/heads/dist" in manifest["entries"]
+    clone_archive.verify_source(task, tmp_path / "clones", archive)
+
+
 def test_business_scope_and_key_normalizes_closing_status():
     wf_running = {
         "workflow_id": "wf-1",

@@ -62,6 +62,8 @@ BYPASS_IGNORED_FILE_NAMES = frozenset({
 def is_bypass_rel_path(rel: str | Path) -> bool:
     """Check if a relative path belongs to known external indexers or bypass artifacts."""
     parts = Path(rel).parts
+    if parts and parts[0] == ".git":
+        return False
     for part in parts[:-1]:
         if part in BYPASS_IGNORED_DIRS:
             return True
@@ -228,9 +230,11 @@ def _inventory(root, task=None):
 
     for current, dirs, files in os.walk(root, followlinks=False, onerror=failed):
         rel_current = Path(current).relative_to(root).as_posix()
+        in_git = rel_current == ".git" or rel_current.startswith(".git/")
         dirs[:] = [
             d for d in dirs
-            if d not in BYPASS_IGNORED_DIRS
+            if in_git
+            or d not in BYPASS_IGNORED_DIRS
             or _is_declared_or_ancestor(d if rel_current == "." else f"{rel_current}/{d}", declared)
         ]
         for name in sorted(dirs + files):
@@ -238,7 +242,7 @@ def _inventory(root, task=None):
             info = path.lstat()
             rel = path.relative_to(root).as_posix()
             is_declared = _is_declared_or_ancestor(rel, declared)
-            if not is_declared and (
+            if not in_git and not is_declared and (
                 stat.S_ISSOCK(info.st_mode)
                 or name.endswith(".sock")
                 or name in BYPASS_IGNORED_FILE_NAMES
