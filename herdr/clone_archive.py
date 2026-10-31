@@ -139,7 +139,7 @@ def _declared_deliverable_rel_paths(task: dict | None, root: Path | str | None =
     """Collect relative paths of all declared artifacts/deliverables on a task."""
     if not isinstance(task, dict):
         return set()
-    from herdr.deliverables import _ref_rel
+    from herdr.deliverables import _RECORDED_KEYS, _ref_rel
 
     workspaces: list[Path] = []
     if root is not None:
@@ -156,7 +156,7 @@ def _declared_deliverable_rel_paths(task: dict | None, root: Path | str | None =
             pass
 
     declared = set()
-    for key in ("artifacts", "artifact_refs", "changed_artifacts", "deliverables"):
+    for key in _RECORDED_KEYS:
         for item in task.get(key) or []:
             matched = False
             for ws in workspaces:

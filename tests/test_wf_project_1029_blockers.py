@@ -89,13 +89,14 @@ def test_preserve_clone_and_verify_source_with_declared_artifact_in_excluded_dir
     (repo / "dist").mkdir()
     (repo / "dist" / "analysis.md").write_text("# Deliverable Analysis")
 
-    # Verify that supported deliverable reference forms (dict artifact_path, absolute paths)
-    # are properly normalized and preserved in the manifest and inventory.
-    for artifact_ref in [
-        "dist/analysis.md",
-        {"artifact_path": "dist/analysis.md"},
-        str(repo / "dist/analysis.md"),
-        {"artifact_path": str(repo / "dist/analysis.md")},
+    # Verify that supported deliverable reference forms (dict artifact_path, absolute paths,
+    # and observation-backed outputs) are properly normalized and preserved in the manifest and inventory.
+    for test_payload in [
+        {"artifacts": ["dist/analysis.md"]},
+        {"artifacts": [{"artifact_path": "dist/analysis.md"}]},
+        {"artifacts": [str(repo / "dist/analysis.md")]},
+        {"artifacts": [{"artifact_path": str(repo / "dist/analysis.md")}]},
+        {"observations": [{"artifact_path": "dist/analysis.md"}]},
     ]:
         task = {
             "task_id": "t-decl",
@@ -103,7 +104,7 @@ def test_preserve_clone_and_verify_source_with_declared_artifact_in_excluded_dir
             "run_id": "r-decl",
             "clone_path": str(repo),
             "workspace": str(repo),
-            "artifacts": [artifact_ref],
+            **test_payload,
         }
         archive = clone_archive.preserve_clone(task, tmp_path / "clones")
         assert archive is not None
