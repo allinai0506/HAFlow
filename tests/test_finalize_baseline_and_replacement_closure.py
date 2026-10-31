@@ -289,6 +289,45 @@ class TestReplacementObligationConvergence(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["task_id"], "impl-old")
 
+    def test_converge_rejects_historical_delivery_on_different_candidate(self):
+        """历史终态交付 candidate 与当前冻结候选不一致时不得清掉替换义务（PR #360 评审遗留）。"""
+        from services.controller import infra_recovery
+
+        wf_id = "wf-impl-2"
+        self.store.save_workflow({"workflow_id": wf_id, "status": "running"})
+
+        self.store.save_task({
+            "task_id": "impl-old",
+            "workflow_id": wf_id,
+            "node": "implementation",
+            "stage": "implementation",
+            "status": "superseded",
+            "replacement_pending": True,
+            "superseded_by": None,
+        })
+        # 旧的 cleaned 交付落在另一个 candidate 上：它不能替新义务完成交付
+        self.store.save_task({
+            "task_id": "impl-settled",
+            "workflow_id": wf_id,
+            "node": "implementation",
+            "stage": "implementation",
+            "status": "cleaned",
+            "candidate_sha": "b" * 40,
+        })
+
+        ports = MagicMock()
+        ports._get_store.return_value = self.store
+        ports.load_tasks.return_value = self.store.list_tasks(workflow_id=wf_id)
+        ports.workflow_closed.return_value = False
+        ports._scheduler_current_frozen_candidate_sha.return_value = "a" * 40
+
+        converged = infra_recovery.converge_dangling_replacement_obligations(ports, wf_id)
+        self.assertFalse(converged, "Stale-candidate delivery must not clear the replacement obligation")
+        reloaded = self.store.get_task("impl-old")
+        self.assertTrue(reloaded.get("replacement_pending"), "replacement_pending must stay pending")
+        events = self.store.list_events(workflow_id=wf_id, event_type="replacement_obligation_auto_resolved")
+        self.assertEqual(len(events), 0)
+
 
 class TestIntegrateBaseRefResolution(unittest.TestCase):
     def test_integrate_task_falls_back_to_main_repo_when_remote_base_missing(self):

@@ -173,8 +173,11 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
                     settled_nodes.setdefault(node_id, (task.get("task_id"), "settled_gate_pass"))
             elif not verdict:
                 # Non-gate node (e.g. implementation): deliverable settled
+                # 交付必须落在当前冻结 candidate 上；历史终态任务（candidate
+                # 不同）不是本义务的交付证据，不得替替代任务清账
+                # (PR #360 评审遗留)。
                 candidate = str(task.get("candidate_sha") or task.get("integrated_commit") or task.get("commit") or "")
-                if (candidate and candidate.lower() == frozen.lower()) or st in ("integrated", "cleanup_ready", "cleaned"):
+                if candidate and candidate.lower() == frozen.lower():
                     settled_nodes.setdefault(node_id, (task.get("task_id"), "settled_node_delivery"))
     if not settled_nodes:
         return False
