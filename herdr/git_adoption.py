@@ -369,8 +369,6 @@ def _check_author(commits, allowed_authors=None, expected_agent=None):
         if allowed:
             if author_email in allowed or author_name in allowed:
                 matched = True
-            elif any(token in author_email or token in author_name for token in allowed):
-                matched = True
         if not matched and agent:
             if agent in author_name or agent in author_email:
                 matched = True

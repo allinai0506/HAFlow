@@ -351,6 +351,22 @@ class ClassifyByTimeTest(unittest.TestCase):
         self.assertEqual(verdict, REFUSED)
         self.assertEqual(detail["reason"], "foreign_author")
 
+    def test_substring_author_refused_for_exact_match(self):
+        commit = _commit("c1", 1100, paths=["src/a.py"])
+        commit["author_name"] = "Alice Impersonator"
+        commit["author_email"] = "alice@example.com.evil.test"
+        verdict, detail = classify_commit_state(
+            head="c1",
+            branch="agent/opencode/feat-t1",
+            task_id="t1",
+            created_at=1000,
+            head_history=[commit, _commit("old", 500)],
+            current_branch="agent/opencode/feat-t1",
+            allowed_authors=["alice@example.com"],
+        )
+        self.assertEqual(verdict, REFUSED)
+        self.assertEqual(detail["reason"], "foreign_author")
+
 
 class AdoptionHelperTest(unittest.TestCase):
     def test_skew_env_override(self):
