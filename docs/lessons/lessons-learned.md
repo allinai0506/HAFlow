@@ -8928,3 +8928,84 @@ pytest -q tests/test_workflow_startup_core.py tests/test_workflow_startup_conver
 - GitHub ruleset "main"（id 25126777）— `non_fast_forward`/`deletion` 自 2026-10-15 生效；本次事故与其无冲突，佐证初诊 force-push 结论不成立
 - `origin/docs/workflow-decision-audit-v1` — 指向 4262830，#359 实际落点；合并 PR #364 后该分支应删除以免再被误挂
 ---
+
+## §214 探针的确定性否定回答不是探针失败：hub stop 在 macOS 26 全量拒发（PR #368）
+
+### 问题现象与根因剖析
+
+2026-10-31 PR #368 CI 两次 pytest 失败。定位过程发现与该 PR 改动无关的产品缺陷：experience hub 的 `stop` 在 macOS 26（darwin 25.6.0）上对所有 ad-hoc hub 拒发信号——本地对 `test_start_stop_roundtrip` 单进程 1.7s 确定性复现（`state: running (hub listener present); unverifiable, no signal sent`），CI run 2 的 10 条 hub 失败同签名。
+
+**根因**：`herdr/experience/hub_lifecycle.py::classify_manager` 把 `launchctl list <label>` 的一切 rc≠0 归为 MANAGER_UNKNOWN（fail-closed），而 `_running_exit("stop", MANAGER_UNKNOWN)` 拒发信号。macOS 26 对**未加载 label** 返回 rc=113（旧版为 3，语义相同）——"Could not find service" 是探针的**确定性回答**（证明目标进程不在该 label 下托管），不是"探针失败（无证据）"。两类语义混同后，所有 ad-hoc hub 在新 macOS 上都无法停止。CI runner 当日其他 PR 通过是因为其 launchctl 恰好命中 label 加载态——环境差异把缺陷藏到了 CI 排查路径之外。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 确定性否定 ≠ 证据缺失 | "未找到"与"探测失败"语义不同；混同会把可判定场景错归 fail-closed，使功能整体失效 | 探针分类三档：肯定命中 / 确定性否定（按其语义继续）/ 真失败（unknown 拒发）；按 stderr 语义（"could not find service"，大小写不敏感）而非 rc 数值判定——rc 跨 macOS 版本漂移（3→113） |
+| OS 升级让"通过中的测试"变成隐藏的产品损坏 | 测试在旧 macOS 通过 ≠ 逻辑正确；依赖系统探针（launchctl/lsof/ps）的链路随系统行为漂移 | 开发机/runner OS 升级后，对系统探针依赖链路做一轮实跑核验；本例正是借 CI 排查才暴露 |
+| fail-closed 边界的契约变更必须对抗评审 | 放宽一个分类分支就是移动安全边界 | 契约变更须拆分既有钉死用例并保留反向用例（not-found→AD_HOC 允许 signal；超时/无工具/权限拒绝→UNKNOWN 拒发）；CLI 层 "manager unknown → 拒停" 契约不变（`test_manager_unknown_cli_fixture` 经 patch 直注 UNKNOWN 继续守卫） |
+| 信号类操作的最后防线在身份复核而非 manager 分类 | manager 只挡 launchd 托管进程；真正决定"杀谁"的是身份三重复核 | stop 链路保持：SIGNAL 仅经 AD_HOC 确定路径 + endpoint/cmdline/registry 三重复核；launchd 命中同 pid 仍拒停并提示 bootout/kickstart；仅 SIGTERM 无 SIGKILL，复活必 re-occupied exit 4 不静默成功 |
+
+### 操作规范
+
+1. `classify_manager` 的 not-found 判定按 stderr 语义（"could not find service"），不依赖 rc 数值；launchctl 未来改文案需同步该判定。
+2. 其他 launchctl 降级场景（如 `procinfo` 需 root）不在该语义内：stop 对"无法证明 manager"仍拒发（fail-closed）。
+3. launchd 判定的作用域是 hub 规范 label（`com.user.herdr-experience-hub`）；其他 label/域托管的进程不在该探针覆盖内——这是既有 label 作用域设计，不是本次引入。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q -n auto tests/test_experience_hub_lifecycle_unit.py \
+  tests/test_experience_hub_lifecycle_cli.py tests/test_coordinator_auto_heal.py
+bin/herdr-experience-hub stop --help   # CLI 冒烟
+```
+
+### 相关文档 / 关联证据
+
+- PR #368（merge 854f667）第二轮提交：`herdr/experience/hub_lifecycle.py::classify_manager` + 契约测试拆分
+- `tests/test_experience_hub_lifecycle_unit.py` — not-found→AD_HOC 与真失败→UNKNOWN 双向用例
+- 复盘要点已内化于本节操作规范与守护测试；独立评审（对抗核对 fail-closed 边界：SIGNAL 仅经 AD_HOC 确定路径 + 身份三重复核、launchd 拒停不变、仅 SIGTERM）随 PR #368 评审线归档
+
+---
+
+## §215 CI 等价复现：xdist 环境钉子、`-x` 早停陷阱与测试分布敏感（#368 CI 排查）
+
+### 问题现象与根因剖析
+
+排查 #368 CI 失败时，本地复现经历三重偏差，每重偏差都会得出错误结论：
+
+1. **单进程 ≠ CI**：CI 用 `pytest -q -n auto`（`haflow-tests.yml:153` + HOME 重定向到 `$RUNNER_TEMP/ci-home`）；单进程跑不出 xdist 的分布、并发与 HOME 条件。
+2. **`-x` 早停的"全量"是前缀**：单进程带 `-x` 在首个失败（experience hub，字母序靠前）即停，"2310 passed" 只是套件前缀——CI 同仓全量实际 ~6600+ 项。拿前缀当全量证据会漏掉全部后段失败。
+3. **本地 xdist 假失败海**：xdist worker 继承被 conftest `_isolate_home()` 改写的 HOME，`site.getuserbase()` 解析到临时目录 → user-site（PyYAML 所在地）失联 → `yaml=None` → 164 项失败 + 3 个 ImportError，与被排查问题完全无关。
+
+修正复现环境后（显式 `PYTHONUSERBASE`），CI 同款 `-n auto` 全量 6712 passed，仅剩 1 项 main 上同样失败的机器依赖项——此时失败签名才与 CI 可比（C1 三条 stage-state + C2 hub 十条，均 main 实测复现）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 复现 CI 必须同款命令 | `-n auto` 的分布、HOME 重定向、并发时序本身就是失败条件的一部分 | 本地复现照抄 `haflow-tests.yml` 的 pytest 调用；CI 失败先取 `pytest.log` artifact 对比完整 FAILED 清单与本地签名 |
+| `-x` 早停的"全量"是前缀 | 停在第 N 个失败时，后续数千用例从未执行 | 汇报全量结果前核对总数与 CI 量级一致（本仓 CI ~6600+）；排查期不加 `-x` |
+| conftest 重定向 HOME 会切断 user-site | xdist worker 继承被改写的 HOME，PyYAML 等用户包失联造成大面积假失败 | 本地 xdist 复现显式钉 `PYTHONUSERBASE=$(python3 -c 'import site;print(site.getuserbase())')`；xdist 扩展用 `pip install --target <dir>` + `PYTHONPATH`（PEP 668 下不污染系统环境） |
+| 新增测试文件会改变 xdist 分布 | 顺序依赖用例（未 patch 共享路径、依赖同 worker 其他用例先建目录）在分布变化时暴露，失败"看起来"与新 PR 相关 | 测试逐用例自隔离（临时目录/显式 patch），不依赖同 worker 其他用例的副作用；对照 main 同款命令跑一遍即可判定"新 PR 引入 vs 预存暴露" |
+
+### 操作规范
+
+1. 排查 CI pytest 失败的标准动作：下载 `pytest-log-<n>` artifact → 完整 FAILED 清单 → 本地以 CI 同款命令（`-n auto` + HOME 钉子）复现 → 与 origin/main 同款对照 → 判定"引入 vs 暴露"。
+2. 本地 xdist 复现环境钉子（固定写法）：`HOME=<沙盒>/.ci-home PYTHONUSERBASE=$(python3 -c 'import site;print(site.getuserbase())') PYTHONPATH=/tmp/xdist-deps python3 -m pytest -q -n auto`；xdist 安装 `python3 -m pip install --target /tmp/xdist-deps pytest-xdist`（版本与系统 pytest 对齐）。
+
+### 验证命令 / 守护测试
+
+```bash
+# CI 等价复现（钉子缺一即假失败海）
+HOME=/tmp/ci-home PYTHONUSERBASE=$(python3 -c 'import site;print(site.getuserbase())') \
+PYTHONPATH=/tmp/xdist-deps python3 -m pytest -q -n auto tests/
+```
+
+### 相关文档 / 关联证据
+
+- `.github/workflows/haflow-tests.yml:153` — CI 的 `pytest -q -n auto` 调用与 HOME 重定向
+- `tests/conftest.py::_isolate_home` — HOME 重定向与 PYTHONUSERBASE 钉点（`setdefault`，外部显式值优先）
+- PR #368 run 1 的 `pytest-log-368` artifact — 仅 3 条 stage-state 失败；run 2 级联出 hub 失败，佐证"同签名对照"必要性
+
+---
