@@ -755,12 +755,22 @@ def classify_manager(
     target pid.  A successful lookup with a different/absent PID is
     ``ad_hoc`` (issue orphans).  Any probe failure is ``unknown`` and must
     never lead to a signal.
+    "Could not find service" 是探针的确定性回答（label 未加载 ⇒ 目标必非
+    该 label 托管），归 ``ad_hoc``；其余失败（超时/无工具/空输出/其他错误）
+    仍归 ``unknown`` 拒发信号（fail-closed 不变；新版 macOS 将未加载 label
+    的 rc 从 3 改为 113，此处按 stderr 语义而非 rc 判定）。
     """
     if missing:
         return ManagerProbe(MANAGER_UNKNOWN, target_pid, "launchctl is not available")
     if timed_out:
         return ManagerProbe(MANAGER_UNKNOWN, target_pid, "launchctl timed out")
     if returncode != 0:
+        if "could not find service" in (stderr or "").lower():
+            return ManagerProbe(
+                MANAGER_AD_HOC,
+                target_pid,
+                "label not loaded (launchctl: could not find service)",
+            )
         return ManagerProbe(
             MANAGER_UNKNOWN,
             target_pid,

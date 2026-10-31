@@ -372,23 +372,9 @@ def test_stage_summary_and_ops_overlay_honor_startup_outcome():
     assert inventory.stage_summary([], "wrapup", workflow={"status": "completed"})["status"] == "cleaned"
     running = {"status": "running", "startup_ready": True}
     assert inventory.stage_summary([], "plan", workflow=running)["status"] == "waiting"
-    snap = {
-        "status": "completed",
-        "outcome": "startup_failed",
-        "startup_ready": False,
-        "failed_stage": "preflight",
-        "startup_failure_reason": "x" * 3000,
-        "config": {"secret": "no"},
-    }
-    overlaid = inventory._overlay_startup_fields({"workflow_id": "wf-x", "tasks": {}}, snap)
-    assert overlaid["outcome"] == "startup_failed"
-    assert overlaid["startup_ready"] is False
-    assert overlaid["failed_stage"] == "preflight"
-    assert len(overlaid["startup_failure_reason"]) == 2048
-    assert "config" not in overlaid
-    kept = inventory._overlay_startup_fields({"status": "running", "outcome": "kept"}, snap)
-    assert kept["status"] == "running"
-    assert kept["outcome"] == "kept"
+    # ops_center 的 per-card overlay 已删除（PR #364 评审遗留）：startup 字段
+    # 由 herdr.ops_center 投影经同一 read_inventory 携带，见
+    # tests/test_console_ops_review_debt.py。
 
 
 def test_flow_canvas_and_graph_mark_startup_states(tmp_path):
