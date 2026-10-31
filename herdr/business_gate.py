@@ -5,7 +5,10 @@ from .workflow_progress import active_tasks, _hash
 
 
 def _workflow_key(workflow, config):
-    return _hash({'workflow': {k: workflow.get(k) for k in
+    wf_status = workflow.get('status')
+    if wf_status in ('running', 'closing'):
+        wf_status = 'running'
+    return _hash({'workflow': {k: (wf_status if k == 'status' else workflow.get(k)) for k in
         ('workflow_id', 'execution_id', 'status', 'candidate_sha', 'candidate_episode_id', 'created_at', 'reopened_at')},
         'config': config})
 

@@ -289,8 +289,11 @@ def _business_scope(task, workflow):
               'completion_epoch', 'candidate_sha', 'acceptance_criteria', 'status',
               'superseded_by', 'clone_path', 'execution_mode')
     from .workflow_progress import _hash
+    wf_status = workflow.get('status')
+    if wf_status in ('running', 'closing'):
+        wf_status = 'running'
     return _hash({'task': {key: task.get(key) for key in fields},
-                  'workflow': {key: workflow.get(key) for key in
+                  'workflow': {key: (wf_status if key == 'status' else workflow.get(key)) for key in
                                ('workflow_id', 'execution_id', 'status', 'candidate_sha', 'candidate_episode_id')}})
 
 

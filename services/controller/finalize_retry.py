@@ -91,6 +91,9 @@ def _check_finalize_retry(ports, task, status, now):
                            "finalize_subprocess_error",
                            {"error": f"{type(exc).__name__}: {exc}"[:500]})
         return True
+    if isinstance(outcome, dict) and outcome.get("kind") == "inflight":
+        # In-flight finalization by another caller is an unbudgeted wait, not a failure.
+        return True
     if (isinstance(outcome, dict) and outcome.get("kind") == "wait"
             and outcome.get("reason") == "git_index_lock"
             and outcome.get("budgeted") is False):

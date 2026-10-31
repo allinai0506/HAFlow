@@ -8825,3 +8825,55 @@ pytest -v \
 - `tests/test_wf_1029_fix1_nested_git_commit.py` ~ `tests/test_wf_1029_fix6_auto_redispatch_penalize_agent.py` — 6 项专项回归测试套件全绿
 
 ---
+
+## §212 全链路排查与卡点治理：wf-project-1029-01 业务工作流耗时 14 小时根因闭环
+
+### 问题现象与根因剖析
+
+在真实项目 `nexusarchive` 业务工作流 `wf-project-1029-01`（"修复告警中心复制错误"）的实际执行中，工作流耗时长达 14.09 小时（从 2026-10-29 21:02 持续至 10-30 11:11），定位出以下核心阻断与延迟根因：
+1. **工作区归档未忽略大型依赖与构建产物导致物理归档预算超限与重复失败**：`nexusarchive` 包含 610MB 的 `node_modules`、580MB 的 `dist-release` 及 200MB 的 `.m2`，因 `herdr/clone_archive.py` 的 `BYPASS_IGNORED_DIRS` 仅配置了 `{".codegraph"}`，导致克隆归档体积严重超过 `MAX_BYTES=1GB` 且遍历耗时突破 `MAX_SECONDS=120s`，触发 `archive byte budget exceeded` 与 `archive inventory budget exceeded`，致使 `close-workflow` 陷入 13 次指数退避重试循环（历时逾 3 小时）。
+2. **工作流 `closing` 状态导致业务范围哈希与已持久化凭据脱节触发 Close Abort**：在关闭归档重试时，`task_cli_workflow_close.py` 预先将 workflow 状态置为 `closing`。`herdr/task_checkpoint.py` 的 `_business_scope` 与 `herdr/business_gate.py` 的 `_workflow_key` 将 `closing` 纳入哈希计算，与任务在 `running` 状态下完成签署的 `completion_receipt` 哈希不一致，引发 `[CLOSE ABORT] business acceptance unavailable: wf-project-1029-01-test-claude`，彻底阻断闭环。
+3. **Commit 阶段 pre-commit 复杂度门禁失败被误判为可重试导致无效重试 50 分钟与挂起**：在 `wf-project-1029-01-impl-qodercli` 任务提交时，项目内置 Git pre-commit hook 报告 `ratchet: 326 -> 327, Complexity check failed! Commit blocked` (rc=1)。`services/controller/git_finalize.py` 未将代码静态复杂度/钩子阻断识别为不可恢复错误，盲目按指数退避连续重试 5 次（耗时约 50 分钟），最终耗尽预算挂起 `finalize_escalated`，致使工作流整夜停滞（22:52 至 07:06）。
+4. **Worker 启动就绪检测硬编码 6 次轮询（3秒）脱离 `total_timeout=20s` 导致慢启动 Agent 误报与回滚**：`services/herdr-worker.py` 的 `wait_startup_ready` 默认 `attempts=6` 且每次睡眠 0.5s，在 3 秒左右即耗尽轮询，完全忽略传入的 `total_timeout=20`。在 `opencode` / `qodercli` 等冷启动耗时超过 3 秒的 Agent 上触发 `Worker startup UNKNOWN: interactive_not_idle` 并触发工位回滚。
+5. **Agent 启动仅捕获 `agent_pane_busy` 未捕获 `agent_not_ready`**：`herdr-worker.py` 的 `start_agent` 仅对 `agent_pane_busy` 执行重试，在 Agent 偶发返回 `agent_not_ready` 时直接抛出异常导致 Worker 启动失败回滚。
+6. **Controller Finalize 缺乏并发任务调用互斥**：多线程调度下 `services/controller/git_finalize.py` 同时并发执行同一任务终化，导致冲突触发 `[FINALIZE WAIT] reason=git_busy` (exit code 75) 及 `git process still active`。
+7. **PR 交付推送网络写死 30 秒超时**：`herdr/pr_delivery.py` 的 `_git` 统一使用 `timeout=30`，在企业网络大仓库推送分支时容易触发超时导致 PR 延期。
+8. **Advancement 启动等待日志无节流刷屏**：在 Deep Preflight 执行期间，控制器在每轮 sweep 频繁输出 `[STARTUP WAIT]` 日志，一分钟内多达 27 条，污染日志流。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 工作区包含 node_modules/target 导致归档字节超限 | 企业单体/大仓项目必然包含包管理器缓存与编译产物，必须在归档扫描层予以黑名单豁免；但严禁全局排除 reports 等通用业务目录，必须保留任务显式声明的交付物 | `clone_archive.py` 的 `BYPASS_IGNORED_DIRS` 仅忽略工具/缓存目录，排除 reports/coverage 等常规目录，并在 `_inventory` 中强保护 `artifacts`/`deliverables` |
+| closing 状态导致 business_scope 哈希漂移引发 close abort | 工作流从 running 迁移到 closing 仅是物理归档收尾过程，业务交付物的完整性哈希不得被收尾状态污染 | `task_checkpoint.py` 与 `business_gate.py` 将 `closing` 状态归一化为 `running` 进行范围哈希计算 |
+| pre-commit hook / complexity 门禁失败盲目重试 50 分钟 | 复杂度门禁与 pre-commit hook 错误是代码静态检查拒绝，绝不可能自愈，重复执行只能白白浪费数十倍时间 | `git_finalize.py` 识别 pre-commit / husky / complexity check 失败关键词，立即判定 `unrecoverable = True` 快速升级 |
+| 启动就绪检测 3 秒即超时误杀冷启动 Agent | 轮询次数硬编码会使超时预算形同虚设，慢启动 Agent 需要充足的初始化窗口，同时必须适配 CI 进程超时上限（<=12s） | `wait_startup_ready` 以 `deadline` 为基准轮询（默认 8.0s 并支持 `HERDR_WORKER_STARTUP_TIMEOUT` 环境变量配置），并支持对 `agent_not_ready` 短暂退避重试 |
+| 控制器单模块行数超限 | 职责拆分与模块化架构测试强制每个子模块代码行数 <= 500 行，新增逻辑不得随意突破行数预算 | `advancement.py` 精简内部依赖映射与打印格式，控制在 497 行（<= 500 行），符合架构守卫门禁 |
+| 终化并发调用竞争 Git 工作区 | 同一任务终化过程包含 Git 索引操作与状态写，多线程同时执行必然踩锁；且在飞跳过不得扣减重试预算 | 控制器通过 `_finalize_inflight` 集合按 task_id 实现线程安全互斥；`finalize_retry.py` 将 inflight 识别为非消耗预算的 wait，杜绝虚假升级 |
+| 大仓推送 30 秒超时导致 PR 交付停滞 | 网络推送耗时取决于网络带宽与远端负载，大仓需放宽推送超时限制 | `pr_delivery.py` 推送操作支持 `HERDR_GIT_PUSH_TIMEOUT` 环境变量（默认 120 秒） |
+| preflight 期间启动日志频繁刷屏 | 调度轮询每秒执行，缺乏节流会淹没关键排错日志 | `advancement.py` 针对未就绪启动日志按 30 秒窗口实施最小节流 |
+
+### 操作规范
+
+1. **归档目录过滤**：物理归档必须跳过所有语言生态的依赖与临时构建目录，保障单任务归档时间在秒级完成。
+2. **凭据哈希不变量**：工作流生命周期的物理关闭阶段（closing）在逻辑业务契约上与 running 对齐，杜绝因调度元数据变更导致有效证据失效。
+3. **错误快速升级**：致命的静态代码门禁错误立即熔断并通知人工，禁止进入退避重试死循环。
+4. **启动容忍与退避**：工位准备必须包容 Agent 初始化耗时，为慢模型/本地服务提供完整的 20 秒冷启动预算。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_wf_project_1029_blockers.py
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/clone_archive.py` — `BYPASS_IGNORED_DIRS` 增补大仓依赖与构建目录，复用 `deliverables._RECORDED_KEYS` 与 `_ref_rel` 确保显式声明与 observation-backed 交付物及祖先目录完整保留
+- `herdr/task_checkpoint.py` 与 `herdr/business_gate.py` — `closing` 状态向 `running` 归一化计算业务范围哈希
+- `services/controller/git_finalize.py` — pre-commit/husky/complexity 失败快速熔断与 `_finalize_inflight` 并发互斥
+- `services/herdr-worker.py` — `wait_startup_ready` 按真实 deadline 轮询与 `start_agent` 捕获 `agent_not_ready`
+- `herdr/pr_delivery.py` — push 超时延长至 120 秒
+- `services/controller/advancement.py` 与 `services/herdr-controller.py` — `_startup_wait_logged` 启动日志 30 秒节流
+- `tests/test_wf_project_1029_blockers.py` — 10 项全链路卡点专项回归测试
+
+---

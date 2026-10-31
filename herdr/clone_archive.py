@@ -31,6 +31,23 @@ MAX_SECONDS = 120
 # "side-channel diagnostics must not alter execution status" (AGENTS.md §4.10).
 BYPASS_IGNORED_DIRS = frozenset({
     ".codegraph",  # CodeGraph MCP / local index daemon runtime artifacts (db, pid, logs)
+    "node_modules",  # JavaScript / TypeScript package dependencies
+    "dist",  # Frontend / TypeScript build outputs
+    "dist-release",  # Release build outputs
+    "build",  # General build output
+    "target",  # Java / Rust / Maven build outputs
+    ".m2",  # Local Maven artifact cache
+    ".gradle",  # Gradle build cache
+    ".venv",  # Python virtual environments
+    "venv",  # Python virtual environments
+    "__pycache__",  # Python bytecode cache
+    ".pytest_cache",  # Pytest cache
+    ".mypy_cache",  # Mypy type check cache
+    ".ruff_cache",  # Ruff linter cache
+    ".turbo",  # Turborepo build cache
+    ".next",  # Next.js build output
+    ".nuxt",  # Nuxt.js build output
+    ".cache",  # Generic compiler/indexer cache
 })
 
 BYPASS_IGNORED_FILE_SUFFIXES = (
@@ -118,28 +135,117 @@ def _root(task, clone_root):
     return root
 
 
-def _inventory(root):
+def _declared_deliverable_rel_paths(task: dict | None, root: Path | str | None = None) -> set[str]:
+    """Collect relative paths of all declared artifacts/deliverables on a task."""
+    if not isinstance(task, dict):
+        return set()
+    from herdr.deliverables import _RECORDED_KEYS, _ref_rel
+
+    workspaces: list[Path] = []
+    if root is not None:
+        try:
+            workspaces.append(Path(root))
+        except Exception:
+            pass
+    if task.get("workspace"):
+        try:
+            ws_path = Path(task["workspace"])
+            if ws_path not in workspaces:
+                workspaces.append(ws_path)
+        except Exception:
+            pass
+
+    declared = set()
+    for key in _RECORDED_KEYS:
+        for item in task.get(key) or []:
+            matched = False
+            for ws in workspaces:
+                rel = _ref_rel(item, ws)
+                if rel:
+                    declared.add(rel)
+                    matched = True
+                    break
+            if matched:
+                continue
+
+            candidates: list[str] = []
+            if isinstance(item, str):
+                candidates.append(item)
+            elif isinstance(item, dict):
+                for f in ("rel_path", "path", "ref", "artifact_path", "content_ref"):
+                    val = item.get(f)
+                    if val:
+                        candidates.append(str(val))
+                meta = item.get("metadata")
+                if isinstance(meta, dict):
+                    for f in ("artifact_path", "path", "rel_path"):
+                        val = meta.get(f)
+                        if val:
+                            candidates.append(str(val))
+                if not candidates and item.get("name"):
+                    candidates.append(str(item.get("name")))
+
+            for raw in candidates:
+                text = str(raw or "").strip().replace("\\", "/")
+                if text.startswith("./"):
+                    text = text[2:]
+                if not text or any(ch.isspace() for ch in text) or ".." in Path(text).parts:
+                    continue
+                if not text.startswith("/"):
+                    declared.add(text)
+                    break
+                raw_path = Path(text).expanduser()
+                for ws in workspaces:
+                    try:
+                        resolved = raw_path.resolve()
+                        ws_res = ws.resolve()
+                        if ws_res in resolved.parents and resolved != ws_res:
+                            rel_p = resolved.relative_to(ws_res).as_posix()
+                            if rel_p and ".." not in Path(rel_p).parts:
+                                declared.add(rel_p)
+                                break
+                    except (OSError, ValueError):
+                        continue
+    return declared
+
+
+def _is_declared_or_ancestor(rel: str, declared: set[str]) -> bool:
+    """Check if rel is an explicitly declared path or an ancestor directory of one."""
+    if not declared:
+        return False
+    norm = rel.rstrip("/") + "/"
+    return rel in declared or any(p.startswith(norm) for p in declared)
+
+
+def _inventory(root, task=None):
     entries = {}
     total = 0
     deadline = time.monotonic() + MAX_SECONDS
+    declared = _declared_deliverable_rel_paths(task, root)
 
     def failed(error):
         raise error
 
     for current, dirs, files in os.walk(root, followlinks=False, onerror=failed):
-        dirs[:] = [d for d in dirs if d not in BYPASS_IGNORED_DIRS]
+        rel_current = Path(current).relative_to(root).as_posix()
+        dirs[:] = [
+            d for d in dirs
+            if d not in BYPASS_IGNORED_DIRS
+            or _is_declared_or_ancestor(d if rel_current == "." else f"{rel_current}/{d}", declared)
+        ]
         for name in sorted(dirs + files):
             path = Path(current) / name
             info = path.lstat()
-            if (
+            rel = path.relative_to(root).as_posix()
+            is_declared = _is_declared_or_ancestor(rel, declared)
+            if not is_declared and (
                 stat.S_ISSOCK(info.st_mode)
                 or name.endswith(".sock")
                 or name in BYPASS_IGNORED_FILE_NAMES
                 or name in BYPASS_IGNORED_DIRS
             ):
                 continue  # Live IPC endpoint, external indexer, or transient metadata.
-            rel = path.relative_to(root).as_posix()
-            if is_bypass_rel_path(rel):
+            if not is_declared and is_bypass_rel_path(rel):
                 continue
             if len(entries) >= MAX_ENTRIES or time.monotonic() > deadline:
                 raise ValueError("archive inventory budget exceeded")
@@ -182,7 +288,7 @@ def preserve_clone(task, clone_root):
         verify_source(task, clone_root, task["clone_archive"])
         return task["clone_archive"]
     info = root.stat()
-    entries = _inventory(root)
+    entries = _inventory(root, task=task)
     manifest = {
         "task_id": task["task_id"],
         "workflow_id": task["workflow_id"],
@@ -226,7 +332,7 @@ def preserve_clone(task, clone_root):
                     not member.issym() or member.linkname != expected["target"]
                 ):
                     raise ValueError("archive link verification failed")
-        if _inventory(root) != entries or (root.stat().st_dev, root.stat().st_ino) != (
+        if _inventory(root, task=task) != entries or (root.stat().st_dev, root.stat().st_ino) != (
             info.st_dev,
             info.st_ino,
         ):
@@ -299,9 +405,10 @@ def verify_source(task, clone_root, archive):
         if not is_residual_clone_shell(root):
             raise ValueError("clone instance changed")
     manifest = archive_manifest(dict(task, clone_archive=archive))
-    current = _inventory(root)
+    current = _inventory(root, task=task)
+    declared = _declared_deliverable_rel_paths(task, root)
     manifest_entries = {
-        k: v for k, v in manifest["entries"].items() if not is_bypass_rel_path(k)
+        k: v for k, v in manifest["entries"].items() if _is_declared_or_ancestor(k, declared) or not is_bypass_rel_path(k)
     }
     deleting = task.get("clone_reclaim_started") == archive["manifest_sha256"]
     if current != manifest_entries and not (
