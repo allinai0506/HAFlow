@@ -837,11 +837,14 @@ _settlement_lock = threading.Lock()
 _settlement_inflight: set = set()
 
 
-def trigger_background_sync(state_db_path: Optional[Path] = None) -> bool:
+def trigger_background_sync(state_db_path: Optional[Path] = None,
+                            hub_client: Optional[Any] = None) -> bool:
     """Start one bounded daemon sync; skip while another is in flight.
 
     Single-flight guard for dispatch/sentinel hot paths: returns True when a
     worker was started, False when a previous sync is still running.
+    ``hub_client`` 透传调用方已认证的客户端（token-file 凭据场景下自建
+    collector 没有 Hub 客户端，PR #377 三轮 P1）。
     """
     global _bg_sync_inflight
     with _bg_sync_lock:
@@ -852,7 +855,7 @@ def trigger_background_sync(state_db_path: Optional[Path] = None) -> bool:
     def _worker():
         global _bg_sync_inflight
         try:
-            ExperienceCollector().recover_and_sync(state_db_path=state_db_path)
+            ExperienceCollector(hub_client=hub_client).recover_and_sync(state_db_path=state_db_path)
         except Exception as exc:
             LOGGER.debug("Background experience sync failed: %s", exc)
         finally:

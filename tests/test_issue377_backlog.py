@@ -138,15 +138,16 @@ def test_post_close_experience_sync_honors_opt_out(tmp_path, monkeypatch):
     store = SQLiteStateStore(tmp_path / "state.db")
     store.save_workflow({"workflow_id": "wf-x", "status": "completed"})
     monkeypatch.setenv("HERDR_EXPERIENCE_COLLECTION_DISABLED", "1")
-    calls = []
     monkeypatch.setattr(close_mod, "_experience_collector_factory",
-                        lambda db_path, hub_client: (_ for _ in ()).throw(
+                        lambda **kw: (_ for _ in ()).throw(
                             AssertionError("opt-out 下不得构造 collector")))
     close_mod._post_close_experience_sync("wf-x", store.db_path)
 
 
-def test_post_close_experience_sync_binds_store_db_and_drains_async(tmp_path, monkeypatch):
-    """Codex P2：采集与后台 drain 都必须绑定 close 所用库；close 不同步上传。"""
+def test_post_close_experience_sync_keeps_collector_db_default_and_drains(tmp_path, monkeypatch):
+    """Codex 三轮 P1×2：close 期记录必须落在默认 collector 库（recovery
+    drain 的同一个库），workflow state db 只作任务事实源；已认证 Hub
+    client 透传给后台 drain（token-file 凭据场景不静默 no_hub_client）。"""
     from herdr import task_cli_workflow_close as close_mod
     store = SQLiteStateStore(tmp_path / "state.db")
     store.save_workflow({"workflow_id": "wf-x", "status": "completed"})
@@ -156,7 +157,8 @@ def test_post_close_experience_sync_binds_store_db_and_drains_async(tmp_path, mo
 
     class _FakeCollector:
         def __init__(self, db_path=None, hub_client=None):
-            recorded["collector_db"] = db_path
+            recorded["collector_db"] = db_path      # 必须保持默认（None）
+            recorded["collector_hub"] = hub_client
             self.hub_client = hub_client
 
         def collect_and_sync_lessons(self, lessons_path=None, sync_to_hub=True):
@@ -165,19 +167,35 @@ def test_post_close_experience_sync_binds_store_db_and_drains_async(tmp_path, mo
 
         def collect_workflow_tasks(self, workflow_id, state_db_path=None):
             recorded["tasks_wf"] = workflow_id
-            recorded["tasks_db"] = state_db_path
+            recorded["tasks_db"] = state_db_path    # 任务事实源 = workflow 库
             return {"ok": True}
 
     monkeypatch.setattr(close_mod, "_experience_collector_factory",
-                        lambda db_path, hub_client=None: _FakeCollector(db_path, hub_client))
+                        lambda **kw: _FakeCollector(**kw))
     drained = []
     monkeypatch.setattr(close_mod, "_experience_background_drain",
-                        lambda db_path: drained.append(db_path))
+                        lambda state_db_path=None, hub_client=None:
+                            drained.append((state_db_path, hub_client)))
     close_mod._post_close_experience_sync("wf-x", store.db_path)
-    assert recorded["tasks_db"] == store.db_path, "采集必须绑定 close 所用库"
+    # 任务事实源绑定 close 所用库
+    assert recorded["tasks_db"] == store.db_path
     assert recorded["tasks_wf"] == "wf-x"
     assert recorded["lessons_sync_to_hub"] is False, "close 路径不得同步上传"
-    assert drained == [store.db_path], "上传由后台单飞 drain 承接"
+    # collector 记录库不得被误写成 workflow 库（Codex 三轮 P1）
+    assert recorded["collector_db"] is None, "collector 记录库必须保持默认"
+    # 已认证 client 透传给 drain；drain 的任务事实源同为 close 库
+    assert drained == [(store.db_path, recorded["collector_hub"])]
+
+    # hub client 缺失时透传 None（行为不变）
+    recorded.clear(); drained.clear()
+
+    class _NoHubCollector(_FakeCollector):
+        def __init__(self, **kw):
+            super().__init__(db_path=kw.get("db_path"), hub_client=kw.get("hub_client"))
+
+    monkeypatch.setattr(close_mod, "_experience_collector_factory", lambda **kw: _NoHubCollector(**kw))
+    close_mod._post_close_experience_sync("wf-x", store.db_path)
+    assert drained == [(store.db_path, None)]
 
 
 # ---------------------------------------------------------------- sentinel
