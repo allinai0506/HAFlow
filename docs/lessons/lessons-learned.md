@@ -8868,12 +8868,12 @@ pytest -v tests/test_wf_project_1029_blockers.py
 
 ### 相关文档 / 关联证据
 
-- `herdr/clone_archive.py` — `BYPASS_IGNORED_DIRS` 增补大仓依赖与构建目录，复用 `deliverables._RECORDED_KEYS` 与 `_ref_rel` 确保显式声明与 observation-backed 交付物及祖先目录完整保留
+- `herdr/clone_archive.py` — `BYPASS_IGNORED_DIRS` 增补大仓依赖与构建目录，复用 `deliverables._RECORDED_KEYS` 与 `_ref_rel` 确保显式声明与 observation-backed 交付物及祖先目录完整保留，且严格豁免 `.git` 内部元数据（如 `refs/heads/build`）防止误删分支
 - `herdr/task_checkpoint.py` 与 `herdr/business_gate.py` — `closing` 状态向 `running` 归一化计算业务范围哈希
 - `services/controller/git_finalize.py` — pre-commit/husky/complexity 失败快速熔断与 `_finalize_inflight` 并发互斥
 - `services/herdr-worker.py` — `wait_startup_ready` 按真实 deadline 轮询与 `start_agent` 捕获 `agent_not_ready`
 - `herdr/pr_delivery.py` — push 超时延长至 120 秒
 - `services/controller/advancement.py` 与 `services/herdr-controller.py` — `_startup_wait_logged` 启动日志 30 秒节流
-- `tests/test_wf_project_1029_blockers.py` — 10 项全链路卡点专项回归测试
+- `tests/test_wf_project_1029_blockers.py` — 11 项全链路卡点专项回归测试
 
 ---

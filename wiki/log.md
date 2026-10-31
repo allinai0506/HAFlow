@@ -3839,3 +3839,8 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Controller 终化并发调用互斥与行数架构治理：`services/controller/git_finalize.py` 引入 `_finalize_inflight` 集合并作为标准依赖注册到 `services/herdr-controller.py` 与 `DEPENDENCIES`，实现单任务终化互斥，消除 `git_busy (75)` 竞争；`services/controller/finalize_retry.py` 将 inflight 识别为非预算扣减等待，防止重复终化跳过引发虚假升级；`services/controller/advancement.py` 引入 30 秒节流窗口消除 Deep Preflight 刷屏，并精简至 497 行符合模块化门禁（<= 500 行）。
 - PR 交付推送超时弹性配置：`herdr/pr_delivery.py` 的 `_git` 针对 `push` 操作放宽超时至 120 秒，并支持 `HERDR_GIT_PUSH_TIMEOUT` 环境变量配置。
 - 验证：10 项全链路卡点专项回归测试（`tests/test_wf_project_1029_blockers.py`）及全量 CI 检查全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §212。
+
+## [2026-10-31] Fix | 物理归档严格豁免 Git 仓库内部元数据与活体 Socket 旁路隔离
+- Git 元数据豁免与分支指针保全：`herdr/clone_archive.py` 的 `is_bypass_rel_path` 与 `_inventory` 遍历中增加 `.git` 路径严格豁免，杜绝名为 `build`、`dist` 等匹配构建目录名称的松散分支引用（如 `.git/refs/heads/build`）被误判为构建产物剔除，确保归档恢复后的 Git 仓库能正常解析 HEAD 与分支指针。
+- 活体 Socket 旁路隔离防御：明确 Unix-domain socket（`.sock` / `stat.S_ISSOCK`）属于运行时 IPC 终端，不受 Git 元数据豁免影响，始终在物理归档中被跳过（如 `.git/fsmonitor.sock`），符合 `AGENTS.md` §4.10 旁路隔离约束，杜绝触发非预期 `unsupported sandbox special file` 异常导致工作流收尾失败。
+- 验证：更新 `test_git_metadata_preserved_even_when_named_build_or_dist` 回归测试，覆盖松散分支保全与 `.git/fsmonitor.sock` 活体 socket 自动旁路隔离；全量 11 项卡点专项测试全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §212。
