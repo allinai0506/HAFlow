@@ -603,6 +603,26 @@ def close_workflow_owned(
     if dry_run:
         print("[DRY RUN] no changes were made")
     else:
+        # Trigger corporate lessons and task experience sync (100% fail-open)
+        if not abandon:
+            try:
+                from herdr.experience.client import ExperienceClient
+                from herdr.experience.collector import ExperienceCollector
+
+                hub_client = None
+                try:
+                    client = ExperienceClient()
+                    if client.token:
+                        hub_client = client
+                except Exception:
+                    hub_client = None
+
+                collector = ExperienceCollector(hub_client=hub_client)
+                collector.collect_and_sync_lessons()
+                collector.collect_workflow_tasks(workflow_id)
+                collector.recover_and_sync()
+            except Exception as exc:
+                print(f"[EXPERIENCE SYNC NOTICE] post-close sync: {exc}")
         print(f"[WORKFLOW CLOSED] {workflow_id}")
     return report
 

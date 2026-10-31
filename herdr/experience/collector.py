@@ -799,7 +799,7 @@ class ExperienceCollector:
             conn = state_db.get_db_connection(state_db_path)
             try:
                 rows = conn.execute(
-                    "SELECT task_id, status, run_id FROM tasks WHERE workflow_id = ? ORDER BY created_at",
+                    "SELECT task_id, status FROM tasks WHERE workflow_id = ? ORDER BY created_at",
                     (str(workflow_id),),
                 ).fetchall()
             finally:

@@ -3874,3 +3874,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - CI 阻塞根因（#368 第二轮）：macOS 26 上 `launchctl list <未加载label>` rc=113 被归探针失败 → ad-hoc hub 无法 stop（产品缺陷）；classify_manager 区分确定性否定与探针失败（详见 lessons §214）。xdist 顺序依赖的 stage-state 测试隔离（复现方法见 lessons §215）。
 - 验证：五 PR CI 全绿；#368 第二轮 CI 同款 `-n auto` 本地全量 6712 passed；23 条评审线程回复+Resolve（含 4 条经三层证据核验的"已在 main 修复"引证）；独立对抗评审逐批 MERGE_READY（fail-closed 边界逐路径核对）。
 - 教训见 lessons §214/§215。
+
+## [2026-10-31] Fix | 工作流收尾经验提炼通道闭环：SQL 字段解耦、凭据自动回退与 Fail-open 收尾挂载
+- 修正 SQL 物理列查询：`herdr/experience/collector.py` 移除 `collect_workflow_tasks` 中对 `tasks.run_id` 的直接查询，彻底解决 `no such column: run_id` 导致的静默提炼失败。
+- 凭据自动回退与鉴权修复：`herdr/experience/client.py` 在 `HERDR_HUB_TOKEN` 缺省时，自动回退读取本地受保护的凭据文件（`state_db.get_user_token` 及 credentials 目录安全回退），消除 Experience Hub 全量 401 Unauthorized，同时保持 `herdr/state/` 架构冻结不变。
+- 工作流收尾提炼通道闭环：`herdr/task_cli_workflow_close.py` 的 `close_workflow_owned` 在工作流物理收尾完成后，以 100% fail-open 方式自动触发 `collect_and_sync_lessons`、`collect_workflow_tasks` 与 `recover_and_sync`，确保每次工作流收尾均自动沉淀并同步经验资产。
+- 生产现场补齐：成功提取积压的 45 条工程教训资产（§165 ~ §213）并同步推送到 Experience Hub，经验总数从 7 条恢复至 52 条。
+- 验证：新增 `tests/test_workflow_experience_closeout.py` 专项守护测试，全量 126 项经验回归测试全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §216。
