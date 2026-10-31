@@ -486,9 +486,13 @@ def launch_task_orchestrated(args, *, deps):
             stage_skills_into_workspace,
             SkillCapabilityGap,
         )
+        # 门控判定必须用 pinned 模板配置：注册外壳（registry envelope）的
+        # template_name 为空且 workflow_template 藏在 config 里（Codex 二轮
+        # 评审），用外壳会让适配流静默跳过默认技能装配。
         wf_cfg = {}
         try:
-            wf_cfg = (store.get_workflow(args.workflow_id) or {})
+            _, pinned_cfg, _ = store.read_workflow_snapshot(args.workflow_id)
+            wf_cfg = pinned_cfg or {}
         except Exception:
             wf_cfg = {}
         node_skills = stage_skills_for_node(
