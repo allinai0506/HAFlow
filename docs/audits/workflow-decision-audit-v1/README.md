@@ -51,11 +51,11 @@
 
 ### Q2：是否存在重复、冲突或互相阻塞的决策逻辑？
 
-#### 结论：**存在大量重复判断、局部竞态冲突以及多处静默死胡同**。
+#### 结论：**存在大量重复判断、局部恢复次序耦合以及多处静默死胡同**。
 
 - **已确认事实**：
   1. **重复判断**：`_scheduler_join_gate_allows()` 在一次推进链路中，分别在 [`advancement.py:323`](../../../services/controller/advancement.py#L323)、[`stage_delivery.py:64`](../../../services/controller/stage_delivery.py#L64)、[`direct_dispatch.py:81`](../../../services/controller/direct_dispatch.py#L81) **被无缓存连续重复计算 3 次**；
-  2. **竞态冲突**：Sentinel 看门狗判定超时将任务置为 `failed` 与 Controller `process_gate_verdict_reconciliations` 尝试从磁盘读取有效门禁将其跃迁为 `completed` 存在并发竞争；
+  2. **恢复次序耦合（初稿误判为并发竞态，已更正）**：`registry_watcher()` 先同步执行 `process_gate_verdict_reconciliations()` 再重载任务，仅对仍为 `failed` 的任务执行基础设施恢复（详见 [decision-inventory §6](decision-inventory.md) 更正）；两者当前不构成并发竞争，但次序正确性依赖该串行假设；
   3. **静默死胡同 (Silent Deadlock)**：在 `task_events.py:53-64` 中，Staged 流程在自动验收失败后直接 `return` 且不再重试，任务被永久锁定在 `agent_done`。
 - **证据**：
   - 代码位置：[`services/controller/task_events.py:48-64`](../../../services/controller/task_events.py#L48-L64)。

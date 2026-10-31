@@ -59,9 +59,9 @@ Input Tuple = (
   此时系统没有任何一条规则（无论是自动推进、返工机制还是重试调度）能够消费处于 `agent_done` 且 `auto_acceptance_rejected` 的任务。该状态成为决策盲区。
 
 ### 3.2 互斥性 (Mutual Exclusivity)：同一状态是否可能触发互相矛盾的动作？
-- **审计结论：存在局部冲突**。
-- **事实与代码证据**：
-  在门禁任务超时场景下，[`services/herdr-sentinel.py:650`](../../../services/herdr-sentinel.py#L650) 将任务置为 `failed` 并准备释放窗格；但与此同时，[`services/controller/auto_verdict.py:83-93`](../../../services/controller/auto_verdict.py#L83-L93) 的 `process_gate_verdict_reconciliations` 会并发读取该任务的 `gate-verdict.json`，如果发现存在 `pass`，会试图调用 `try_auto_verdict` 将任务强行翻案跃迁为 `completed`。两者产生直接竞态。
+- **审计结论：初稿误判为并发竞态，已更正为恢复次序耦合**。
+- **事实与代码证据（更正）**：
+  在门禁任务超时场景下，[`services/herdr-sentinel.py`](../../../services/herdr-sentinel.py) 的看门狗将任务置为 `failed`，其状态写入携带 expected status/version 守卫；而 Controller 侧 [`services/controller/registry.py:117-160`](../../../services/controller/registry.py#L117-L160) 的 `registry_watcher()` 为**串行**顺序：先同步执行 [`auto_verdict.py:83-93`](../../../services/controller/auto_verdict.py#L83-L93) 的 `process_gate_verdict_reconciliations()`（抢救 `gate-verdict.json` 自动翻案），随后**重新加载任务列表**，再对仍处于 `failed` 的任务调用 `recover_infra_failed_tasks()`。裁决被成功采纳的任务不会进入后续恢复分支，两者当前不构成并发竞态。残留风险是恢复次序正确性依赖该串行假设；若未来任一路径改为并发执行，需先引入任务级恢复互斥。
 
 ### 3.3 确定性 (Determinism)：相同输入是否产生相同的合法决策？
 - **审计结论：缺乏强确定性**。

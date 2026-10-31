@@ -64,11 +64,11 @@
 - **危害**：该 Task 既没有进入 `completed`，也没有进入 `rework` 或 `failed`，而是死锁在 `agent_done`。Controller 没有安排任何重试或自动修复逻辑，工作流就此彻底停滞。
 
 ### 6. 多个恢复机制重复处理同一个故障
-- **典型案例：看门狗超时与基础设施恢复竞态**  
-  - [`services/herdr-sentinel.py`](../../../services/herdr-sentinel.py) 的 `hard_timeout_watchdog` 会将超时的任务强制写为 `failed`；
-  - 随后 Controller [`services/controller/registry.py:153`](../../../services/controller/registry.py#L153) 的 `recover_infra_failed_tasks()` 尝试自动作废补派；
-  - 与此同时，[`services/controller/auto_verdict.py:83`](../../../services/controller/auto_verdict.py#L83) 又试图从该 `failed` 任务所属克隆中抢救 `gate-verdict.json` 实施自动翻案。
-- **危害**：两个异步恢复过程竞争修改同一任务的生命周期状态，导致 CAS 乐观锁冲突或状态震荡。
+- **典型案例：看门狗超时与门禁裁决恢复的执行顺序**（初稿曾误判为并发竞态，已更正）
+  - [`services/herdr-sentinel.py`](../../../services/herdr-sentinel.py) 的 `hard_timeout_watchdog` 将超时任务强制写为 `failed`，状态写入携带 expected status/version 守卫；
+  - Controller [`services/controller/registry.py:117-160`](../../../services/controller/registry.py#L117-L160) 的 `registry_watcher()` 为**串行**顺序：先同步调用 [`auto_verdict.py:83`](../../../services/controller/auto_verdict.py#L83) 的 `process_gate_verdict_reconciliations()`（抢救 `gate-verdict.json` 自动翻案），随后**重新加载任务**，再对仍处于 `failed` 的任务调用 `recover_infra_failed_tasks()`。
+- **结论（更正）**：裁决被成功采纳的任务经任务重载后不会进入基础设施恢复分支，两个恢复路径当前不构成并发竞争，也不产生 CAS 冲突或状态震荡；初稿"两个异步恢复过程竞争"的表述不成立。
+- **残留风险（降级）**：恢复次序的正确性依赖 `registry_watcher()` 的串行执行假设；若未来将任一路径改为异步/并发执行，需先引入显式的任务级恢复互斥。
 
 ### 7. 交付物已经合格，但节点无法推进
 - **典型案例：Challenger 缺少 `Plan-Ref` 字段**  
