@@ -548,7 +548,10 @@ def freeze_run_definition(workflow_id, definition=None, *, source_file=None):
     return _snapshot_workflow_definition(workflow_id, source)
 
 
-def register_workflow(workflow_id, project, requirement="", title="", execution=None, context=None, workflow_file=None, metadata=None):
+def register_workflow(
+    workflow_id, project, requirement="", title="", execution=None, context=None,
+    workflow_file=None, metadata=None, *, on_committed=None,
+):
     title = (title or "").strip()
     subject = title or requirement_subject(requirement) or "未命名工作流"
     # Single-write contract: workflow_file and metadata are merged into the
@@ -610,16 +613,23 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
         "workflow_file": resolved_workflow_file,
     }
     if hasattr(store, "register_workflow"):
-        store.register_workflow(wf_entry, event_payload=event_payload)
+        receipt = store.register_workflow(wf_entry, event_payload=event_payload)
     else:
         store.save_workflow(wf_entry)
+        recorded = None
         if hasattr(store, "record_event"):
-            store.record_event(
+            recorded = store.record_event(
                 event_type="workflow_created",
                 payload=event_payload,
                 workflow_id=workflow_id,
                 source="register_workflow",
             )
+        event_id = recorded.get("id") if isinstance(recorded, dict) else None
+        receipt = {"ok": True, "workflow_id": workflow_id, "event_id": event_id}
+    # Note ownership only after the registration transaction returns, and
+    # before projection. A projection error must not erase a committed receipt.
+    if callable(on_committed):
+        on_committed(receipt)
     try:
         from .state_store import sync_workflows_projection
     except ImportError:
@@ -629,17 +639,18 @@ def register_workflow(workflow_id, project, requirement="", title="", execution=
 
 def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agents=None):
     store = _get_store()
-    record = store.get_workflow(workflow_id)
-    if not record:
+    if not store.get_workflow(workflow_id):
         raise RuntimeError(f"未找到工作流注册记录: {workflow_id}")
 
-    record["startup_ready"] = True
+    updates = {"startup_ready": True}
     if healthy_agents is not None:
-        record["healthy_agents"] = healthy_agents
+        updates["healthy_agents"] = healthy_agents
     if unhealthy_agents is not None:
-        record["unhealthy_agents"] = unhealthy_agents
+        updates["unhealthy_agents"] = unhealthy_agents
 
-    store.save_workflow(record)
+    # 条件写：终态记录不得被启动窗口的写入改回 running（禁止全量 upsert）。
+    store.update_workflow_metadata(
+        workflow_id, updates, expected_status="running")
 
     try:
         from .state_store import sync_workflows_projection

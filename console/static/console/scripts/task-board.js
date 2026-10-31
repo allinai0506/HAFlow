@@ -151,7 +151,14 @@ function updateAttentionHub(){
     ab.style.borderColor='rgba(217,119,6,0.25)';
     const actBtn=`<button class="btn primary" onclick="openControllerCockpit(${esc(JSON.stringify({workflowId:state.workflowId,taskId:stall.target_task_id||''}))})">在 Controller 中处理</button>`;
     ab.innerHTML=`<div style="display:flex;align-items:center;gap:8px"><span class="att-badge" style="background:var(--warning);color:#fff">推进停滞告警</span><span class="att-text" style="color:var(--text-primary)">⚠️ ${esc(stall.message)}</span></div><div>${actBtn}</div>`;
-  }else if(w&&(w.status==='completed'||w.outcome==='delivered')){
+  }else if(w&&(workflowStatusKey(w)==='startup_pending'||workflowStatusKey(w)==='startup_failed'||workflowStatusKey(w)==='abandoned')){
+    const key=workflowStatusKey(w);
+    const danger=key!=='startup_pending';
+    ab.style.background=danger?'var(--danger-bg)':'var(--warning-bg)';
+    ab.style.borderColor=danger?'rgba(220,38,38,0.25)':'rgba(217,119,6,0.25)';
+    const hint=workflowStartupHint(w);
+    ab.innerHTML=`<div style="display:flex;align-items:center;gap:8px"><span class="att-badge">${esc(workflowStatusLabel(w))}</span><span class="att-text">${esc(hint||workflowStatusLabel(w))}</span></div><div></div>`;
+  }else if(w&&(w.status==='completed'||w.status==='cleaned'||w.outcome==='delivered')){
     ab.style.background='var(--success-bg)';
     ab.style.borderColor='rgba(22,163,74,0.25)';
     ab.innerHTML=`<div style="display:flex;align-items:center;gap:8px"><span class="att-badge" style="background:var(--success);color:#fff">已交付</span><span class="att-text" style="color:var(--text-primary);font-weight:500">🎉 工作流已顺利完成全流程闭环并交付归档</span></div><div></div>`;

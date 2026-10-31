@@ -50,6 +50,21 @@ class TestConsoleRunJob(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error"], "preflight failed")
 
+    def test_factory_stderr_guidance_reaches_failed_job(self):
+        module = load_console()
+        workflow_id = "wf-console-startup-failed"
+        stderr = (
+            "[WORKFLOW STARTUP FAILED] workflow_id=" + workflow_id + " stage=preflight\n"
+            "next: herdr-task close-workflow " + workflow_id + " --abandon"
+        )
+        completed = type("Completed", (), {"returncode": 1, "stdout": "", "stderr": stderr})()
+        with patch.object(module.common, "run", return_value=completed):
+            job = module.start_workflow_job("/tmp/project", "需求")
+            result = self.wait_for_terminal(module, job["job_id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(workflow_id, result["error"])
+        self.assertIn("herdr-task close-workflow " + workflow_id + " --abandon", result["error"])
+
     def test_workflow_command_allows_preflight_and_dispatch_time(self):
         module = load_console()
         completed = type("Completed", (), {"returncode": 0, "stdout": "WORKFLOW_ID\n", "stderr": ""})()

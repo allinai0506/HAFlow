@@ -25,7 +25,11 @@ function flowIconSvg(id){
   const p=paths[id]||paths.requirements;
   return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'+p+'</svg>';
 }
+function startupNodeLabel(state){
+  return ({startup_pending:'启动中（尚未就绪）',startup_failed:'启动失败',abandoned:'已放弃'})[state]||String(state||'');
+}
 function flowCardFoot(n){
+  if(n.workflow_startup_state)return startupNodeLabel(n.workflow_startup_state);
   const u=n.resource_usage;
   if(u)return '累计任务 '+u.task_count+' / '+(u.max_tasks_per_node??'未设')+' · 运行 '+u.active_task_count+' / '+(u.max_concurrency??'未设')+' · 工位引用 '+u.pane_count+(u.overflow?' · 超限':'');
   if(!n.task_count)return (n.status === 'completed' || n.status === 'cleaned') ? '已完成' : '尚未开始';
@@ -34,6 +38,7 @@ function flowCardFoot(n){
   return agents.length?head+' · '+agents.join(' · '):head;
 }
 function flowNodeStatus(node,fallback){
+  if(node.workflow_startup_state)return startupNodeLabel(node.workflow_startup_state);
   if(recoveryUnavailable())return '状态未确认';
   if(node.status==='completed'||node.status==='cleaned'||fallback==='已完成')return fallback;
   const op=currentRecovery(node.id)[0];
@@ -92,7 +97,10 @@ function flowChecklist(node){
   const issueLabels={required_task_missing:'必需任务缺失',required_task_out_of_workflow:'必需任务属于其他工作流',required_task_out_of_node:'必需任务属于其他节点',required_task_lineage_cycle:'任务替代关系存在循环',required_task_ids_invalid:'必需任务配置无效',workflow_config_invalid:'工作流配置无效',required_task_incomplete:'必需任务尚未完成'};
   (node.completion_issues||[]).forEach(issue=>items.push(['bad',(issueLabels[issue.reason]||issue.reason)+(issue.task_id?' · '+issue.task_id:'')]));
   const agents=(node.agents||[]).filter(Boolean);
-  if(!agents.length){
+  if(node.workflow_startup_state){
+    items.push([node.workflow_startup_state==='startup_pending'?'wait':'bad',startupNodeLabel(node.workflow_startup_state)+' · 工作流未就绪']);
+  }
+  else if(!agents.length){
     if(node.status==='completed')items.push(['ok','阶段已收尾完成']);
     else items.push(['wait','尚未分配执行者']);
   }
@@ -151,14 +159,18 @@ function renderFlowWorkbench(){
   if(state.shellView&&state.shellView!=='workbench')return;
   if(state.opsMode||state.dashMode||state.workflowId==='__templates__')return;
   const g=flowGraphData();const nodes=g.nodes||[];
+  const wf=state.workflow&&state.workflow.workflow;
+  const wfKey=wf?workflowStatusKey(wf):'';
+  const startup=wfKey==='startup_pending'||wfKey==='startup_failed'||wfKey==='abandoned';
   setWorkspaceMode(state.workflowView);
   const fs=document.getElementById('flowSummary');
   if(fs){
-    if(state.workflowView==='flow'&&nodes.length){
+    if(state.workflowView==='flow'&&(nodes.length||startup)){
       const working=nodes.filter(n=>n.status==='working').length;
       fs.style.display='inline-flex';
       const dotHtml=working>0?'<span class="flow-status-dot" style="background:#5e6ad2;box-shadow:0 0 0 2px rgba(94,106,210,.25)"></span>':'<span class="flow-status-dot"></span>';
-      fs.innerHTML=dotHtml+'<span><b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span>';
+      const label=wf?esc(workflowStatusLabel(wf)):'';
+      fs.innerHTML=dotHtml+'<span>'+(label?label+' · ':'')+'<b>'+nodes.length+'</b> 个节点 · <b>'+working+'</b> 个运行中</span>';
     }else{
       fs.style.display='none';
     }
@@ -168,7 +180,10 @@ function renderFlowWorkbench(){
   if(!state.flowSelectedNodeId||!nodes.some(n=>n.id===state.flowSelectedNodeId)){state.flowSelectedNodeId=pickDefaultFlowNodeId(nodes);}
   const recoveries=currentRecovery();
   const ticker=document.getElementById('bottomTicker');
-  if(ticker)ticker.textContent=state.controllerActionsData?.pending?'正在读取恢复状态…':recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
+  if(ticker){
+    const hint=wf?workflowStartupHint(wf):'';
+    ticker.textContent=startup&&hint?hint:startup?workflowStatusLabel(wf):state.controllerActionsData?.pending?'正在读取恢复状态…':recoveryUnavailable()?'恢复状态读取失败，卡点未确认':recoveries.length?'有 '+recoveries.length+' 项恢复待办，请查看卡点':'工作流调度就绪';
+  }
   const attnBar=document.getElementById('flowAttnBar');
   if(attnBar){
     if(state.workflowView==='flow'&&state.controllerActionsData?.pending){

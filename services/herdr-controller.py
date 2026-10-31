@@ -43,6 +43,7 @@ try:
         record_observation_created,
         record_trajectory_event,
     )
+    from herdr.log_throttle import StartupWaitLog
     from herdr import liveness
 except ImportError:
     from herdr_projects import (
@@ -58,6 +59,7 @@ except ImportError:
         record_observation_created,
         record_trajectory_event,
     )
+    from herdr.log_throttle import StartupWaitLog
     from herdr import liveness
 
 
@@ -298,6 +300,12 @@ _CONTINUATION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="c
 _continuation_scan_lock = threading.Lock()
 _continuation_scan_at = 0.0
 
+# Startup watchdog (60s-throttled) + bounded startup-wait logging.
+_startup_watchdog_scan_at = 0.0
+_startup_watchdog_cursor = None
+_startup_projection_stale = False
+_startup_wait_log = StartupWaitLog()
+
 
 # 总指挥上下文卫生 & 效率纪律
 #
@@ -465,6 +473,7 @@ install_modules(globals(), (
     "selective_plan",
     "stage_delivery",
     "stage_state",
+    "startup_watchdog",
     "supervisor_actions",
     "supervisor_checkpoints",
     "supervisor_evidence",
