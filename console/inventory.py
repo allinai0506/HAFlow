@@ -7,19 +7,6 @@ from herdr.kernel import state_db_path
 from herdr import controller_actions as herdr_controller_actions
 from console import common
 
-_STARTUP_CARD_FIELDS = ("status", "startup_ready", "outcome", "failed_stage", "startup_failure_reason")
-
-def _overlay_startup_fields(card, snapshot):
-    if not isinstance(card, dict) or not isinstance(snapshot, dict):
-        return card
-    for key in _STARTUP_CARD_FIELDS:
-        if key in card or key not in snapshot:
-            continue
-        value = snapshot.get(key)
-        if key == "startup_failure_reason":
-            value = str(value or "")[:2048]
-        card[key] = value
-    return card
 
 def ops_center(workflow_id=None,include_tasks=False):
     from herdr.ops_center import build_ops_center_payload
@@ -27,11 +14,9 @@ def ops_center(workflow_id=None,include_tasks=False):
     cards = payload.get("workflow_cards") if isinstance(payload, dict) else None
     if not isinstance(cards, list):
         return payload
-    for card in cards:
-        if not isinstance(card, dict) or not card.get("workflow_id"):
-            continue
-        snap = workflow_by_id(card.get("workflow_id")) or {}
-        _overlay_startup_fields(card, snap if isinstance(snap, dict) else {})
+    # startup 字段（含 failed_stage）由 ops_center 投影经同一 read_inventory
+    # 携带；逐卡片重开 recovery snapshot 会因超大 config 使整页请求失败
+    # (PR #364 评审遗留)。
     return payload
 
 def projects():return list(common.load_json(common.PROJECTS_FILE,{'projects':{}}).get('projects',{}).values())

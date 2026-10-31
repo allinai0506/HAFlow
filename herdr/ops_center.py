@@ -46,13 +46,13 @@ def build_ops_center_payload(workflow_id=None, include_tasks=False, *, db_path=N
             config = validate_required_task_scope(normalize_workflow(config), wid, store=SnapshotTasks())
             # Lifecycle fields ride along for the card builder: startup labels
             # read them off the card (status/startup_ready/outcome/reason).
-            for key in ("status", "startup_ready", "outcome", "startup_failure_reason"):
+            for key in ("status", "startup_ready", "outcome", "failed_stage", "startup_failure_reason"):
                 if record.get(key) is not None and config.get(key) is None:
                     config[key] = record[key]
             return config, label or config.get("name") or wid
         except Exception:
             failure = {"configuration_error": "workflow_config_invalid"}
-            for key in ("status", "startup_ready", "outcome", "startup_failure_reason"):
+            for key in ("status", "startup_ready", "outcome", "failed_stage", "startup_failure_reason"):
                 if record.get(key) is not None:
                     failure[key] = record[key]
             return failure, label or wid

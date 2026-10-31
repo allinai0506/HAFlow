@@ -186,6 +186,6 @@ DEPENDENCIES = {'git_finalize_pending_tasks': ('load_tasks',),
                                     '_workflow_close_inflight', '_workflow_entry',
                                     'attention_blocks_retry', 'attention_clear',
                                     'git_escalated_tasks', 'git_finalize_pending_tasks', 'liveness',
-                                    'subprocess', 'threading')}
+                                    'load_tasks', 'subprocess', 'threading')}
 
 __all__ = tuple(DEPENDENCIES)

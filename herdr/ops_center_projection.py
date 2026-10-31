@@ -115,7 +115,7 @@ def _build_workflow_cards(workflows_tasks, now, all_tasks=None, workflow_lookup=
         # express startup_pending/startup_failed, and zero-task rows would
         # render as generic idle cards.
         if isinstance(workflow, dict):
-            for key in ("status", "startup_ready", "outcome", "startup_failure_reason"):
+            for key in ("status", "startup_ready", "outcome", "failed_stage", "startup_failure_reason"):
                 if workflow.get(key) is not None:
                     card[key] = workflow.get(key)
         cards.append(card)
