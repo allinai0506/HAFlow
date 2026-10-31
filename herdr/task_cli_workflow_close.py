@@ -7,8 +7,13 @@ import tarfile
 from pathlib import Path
 
 
-def _experience_collector_factory(db_path=None, hub_client=None):
-    """经验采集器工厂（可注入点，PR #377 测试与实现共用）。"""
+def _experience_collector_factory(hub_client=None):
+    """经验采集器工厂（可注入点，PR #377 测试与实现共用）。
+
+    Collector 自己的 local_collector_records 库保持默认（Sentinel 周期
+    drain 的同一个库）；db_path 参数误传 workflow 库会把 close 期记录
+    写进 recovery 永远捞不到的地方（Codex 三轮 P1）。
+    """
     from herdr.experience.client import ExperienceClient
     from herdr.experience.collector import ExperienceCollector
     hub = hub_client
@@ -19,13 +24,19 @@ def _experience_collector_factory(db_path=None, hub_client=None):
                 hub = client
         except Exception:
             hub = None
-    return ExperienceCollector(db_path=db_path, hub_client=hub)
+    return ExperienceCollector(hub_client=hub)
 
 
-def _experience_background_drain(db_path=None):
-    """后台单飞 drain：Hub 上传离开 close 同步路径（Hub 不可达不阻塞收尾）。"""
+def _experience_background_drain(state_db_path=None, hub_client=None):
+    """后台单飞 drain：Hub 上传离开 close 同步路径（Hub 不可达不阻塞收尾）。
+
+    透传 close 期已认证的 Hub client——trigger_background_sync 自建的
+    collector 只在 HERDR_HUB_URL/TOKEN 环境变量存在时才有 Hub 客户端，
+    丢弃 client 会让 token-file 凭据场景静默 no_hub_client（Codex 三轮
+    P1）。
+    """
     from herdr.experience.collector import trigger_background_sync
-    return trigger_background_sync(state_db_path=db_path)
+    return trigger_background_sync(state_db_path=state_db_path, hub_client=hub_client)
 
 
 def _post_close_experience_sync(workflow_id, db_path=None):
@@ -35,18 +46,19 @@ def _post_close_experience_sync(workflow_id, db_path=None):
        _trigger_experience_collection_best_effort 同一 opt-out 守卫）；
     2. close 只做本地持久化（sync_to_hub=False），Hub 上传交给后台单飞
        drain——Hub 不可达时 close 不被 8s×N 请求超时拖住；
-    3. 采集与 drain 绑定 close 所用库（db_path），WORKFLOW_FILE 选库
-       场景不再走默认库错采。
+    3. 采集任务事实绑定 close 所用库（db_path=workflow state db）；
+       collector 记录库保持默认（与 recovery drain 同库，Codex 三轮 P1）；
+    4. 已认证 Hub client 透传给后台 drain。
     """
     import os
     if os.environ.get("HERDR_EXPERIENCE_COLLECTION_DISABLED") == "1":
         print("[EXPERIENCE SYNC] disabled by HERDR_EXPERIENCE_COLLECTION_DISABLED")
         return
     try:
-        collector = _experience_collector_factory(db_path=db_path)
+        collector = _experience_collector_factory()
         collector.collect_and_sync_lessons(sync_to_hub=False)
         collector.collect_workflow_tasks(workflow_id, state_db_path=db_path)
-        _experience_background_drain(db_path)
+        _experience_background_drain(db_path, hub_client=getattr(collector, "hub_client", None))
     except Exception as exc:
         print(f"[EXPERIENCE SYNC NOTICE] post-close sync: {exc}")
 

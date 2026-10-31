@@ -97,7 +97,8 @@ def test_close_workflow_owned_triggers_experience_collector(tmp_path: Path):
 
     with patch("herdr.experience.collector.ExperienceCollector", MockCollector), \
          patch("herdr.experience.collector.trigger_background_sync",
-               lambda state_db_path=None: sync_calls.append(f"drain:{state_db_path}")):
+               lambda state_db_path=None, hub_client=None:
+                   sync_calls.append(f"drain:{state_db_path}:{hub_client is not None}")):
         close_workflow_owned(
             "wf-close-exp",
             load_tasks=lambda: {"tasks": [store.get_task("wrap")]},
@@ -119,7 +120,8 @@ def test_close_workflow_owned_triggers_experience_collector(tmp_path: Path):
 
     assert "lessons-local" in sync_calls, "close 本地持久化 lessons（不再同步上传）"
     assert "tasks:wf-close-exp" in sync_calls
-    assert f"collector-db:{store.db_path}" in sync_calls, "采集绑定 close 所用库"
-    assert f"drain:{store.db_path}" in sync_calls, "上传由同库后台 drain 承接"
+    # collector 记录库保持默认（非 workflow 库），任务事实源绑定 close 库
+    assert "collector-db:None" in sync_calls
+    assert f"drain:{store.db_path}:False" in sync_calls, "上传由后台 drain 承接（本场景无已认证 client）"
     assert "lessons-sync" not in sync_calls and "recover" not in sync_calls
 
