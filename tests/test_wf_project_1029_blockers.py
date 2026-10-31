@@ -264,3 +264,27 @@ def test_startup_wait_logging_is_throttled(capsys):
     advancement.check_workflow_stage_advance(mock_ports, "wf-throttle-test")
     out2 = capsys.readouterr().out
     assert "[STARTUP WAIT]" not in out2
+
+
+def test_finalize_retry_inflight_does_not_consume_budget():
+    from services.controller import finalize_retry
+
+    mock_ports = MagicMock()
+    mock_ports.subprocess.SubprocessError = subprocess.SubprocessError
+    mock_ports.workflow_closed.return_value = False
+    task = {"task_id": "t-inf", "status": "completed", "integration_mode": "git"}
+    mock_ports.finalize_completed_task.return_value = {
+        "retryable": True,
+        "kind": "inflight",
+        "reason": "finalize_already_in_progress",
+    }
+    mock_ports.get_task.return_value = task
+    mock_ports.should_retry_finalize.return_value = (True, "retry", False)
+
+    for now in [1000, 1010, 1020, 1030, 1040, 1050]:
+        res = finalize_retry._check_finalize_retry(mock_ports, task, "completed", now)
+        assert res is True
+
+    # Attention note should never have been called (no budget consumed)
+    mock_ports.attention_note.assert_not_called()
+    mock_ports._escalate_finalize.assert_not_called()

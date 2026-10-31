@@ -3836,6 +3836,6 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 关闭收尾状态业务范围哈希对齐：`herdr/task_checkpoint.py` 的 `_business_scope` 与 `herdr/business_gate.py` 的 `_workflow_key` 将 `closing` 状态向 `running` 归一化计算哈希，彻底解决关闭归档重试时因状态变更为 `closing` 导致已签署业务凭据失效而触发 `[CLOSE ABORT]` 的问题。
 - Pre-commit 与复杂度静态门禁失败快速熔断：`services/controller/git_finalize.py` 识别 pre-commit hook、husky 及 complexity check 失败关键词，判定为 `unrecoverable = True` 立即熔断升级，杜绝代码拒绝被误判为瞬态错误而无效重试 50 分钟（整夜挂死）。
 - Worker 启动就绪检测超时与错误退避修复：`services/herdr-worker.py` 的 `wait_startup_ready` 以 `deadline = time.monotonic() + total_timeout` 为基准轮询（默认 8.0s 并支持环境变量 `HERDR_WORKER_STARTUP_TIMEOUT` 弹性调节，兼容 CI 12s 上限），为冷启动 Agent 提供充裕时间；`start_agent` 增加对 `agent_not_ready` 的退避重试，防止偶发准备中导致工位误回滚。
-- Controller 终化并发调用互斥与行数架构治理：`services/controller/git_finalize.py` 引入 `_finalize_inflight` 集合并作为标准依赖注册到 `services/herdr-controller.py` 与 `DEPENDENCIES`，实现单任务终化互斥，消除 `git_busy (75)` 竞争；`services/controller/advancement.py` 引入 30 秒节流窗口消除 Deep Preflight 刷屏，并精简至 497 行符合模块化门禁（<= 500 行）。
+- Controller 终化并发调用互斥与行数架构治理：`services/controller/git_finalize.py` 引入 `_finalize_inflight` 集合并作为标准依赖注册到 `services/herdr-controller.py` 与 `DEPENDENCIES`，实现单任务终化互斥，消除 `git_busy (75)` 竞争；`services/controller/finalize_retry.py` 将 inflight 识别为非预算扣减等待，防止重复终化跳过引发虚假升级；`services/controller/advancement.py` 引入 30 秒节流窗口消除 Deep Preflight 刷屏，并精简至 497 行符合模块化门禁（<= 500 行）。
 - PR 交付推送超时弹性配置：`herdr/pr_delivery.py` 的 `_git` 针对 `push` 操作放宽超时至 120 秒，并支持 `HERDR_GIT_PUSH_TIMEOUT` 环境变量配置。
-- 验证：8 项全链路卡点专项回归测试（`tests/test_wf_project_1029_blockers.py`）及关联 90 项测试全部通过；`compileall` 与 `git diff --check` clean。教训见 lessons §212。
+- 验证：10 项全链路卡点专项回归测试（`tests/test_wf_project_1029_blockers.py`）及全量 CI 检查全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §212。

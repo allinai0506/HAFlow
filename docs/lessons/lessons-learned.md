@@ -8849,7 +8849,7 @@ pytest -v \
 | pre-commit hook / complexity 门禁失败盲目重试 50 分钟 | 复杂度门禁与 pre-commit hook 错误是代码静态检查拒绝，绝不可能自愈，重复执行只能白白浪费数十倍时间 | `git_finalize.py` 识别 pre-commit / husky / complexity check 失败关键词，立即判定 `unrecoverable = True` 快速升级 |
 | 启动就绪检测 3 秒即超时误杀冷启动 Agent | 轮询次数硬编码会使超时预算形同虚设，慢启动 Agent 需要充足的初始化窗口，同时必须适配 CI 进程超时上限（<=12s） | `wait_startup_ready` 以 `deadline` 为基准轮询（默认 8.0s 并支持 `HERDR_WORKER_STARTUP_TIMEOUT` 环境变量配置），并支持对 `agent_not_ready` 短暂退避重试 |
 | 控制器单模块行数超限 | 职责拆分与模块化架构测试强制每个子模块代码行数 <= 500 行，新增逻辑不得随意突破行数预算 | `advancement.py` 精简内部依赖映射与打印格式，控制在 497 行（<= 500 行），符合架构守卫门禁 |
-| 终化并发调用竞争 Git 工作区 | 同一任务终化过程包含 Git 索引操作与状态写，多线程同时执行必然踩锁 | 控制器通过 `_finalize_inflight` 集合按 task_id 实现线程安全互斥，在飞中调用安全退出并等待下次调度 |
+| 终化并发调用竞争 Git 工作区 | 同一任务终化过程包含 Git 索引操作与状态写，多线程同时执行必然踩锁；且在飞跳过不得扣减重试预算 | 控制器通过 `_finalize_inflight` 集合按 task_id 实现线程安全互斥；`finalize_retry.py` 将 inflight 识别为非消耗预算的 wait，杜绝虚假升级 |
 | 大仓推送 30 秒超时导致 PR 交付停滞 | 网络推送耗时取决于网络带宽与远端负载，大仓需放宽推送超时限制 | `pr_delivery.py` 推送操作支持 `HERDR_GIT_PUSH_TIMEOUT` 环境变量（默认 120 秒） |
 | preflight 期间启动日志频繁刷屏 | 调度轮询每秒执行，缺乏节流会淹没关键排错日志 | `advancement.py` 针对未就绪启动日志按 30 秒窗口实施最小节流 |
 
