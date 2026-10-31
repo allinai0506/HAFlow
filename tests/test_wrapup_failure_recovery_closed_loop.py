@@ -581,18 +581,16 @@ def test_close_accepts_human_adjudicated_blocked_verdicts(scene, controller, age
         "execution_id": "exec-al", "stage_verdict": "blocked",
         "accepted_with_limits": True,
     })
-    import importlib.util
-    from pathlib import Path as _P
-
-    spec = importlib.util.spec_from_file_location(
-        "close_cli_al", _P(__file__).resolve().parents[1] / "bin/herdr-task")
-    from herdr.task_cli_workflow_close import close_workflow  # noqa: F401
-    # 直接调用 close 的 blocked 判定片段:通过 CLI 入口验证
-    loader_mod = importlib.import_module("herdr.task_cli_workflow_close")
-    tasks = store.list_tasks(workflow_id="wf-al")
-    blocked = [
-        t["task_id"] for t in tasks
-        if t.get("status") != "superseded" and t.get("stage_verdict") == "blocked"
-        and not (t.get("accepted_with_limits") and not t.get("finalize_escalated"))
-    ]
-    assert blocked == []
+    # 通过真实 CLI 入口走 close-workflow 全链路（Codex PR #340 评审遗留）：
+    # 复制生产过滤表达式到测试里无法保护该回归——移除
+    # task_cli_workflow_close 的 accepted_with_limits 豁免必须让本用例
+    # 以 [CLOSE ABORT] 退出码 2 失败。
+    cli(scene, "close-workflow", "wf-al")
+    assert store.get_workflow("wf-al")["status"] == "completed"
+    events = store.list_events(workflow_id="wf-al", event_type="workflow_transition")
+    assert any(
+        _json.loads(e["payload_json"]).get("to_status") == "completed"
+        if isinstance(e.get("payload_json"), str)
+        else (e.get("payload") or {}).get("to_status") == "completed"
+        for e in events
+    ), "close receipt (workflow_transition → completed) must be persisted"

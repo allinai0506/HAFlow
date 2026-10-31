@@ -290,6 +290,9 @@ def check_workflow_recovery(ports, workflow_id, now=None):
     return operations
 
 
+NOTIFY_RETRY_INTERVAL_SECONDS = 300.0
+
+
 def _notify_waiting_human(ports, workflow_id, operations):
     """waiting_human 必须可听见:每个操作每个版本只通知一次。
 
@@ -297,6 +300,11 @@ def _notify_waiting_human(ports, workflow_id, operations):
     通知数为 0,整条工作流都在等这个裁决却没有人被叫。去重键是操作
     id+version(人工裁决后 version 递增,再次等待会重新通知);操作离开
     waiting_human 时清理对应 episode。
+
+    投递失败必须可重试(PR #336 评审遗留):op_version 只在 notify 成功
+    返回后锁定;失败仅记录 attempt 版本与时间戳,同一版本按
+    NOTIFY_RETRY_INTERVAL_SECONDS 有界退避重试,否则瞬时故障会让恢复
+    操作整夜静默。
     """
     for op in operations:
         op_id = op.get("id")
@@ -310,6 +318,11 @@ def _notify_waiting_human(ports, workflow_id, operations):
             continue
         if episode.get("op_version") == op.get("version"):
             continue
+        version = op.get("version")
+        last_attempt = float(episode.get("last_attempt_at") or 0)
+        if (episode.get("attempt_version") == version
+                and ports.time.time() - last_attempt < NOTIFY_RETRY_INTERVAL_SECONDS):
+            continue
         detail = op.get("detail") or {}
         payload = op.get("payload") or {}
         task_ids = payload.get("task_ids") or payload.get("affected_task_ids") or []
@@ -317,7 +330,7 @@ def _notify_waiting_human(ports, workflow_id, operations):
         message = (
             f"恢复操作等待人工裁决: kind={payload.get('kind')} "
             f"reason={detail.get('reason') or ''}\n"
-            f"operation id={op_id} version={op.get('version')} "
+            f"operation id={op_id} version={version} "
             f"tasks={','.join(str(t) for t in list(task_ids or [])[:3])}\n"
             f"{str(detail.get('decision_needed') or '')[:400]}"
         )
@@ -326,16 +339,22 @@ def _notify_waiting_human(ports, workflow_id, operations):
             "workflow_id": workflow_id,
             "event_type": "workflow_recovery",
             "reason": "recovery_waiting_human",
-            "op_version": op.get("version"),
+            "op_version": episode.get("op_version"),
+            "attempt_version": version,
             "last_attempt_at": ports.time.time(),
             "detail": message[:500],
         })
-        ports.notify_attention(
+        delivered = ports.notify_attention(
             "Herdr Factory · 恢复等待人工",
             {"task_id": task_ref, "workflow_id": workflow_id},
             message,
             "recovery_waiting_human",
         )
+        if delivered:
+            ports._attention_store.upsert(key, {
+                **(ports._attention_store.get(key) or {}),
+                "op_version": version,
+            })
 
 
 DEPENDENCIES = {'execute_workflow_recovery': ('REWORKABLE_STATUSES', 'TASK_MANAGER', '_get_store',
