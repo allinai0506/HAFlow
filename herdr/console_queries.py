@@ -114,11 +114,13 @@ def read_inventory(db_path=None):
             workflows[row['workflow_id']] = workflow
         # Filter by indexed event type before grouping; fetch at most one
         # qualifying candidate per workflow rather than all historical events.
-        rows = conn.execute('''SELECT e.workflow_id, e.id, e.payload_json
+        # 失效事件与冻结事件一起解析：失效后 SHA 清空、episode 保留失效事件 id，
+        # 与 recovery_store._workflow_snapshot 保持一致（PR #313 评审遗留）。
+        rows = conn.execute('''SELECT e.workflow_id, e.id, e.event_type, e.payload_json
             FROM events e JOIN (
                 SELECT events.workflow_id, MAX(events.id) AS id
                 FROM events JOIN workflows w ON w.workflow_id=events.workflow_id
-                WHERE events.event_type='candidate_frozen'
+                WHERE events.event_type IN ('candidate_frozen','candidate_invalidated')
                   AND events.source='critical-path-scheduler'
                   AND events.timestamp >= MAX(COALESCE(w.created_at,0),
                     CAST(COALESCE(json_extract(w.metadata_json,'$.reopened_at'),0) AS REAL))
@@ -126,7 +128,8 @@ def read_inventory(db_path=None):
             ) latest ON latest.id=e.id''')
         for row in rows:
             workflow = workflows[row['workflow_id']]
-            workflow['candidate_sha'] = json.loads(row['payload_json']).get('candidate_sha')
+            if row['event_type'] == 'candidate_frozen':
+                workflow['candidate_sha'] = json.loads(row['payload_json']).get('candidate_sha')
             workflow['candidate_episode_id'] = row['id']
         return tasks, workflows
     finally:

@@ -198,3 +198,138 @@ def test_frozen_off_base_candidate_must_be_a_real_full_commit(scene, frozen):
     else:
         scheduler_facts.record_candidate_frozen('wf-candidate', frozen, db_path=db)
     assert controller._scheduler_expected_candidate_sha("wf-candidate", str(repo), [], None) == ""
+
+
+def _repo_git(repo):
+    def git(*args, cwd=None):
+        return subprocess.run(["git", "-C", str(cwd or repo), *args], check=True,
+                              text=True, capture_output=True).stdout.strip()
+    return git
+
+
+def _advance_base(repo, git):
+    git("checkout", "-q", "main")
+    (repo / "f").write_text("base advance")
+    git("commit", "-qam", "base advance", "--no-gpg-sign")
+    return git("rev-parse", "main")
+
+
+def test_invalidation_preserves_next_episode_token(scene):
+    """失效事件必须成为下一 episode 的 CAS token，否则再冻结永远被拒（#313）。"""
+    from herdr.recovery_store import read_snapshot
+    controller, repo, db, sha, spec, item, launches = scene
+    git = _repo_git(repo)
+    git("checkout", "-q", "candidate")
+    (repo / "f").write_text("off base work")
+    git("commit", "-qam", "off base", "--no-gpg-sign")
+    stale = git("rev-parse", "HEAD")
+    base_tip = _advance_base(repo, git)
+    res = scheduler_facts.record_candidate_frozen("wf-candidate", stale, db_path=db,
+        repo_path=str(repo), base_branch="main")
+    assert res["status"] == "invalidated" and res["base_tip"] == base_tip
+    snapshot = read_snapshot(db, "wf-candidate")[0]
+    assert snapshot["candidate_sha"] is None
+    invalidated_id = snapshot["candidate_episode_id"]
+    assert invalidated_id == res["event"]["id"] > 0
+    expected = read_snapshot(db, "wf-candidate")[0]["candidate_episode_id"]
+    res = scheduler_facts.record_candidate_frozen("wf-candidate", base_tip, db_path=db,
+        repo_path=str(repo), base_branch="main", expected_episode_id=expected)
+    assert res["status"] == "created"
+    assert read_snapshot(db, "wf-candidate")[0]["candidate_sha"] == base_tip
+
+
+def test_stale_request_cannot_clear_frozen_candidate_via_invalidation(scene):
+    """过期请求（inventory 已变）不得先写失效事件清掉有效候选（#313）。"""
+    import sqlite3
+    from herdr.candidate_assembly import delivery_inventory
+    from herdr.recovery_store import read_snapshot
+    from herdr.state_store import SQLiteStateStore
+    controller, repo, db, sha, spec, item, launches = scene
+    git = _repo_git(repo)
+    store = SQLiteStateStore(db)
+    git("checkout", "-q", "candidate")
+    (repo / "f").write_text("delivery")
+    git("commit", "-qam", "delivery", "--no-gpg-sign")
+    delivered = git("rev-parse", "HEAD")
+    store.save_task({"task_id": "t1", "workflow_id": "wf-candidate", "node": "implementation",
+        "execution_id": "gen", "run_id": "run-t1", "status": "cleaned", "integration_mode": "git",
+        "commit": delivered, "integrated_commit": delivered,
+        "integration_ref": "refs/herdr/tasks/t1"})
+    workflow, _, tasks = read_snapshot(db, "wf-candidate")
+    inventory = delivery_inventory(workflow, tasks, "implementation")
+    store.save_task(dict(store.get_task("t1"), status="superseded", superseded_by="t2"))
+    _advance_base(repo, git)
+    with pytest.raises(ValueError, match="inventory changed"):
+        scheduler_facts.record_candidate_frozen("wf-candidate", sha, db_path=db,
+            source_node="implementation", expected_episode_id=0,
+            repo_path=str(repo), base_branch="main",
+            delivery_inventory=inventory, publication_event_id=None)
+    with sqlite3.connect(db) as conn:
+        assert not conn.execute(
+            "SELECT 1 FROM events WHERE event_type='candidate_invalidated'").fetchone()
+
+
+def _publish_remote_base_advance(repo, origin, git):
+    """从第二个 clone 推进远程 main，不刷新 repo 的 origin/main 跟踪引用。"""
+    git("init", "-q", "--bare", str(origin))
+    git("remote", "add", "origin", str(origin))
+    git("push", "-q", "origin", "main")
+    stale_tip = git("rev-parse", "origin/main")
+    second = origin.parent / "second"
+    git("clone", "-q", str(origin), str(second))
+    git("config", "user.email", "fixture@example.invalid", cwd=second)
+    git("config", "user.name", "fixture", cwd=second)
+    (second / "base").write_text("remote base advance")
+    git("add", ".", cwd=second)
+    git("commit", "-qm", "remote base advance", "--no-gpg-sign", cwd=second)
+    git("push", "-q", "origin", "main", cwd=second)
+    return stale_tip, git("rev-parse", "origin/main", cwd=second)
+
+
+def test_refresh_remote_base_updates_stale_tracking_ref(scene, tmp_path):
+    from herdr.launch_baseline import _rev_parse_commit, refresh_remote_base
+    _, repo, *_ = scene
+    git = _repo_git(repo)
+    stale_tip, fresh_tip = _publish_remote_base_advance(repo, tmp_path / "origin.git", git)
+    assert _rev_parse_commit(str(repo), "origin/main") == stale_tip
+    assert refresh_remote_base(str(repo), "main") is True
+    assert _rev_parse_commit(str(repo), "origin/main") == fresh_tip
+
+
+def test_refresh_remote_base_tolerates_missing_origin(scene):
+    from herdr.launch_baseline import refresh_remote_base
+    _, repo, *_ = scene
+    assert refresh_remote_base(str(repo), "main") is False
+    assert refresh_remote_base(str(repo), "") is False
+
+
+def test_freeze_refreshes_remote_base_before_recording(scene, tmp_path):
+    """远程 base 已前进时，freeze 不得基于过期 origin/main 通过新鲜度判定（#313）。"""
+    import json
+    import sqlite3
+    from herdr.scheduler_facts import publish_integrated_candidate
+    from herdr.state_store import SQLiteStateStore
+    controller, repo, db, sha, spec, item, launches = scene
+    git = _repo_git(repo)
+    stale_tip, fresh_tip = _publish_remote_base_advance(repo, tmp_path / "origin.git", git)
+    git("checkout", "-q", "candidate")
+    (repo / "f").write_text("off base delivery")
+    git("commit", "-qam", "off base delivery", "--no-gpg-sign")
+    frozen = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main")
+    store = SQLiteStateStore(db)
+    store.save_workflow({'workflow_id': 'wf-candidate', 'status': 'running',
+        'execution_id': 'gen', 'project_root': str(repo), 'base_branch': 'main'})
+    store.save_task({"task_id": "t1", "workflow_id": "wf-candidate", "node": "implementation",
+        "execution_id": "gen", "run_id": "run-t1", "status": "integrated", "integration_mode": "git",
+        "commit": frozen, "integrated_commit": frozen,
+        "integration_ref": "refs/herdr/tasks/t1", "integration_publication_episode_id": 0})
+    git("update-ref", "refs/herdr/tasks/t1", frozen)
+    publish_integrated_candidate(store, "t1")
+    assert controller._scheduler_freeze_candidate(
+        "wf-candidate", str(repo), "implementation", []) == ""
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE event_type='candidate_invalidated'").fetchall()
+    assert rows and json.loads(rows[0][0])["reason"] == "base_advanced"
+    assert json.loads(rows[0][0])["base_tip"] == fresh_tip

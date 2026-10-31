@@ -125,34 +125,6 @@ def record_candidate_frozen(
             raise ValueError('candidate episode changed')
         prior = json.loads(row['payload_json']) if (row and row['event_type'] == 'candidate_frozen') else {}
 
-        effective_repo = repo_path or metadata.get('project_root')
-        effective_base = base_branch or metadata.get('base_branch')
-        if effective_repo and effective_base:
-            from .launch_baseline import _rev_parse_commit, _git_is_ancestor
-            resolved_sha = _rev_parse_commit(effective_repo, f"{sha}^{{commit}}")
-            if resolved_sha:
-                base_tip = _rev_parse_commit(effective_repo, f"origin/{effective_base}") or _rev_parse_commit(effective_repo, effective_base)
-                if base_tip and base_tip != sha:
-                    is_ancestor = _git_is_ancestor(effective_repo, base_tip, sha)
-                    if is_ancestor is False:
-                        invalidated_event = state_db.record_event({
-                            'event_type': EVENT_CANDIDATE_INVALIDATED,
-                            'workflow_id': workflow_id,
-                            'source': SCHEDULER_EVENT_SOURCE,
-                            'payload': {
-                                'candidate_sha': sha,
-                                'reason': 'base_advanced',
-                                'base_branch': effective_base,
-                                'base_tip': base_tip,
-                                'rotated_from': prior.get('candidate_sha', ''),
-                            }
-                        }, conn=conn)
-                        return {
-                            'status': 'invalidated',
-                            'event': invalidated_event,
-                            'reason': 'base_advanced',
-                            'base_tip': base_tip,
-                        }
         if delivery_inventory is not None:
             from .candidate_assembly import delivery_inventory as current_inventory
             workflow, _, tasks = recovery_store._snapshot(conn, workflow_id)
@@ -183,6 +155,36 @@ def record_candidate_frozen(
                 raise ValueError('candidate publication identity unknown')
             if publication_event_id <= prior.get('publication_event_id', 0):
                 return {'status': 'exists', 'event': dict(row)}
+        # 失效写入放在 inventory/publication 校验之后：过期请求先被拒绝，
+        # 不得借 base advance 清掉仍有效的冻结候选（PR #313 评审遗留）。
+        effective_repo = repo_path or metadata.get('project_root')
+        effective_base = base_branch or metadata.get('base_branch')
+        if effective_repo and effective_base:
+            from .launch_baseline import _rev_parse_commit, _git_is_ancestor
+            resolved_sha = _rev_parse_commit(effective_repo, f"{sha}^{{commit}}")
+            if resolved_sha:
+                base_tip = _rev_parse_commit(effective_repo, f"origin/{effective_base}") or _rev_parse_commit(effective_repo, effective_base)
+                if base_tip and base_tip != sha:
+                    is_ancestor = _git_is_ancestor(effective_repo, base_tip, sha)
+                    if is_ancestor is False:
+                        invalidated_event = state_db.record_event({
+                            'event_type': EVENT_CANDIDATE_INVALIDATED,
+                            'workflow_id': workflow_id,
+                            'source': SCHEDULER_EVENT_SOURCE,
+                            'payload': {
+                                'candidate_sha': sha,
+                                'reason': 'base_advanced',
+                                'base_branch': effective_base,
+                                'base_tip': base_tip,
+                                'rotated_from': prior.get('candidate_sha', ''),
+                            }
+                        }, conn=conn)
+                        return {
+                            'status': 'invalidated',
+                            'event': invalidated_event,
+                            'reason': 'base_advanced',
+                            'base_tip': base_tip,
+                        }
         if prior.get('candidate_sha') == sha:
             return {'status': 'exists', 'event': dict(row)}
         event = state_db.record_event({'event_type': EVENT_CANDIDATE_FROZEN,
