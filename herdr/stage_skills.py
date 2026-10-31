@@ -195,6 +195,28 @@ def stage_skills_for_node(node_id: str, configured_skills: Optional[List[str]] =
     return list(STAGE_SKILL_BINDINGS.get(node_id, []))
 
 
+LAUNCHER_MANAGED_MANIFEST = ".herdr-launcher-managed.json"
+
+
+def _record_launcher_managed(target_skills_dir: Path, staged: List[str]) -> None:
+    """记录 launcher 拥有的技能名（符号链接或复制皆算，PR #375 二轮评审）。
+
+    复制回退（cross-volume）产生的真实目录无法用 islink 判别归属；
+    manifest 是交付过滤的权威所有权来源。
+    """
+    manifest_path = target_skills_dir / LAUNCHER_MANAGED_MANIFEST
+    try:
+        managed = []
+        if manifest_path.exists():
+            managed = list(json.loads(manifest_path.read_text(encoding="utf-8")))
+        for name in staged:
+            if name not in managed:
+                managed.append(name)
+        manifest_path.write_text(json.dumps(managed, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError):
+        pass  # best-effort：manifest 失败不阻断技能装配
+
+
 def stage_skills_into_workspace(clone_path: str | Path, skill_names: List[str]) -> List[Dict[str, Any]]:
     """Link or copy resolved skills into <clone_path>/.agents/skills/<name> so agents have local workspace access."""
     clone = Path(clone_path)
@@ -205,6 +227,7 @@ def stage_skills_into_workspace(clone_path: str | Path, skill_names: List[str]) 
     target_skills_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_skills: List[Dict[str, Any]] = []
+    staged_names: List[str] = []
     for skill_name in skill_names:
         resolved = resolve_stage_skill(skill_name)
         resolved_skills.append(resolved)
@@ -213,6 +236,7 @@ def stage_skills_into_workspace(clone_path: str | Path, skill_names: List[str]) 
         if os.path.islink(skill_dst) or os.path.lexists(skill_dst):
             try:
                 if skill_dst.resolve() == skill_src.resolve():
+                    staged_names.append(skill_name)
                     continue
                 os.unlink(skill_dst)
             except OSError:
@@ -224,6 +248,8 @@ def stage_skills_into_workspace(clone_path: str | Path, skill_names: List[str]) 
                 # Fallback to directory copy if symlinks fail (e.g. cross-volume on Windows)
                 import shutil
                 shutil.copytree(skill_src, skill_dst)
+        staged_names.append(skill_name)
+    _record_launcher_managed(target_skills_dir, staged_names)
 
     return resolved_skills
 

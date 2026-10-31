@@ -119,6 +119,21 @@ def test_launcher_owned_distinguishes_symlink_skills_from_real_content(tmp_path)
     assert is_launcher_owned("src/main.py", tmp_path) is True
 
 
+def test_launcher_copied_skills_owned_via_manifest(tmp_path):
+    """Codex 二轮：复制回退（cross-volume）的场景——manifest 是所有权权威来源。"""
+    import json as _json
+    from herdr.repo_hygiene import is_launcher_owned
+    from herdr.stage_skills import LAUNCHER_MANAGED_MANIFEST
+    (tmp_path / ".agents" / "skills" / "copied-skill").mkdir(parents=True)
+    (tmp_path / ".agents" / "skills" / "copied-skill" / "SKILL.md").write_text("x\n")
+    (tmp_path / ".agents" / "skills" / "task-owned-skill").mkdir(parents=True)
+    # launcher 装配记录：copied-skill 属于 launcher；task-owned-skill 不在册
+    (tmp_path / ".agents" / "skills" / LAUNCHER_MANAGED_MANIFEST).write_text(
+        _json.dumps(["copied-skill"]), encoding="utf-8")
+    assert is_launcher_owned(".agents/skills/copied-skill/SKILL.md", tmp_path) is True
+    assert is_launcher_owned(".agents/skills/task-owned-skill/SKILL.md", tmp_path) is False
+
+
 def test_delivery_staging_keeps_real_skill_content(store_and_clone):
     """commit_task 的 untracked 过滤不再吞掉任务自建技能内容。"""
     from herdr.repo_hygiene import is_launcher_owned, is_internal_untracked

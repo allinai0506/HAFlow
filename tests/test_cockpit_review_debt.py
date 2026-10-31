@@ -104,8 +104,29 @@ if (typeof cockpitTargetLookup !== 'function') {
   process.exit(1);
 }
 '''
-    result = subprocess.run(['node', '-e', probe], text=True, capture_output=True, timeout=20)
+    # Linux 单参数上限：365KB 的探针经 stdin 传入（node -），不走 argv
+    result = subprocess.run(['node', '-'], input=probe, text=True,
+                            capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr or 'shared scope probe failed'
+
+
+def test_controller_version_cache_invalidates_on_controller_restart(monkeypatch, tmp_path):
+    """Codex 二轮：Controller 重启追加新指纹后缓存必须失效；缺失不永久缓存。"""
+    from console import runtime
+    log = tmp_path / 'controller.out.log'
+    log.write_text('HERDR_RUNTIME_FINGERPRINT={"running_sha": "sha-v1"}\n', encoding='utf-8')
+    monkeypatch.setenv('HERDR_CONTROLLER_LOG', str(log))
+    runtime._controller_version = None
+    runtime._controller_version_source = None
+    try:
+        assert runtime.controller_version() == 'sha-v1'
+        log.write_text('HERDR_RUNTIME_FINGERPRINT={"running_sha": "sha-v2"}\n', encoding='utf-8')
+        assert runtime.controller_version() == 'sha-v2'
+        log.unlink()
+        assert runtime.controller_version() in (None, '')
+    finally:
+        runtime._controller_version = None
+        runtime._controller_version_source = None
 
 
 def test_controller_version_reads_controller_published_fingerprint(monkeypatch, tmp_path):
@@ -119,6 +140,7 @@ def test_controller_version_reads_controller_published_fingerprint(monkeypatch, 
         encoding='utf-8')
     monkeypatch.setenv('HERDR_CONTROLLER_LOG', str(log))
     runtime._controller_version = None
+    runtime._controller_version_source = None
     try:
         assert runtime.controller_version() == 'abc123def'
     finally:
@@ -128,6 +150,7 @@ def test_controller_version_reads_controller_published_fingerprint(monkeypatch, 
     monkeypatch.setenv('HOME', str(tmp_path / 'empty-home'))
     (tmp_path / 'empty-home').mkdir()
     runtime._controller_version = None
+    runtime._controller_version_source = None
     try:
         assert runtime.controller_version() in (None, '')
     finally:

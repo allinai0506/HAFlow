@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from herdr.reason_labels import human_reason
 from herdr.agent_binary import resolve_agent_binary
@@ -82,6 +83,12 @@ def slots(p, p_panes=None, claimed=None):
     return out
 
 _controller_version=None
+_controller_version_source=None
+
+def _controller_log_path():
+    import os
+    return os.environ.get('HERDR_CONTROLLER_LOG') or os.path.expanduser(
+        '~/.herdr-controller/logs/controller.out.log')
 
 def controller_version():
     """Controller 自发布运行证据里的 attested sha；证据缺失保持 unknown。
@@ -92,29 +99,35 @@ def controller_version():
     指纹冒充 Controller 版本（PR #343 评审遗留）——这里只读 Controller
     的证据文件，读不到就显式 unknown。
 
-    Memoized per process: the running code does not change under a live
-    interpreter, and an attested snapshot re-hash is too costly per request.
+    缓存以证据文件的 (mtime_ns, size) 为键：Controller 重启/升级会追加
+    新指纹，缓存必须随之失效；证据缺失不永久缓存 unknown（Codex 二轮
+    评审）。
     """
-    global _controller_version
-    if _controller_version is None:
-        try:
-            import os
-            log_path=os.environ.get('HERDR_CONTROLLER_LOG') or os.path.expanduser(
-                '~/.herdr-controller/logs/controller.out.log')
-            marker='HERDR_RUNTIME_FINGERPRINT='
-            line=''
-            with open(log_path, 'r', encoding='utf-8', errors='ignore') as handle:
-                for raw in handle:
-                    if raw.startswith(marker):
-                        line=raw[len(marker):].strip()
-            payload=json.loads(line) if line else None
-            sha=str((payload or {}).get('running_sha') or '').strip()
-            if sha and sha != 'unknown':
-                _controller_version=sha
-            else:
-                _controller_version=''
-        except Exception:
+    global _controller_version, _controller_version_source
+    try:
+        stat=os.stat(_controller_log_path())
+        source=(stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        source=None
+    if _controller_version is not None and _controller_version_source == source:
+        return _controller_version or None
+    _controller_version_source=source
+    _controller_version=''
+    try:
+        marker='HERDR_RUNTIME_FINGERPRINT='
+        line=''
+        with open(_controller_log_path(), 'r', encoding='utf-8', errors='ignore') as handle:
+            for raw in handle:
+                if raw.startswith(marker):
+                    line=raw[len(marker):].strip()
+        payload=json.loads(line) if line else None
+        sha=str((payload or {}).get('running_sha') or '').strip()
+        if sha and sha != 'unknown':
+            _controller_version=sha
+        else:
             _controller_version=''
+    except Exception:
+        _controller_version=''
     return _controller_version or None
 
 def service_status():

@@ -8,6 +8,7 @@ under the file-health budget and stays unit-testable without git.
 from __future__ import annotations
 
 import ast
+import json
 import os
 from pathlib import Path
 
@@ -27,9 +28,11 @@ def is_internal_untracked(path: str) -> bool:
 def is_launcher_owned(path: str, root: str | os.PathLike = "") -> bool:
     """True 当该 .agents/ 路径属于 launcher 拥有的基础设施（PR #355 评审遗留）。
 
-    launcher 通过符号链接把 universal skills 挂进 ``.agents/skills/<name>``；
-    任务自己创建的真实（非符号链接）技能内容是业务交付物，不得被
-    ``.agents/`` 全树排除吞掉。``root`` 为 clone 根，用于解析相对路径。
+    launcher 通过符号链接（cross-volume 时复制回退）把 universal skills
+    挂进 ``.agents/skills/<name>``；任务自己创建的真实技能内容是业务
+    交付物，不得被 ``.agents/`` 全树排除吞掉。所有权权威来源是装配时
+    写入的 ``.herdr-launcher-managed.json`` manifest；缺失时回退 islink
+    判别（PR #375 二轮评审：复制回退场景）。
     """
     parts = Path(str(path or "")).parts
     if ".agents" not in parts:
@@ -39,6 +42,13 @@ def is_launcher_owned(path: str, root: str | os.PathLike = "") -> bool:
     if not rest or rest[0] != "skills" or len(rest) < 2:
         return True  # .agents 顶层与其他子路径维持排除
     base = Path(root) if root else Path()
+    manifest = base / ".agents" / "skills" / ".herdr-launcher-managed.json"
+    try:
+        if manifest.exists():
+            managed = json.loads(manifest.read_text(encoding="utf-8"))
+            return parts[idx + 2] in managed
+    except (OSError, ValueError):
+        pass
     skill_entry = base.joinpath(*parts[: idx + 3])
     try:
         return os.path.islink(str(skill_entry))
