@@ -113,9 +113,14 @@ def launch_task_orchestrated(args, *, deps):
             if not predecessor:
                 args.dispatch_round = 1
             else:
-                pred_cand = predecessor.get("candidate_sha") or ""
+                pred_cand = (
+                    predecessor.get("candidate_sha")
+                    or predecessor.get("commit")
+                    or predecessor.get("integrated_commit")
+                    or ""
+                )
                 cur_cand = getattr(args, "candidate_sha", None) or ""
-                if cur_cand and cur_cand != pred_cand:
+                if cur_cand and pred_cand and cur_cand != pred_cand:
                     args.dispatch_round = 1
                 elif predecessor.get("launch_not_started"):
                     args.dispatch_round = int(predecessor.get("dispatch_round") or 1)

@@ -305,16 +305,15 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
                 or (old.get('dispatch_role') or 'worker') != role):
             raise ValueError('supersedes must bind previous round of same workflow/node/role')
         cur_cand = candidate_sha or ''
-        old_cand = old.get('candidate_sha') or ''
-        if cur_cand and cur_cand != old_cand:
-            if dispatch_round != 1:
-                raise ValueError('fresh candidate round requires dispatch_round=1')
-        elif old.get('launch_not_started'):
-            expected = int(old.get('dispatch_round') or 1)
-            if dispatch_round != expected and dispatch_round != expected + 1:
-                raise ValueError('relaunch after unstarted predecessor must preserve or advance round')
-        elif dispatch_round != int(old.get('dispatch_round') or 1) + 1:
-            raise ValueError('supersedes must bind previous round of same workflow/node/role')
+        old_cand = old.get('candidate_sha') or old.get('commit') or old.get('integrated_commit') or ''
+        same_candidate = bool(cur_cand and old_cand and cur_cand == old_cand)
+        if same_candidate:
+            if old.get('launch_not_started'):
+                expected = int(old.get('dispatch_round') or 1)
+                if dispatch_round != expected and dispatch_round != expected + 1:
+                    raise ValueError('relaunch after unstarted predecessor must preserve or advance round')
+            elif dispatch_round != int(old.get('dispatch_round') or 1) + 1:
+                raise ValueError('supersedes must bind previous round of same workflow/node/role')
     task = find_dispatch_task(store, workflow_id, node_id, role, candidate_sha,
                               dispatch_round, execution_id)
     if task:
