@@ -400,12 +400,20 @@ def recover_router_isolation_tasks(ports, workflow_id, tasks=None):
             continue
         requested = task.get("agent") or "auto"
         eligible = False
+        round_kwargs = {}
+        if task.get("dispatch_round") is not None:
+            round_kwargs["dispatch_round"] = task["dispatch_round"]
+        if task.get("candidate_episode_id") is not None:
+            round_kwargs["candidate_episode_id"] = task["candidate_episode_id"]
+        if task.get("candidate_author"):
+            round_kwargs["candidate_author"] = task["candidate_author"]
         try:
             choose_agent(
                 workflow_id,
                 task.get("node") or task.get("stage"),
                 task.get("task_type") or "test",
                 requested=requested,
+                **round_kwargs,
             )
             eligible = True
         except (OSError, RuntimeError, ValueError, AttributeError):
@@ -417,6 +425,7 @@ def recover_router_isolation_tasks(ports, workflow_id, tasks=None):
                     task.get("node") or task.get("stage"),
                     task.get("task_type") or "test",
                     requested="auto",
+                    **round_kwargs,
                 )
                 eligible = True
             except (OSError, RuntimeError, ValueError, AttributeError):

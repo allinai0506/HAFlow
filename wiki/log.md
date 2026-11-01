@@ -7,6 +7,41 @@
 > *Human + Agent, in Flow*  
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
+
+## [2026-11-01] review | PR #384 CI 单点修复、两轮 Codex 深度缺陷治理与经验沉淀 (§218)
+
+- 背景：PR #384 在 EGM 宏观设计论证后，CI 全量测试与两轮 Codex 自动化代码审查暴露出 1 个存量哈希基线漂移与 5 个微观物理接线缺陷。为防止“架构设计完备但生产接线脱节”，完成全部代码修复、新增针对性回归测试并将系统性教训沉淀至 `docs/lessons/lessons-learned.md` (§218)。
+- 关键治理点：
+  1. 存量哈希金标保护：`_FACT_FIELDS` 恢复不变，`recovery_identity` 与 `assess_workflow` 中改用条件式按需注入，守护历史数据签名基准（测试 `test_existing_recovery_identities_survive_delivery_extension` 通过）。
+  2. 真实 CLI/Controller 路由透传：在 `task_cli_launch.py:resolve_launch_agent` 与 `services/controller/infra_recovery.py` 中完整透传 `dispatch_round` 与反查出的 `candidate_author`，使两轮隔离在生产入口真正生效。
+  3. 任务活跃状态枚举对齐：`node_dispatch.py` 严格引用 `transitions.py` 的权威事实源 `ACTIVE_TASK_STATUSES`，杜绝通用直觉手写字符串导致正在运行的 Worker 被提前误标记为 `superseded`。
+  4. 规范化占位符与显式门禁解耦：`workflow_progress.py` 正确识别 `gate_placeholder_normalized=True` 占位符（返回 None，不当成门禁），同时保留显式声明的 `gate: {}` 按 `_DEFAULT_GATES` 正常回退（修复 `test_empty_gate_uses_default`）。
+  5. 不可变操作代际预算继承：`node_dispatch_store.reconcile_workflow` 生成替代操作时显式继承上一代的 `replan_count`，保证熔断计数器不因对象替换而归零。
+  6. 多任务部分修复跨轮隔离：`agent_router._compute_used_agents` 在审查模式（`is_verifier=True`）下排除所有当前候选代码的非 `superseded` 实际贡献者，防止多任务重派场景下未变动模块作者“自审自验”。
+- 验收结果：
+  - `tests/test_agent_router_rounds.py` (6 passed，含 CLI 透传与多任务贡献者隔离专项)
+  - `tests/test_workflow_recovery_autonomy.py` (7 passed)
+  - `tests/test_workflow_progress.py` (34 passed，含空门禁与规格化占位符专项)
+  - `tests/test_delivery_rework.py` (21 passed)
+  - 核心守护套件 65 passed in 0.64s；编译与语法检查 clean。
+- 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §218。
+## [2026-11-01] fix | 工作流端到端自主推进与异常停滞系统性治理 (wf-haflow-1029-02 闭环)
+
+- 背景：针对 `wf-haflow-1029-02` 等实际流水线在非标模板、双 Agent 环境、多任务交叠及收尾清理阶段出现的异常停滞与人为介入问题，通过 EGM（5 阶段 Goldfish 审查）定稿方案 A，按 4 个有序里程碑完成系统性工程治理与全链路闭环验证。
+- 落地实现与治理矩阵：
+  1. Milestone 1（工位清理白名单）：在 `herdr/clone_archive.py` 中扩充 `BYPASS_IGNORED_DIRS`（`test-evidence`、`test-results`、`coverage`、`playwright-report` 等），杜绝测试产物误阻断工位销毁。
+  2. Milestone 2（轮次级路由隔离）：在 `herdr/agent_router.py` 中实现 `_compute_used_agents`，支持 `HERDR_ROUTER_ROUND_SCOPED_ISOLATION`，审查节点仅排除当前候选版本作者，允许原作者在 Round 2 自修复，设置 `MAX_REMEDIATION_ROUNDS = 2` 熔断，彻底根除双 Agent 候选池枯竭死锁。
+  3. Milestone 3（动态归因与自愈）：在 `herdr/workflow_progress.py` 中消除 `'implementation'` 硬编码，支持按 DAG 门禁动态反查（如 `'craft'`）；修复 Python 布尔短路运算符比对缺陷，补齐 `integrated_commit` 与并行多任务活动集合回退；在 `herdr/node_dispatch.py` 中支持前序变更的安全重规划与 2 次熔断。
+  4. Milestone 4（收尾可见性与全链路验证）：确保收尾等待期间工作流保持 `status = 'running'`，收尾失败连续退避 >= 2 次时通过 `attention_note` 抛出结构化 `auto_close_blocked` 告警；编写 `tests/test_e2e_full_autonomous_flow.py` 仿真全链路，验证 0 次非预期停滞。
+- 验证结果：
+  - `tests/test_repo_hygiene_whitelist.py` (16 passed)
+  - `tests/test_agent_router_rounds.py` (4 passed)
+  - `tests/test_workflow_recovery_autonomy.py` (5 passed)
+  - `tests/test_e2e_full_autonomous_flow.py` (2 passed)
+  - 回归测试（`test_adaptive_router.py`、`test_workflow_stall_regressions.py`、`test_task_cli_workflow_close.py` 56 passed）
+  - 全量静态编译与 `git diff --check`（Clean）
+- 交付产物：架构定稿文档 `docs/designs/workflow-autonomy-and-blocker-remediation.md` + 4 组专项守护测试 + Lessons Learned §217。
+
 ## [2026-10-31] fix | 评审欠账清零：三批次修复 18 条 + 二轮/三轮收敛，0 未解决线程
 
 - 背景：2026-10-31 审计发现 #312–#362 各 PR 的未解决评审线程共 67 条（含误挂 docs 分支丢失后重落地的 #359 自带欠账）。经三批次修复 + Codex 二轮/三轮对修复本身的复核，全部闭环，受审 PR 未解决线程归零。

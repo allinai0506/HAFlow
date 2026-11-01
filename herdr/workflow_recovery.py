@@ -70,8 +70,22 @@ def repair_coverage(operation, tasks):
         if valid and kind == 'successor' and payload.get('kind') != 'finalize':
             lineage = target.get('recovery_lineage') or {}
             required = {'predecessor_id': original_id, 'successor_id': entry['task_id'],
-                        'predecessor_run_id': entry['source_run_id'], 'successor_run_id': entry['run_id'],
-                        'candidate_sha': payload.get('candidate_sha')}
+                        'predecessor_run_id': entry['source_run_id'], 'successor_run_id': entry['run_id']}
+            matches_candidate = (
+                old.get('commit') == payload.get('candidate_sha')
+                or old.get('integrated_commit') == payload.get('candidate_sha')
+                or old.get('candidate_sha') == payload.get('candidate_sha')
+                or (not payload.get('candidate_sha'))
+            )
+            lineage_cand = lineage.get('candidate_sha')
+            lineage_matches = (
+                lineage_cand in (
+                    payload.get('candidate_sha'),
+                    old.get('commit'),
+                    old.get('integrated_commit'),
+                    target.get('candidate_sha'),
+                )
+            )
             if not old.get('commit') and old.get('candidate_sha') == payload.get('candidate_sha'):
                 # 前驱死于提交前(看门狗/熔断/崩溃):继任者扎根同一冻结候选。
                 # committed 谱系字典由 link_committed_successor 写入,而该原语
@@ -84,8 +98,9 @@ def repair_coverage(operation, tasks):
             else:
                 valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
                          and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id
-                         and bool(payload.get('candidate_sha')) and old.get('commit') == payload['candidate_sha']
-                         and all(lineage.get(key) == value for key, value in required.items()))
+                         and bool(payload.get('candidate_sha')) and matches_candidate
+                         and all(lineage.get(key) == value for key, value in required.items())
+                         and lineage_matches)
         elif valid and kind == 'delivered_successor' and payload.get('kind') != 'finalize':
             parent = by_id.get(target.get('supersedes')) or {}
             lineage = target.get('recovery_lineage') or {}
@@ -251,9 +266,14 @@ def existing_delivery_details(operation, workflow, tasks, store):
     try:
         for tid in original_ids:
             task = by_id.get(tid) or {}
+            matches_cand = (
+                task.get('candidate_sha') == payload.get('candidate_sha')
+                or task.get('commit') == payload.get('candidate_sha')
+                or task.get('integrated_commit') == payload.get('candidate_sha')
+            )
             if (task.get('workflow_id') != workflow.get('workflow_id') or not task.get('run_id')
                     or task.get('execution_id') != workflow.get('execution_id')
-                    or (task.get('candidate_sha') or task.get('commit')) != payload.get('candidate_sha')):
+                    or not matches_cand):
                 continue
             parent = by_id.get(task.get('supersedes')) or {}
             if (task.get('status') in ('pending', 'working') and not task.get('stage_verdict')

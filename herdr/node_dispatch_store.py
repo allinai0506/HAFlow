@@ -140,6 +140,10 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
                 legacy = not predecessors and node['id'] in legacy_notified
                 detail = ({'reason': 'legacy_dispatch_unknown', 'origin': 'legacy_notified',
                            'deadline_at': now + core.WAIT_SECONDS} if legacy else {})
+                if previous and previous.get('detail') and isinstance(previous['detail'], dict):
+                    inherited_replan = int(previous['detail'].get('replan_count') or 0)
+                    if inherited_replan:
+                        detail['replan_count'] = inherited_replan
                 status, started = ('awaiting_result', 1) if legacy else ('pending', 0)
                 if core.cancelled_inventory(node_tasks):
                     status, started = 'waiting_human', 0

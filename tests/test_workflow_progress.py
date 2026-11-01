@@ -154,6 +154,37 @@ def test_empty_gate_uses_default():
     assert assess_workflow(WF, {'nodes': [{'id': 'test', 'gate': {}}, {'id': 'implementation'}]}, [task(execution_id='generation-1'), task('implementation', execution_id='generation-1', stage_verdict='pass', status='committed')])['obligations'][0]['status'] == 'pending'
 
 
+def test_normalized_placeholder_preserves_default_gate_for_standard_nodes():
+    """Normalized placeholders on standard nodes (test, review, wrapup) retain default gate targets."""
+    normalized_cfg = {
+        'nodes': [
+            {'id': 'test', 'gate': {}, 'gate_placeholder_normalized': True},
+            {'id': 'implementation'},
+        ]
+    }
+    tasks = [
+        task(execution_id='generation-1'),
+        task('implementation', execution_id='generation-1', stage_verdict='pass', status='committed'),
+    ]
+    assessment = assess_workflow(WF, normalized_cfg, tasks)
+    assert assessment['obligations'][0]['status'] == 'pending'
+    assert assessment['obligations'][0]['reason'] == 'blocked_gate'
+
+
+def test_normalized_placeholder_leaves_ordinary_nodes_ungated():
+    """Normalized placeholders on ordinary nodes (craft, docs) remain ungated (return None)."""
+    normalized_cfg = {
+        'nodes': [
+            {'id': 'docs', 'gate': {}, 'gate_placeholder_normalized': True},
+            {'id': 'craft'},
+        ]
+    }
+    from herdr.workflow_progress import _gate
+    nodes_map = {n['id']: n for n in normalized_cfg['nodes']}
+    assert _gate(nodes_map, 'docs') is None
+    assert _gate(nodes_map, 'craft') is None
+
+
 @pytest.mark.parametrize('status', ['completed', 'closing', 'abandoned'])
 def test_non_running_workflow_waits(status):
     assert assess_workflow(dict(WF, status=status), CFG, [task()])['obligations'][0]['status'] == 'waiting_human'

@@ -1,7 +1,7 @@
 """Pure node dispatch identity, registration evidence and wait projection."""
 import hashlib
 import json
-from .transitions import COMPLETED_TASK_STATUSES
+from .transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
 
 WAIT_SECONDS = 900
 CHECK_SECONDS = 30
@@ -199,9 +199,25 @@ def result(operation, workflow, config, tasks, now):
     if not active(workflow):
         return None
     if not predecessors_current(operation, workflow, tasks):
-        return ('waiting_human' if operation['started'] else 'superseded',
+        replan_count = int((operation.get('detail') or {}).get('replan_count', 0))
+        if replan_count >= 2:
+            return ('waiting_human',
+                    {'reason': 'dispatch_replan_exhausted',
+                     'replan_count': replan_count,
+                     'decision_needed': '前序任务连续重规划达到上限(2次)，请人工核对任务谱系'})
+        running_tasks = [
+            t for t in registered_tasks(operation, workflow, tasks)
+            if t.get('status') in ACTIVE_TASK_STATUSES
+        ]
+        if operation['started'] and running_tasks:
+            return ('waiting_human',
+                    {'reason': 'dispatch_predecessor_changed',
+                     'replan_count': replan_count,
+                     'decision_needed': '前序任务补派责任已变化且当前任务仍在执行，等待任务退出或人工核对'})
+        return ('superseded',
                 {'reason': 'dispatch_predecessor_changed',
-                 'decision_needed': '前序任务补派责任已变化，核对替代派发结果及当前任务谱系'})
+                 'responsibility_transferred_to': 'replan',
+                 'replan_count': replan_count + 1})
     if not operation['started'] and verification_reused(
             workflow, config, operation['payload']['node_id'], tasks):
         return 'superseded', {'reason': 'dispatch_verification_reused',

@@ -120,6 +120,23 @@ def resolve_launch_agent(args, node_id, store, *, choose_agent, workflow_config_
         }
         if penalized:
             kwargs["penalize_agents"] = penalized
+        if getattr(args, "dispatch_round", None) is not None:
+            kwargs["dispatch_round"] = args.dispatch_round
+        candidate_author = getattr(args, "candidate_author", None)
+        if not candidate_author and getattr(args, "candidate_sha", None) and args.workflow_id:
+            try:
+                candidate_sha = args.candidate_sha
+                w_tasks = store.list_tasks(workflow_id=args.workflow_id)
+                for t in w_tasks:
+                    if t.get("agent") and (t.get("commit") == candidate_sha or t.get("integrated_commit") == candidate_sha):
+                        candidate_author = t["agent"]
+                        break
+            except Exception:
+                pass
+        if candidate_author:
+            kwargs["candidate_author"] = candidate_author
+        if getattr(args, "candidate_episode_id", None) is not None:
+            kwargs["candidate_episode_id"] = args.candidate_episode_id
         return choose_agent(
             args.workflow_id,
             node_id,
