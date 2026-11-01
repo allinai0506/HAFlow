@@ -860,16 +860,41 @@ class MetricVector:
 # 写 "...展示 FAIL 状态..."），此时一条绿色用例会被当成失败项，使
 # failing_tests 非空、内循环永不收敛，把满分 100 的绿色套件压到 95 分
 # 并最终误报 inner_loop_exhausted。故必须先排除带通过标记的行。
-_PASS_MARKERS = ("✓", "√")
+_PASS_MARKERS = ("✓", "√", "PASS", "PASS ")
+
+
+def _clean_failing_test_line(line: str) -> str:
+    """Strip status marker prefix from a failure line while preserving test name."""
+    cleaned = line.strip(" │|\t")
+    for prefix in ("FAIL:", "FAIL", "✕", "×", "●"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+            break
+    return cleaned
 
 
 def _is_failing_test_line(line: str) -> bool:
     """True only for test lines that actually denote a failure."""
-    stripped = line.strip()
+    stripped = line.strip(" │|\t")
     if not stripped or stripped.startswith(_PASS_MARKERS):
         return False
-    return "✕" in line or "FAIL " in line
+    return (
+        stripped.startswith(("✕", "×", "●", "FAIL ", "FAIL\t", "FAIL:"))
+        or stripped == "FAIL"
+    )
 
+
+_PYTEST_SUMMARY_LINE_RE = re.compile(
+    r"^\s*(=+\s*)?([0-9\w\s,]+?)\s+in\s+[\d\.]+s(\s*=+)?\s*$"
+)
+
+_VITEST_SUMMARY_RE = re.compile(
+    r"^\s*[│|]?\s*Tests\s+(?:(\d+)\s+failed\s*\|\s*)?(?:(\d+)\s+passed\s*)?\((\d+)\)"
+)
+
+_JEST_SUMMARY_RE = re.compile(
+    r"^\s*[│|]?\s*Tests:\s*(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(\d+)\s+total"
+)
 
 _SUREFIRE_RE = re.compile(
     r"Tests run:\s*(\d+)"
@@ -898,11 +923,16 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
 
     # 1. pytest summaries: "1 failed, 4 passed in 0.15s" (one per invocation)
     pytest_matched = False
-    for m in re.finditer(r"(?:=+)?\s*([\d\w\s,]+)\s+in\s+[\d\.]+s", output):
-        summary_str = m.group(1)
-        passed_m = re.search(r"(\d+)\s+passed", summary_str)
-        failed_m = re.search(r"(\d+)\s+failed", summary_str)
-        error_m = re.search(r"(\d+)\s+error", summary_str)
+    for line in output.splitlines():
+        if "::" in line or "[" in line or "/" in line or "\\" in line:
+            continue
+        m = _PYTEST_SUMMARY_LINE_RE.match(line)
+        if not m:
+            continue
+        summary_str = m.group(2)
+        passed_m = re.search(r"\b(\d+)\s+passed\b", summary_str)
+        failed_m = re.search(r"\b(\d+)\s+failed\b", summary_str)
+        error_m = re.search(r"\b(\d+)\s+errors?\b", summary_str)
         if not (passed_m or failed_m or error_m):
             continue
         matched = True
@@ -912,6 +942,8 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
         errors = int(error_m.group(1)) if error_m else 0
         passed_sum += passed
         total_sum += passed + failed + errors
+
+    if pytest_matched:
         for line in output.splitlines():
             if line.startswith("FAILED ") or line.startswith("ERROR "):
                 parts = line.split(maxsplit=1)
@@ -920,20 +952,14 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
                     if target not in failing:
                         failing.append(target)
 
-
-    # 1b. pytest collect-only (INV-EVAL-04 smoke default): "6449 tests
-    # collected in 2.09s" with exit 0 is a healthy receipt, but nothing
-    # ran — record zero evidence instead of fabricating passes. Collection
-    # errors carry a pytest error summary ("no tests collected, N error")
-    # and are already handled by branch 1 above.
-    if not matched and exit_code == 0 and re.search(r"\d+\s+tests?\s+collected\b", output):
-        return 0, 0, []
-
     # 2. vitest summaries: "Tests  1 failed | 11 passed (12)"
     vitest_matched = False
-    for m in re.finditer(
-            r"Tests\s+(?:(\d+)\s+failed\s*\|\s*)?(?:(\d+)\s+passed\s*)?\((\d+)\)",
-            output):
+    for line in output.splitlines():
+        if "::" in line or "[" in line:
+            continue
+        m = _VITEST_SUMMARY_RE.search(line)
+        if not m:
+            continue
         vitest_matched = True
         matched = True
         failed = int(m.group(1)) if m.group(1) else 0
@@ -944,23 +970,29 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
     if vitest_matched:
         for line in output.splitlines():
             if _is_failing_test_line(line):
-                cleaned = line.replace("FAIL", "").replace("✕", "").strip()
+                cleaned = _clean_failing_test_line(line)
                 if cleaned and cleaned not in failing:
                     failing.append(cleaned)
 
     # 3. jest summaries: "Tests: X failed, Y passed, Z total"
-    for m in re.finditer(
-            r"Tests:\s*(?:(\d+)\s+failed,\s*)?(?:(\d+)\s+passed,\s*)?(\d+)\s+total",
-            output):
+    jest_matched = False
+    for line in output.splitlines():
+        if "::" in line or "[" in line:
+            continue
+        m = _JEST_SUMMARY_RE.search(line)
+        if not m:
+            continue
+        jest_matched = True
         matched = True
         failed = int(m.group(1)) if m.group(1) else 0
         passed = int(m.group(2)) if m.group(2) else 0
         total = int(m.group(3)) if m.group(3) else (passed + failed)
         passed_sum += passed
         total_sum += total
+    if jest_matched:
         for line in output.splitlines():
             if _is_failing_test_line(line):
-                cleaned = line.replace("FAIL", "").replace("✕", "").strip()
+                cleaned = _clean_failing_test_line(line)
                 if cleaned and cleaned not in failing:
                     failing.append(cleaned)
 
@@ -969,6 +1001,8 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
     # summing them against the Results totals would double count. Surefire's
     # run count includes skipped, so passed = run - failures - errors - skipped.
     for line in output.splitlines():
+        if "::" in line or ("[" in line and not line.strip().startswith("[INFO]")):
+            continue
         m = _SUREFIRE_RE.search(line)
         if not m or "Time elapsed" in line:
             continue
@@ -981,38 +1015,63 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
         total_sum += run
 
     # 5. Python standard unittest: "Ran X test(s) in Ys" (+OK / failures=N)
-    unittest_segments = list(re.finditer(r"Ran\s+(\d+)\s+tests?\s+in\s+[\d\.]+s", output))
-    if unittest_segments:
-        matched = True
-        ut_total = sum(int(m.group(1)) for m in unittest_segments)
-        ut_ok = exit_code == 0 and ("\nOK" in output or output.endswith("OK"))
-        if ut_ok:
-            passed_sum += ut_total
-            total_sum += ut_total
-        else:
-            failed_cnt = 0
-            fail_m = re.search(r"failures=(\d+)", output)
-            err_m = re.search(r"errors=(\d+)", output)
-            if fail_m:
-                failed_cnt += int(fail_m.group(1))
-            if err_m:
-                failed_cnt += int(err_m.group(1))
-            if failed_cnt == 0:
-                failed_cnt = 1
-            passed_sum += max(0, ut_total - failed_cnt)
-            total_sum += ut_total
-            for line in output.splitlines():
-                if line.startswith("FAIL: ") or line.startswith("ERROR: "):
-                    target = line.split(maxsplit=1)[1].strip()
-                    if target not in failing:
-                        failing.append(target)
+    for line in output.splitlines():
+        if "::" in line or "[" in line:
+            continue
+        m = re.match(r"^\s*Ran\s+(\d+)\s+tests?\s+in\s+[\d\.]+s", line)
+        if m:
+            matched = True
+            ut_total = int(m.group(1))
+            ut_ok = exit_code == 0 and ("\nOK" in output or output.endswith("OK"))
+            if ut_ok:
+                passed_sum += ut_total
+                total_sum += ut_total
+            else:
+                failed_cnt = 0
+                fail_m = re.search(r"failures=(\d+)", output)
+                err_m = re.search(r"errors=(\d+)", output)
+                if fail_m:
+                    failed_cnt += int(fail_m.group(1))
+                if err_m:
+                    failed_cnt += int(err_m.group(1))
+                if failed_cnt == 0:
+                    failed_cnt = 1
+                passed_sum += max(0, ut_total - failed_cnt)
+                total_sum += ut_total
+                for l in output.splitlines():
+                    if l.startswith("FAIL: ") or l.startswith("ERROR: "):
+                        target = l.split(maxsplit=1)[1].strip()
+                        if target not in failing:
+                            failing.append(target)
+            break
+
+    # 1b. pytest collect-only (INV-EVAL-04 smoke default): "6449 tests
+    # collected in 2.09s" with exit 0 is a healthy receipt, but nothing
+    # ran — record zero evidence instead of fabricating passes. Collection
+    # errors carry a pytest error summary ("no tests collected, N error")
+    # and are already handled by branch 1 above.
+    if not matched and exit_code == 0:
+        for line in output.splitlines():
+            if "::" in line or "[" in line:
+                continue
+            if re.match(
+                r"^\s*(=+\s*)?(?:(\d+)\s+tests?\s+collected|no tests collected)\s+in\s+[\d\.]+s(\s*=+)?\s*$",
+                line,
+            ):
+                return 0, 0, []
 
     # 6. Fallback runner: pytest short summary without timing (e.g. "4248 passed" or "= 1 failed, 4 passed =")
     # Only evaluated if none of the explicit multi-runner summaries above matched.
     if not matched:
         for line in output.splitlines():
+            if "::" in line or "[" in line or "/" in line or "\\" in line:
+                continue
             line_clean = line.strip(" =\t")
-            if line_clean.startswith("Test Files") or line_clean.startswith("Tests") or line_clean.startswith("[INFO]"):
+            if (
+                line_clean.startswith("Test Files")
+                or line_clean.startswith("Tests")
+                or line_clean.startswith("[INFO]")
+            ):
                 continue
             passed_m = re.search(r"\b(\d+)\s+passed\b", line_clean)
             failed_m = re.search(r"\b(\d+)\s+failed\b", line_clean)

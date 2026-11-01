@@ -9165,3 +9165,47 @@ pytest -q tests/test_workflow_recovery_autonomy.py::test_gate_placeholder_normal
 - `herdr/node_dispatch_store.py` — 替代操作显式继承 `previous['detail']['replan_count']`
 - `herdr/agent_router.py` — 审查者排除涵盖所有非 `superseded` 候选实际贡献者
 ---
+
+## 219. 测试输出解析器全局正则跨行污染与 collect-only 误判
+
+### 问题背景
+
+真实工作流 `wf-haflow-1101-01` 在测试工位执行 `pytest -q --collect-only` 产生健康收集结果（`6816 tests collected in 7.15s`），命令退出码为 0，但节点却被评估器误判为 `blocked`，触发 Recovery Op `372067`。
+根因分析排查确认：
+1. `herdr/evaluator.py:parse_test_output` 使用无行边界锚定的全局跨行正则 `re.finditer(r"(?:=+)?\s*([\d\w\s,]+)\s+in\s+[\d\.]+s", output)`，意外匹配到了测试用例参数名中的 `[1-4015 passed in 3.00s]`，导致 `matched = True`，虚构了 36,145 项通过测试；
+2. 因 `matched = True`，紧随其后的 `collect-only` 分支（`if not matched and exit_code == 0 ...`）被短路跳过；
+3. 随后的 Vitest/Jest 解析分支同样因缺乏行首锚定，匹配到了参数名中的 `Tests  1 passed (1)`，激活了失败行扫描；
+4. `_is_failing_test_line` 使用无行首约束的 `"FAIL " in line`，将参数中包含 `展示 FAIL 状态` 的绿色测试名误判为失败行，注入 4 项 `failing_tests`；
+5. `calculate_metrics` 收到非空 `failing_tests` 判定为未收敛，`herdr-loop eval` 退出码 1，Controller 捕获为 `blocked`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 全局跨行正则扫描测试摘要匹配到测试名称 | 终端日志中包含用例 ID、参数化取值或打印内容，无行边界正则会将用例名（如 `test[1-4015 passed in 3.00s]`）当成测试套件摘要 | 所有测试框架摘要匹配必须强制行级锚定（`^`、`$`），且显式排除含有 `::`、`[` 等测试用例标识特征的行 |
+| 失败测试行检测使用 substring 泛匹配 | `"FAIL " in line` 会将用例名或参数中包含 "FAIL"、"FAIL_OVER" 等单词的绿色测试误判为失败 | 失败行检测必须且仅检查行首失败前缀标记（如 `✕`、`×`、`●`、`FAIL `），严禁在行中全局查找 |
+| 收集判定受前置易错匹配状态变量短路 | `if not matched and exit_code == 0 ...` 依赖 `matched`，前序对用例名的误匹配导致本应生效的收集成功判定被跳过 | 严格按行过滤，消除虚假 `matched`；同时确保收集成功只记录零证据（`(0, 0, [])`），不虚构通过计数 |
+| 提取失败名称时在整行中全串替换关键单词 | `line.replace("FAIL", "")` 会篡改用例名称本身（如将 `test FAIL status` 篡改为 `test  status`） | 仅剥离行首状态前缀（`FAIL:`、`FAIL`、`✕`、`×`、`●`），完整保留后续用例名称与文件路径 |
+
+### 操作规范
+
+1. **严格行级日志解析**：对测试、构建、静态检查工具的终端输出进行解析时，严禁使用非锚定的跨行正则搜索；必须逐行处理并排除用例 ID 标识符（如 `::`、`[`、`/`）。
+2. **行首标记与前缀剥离**：用例判定函数（如 `_is_failing_test_line` 与 `_clean_failing_test_line`）必须且仅检查行首标记（strip 缩进/边框字符后），剥离前缀仅切除行首匹配词，严禁在整行中 replace。
+3. **collect-only 零执行证据原则**：收集阶段成功只能返回 `(0, 0, [])`，严禁虚构通过数量，真实失败（如 collection error）必须如实暴露。
+
+### 验证命令 / 守护测试
+
+```bash
+# 验证 collect-only 与参数中含摘要/失败标记的测试精准解析
+pytest -q tests/test_evaluator_collect_only_parsing.py
+
+# 验证已有 ANSI、执行状态、多 Runner 兼容套件不回归
+pytest -q tests/test_evaluator_ansi_test_output.py tests/test_evaluator_execution_status.py tests/test_evaluator_multi_runner_metrics.py tests/test_loop_suite_smoke_default.py tests/test_loop_evaluator.py tests/test_c07_test_count_fix.py
+```
+
+### 相关文档 / 关联证据
+
+- 诊断报告：Recovery Op `372067` 阻塞根因排查记录
+- `herdr/evaluator.py` — 重构 `_is_failing_test_line`、`_clean_failing_test_line`、`parse_test_output`（行级锚定与用例标识隔离）
+- `tests/test_evaluator_collect_only_parsing.py` — 6 项专项回归守护测试
+---
