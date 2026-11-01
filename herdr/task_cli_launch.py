@@ -215,22 +215,21 @@ def resolve_launch_agent(args, node_id, store, *, choose_agent, workflow_config_
 
 
 def _release_after_router_rejection(args, node_id, store, error, release_agent_reservation, *,
-                                    record_unexpected, record_router_failure_task):
-    intent = getattr(args, "_launch_intent", None)
-    if intent:
-        try:
-            from herdr.task_resources import abort_launch_intent
-            abort_launch_intent(store, intent, reason="router_rejected")
-        except Exception:
-            pass
+                                    record_unexpected=False, record_router_failure_task=None):
+    from herdr.task_resources import record_launch_rejection
+    try:
+        record_launch_rejection(
+            store,
+            args,
+            reason=f"router_rejected: {error}",
+            resources_absent=True,
+        )
+    except Exception:
+        pass
     try:
         release_agent_reservation(args.task_id)
     except Exception:
         pass
-    if record_unexpected:
-        from herdr.agent_router import RouterHealthRejection, RouterPolicyRejection
-        if not isinstance(error, (RouterHealthRejection, RouterPolicyRejection)):
-            record_router_failure_task(args, node_id, error)
     print(f"[ROUTER REJECTED] {error}")
     if "preflight" in str(error).lower():
         print("Run './bin/herdr-deep-preflight --deep' to inspect agent connectivity and credentials.")

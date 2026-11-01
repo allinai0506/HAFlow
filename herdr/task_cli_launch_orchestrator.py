@@ -109,9 +109,18 @@ def launch_task_orchestrated(args, *, deps):
         args.dispatch_role = (
             requested_role or (predecessor or {}).get("dispatch_role") or "worker"
         )
-        args.dispatch_round = getattr(args, "dispatch_round", None) or (
-            int(predecessor.get("dispatch_round") or 1) + 1 if predecessor else 1
-        )
+        if getattr(args, "dispatch_round", None) is None:
+            if not predecessor:
+                args.dispatch_round = 1
+            else:
+                pred_cand = predecessor.get("candidate_sha") or ""
+                cur_cand = getattr(args, "candidate_sha", None) or ""
+                if cur_cand and pred_cand and cur_cand != pred_cand:
+                    args.dispatch_round = 1
+                elif predecessor.get("launch_not_started"):
+                    args.dispatch_round = int(predecessor.get("dispatch_round") or 1)
+                else:
+                    args.dispatch_round = int(predecessor.get("dispatch_round") or 1) + 1
         _validate_supersedes_for_launch(args, node_id, store)
         clone_root = (
             Path(

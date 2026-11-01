@@ -261,6 +261,8 @@ def find_dispatch_task(store, workflow_id, node_id, role, candidate_sha, dispatc
         # matching identity from terminal failed/superseded task history.
         if 'dispatch_role' not in task or 'dispatch_round' not in task:
             continue
+        if task.get('status') == 'superseded' or task.get('launch_not_started'):
+            continue
         if ((execution_id is None or task.get('execution_id') == execution_id)
                 and (task.get('node') or task.get('stage')) == node_id
                 and (task.get('dispatch_role') or 'worker') == role
@@ -300,8 +302,18 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
         old = store.get_task(supersedes)
         if (not old or old.get('workflow_id') != workflow_id
                 or (old.get('node') or old.get('stage')) != node_id
-                or (old.get('dispatch_role') or 'worker') != role
-                or dispatch_round != int(old.get('dispatch_round') or 1) + 1):
+                or (old.get('dispatch_role') or 'worker') != role):
+            raise ValueError('supersedes must bind previous round of same workflow/node/role')
+        cur_cand = candidate_sha or ''
+        old_cand = old.get('candidate_sha') or ''
+        if cur_cand and old_cand and cur_cand != old_cand:
+            if dispatch_round != 1:
+                raise ValueError('fresh candidate round requires dispatch_round=1')
+        elif old.get('launch_not_started'):
+            expected = int(old.get('dispatch_round') or 1)
+            if dispatch_round != expected and dispatch_round != expected + 1:
+                raise ValueError('relaunch after unstarted predecessor must preserve or advance round')
+        elif dispatch_round != int(old.get('dispatch_round') or 1) + 1:
             raise ValueError('supersedes must bind previous round of same workflow/node/role')
     task = find_dispatch_task(store, workflow_id, node_id, role, candidate_sha,
                               dispatch_round, execution_id)

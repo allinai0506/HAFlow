@@ -199,6 +199,80 @@ class TestBaselineFreshnessPreflight(GitFixture):
         self.assertEqual(result["claim_sha"], self.stale_claim)
 
 
+class TestRouterRejectionLifecycle(unittest.TestCase):
+    def test_router_exhaustion_does_not_crash_with_intent_assertion_or_orphan_task(self):
+        """When the router rejects before resources are created, it must record launch rejection
+        cleanly without crashing on intent phase validation or writing an orphan task."""
+        import sqlite3
+        import tempfile
+        from types import SimpleNamespace
+        from herdr.agent_router import RouterRemediationExhausted
+        from herdr.state_store import SQLiteStateStore
+        from herdr.task_cli_launch import _release_after_router_rejection, record_router_failure_task
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteStateStore(Path(tmpdir) / "state.db")
+            conn = sqlite3.connect(store.db_path)
+            # Register a minimal workflow
+            conn.execute(
+                "INSERT INTO workflows (workflow_id, title, status, metadata_json, created_at, updated_at) "
+                "VALUES ('wf-1', 'title', 'running', '{\"project_id\":\"proj\",\"execution_id\":\"exec-1\"}', 100, 100)"
+            )
+            # Record an allocating launch intent
+            intent = {
+                "key": "launch:key1",
+                "intent_id": "intent-1",
+                "workflow_id": "wf-1",
+                "node_id": "test",
+                "role": "worker",
+                "task_id": "wf-1-test-auto-r3",
+                "candidate_sha": "a" * 40,
+                "dispatch_round": 3,
+                "execution_id": "exec-1",
+                "phase": "allocating",
+                "resources": {"planned_clone_path": "/tmp/clone", "run_id": "run-1"},
+            }
+            from herdr.task_resources import _launch_event
+            _launch_event(store, intent, conn=conn)
+            conn.commit()
+            conn.close()
+
+            args = SimpleNamespace(
+                workflow_id="wf-1",
+                task_id="wf-1-test-auto-r3",
+                node="test",
+                stage="test",
+                run_id="run-1",
+                execution_id="exec-1",
+                candidate_sha="a" * 40,
+                dispatch_role="worker",
+                _launch_intent=intent,
+            )
+
+            error = RouterRemediationExhausted("round 3 > MAX_REMEDIATION_ROUNDS (2)")
+            # Should exit with code 2, NOT crash with ValueError: dispatch task is not bound to a matching durable launch intent
+            with self.assertRaises(SystemExit) as raised:
+                _release_after_router_rejection(
+                    args,
+                    "test",
+                    store,
+                    error,
+                    release_agent_reservation=lambda _tid: None,
+                    record_unexpected=True,
+                    record_router_failure_task=lambda *a, **k: record_router_failure_task(
+                        *a,
+                        **k,
+                        get_store=lambda: store,
+                        new_run_id=lambda: "run-1",
+                        now=lambda: 100,
+                        release_agent_reservation=lambda _tid: None,
+                    ),
+                )
+            self.assertEqual(raised.exception.code, 2)
+            # Must NOT produce an orphan task in tasks table
+            self.assertIsNone(store.get_task("wf-1-test-auto-r3"))
+
+
 class TestLaunchOrderGuard(unittest.TestCase):
     """结构性护栏：launch owner 内预检必须先于一切资源创建。
 
