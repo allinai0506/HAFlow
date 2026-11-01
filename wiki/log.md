@@ -19,10 +19,11 @@
   1. **行级正则锚定与用例标识隔离**：对 pytest、Vitest、Jest 摘要匹配增加行级锚定（`^`、`$`）并显式跳过包含 `::`、`[` 的用例行；
   2. **失败行首标记约束与前缀安全剥离**：`_is_failing_test_line` 仅判定行首标记（`✕`、`×`、`●`、`FAIL `），`_clean_failing_test_line` 仅切除行首匹配前缀，防止篡改用例名称本身；
   3. **收集成功零执行原则**：collect-only 正常退出（exit 0）严格返回 `(0, 0, [])`，不伪造通过数；真实失败依然准确识别；
-  4. **TDD 专项守护**：新增 `tests/test_evaluator_collect_only_parsing.py`，完整覆盖真实场景 6 项测试。
+  4. **Codex 深度审查缺陷治理**：支持 pytest >60s 耗时括号后缀（`(?:\s*\([\d:]+\))?`）防止失败项丢失；移除 unittest 短路 break 实现多段统计累加；Maven Surefire 正则支持 `[ERROR]` 与 `[WARNING]` 前缀防止 Java 失败统计失效；
+  5. **TDD 专项守护**：新增 `tests/test_evaluator_collect_only_parsing.py`，完整覆盖真实场景 11 项测试。
 - 验收结果：
-  - `tests/test_evaluator_collect_only_parsing.py` (6 passed)
-  - `tests/test_evaluator_ansi_test_output.py`、`tests/test_evaluator_execution_status.py`、`tests/test_evaluator_multi_runner_metrics.py`、`tests/test_loop_suite_smoke_default.py`、`tests/test_loop_evaluator.py`、`tests/test_c07_test_count_fix.py` (71 passed)
+  - `tests/test_evaluator_collect_only_parsing.py` (11 passed)
+  - `tests/test_evaluator_ansi_test_output.py`、`tests/test_evaluator_execution_status.py`、`tests/test_evaluator_multi_runner_metrics.py`、`tests/test_loop_suite_smoke_default.py`、`tests/test_loop_evaluator.py`、`tests/test_c07_test_count_fix.py` (71 passed, 套件累计 82 passed)
   - 真实 `herdr-loop eval` 端到端验证：初始化与评估在 collect-only 命令下退出码 0，score 100.0，converged True；真实失败用例准确捕获退出码 1；
   - `compileall` 与 `git diff --check`（Clean）。
 - 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §219。

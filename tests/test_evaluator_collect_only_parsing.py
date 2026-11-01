@@ -118,6 +118,59 @@ def test_vitest_all_failing_without_pipe():
     assert "test/broken2.test.ts > fail 2" in failing
 
 
+def test_pytest_summary_with_duration_over_sixty_seconds_captures_failures():
+    """pytest running > 60s formats duration as '65.23s (0:01:05)'.
+
+    Summary must match and FAILED test names must be extracted into failing.
+    """
+    output = (
+        "FAILED tests/test_payment.py::test_charge - AssertionError: assert False\n"
+        "========================= 1 failed, 10 passed in 65.23s (0:01:05) =========================\n"
+    )
+    passed, total, failing = parse_test_output(output, 1)
+    assert passed == 10
+    assert total == 11
+    assert failing == ["tests/test_payment.py::test_charge"]
+
+
+def test_multiple_unittest_runs_are_aggregated_not_truncated():
+    """Multiple unittest runs in output must aggregate all test counts without breaking early."""
+    output = (
+        ".....\n"
+        "----------------------------------------------------------------------\n"
+        "Ran 5 tests in 0.002s\n"
+        "\n"
+        "OK\n"
+        ".......\n"
+        "----------------------------------------------------------------------\n"
+        "Ran 7 tests in 0.003s\n"
+        "\n"
+        "OK\n"
+    )
+    passed, total, failing = parse_test_output(output, 0)
+    assert passed == 12
+    assert total == 12
+    assert failing == []
+
+
+def test_surefire_error_summary_is_counted_when_tests_fail():
+    """Maven Surefire prefixes test summary with [ERROR] when failures occur."""
+    output = (
+        "[INFO] Scanning for projects...\n"
+        "[INFO] Running com.example.AppTest\n"
+        "[ERROR] Failures:\n"
+        "[ERROR]   AppTest.testApp:15 expected:<1> but was:<2>\n"
+        "[INFO]\n"
+        "[ERROR] Tests run: 5, Failures: 1, Errors: 0, Skipped: 0\n"
+        "[INFO] ------------------------------------------------------------------------\n"
+        "[INFO] BUILD FAILURE\n"
+        "[INFO] ------------------------------------------------------------------------\n"
+    )
+    passed, total, failing = parse_test_output(output, 1)
+    assert passed == 4
+    assert total == 5
+
+
 def test_real_diagnostic_log_from_workflow_file():
     """If the actual test.log from the workflow run exists on disk, test directly against it."""
     log_path = Path("/Users/user/.herdr-controller/clones/wf-haflow-1101-01-test-auto/.herdr-loop/logs/test.log")

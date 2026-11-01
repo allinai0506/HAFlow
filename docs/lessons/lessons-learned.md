@@ -9186,12 +9186,16 @@ pytest -q tests/test_workflow_recovery_autonomy.py::test_gate_placeholder_normal
 | 失败测试行检测使用 substring 泛匹配 | `"FAIL " in line` 会将用例名或参数中包含 "FAIL"、"FAIL_OVER" 等单词的绿色测试误判为失败 | 失败行检测必须且仅检查行首失败前缀标记（如 `✕`、`×`、`●`、`FAIL `），严禁在行中全局查找 |
 | 收集判定受前置易错匹配状态变量短路 | `if not matched and exit_code == 0 ...` 依赖 `matched`，前序对用例名的误匹配导致本应生效的收集成功判定被跳过 | 严格按行过滤，消除虚假 `matched`；同时确保收集成功只记录零证据（`(0, 0, [])`），不虚构通过计数 |
 | 提取失败名称时在整行中全串替换关键单词 | `line.replace("FAIL", "")` 会篡改用例名称本身（如将 `test FAIL status` 篡改为 `test  status`） | 仅剥离行首状态前缀（`FAIL:`、`FAIL`、`✕`、`×`、`●`），完整保留后续用例名称与文件路径 |
+| 摘要正则过于狭隘未覆盖运行耗时括号后缀 | pytest 运行超过 60 秒时输出 `in 65.23s (0:01:05)`，正则若仅匹配 `in [\d\.]+s$` 会导致整行不匹配，进而丢失已提取的失败用例名称 | 摘要耗时部分允许可选的时间戳括号后缀（`(?:\s*\([\d:]+\))?`），保证长耗时套件摘要与失败项不丢失 |
+| 多次 unittest 执行时遇到首个匹配直接 break | 类似 `python -m unittest A && python -m unittest B` 的组合执行，首个 `Ran N tests` 触发 break 会截断后续套件统计 | 移除短路 break，对所有匹配的 `Ran N tests` 累加统计，并全局扫描全部失败与错误项 |
+| Maven Surefire 失败时摘要前缀为 [ERROR] 被黑名单误杀 | Maven 失败时输出 `[ERROR] Tests run: 5, Failures: 1...`，若粗暴要求前缀非 `[INFO]` 即过滤会直接破坏 Java 失败统计 | 显式支持 `[INFO]`、`[ERROR]`、`[WARNING]` 及无前缀的 Maven 汇总行，确保 Java 测试统计精准 |
 
 ### 操作规范
 
 1. **严格行级日志解析**：对测试、构建、静态检查工具的终端输出进行解析时，严禁使用非锚定的跨行正则搜索；必须逐行处理并排除用例 ID 标识符（如 `::`、`[`、`/`）。
 2. **行首标记与前缀剥离**：用例判定函数（如 `_is_failing_test_line` 与 `_clean_failing_test_line`）必须且仅检查行首标记（strip 缩进/边框字符后），剥离前缀仅切除行首匹配词，严禁在整行中 replace。
 3. **collect-only 零执行证据原则**：收集阶段成功只能返回 `(0, 0, [])`，严禁虚构通过数量，真实失败（如 collection error）必须如实暴露。
+4. **多 Runner 全生命周期覆盖**：跨语言 Runner 解析必须覆盖成功、失败、长耗时与多段组合执行（如长耗时 `(H:MM:SS)`、多模块 unittest 累加、Maven `[ERROR]` 汇总）。
 
 ### 验证命令 / 守护测试
 
@@ -9206,6 +9210,6 @@ pytest -q tests/test_evaluator_ansi_test_output.py tests/test_evaluator_executio
 ### 相关文档 / 关联证据
 
 - 诊断报告：Recovery Op `372067` 阻塞根因排查记录
-- `herdr/evaluator.py` — 重构 `_is_failing_test_line`、`_clean_failing_test_line`、`parse_test_output`（行级锚定与用例标识隔离）
-- `tests/test_evaluator_collect_only_parsing.py` — 6 项专项回归守护测试
+- `herdr/evaluator.py` — 重构 `_is_failing_test_line`、`_clean_failing_test_line`、`parse_test_output`（行级锚定、耗时后缀、unittest 多段累加、Surefire 多级别支持）
+- `tests/test_evaluator_collect_only_parsing.py` — 11 项专项回归守护测试
 ---
