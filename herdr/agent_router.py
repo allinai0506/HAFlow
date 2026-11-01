@@ -530,28 +530,38 @@ def _compute_used_agents(
             if t_stage in target_stages and t.get("agent"):
                 if exemption and not _consumes_isolation_budget(t):
                     continue
-                if is_verifier:
-                    # Reviewers must never review their own contributions.
-                    # Tasks that were superseded by subsequent repairs no longer contribute
-                    # to the current candidate; but all non-superseded contributors (even from
-                    # earlier rounds in a multi-task subset-redispatch) must be excluded.
-                    if str(t.get("status") or "") == "superseded":
-                        continue
-                elif effective_round is not None:
-                    # In round-scoped mode for workers/implementers, only exclude agents
-                    # who participated in target_stages in the same round, allowing authors
-                    # to repair their own code in subsequent rounds.
+                if effective_round is not None:
                     t_round = t.get("dispatch_round")
                     if t_round is None and isinstance(t.get("detail"), dict):
                         t_round = t["detail"].get("dispatch_round")
                     if t_round is None:
                         t_round = t.get("candidate_episode_id")
+
+                    t_round_int = None
                     if t_round is not None:
                         try:
-                            if int(t_round) != effective_round:
-                                continue
+                            t_round_int = int(t_round)
                         except (ValueError, TypeError):
                             pass
+
+                    if is_verifier:
+                        # Verifiers must never review their own work or code from their contributing lineage.
+                        # In round-scoped mode:
+                        # - Tasks in the current round are excluded.
+                        # - Non-superseded tasks from earlier rounds (e.g., unchanged tasks in a multi-task
+                        #   subset redispatch) still contribute to the reviewed candidate, so their authors
+                        #   must also be excluded.
+                        # - Earlier tasks that were superseded by subsequent repairs no longer contribute
+                        #   to the candidate, so they do not spend the reviewer isolation budget.
+                        is_current_round = (t_round_int is not None and t_round_int == effective_round)
+                        is_active_contributor = (str(t.get("status") or "") != "superseded")
+                        if not (is_current_round or is_active_contributor):
+                            continue
+                    else:
+                        # For workers/implementers, only exclude agents from the same round,
+                        # allowing authors to repair their own code in subsequent rounds.
+                        if t_round_int is not None and t_round_int != effective_round:
+                            continue
                 stage_used_agents.add(t.get("agent"))
 
     return stage_used_agents

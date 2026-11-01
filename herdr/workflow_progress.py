@@ -58,7 +58,9 @@ def _gate(nodes, node_id):
     if node is None:
         return None
     if node.get('gate_placeholder_normalized'):
-        return None
+        # Normalized placeholders on standard gate nodes (test, review, wrapup)
+        # retain legacy default targets; ordinary nodes (docs, craft) remain ungated.
+        return _DEFAULT_GATES.get(node_id)
     if 'gate' in node:
         gate = node['gate']
         if gate is False:
