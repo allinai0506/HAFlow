@@ -9241,6 +9241,8 @@ pytest -q tests/test_evaluator_ansi_test_output.py tests/test_evaluator_executio
 | 存量项目自愈回填仅复制默认上限遗漏模板显式上限 | 模板若同时声明了 `delivery_ceiling_default` 与 `delivery_ceiling`，回填若仅复制默认，后续注册会将其视为已有上限跳过显式上限导入，破坏 PR 门禁 | `ensure_project` 与 `register_workflow` 保持对称：同时回填 `delivery_ceiling` 与 `delivery_ceiling_default`，守护显式安全授权 |
 | 存量定义回填遗漏模板节点级显式上限导致门禁缺失 | 历史存量定义因早期 normalizer 缺陷遗漏了节点级 `delivery_ceiling: pr`，若仅回填根级字段，仍旧无法恢复 wrapup 的显式 PR 门禁 | 实现 `_backfill_template_ceilings` 对称回填模板 wrapup 节点上限（`delivery_ceiling`）与根级上限，彻底修复存量定义的节点级授权 |
 | 注入模板/项目根级显式上限覆盖既有节点级显式上限 | 当定义中显式配置了 `wrapup.delivery_ceiling: pr` 时，若模板或项目包含根级 `delivery_ceiling: workspace`，回填根级显式上限会使其在 `_recorded_ceiling` 中遮蔽节点上限，导致 PR 门禁被静默绕过 | 在 `_backfill_template_ceilings` 与 `register_workflow` 的项目回退中，注入根级显式上限同样强制要求 `not _has_explicit_node_ceiling`；`ensure_project` 中同步清理内存项目记录中冲突的根级上限 |
+| 存量定义的节点级默认上限被模板显式节点上限覆写 | 当存量定义仅配置了 `wrapup.delivery_ceiling_default: pr` 时，导入模板显式上限（`wrapup.delivery_ceiling: workspace`）会在 `_recorded_ceiling` 中因显式优先于默认而静默关闭 PR 门禁 | 在 `_backfill_template_ceilings` 中，仅当目标 wrapup 节点既无 `delivery_ceiling` 又无 `delivery_ceiling_default` 时才导入模板节点上限 |
+| 回填注入的节点上限反向抑制模板自身的根级显式上限 | 存量无上限定义在模板声明根级 PR 上限与节点级 workspace 上限时，先回填节点字段会导致后续守卫误将刚回填的值当作既有覆盖，抑制模板根级 PR 上限导入 | 根级回填守卫必须基于回填前初始状态（`had_node_ceiling`）进行判定，确保模板节点字段的导入绝不抑制其根级显式上限 |
 
 ### 操作规范
 
@@ -9272,7 +9274,7 @@ pytest -q tests/test_wrapup_review_closure.py tests/test_runtime_closure.py
 - `herdr/workflow.py` — `_normalize_workflow_body` 节点级交付上限字段保全
 - `herdr/review_closure.py` — `_recorded_ceiling` 显式优先判定
 - `herdr/stage_skills.py` — `get_default_skill_search_roots` 沙盒权限防御
-- `tests/test_project_template_registration.py` — 10 项专项回归测试（含节点显式优先、重放隔离、原子替换容灾、模板显式上限回填、存量节点上限补齐与根级显式上限防覆盖）
+- `tests/test_project_template_registration.py` — 12 项专项回归测试（含节点显式优先、重放隔离、原子替换容灾、模板显式上限回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写与回填前状态守卫）
 
 
 
