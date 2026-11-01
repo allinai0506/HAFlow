@@ -9100,4 +9100,68 @@ git diff --check
 - `herdr/workflow_progress.py` — 修复动态节点反查、候选集合比对与多任务并行回退
 - `services/controller/workflow_close.py` — 收尾连续退避诊断告警提升
 - `tests/test_e2e_full_autonomous_flow.py` — 端到端全链路闭环仿真守护测试
+
+---
+
+## §218 设计论证与微观接线脱节的系统性复盘：历史哈希基线漂移、状态机常数对齐、上游占位符污染与跨代预算丢失
+
+### 问题背景
+
+在 PR #384（工作流端到端自主推进与异常停滞系统性治理）推进过程中，虽然前期经过了严格的 EGM（5 阶段专家群审计）完成了宏观设计定稿并顺利通过了 27 个新增专项单元测试，但在全量 CI 与两轮 Codex 深度审查中，依然连续暴露出 1 个存量破坏与 5 个微观物理接线缺陷：
+1. 全量 6,805 用例中唯独存量测试 `test_existing_recovery_identities_survive_delivery_extension` 失败（静态字段元组修改导致历史数据 SHA-256 签名漂移）；
+2. 路由器虽然在核心库中支持了轮次与作者隔离，但在真实 CLI (`task_cli_launch.py`) 与 Controller 恢复路径中漏传参数，生产调度仍会退化为全局累积死锁；
+3. 节点派发检测 Worker 运行态时凭借常识直觉硬编码了 `{'running', 'assigned', 'started'}`，脱离了 `transitions.py` 的权威封闭状态集合 `ACTIVE_TASK_STATUSES`，导致活跃 Worker 被提前误标记为 `superseded`；
+4. 工作流结构规范化为了数据结构对齐给未声明门禁的节点自动填补了 `gate: {}`，下游误将规范化占位符当成显式声明门禁，导致无门禁节点陷入死等；而后续粗暴使用假值拦截又误伤了用户显式声明的 `gate: {}` 默认重试目标；
+5. 不变实体替换模型下，旧操作累积的 `replan_count` 熔断计数器保存在 detail 中，新替代操作初始化为空未显式继承，导致熔断计数器不断归零；
+6. 在多任务部分重派修复场景（Subset Redispatch）下，仅排除本轮作者会导致上一轮未变动但贡献了当前候选代码的 Agent 能够“自己审查自己的代码”。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 修改模块全局 `_FACT_FIELDS` 导致存量任务 `recovery_identity` 改变 | 跨系统幂等与去重哈希是固化契约，绝对禁止直接修改静态基线元组；新字段的引入不能破坏无新字段历史快照的计算值 | 扩展哈希签名时必须坚持向前兼容，采用条件式增量注入（`if fact.get('...')`），不得修改基线元组定义 |
+| 核心路由算法完备但在真实 CLI/Controller 漏传参数 | “库函数算法正确”不等于“生产配线板已通电”；仅靠针对核心函数的单元测试会造成虚假安全感 | 凡涉及调度与路由核心决策，必须至少编写一条贯穿 CLI 入口参数组装至状态落盘的端到端真实调用链测试 |
+| 凭通用英文词汇常识手写状态集合判断任务是否存活 | Python 动态语言中拼写不存在的状态名不会抛出异常，只会静默返回 False；手写字符串必导致语义漂移 | 严禁凭直觉手写状态集合，所有生命周期状态检查必须从 `transitions.py` 严格导入唯一事实源（如 `ACTIVE_TASK_STATUSES`） |
+| 上游结构规范化占位符副作用与显式声明门禁混淆 | 规范化生成的合成结构（Synthetic Placeholders）带有系统内部标志，消费端必须先检查标志，不能将结构相等视同语义相等 | 区分 `gate_placeholder_normalized=True`（无门禁）与 `gate_declared=True` 或显式 `gate: {}`（按默认重试目标 fallback） |
+| 不可变状态机替换旧操作时丢失重规划累计计数 | 在基于不可变记录/事件溯源的模型中，生成新代际实体替换旧代际时容易遗漏跨代资源预算的传递 | 当操作被标记为 `superseded` 并生成替代操作时，必须显式从旧操作的 `detail` 继承 `replan_count` 等熔断预算 |
+| 跨轮次隔离忽略未变动前序任务贡献者 | 审查独立性的本质是不自审自产，多任务部分修复时未变动子任务的作者依然是当前候选的实际贡献者 | 审查者排除范围必须涵盖当前候选所有非 `superseded` 的实际贡献者，不能因其发生在旧轮次而放行 |
+
+### 操作规范
+
+1. **三道防线互补原则**：EGM 论证负责宏观架构与协议因果无死锁；全量存量回归（Golden Tests）负责历史兼容性与跨版本签名防漂移；代码审查与调用链测试负责生产接线与状态机常量校验。三者各自独立，不得因前者的完备而减免后者的检验。
+2. **状态常数零容忍**：凡在任何控制、调度、进度评估模块中检查 Task 或 Workflow 状态，必须强制通过 `from herdr.transitions import ...` 引用，禁止在局部文件中手写字符串字面量集合。
+3. **代际继承审计**：凡在 Store 或 Dispatch 中调用“标记旧实体为废弃/替换并生成新实体”的逻辑时，必须对旧实体的 detail/metadata 进行字段逐项审计，显式迁移重试次数、熔断预算和溯源追踪标记。
+4. **占位符防御性解包**：读取工作流节点配置时，先排查 `gate_placeholder_normalized` 标志；若为真直接返回 `None`；只有显式声明的门禁（含显式空字典）才走默认目标回退。
+
+### 验证命令 / 守护测试
+
+```bash
+# 验证存量任务哈希签名基准不漂移
+pytest -q tests/test_delivery_rework.py::test_existing_recovery_identities_survive_delivery_extension
+
+# 验证真实 CLI 启动入口透传轮次与作者隔离
+pytest -q tests/test_agent_router_rounds.py::TestAgentRouterRounds::test_resolve_launch_agent_forwards_round_and_author_isolation
+
+# 验证多任务部分重派下非 superseded 贡献者跨轮隔离
+pytest -q tests/test_agent_router_rounds.py::TestAgentRouterRounds::test_verifier_excludes_unchanged_round1_contributors_in_round2
+
+# 验证活跃 Worker 生命周期状态机对齐与代际预算继承
+pytest -q tests/test_workflow_recovery_autonomy.py::test_node_dispatch_waits_for_active_worker
+pytest -q tests/test_workflow_recovery_autonomy.py::test_replan_budget_carried_across_replacement_operations
+
+# 验证空门禁与规格化占位符隔离
+pytest -q tests/test_workflow_progress.py::test_empty_gate_uses_default
+pytest -q tests/test_workflow_recovery_autonomy.py::test_gate_placeholder_normalized_distinction
+```
+
+### 相关文档 / 关联证据
+
+- PR #384 — `fix(workflow): end-to-end autonomy and blocker remediation (Milestones 1-4)`
+- Git Commit `48b60b5` — 修复 `_FACT_FIELDS` 历史签名漂移
+- Git Commit `189cc19` — 修复 Codex 提出的 CLI 路由透传、状态机枚举、占位符隔离与代际继承缺陷
+- `herdr/task_cli_launch.py` — 真实 CLI 启动入口补充 `dispatch_round` 与 `candidate_author` 反查
+- `herdr/node_dispatch.py` — 对齐 `ACTIVE_TASK_STATUSES` 避免误杀运行中任务
+- `herdr/workflow_progress.py` — 解耦 `gate_placeholder_normalized` 并保留显式 `gate: {}` 默认重试目标
+- `herdr/node_dispatch_store.py` — 替代操作显式继承 `previous['detail']['replan_count']`
+- `herdr/agent_router.py` — 审查者排除涵盖所有非 `superseded` 候选实际贡献者
 ---

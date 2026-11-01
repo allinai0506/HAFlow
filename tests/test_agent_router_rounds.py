@@ -259,3 +259,74 @@ class TestAgentRouterRounds(unittest.TestCase):
 
             # agent-a authored candidate "c"*40; verifier in round 2 MUST exclude agent-a and pick agent-b!
             self.assertEqual(resolved, "agent-b")
+
+    def test_verifier_excludes_unchanged_round1_contributors_in_round2(self):
+        """In multi-task subset redispatch, an unchanged round-1 task's agent still
+        contributes code to the round-2 candidate. The verifier in round 2 must exclude
+        both round-2 repairers and non-superseded round-1 contributors, but not superseded agents."""
+        with patch.object(agent_router, "_get_store", return_value=self.store), \
+             patch.object(agent_router, "workflow_config_for", return_value=self.workflow_config), \
+             patch.object(agent_router, "POOLS_FILE", self.pools_file), \
+             patch.object(agent_router, "RESERVATIONS_FILE", self.reservations_file), \
+             patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file):
+
+            # Seed 3 tasks in implementation stage 'craft':
+            # 1. Unchanged task from round 1 (agent-a)
+            self.store.save_task({
+                "task_id": "t-craft-unchanged",
+                "workflow_id": self.workflow_id,
+                "node": "craft",
+                "stage": "craft",
+                "agent": "agent-a",
+                "status": "completed",
+                "commit": "1" * 40,
+                "dispatch_round": 1,
+            })
+            # 2. Superseded task from round 1 (agent-b)
+            self.store.save_task({
+                "task_id": "t-craft-superseded",
+                "workflow_id": self.workflow_id,
+                "node": "craft",
+                "stage": "craft",
+                "agent": "agent-b",
+                "status": "superseded",
+                "commit": "2" * 40,
+                "dispatch_round": 1,
+            })
+            # 3. Repaired task from round 2 (agent-c)
+            # Add agent-c to pool
+            data = {
+                "projects": {
+                    "proj-rounds": {
+                        "allowed_agents": ["agent-a", "agent-b", "agent-c"],
+                        "disabled_agents": [],
+                        "stage_preferences": {},
+                        "task_type_preferences": {},
+                    }
+                }
+            }
+            with open(self.pools_file, "w", encoding="utf-8") as f:
+                import json
+                json.dump(data, f)
+
+            self.store.save_task({
+                "task_id": "t-craft-repair",
+                "workflow_id": self.workflow_id,
+                "node": "craft",
+                "stage": "craft",
+                "agent": "agent-c",
+                "status": "completed",
+                "commit": "3" * 40,
+                "dispatch_round": 2,
+            })
+
+            # In round 2, verifier review must exclude agent-a (contributor) and agent-c (repairer).
+            # agent-b was superseded and did NOT contribute to candidate, so agent-b is eligible!
+            reviewer = choose_agent(
+                self.workflow_id,
+                "review",
+                "test",
+                dispatch_round=2,
+                candidate_author="agent-c",
+            )
+            self.assertEqual(reviewer, "agent-b")

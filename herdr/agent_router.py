@@ -496,7 +496,12 @@ def _compute_used_agents(
         return stage_used_agents
 
     if candidate_author and is_verifier:
-        stage_used_agents.add(str(candidate_author))
+        if isinstance(candidate_author, (set, list, tuple)):
+            for a in candidate_author:
+                if a:
+                    stage_used_agents.add(str(a))
+        else:
+            stage_used_agents.add(str(candidate_author))
 
     round_scoped_enabled = os.environ.get("HERDR_ROUTER_ROUND_SCOPED_ISOLATION", "1").lower() not in ("0", "false", "no")
     effective_round = None
@@ -525,9 +530,17 @@ def _compute_used_agents(
             if t_stage in target_stages and t.get("agent"):
                 if exemption and not _consumes_isolation_budget(t):
                     continue
-                if effective_round is not None:
-                    # In round-scoped mode, only exclude agents who participated in target_stages
-                    # in the same round.
+                if is_verifier:
+                    # Reviewers must never review their own contributions.
+                    # Tasks that were superseded by subsequent repairs no longer contribute
+                    # to the current candidate; but all non-superseded contributors (even from
+                    # earlier rounds in a multi-task subset-redispatch) must be excluded.
+                    if str(t.get("status") or "") == "superseded":
+                        continue
+                elif effective_round is not None:
+                    # In round-scoped mode for workers/implementers, only exclude agents
+                    # who participated in target_stages in the same round, allowing authors
+                    # to repair their own code in subsequent rounds.
                     t_round = t.get("dispatch_round")
                     if t_round is None and isinstance(t.get("detail"), dict):
                         t_round = t["detail"].get("dispatch_round")

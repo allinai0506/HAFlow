@@ -7,6 +7,24 @@
 > *Human + Agent, in Flow*  
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
+
+## [2026-11-01] review | PR #384 CI 单点修复、两轮 Codex 深度缺陷治理与经验沉淀 (§218)
+
+- 背景：PR #384 在 EGM 宏观设计论证后，CI 全量测试与两轮 Codex 自动化代码审查暴露出 1 个存量哈希基线漂移与 5 个微观物理接线缺陷。为防止“架构设计完备但生产接线脱节”，完成全部代码修复、新增针对性回归测试并将系统性教训沉淀至 `docs/lessons/lessons-learned.md` (§218)。
+- 关键治理点：
+  1. 存量哈希金标保护：`_FACT_FIELDS` 恢复不变，`recovery_identity` 与 `assess_workflow` 中改用条件式按需注入，守护历史数据签名基准（测试 `test_existing_recovery_identities_survive_delivery_extension` 通过）。
+  2. 真实 CLI/Controller 路由透传：在 `task_cli_launch.py:resolve_launch_agent` 与 `services/controller/infra_recovery.py` 中完整透传 `dispatch_round` 与反查出的 `candidate_author`，使两轮隔离在生产入口真正生效。
+  3. 任务活跃状态枚举对齐：`node_dispatch.py` 严格引用 `transitions.py` 的权威事实源 `ACTIVE_TASK_STATUSES`，杜绝通用直觉手写字符串导致正在运行的 Worker 被提前误标记为 `superseded`。
+  4. 规范化占位符与显式门禁解耦：`workflow_progress.py` 正确识别 `gate_placeholder_normalized=True` 占位符（返回 None，不当成门禁），同时保留显式声明的 `gate: {}` 按 `_DEFAULT_GATES` 正常回退（修复 `test_empty_gate_uses_default`）。
+  5. 不可变操作代际预算继承：`node_dispatch_store.reconcile_workflow` 生成替代操作时显式继承上一代的 `replan_count`，保证熔断计数器不因对象替换而归零。
+  6. 多任务部分修复跨轮隔离：`agent_router._compute_used_agents` 在审查模式（`is_verifier=True`）下排除所有当前候选代码的非 `superseded` 实际贡献者，防止多任务重派场景下未变动模块作者“自审自验”。
+- 验收结果：
+  - `tests/test_agent_router_rounds.py` (6 passed，含 CLI 透传与多任务贡献者隔离专项)
+  - `tests/test_workflow_recovery_autonomy.py` (7 passed)
+  - `tests/test_workflow_progress.py` (34 passed，含空门禁与规格化占位符专项)
+  - `tests/test_delivery_rework.py` (21 passed)
+  - 核心守护套件 65 passed in 0.64s；编译与语法检查 clean。
+- 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §218。
 ## [2026-11-01] fix | 工作流端到端自主推进与异常停滞系统性治理 (wf-haflow-1029-02 闭环)
 
 - 背景：针对 `wf-haflow-1029-02` 等实际流水线在非标模板、双 Agent 环境、多任务交叠及收尾清理阶段出现的异常停滞与人为介入问题，通过 EGM（5 阶段 Goldfish 审查）定稿方案 A，按 4 个有序里程碑完成系统性工程治理与全链路闭环验证。
