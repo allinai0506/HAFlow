@@ -8,6 +8,37 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-01] fix | delivery_ceiling_default 模板交付上限配置实例化穿透与历史自愈治理 (§220)
+
+- 背景：`software-development-v1.yaml` 声明了 `delivery_ceiling_default: workspace`，但在 `herdr/projects.py` 中通过模板实例化项目或采用工作区时，`_register_project_workflow` 字典重构遗漏了 `delivery_ceiling_default` 和 `delivery_ceiling` 字段，导致项目快照与工作流 Run 配置中缺失该信息，使得 `herdr/review_closure.py` fail-closed 误判定工作区交付为 `[REVIEW CLOSURE REQUIRED]`。
+- 根因分析：
+  1. `provision_project`、`adopt_workspace_as_project`、`reprovision_project_template` 未将模板中的 `delivery_ceiling_default` 与 `delivery_ceiling` 传给 `_register_project_workflow`；
+  2. `_register_project_workflow` 未将交付上限写入项目 `workflow.json` 与 `projects.json`；
+  3. `register_workflow` 在冻结 Run 快照前缺乏针对历史存量项目的模板回退补齐机制。
+- 治理与修复：
+  1. **全生命周期透传**：在 `_register_project_workflow` 增加对应参数并持久化至 `workflow.json` 与 `projects.json`；在项目创建、采用与重置流程中显式传递；
+  2. **三级自愈与快照对齐**：`register_workflow` 在执行 `freeze_run_definition` 前，通过 `definition` ➔ `project` ➔ `load_template` 三级回退自动补填 `delivery_ceiling_default` 与 `delivery_ceiling`，确保冻结快照与数据库配置准确一致；
+  3. **存量项目透明修复**：`ensure_project` 读取现有 `workflow.json` 时若缺失字段自动就地回填；
+  4. **已冻结快照与重放保护（Codex P1 治理）**：仅在 `not workflow_file`（全新 Run 注册）时执行模板回填；若已显式提供 `workflow_file`（如 replay 历史重放），严格保持不可变历史定义不被模板默认篡改；
+  5. **节点级显式上限优先（Codex P1 治理）**：在注入根级默认前，通过 `_has_explicit_node_ceiling` 校验是否存在节点级显式上限（如 wrapup 的 PR 门禁），绝不盲目覆盖子节点的安全授权；
+  6. **模板节点交付上限规范化保全（Codex P1 第二轮）**：在 `herdr/workflow.py:_normalize_workflow_body` 显式保全节点级 `delivery_ceiling` 与 `delivery_ceiling_default`，并在 `herdr/review_closure.py:_recorded_ceiling` 确立显式上限（根/节点）严格优先于默认回退（节点/根）的判定链条，消除模板创建项目时的门禁静默降级；
+  7. **存量自愈与模板节点上限全量回填（Codex P2 第二轮）**：提取统一自愈回填辅助函数 `_backfill_template_ceilings`，在 `ensure_project` 与 `register_workflow` 中不仅对称回填模板根级上限，更将模板 wrapup 节点的显式上限（`delivery_ceiling: pr`）完整补回存量定义，杜绝因早期 normalizer 缺陷遗留的 PR 门禁静默失效；
+  8. **根级显式上限防覆盖节点上限（Codex P2 第三轮）**：在 `_backfill_template_ceilings` 与 `register_workflow` 的项目记录回退中，注入根级显式上限（`delivery_ceiling`）时同样强制要求 `not _has_explicit_node_ceiling`，防止模板或项目的全局工作区显式上限在 `_recorded_ceiling` 判定链中遮蔽 wrapup 节点的显式 PR 授权；`ensure_project` 中同步清理内存项目记录中冲突的根级上限；
+  9. **节点级默认防覆写（Codex P2 第四轮）**：当定义包含 `wrapup.delivery_ceiling_default: pr` 时，`_backfill_template_ceilings` 严格检查目标节点既有声明，绝不导入模板节点的显式上限（`wrapup.delivery_ceiling: workspace`），消除因显式优先于默认导致的 PR 门禁误关；
+  10. **基于回填前初始状态守卫根级上限（Codex P2 第四轮）**：在 `_backfill_template_ceilings` 与 `register_workflow` 中，根级上限回填守卫统一基于 `had_node_ceiling`（回填前初始状态）判定，防止导入模板节点字段后反向抑制模板自身的根级显式上限（如根 PR、节点 workspace）；
+  11. **根级默认防覆写（Codex P2 第五轮）**：当定义已声明根级默认（`delivery_ceiling_default: pr`）时，`_backfill_template_ceilings` 与 `register_workflow` 严格校验 `not had_root_default`，且节点回填校验 `not had_root_ceiling`，杜绝模板/项目的根显式或节点显式 workspace 注入篡改权威根默认；
+  12. **原子持久化容灾（Codex P2 治理）**：存量项目定义回填统一使用已有原子替换辅助函数 `_save(wf_path, cfg)`（临时文件写入 + `os.replace` 原地替换），杜绝直接 `write_text` 截断式写入在 ENOSPC 或中断时损坏 JSON 文件；
+  13. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
+  14. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 13 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离、原子替换容灾、模板项目创建显式上限优先、存量对称回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写、回填前状态守卫与根级默认防覆写全生命周期。
+- 验收结果：
+  - `tests/test_project_template_registration.py` (25 passed)
+  - `tests/test_wrapup_review_closure.py` (58 passed)
+  - `tests/test_software_development_v1_template.py` 与 `test_software_development_v1_adapter.py` (54 passed)
+  - `tests/test_replay.py`、`test_replay_append_only.py`、`test_replay_engine.py` (58 passed)
+  - `python3 -m compileall -q herdr services bin tests` 与 `git diff --check`（Clean）
+  - 独立代码审查子 Agent 输出 APPROVE，Codex 两轮审查 3 项 P1 与 2 项 P2 缺陷全部治理闭环。
+- 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §220。
+
 ## [2026-11-01] fix | 测试评估器输出解析全局正则跨行污染与 collect-only 误判修复 (§219)
 
 - 背景：真实工作流 `wf-haflow-1101-01` 的测试节点在执行 `pytest --collect-only` 产生健康收集结果（6816 tests collected in 7.15s, exit 0）时，被 `herdr/evaluator.py:parse_test_output` 误判为 `blocked`，触发 Recovery Op `372067`。

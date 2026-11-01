@@ -154,3 +154,599 @@ def test_control_policy_survives_workspace_adoption(
     assert workflow.resolve_control_policy(cfg, "build", "advance") == {
         "mode": expected_mode, "source": "workflow",
     }
+
+
+def test_delivery_ceiling_survives_template_project_registration(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "ceiling-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "ceiling-template.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="ceiling-template")
+    assert project.get("delivery_ceiling_default") == "workspace"
+
+    shared = json.loads(Path(project["workflow_file"]).read_text(encoding="utf-8"))
+    assert shared.get("delivery_ceiling_default") == "workspace"
+
+    projects.register_workflow("wf-ceiling-created", project)
+
+    cfg = projects.workflow_config_for("wf-ceiling-created")
+    assert cfg.get("delivery_ceiling_default") == "workspace"
+    assert store.get_workflow("wf-ceiling-created")["config"].get("delivery_ceiling_default") == "workspace"
+
+    wrapup_task = {
+        "task_id": "wf-ceiling-created-wrapup",
+        "workflow_id": "wf-ceiling-created",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert not closure_required(store, wrapup_task)
+
+
+def test_delivery_ceiling_backfilled_for_existing_project(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "software-dev-legacy",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "software-dev-legacy.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    control_root = tmp_path / "controller"
+    project_dir = control_root / "projects" / "p-legacy"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    wf_file = project_dir / "workflow.json"
+    legacy_wf = {
+        "project_id": "p-legacy",
+        "project_name": "legacy",
+        "project_root": str(root),
+        "base_branch": "main",
+        "workspace_id": "test-workspace",
+        "workflow_template": "software-dev-legacy",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    wf_file.write_text(json.dumps(legacy_wf), encoding="utf-8")
+    legacy_project = {
+        "project_id": "p-legacy",
+        "project_name": "legacy",
+        "project_root": str(root),
+        "base_branch": "main",
+        "workspace_id": "test-workspace",
+        "coordinator_pane_id": "coordinator-pane",
+        "workflow_file": str(wf_file),
+    }
+
+    projects.register_workflow("wf-legacy-01", legacy_project)
+
+    cfg = projects.workflow_config_for("wf-legacy-01")
+    assert cfg.get("delivery_ceiling_default") == "workspace"
+
+    wrapup_task = {
+        "task_id": "wf-legacy-01-wrapup",
+        "workflow_id": "wf-legacy-01",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert not closure_required(store, wrapup_task)
+
+
+def test_delivery_ceiling_survives_workspace_adoption_and_reprovisioning(
+    project_environment, tmp_path,
+):
+    store, template_root = project_environment
+    def_a = {
+        "name": "tmpl-a",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "step_a"}],
+    }
+    def_b = {
+        "name": "tmpl-b",
+        "delivery_ceiling_default": "worktree",
+        "nodes": [{"id": "step_b"}],
+    }
+    (template_root / "tmpl-a.json").write_text(json.dumps(def_a), encoding="utf-8")
+    (template_root / "tmpl-b.json").write_text(json.dumps(def_b), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    proj_a = projects.adopt_workspace_as_project("test-workspace", root, template_name="tmpl-a")
+    assert proj_a.get("delivery_ceiling_default") == "workspace"
+    shared_a = json.loads(Path(proj_a["workflow_file"]).read_text(encoding="utf-8"))
+    assert shared_a.get("delivery_ceiling_default") == "workspace"
+
+    proj_b = projects.reprovision_project_template(proj_a, "tmpl-b")
+    assert proj_b.get("delivery_ceiling_default") == "worktree"
+    shared_b = json.loads(Path(proj_b["workflow_file"]).read_text(encoding="utf-8"))
+    assert shared_b.get("delivery_ceiling_default") == "worktree"
+
+
+def test_explicit_wrapup_delivery_ceiling_not_overridden_by_template_default(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "ceiling-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "ceiling-template.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="ceiling-template")
+
+    # Author custom workflow definition on project's workflow_file
+    custom_wf = {
+        "project_id": project["project_id"],
+        "workflow_template": "ceiling-template",
+        "nodes": [{"id": "wrapup", "delivery_ceiling": "pr", "review_closure_required": True}],
+    }
+    Path(project["workflow_file"]).write_text(json.dumps(custom_wf), encoding="utf-8")
+
+    projects.register_workflow("wf-wrapup-explicit-pr", project)
+
+    cfg = projects.workflow_config_for("wf-wrapup-explicit-pr")
+    assert "delivery_ceiling_default" not in cfg
+
+    wrapup_task = {
+        "task_id": "wf-wrapup-explicit-pr-wrapup",
+        "workflow_id": "wf-wrapup-explicit-pr",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+def test_replay_run_registration_preserves_frozen_snapshot_without_backfill(
+    project_environment, tmp_path,
+):
+    store, template_root = project_environment
+    definition = {
+        "name": "ceiling-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "ceiling-template.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="ceiling-template")
+
+    frozen_file = tmp_path / "replay_workflow.json"
+    frozen_def = {
+        "project_id": project["project_id"],
+        "workflow_template": "ceiling-template",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    frozen_file.write_text(json.dumps(frozen_def), encoding="utf-8")
+
+    projects.register_workflow(
+        "wf-replay-run",
+        project,
+        workflow_file=str(frozen_file),
+    )
+
+    registered_cfg = projects.workflow_config_for("wf-replay-run")
+    assert "delivery_ceiling_default" not in registered_cfg
+    assert "delivery_ceiling" not in registered_cfg
+
+
+def test_ensure_project_backfill_failure_preserves_original_file(
+    project_environment, tmp_path, monkeypatch,
+):
+    store, template_root = project_environment
+    definition = {
+        "name": "atomic-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "atomic-template.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="atomic-template")
+    wf_path = Path(project["workflow_file"])
+
+    # Simulate legacy project file without ceiling
+    original_cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    original_cfg.pop("delivery_ceiling_default", None)
+    wf_path.write_text(json.dumps(original_cfg), encoding="utf-8")
+
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+
+    # Simulate write failure during _save
+    def failing_save(path, data):
+        raise OSError("Simulated disk error during save")
+
+    monkeypatch.setattr(projects, "_save", failing_save)
+
+    # ensure_project catches exception; original file must remain intact and valid JSON
+    projects.ensure_project(root, template_name="atomic-template")
+
+    reloaded = json.loads(wf_path.read_text(encoding="utf-8"))
+    assert reloaded == original_cfg
+
+
+def test_create_project_preserves_explicit_wrapup_ceiling_over_template_default(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "explicit-wrapup-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "delivery_ceiling": "pr",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "explicit-wrapup-template.json").write_text(
+        json.dumps(definition), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="explicit-wrapup-template")
+    projects.register_workflow("wf-explicit-wrapup-created", project)
+
+    wrapup_task = {
+        "task_id": "wf-explicit-wrapup-created-wrapup",
+        "workflow_id": "wf-explicit-wrapup-created",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+def test_ensure_project_backfills_explicit_template_ceiling_alongside_default(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "explicit-template",
+        "delivery_ceiling_default": "workspace",
+        "delivery_ceiling": "pr",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "explicit-template.json").write_text(
+        json.dumps(definition), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="explicit-template")
+    wf_path = Path(project["workflow_file"])
+
+    # Simulate legacy project file that lost ceilings
+    cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    cfg.pop("delivery_ceiling_default", None)
+    cfg.pop("delivery_ceiling", None)
+    wf_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+    updated = projects.ensure_project(root, template_name="explicit-template")
+    assert updated.get("delivery_ceiling") == "pr"
+    assert updated.get("delivery_ceiling_default") == "workspace"
+
+    projects.register_workflow("wf-legacy-explicit-ceiling", updated)
+    registered_cfg = projects.workflow_config_for("wf-legacy-explicit-ceiling")
+    assert registered_cfg.get("delivery_ceiling") == "pr"
+
+    wrapup_task = {
+        "task_id": "wf-legacy-explicit-ceiling-wrapup",
+        "workflow_id": "wf-legacy-explicit-ceiling",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+
+def test_ensure_project_and_register_workflow_backfill_template_wrapup_ceiling(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "template-wrapup-pr",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "delivery_ceiling": "pr",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "template-wrapup-pr.json").write_text(
+        json.dumps(definition), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="template-wrapup-pr")
+    wf_path = Path(project["workflow_file"])
+
+    # Simulate legacy definition created by old normalizer that lost wrapup.delivery_ceiling
+    legacy_cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    legacy_cfg.pop("delivery_ceiling_default", None)
+    legacy_cfg.pop("delivery_ceiling", None)
+    for node in legacy_cfg.get("nodes", []):
+        if node.get("id") == "wrapup":
+            node.pop("delivery_ceiling", None)
+            node.pop("delivery_ceiling_default", None)
+    wf_path.write_text(json.dumps(legacy_cfg), encoding="utf-8")
+
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+
+    # ensure_project should backfill wrapup's delivery_ceiling from template
+    updated_project = projects.ensure_project(root, template_name="template-wrapup-pr")
+    projects.register_workflow("wf-legacy-wrapup-pr", updated_project)
+
+    wrapup_task = {
+        "task_id": "wf-legacy-wrapup-pr-wrapup",
+        "workflow_id": "wf-legacy-wrapup-pr",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+
+
+def test_explicit_node_ceiling_not_overridden_by_template_root_explicit_ceiling(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    template_def = {
+        "name": "template-root-workspace",
+        "delivery_ceiling": "workspace",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "template-root-workspace.json").write_text(
+        json.dumps(template_def), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="template-root-workspace")
+    wf_path = Path(project["workflow_file"])
+
+    cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    cfg.pop("delivery_ceiling", None)
+    cfg.pop("delivery_ceiling_default", None)
+    for node in cfg.get("nodes", []):
+        if node.get("id") == "wrapup":
+            node["delivery_ceiling"] = "pr"
+    wf_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    # Case 1: project record has delivery_ceiling="workspace" (cached on record)
+    assert project.get("delivery_ceiling") == "workspace"
+    projects.register_workflow("wf-explicit-node-with-project-ceiling", project)
+    registered_cfg_1 = projects.workflow_config_for("wf-explicit-node-with-project-ceiling")
+    assert registered_cfg_1.get("delivery_ceiling") is None
+    wrapup_task_1 = {
+        "task_id": "wf-explicit-node-with-project-ceiling-wrapup",
+        "workflow_id": "wf-explicit-node-with-project-ceiling",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task_1) is True
+
+    # Case 2: project record has no delivery_ceiling, so register_workflow falls back to template
+    project_no_ceiling = dict(project)
+    project_no_ceiling.pop("delivery_ceiling", None)
+    projects.register_workflow("wf-explicit-node-with-template-ceiling", project_no_ceiling)
+    registered_cfg_2 = projects.workflow_config_for("wf-explicit-node-with-template-ceiling")
+    assert registered_cfg_2.get("delivery_ceiling") is None
+    wrapup_task_2 = {
+        "task_id": "wf-explicit-node-with-template-ceiling-wrapup",
+        "workflow_id": "wf-explicit-node-with-template-ceiling",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task_2) is True
+
+    # Case 3: ensure_project legacy backfill should also not inject root delivery_ceiling
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+    updated_project = projects.ensure_project(root, template_name="template-root-workspace")
+    assert updated_project.get("delivery_ceiling") is None
+    cfg_after_ensure = json.loads(wf_path.read_text(encoding="utf-8"))
+    assert cfg_after_ensure.get("delivery_ceiling") is None
+
+
+def test_existing_node_default_not_overridden_by_template_node_ceiling(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    template_def = {
+        "name": "template-wrapup-workspace",
+        "delivery_ceiling": "workspace",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "delivery_ceiling": "workspace",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "template-wrapup-workspace.json").write_text(
+        json.dumps(template_def), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="template-wrapup-workspace")
+    wf_path = Path(project["workflow_file"])
+
+    cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    cfg.pop("delivery_ceiling", None)
+    cfg.pop("delivery_ceiling_default", None)
+    for node in cfg.get("nodes", []):
+        if node.get("id") == "wrapup":
+            node.pop("delivery_ceiling", None)
+            node["delivery_ceiling_default"] = "pr"
+    wf_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    # Registration path
+    projects.register_workflow("wf-node-default-pr", project)
+    registered_cfg = projects.workflow_config_for("wf-node-default-pr")
+    assert registered_cfg.get("delivery_ceiling") is None
+    wrapup_node = next(n for n in registered_cfg.get("nodes", []) if n.get("id") == "wrapup")
+    assert wrapup_node.get("delivery_ceiling") is None
+    assert wrapup_node.get("delivery_ceiling_default") == "pr"
+
+    wrapup_task = {
+        "task_id": "wf-node-default-pr-wrapup",
+        "workflow_id": "wf-node-default-pr",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+
+    # ensure_project path
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+    updated_project = projects.ensure_project(root, template_name="template-wrapup-workspace")
+    cfg_after_ensure = json.loads(wf_path.read_text(encoding="utf-8"))
+    assert cfg_after_ensure.get("delivery_ceiling") is None
+    wrapup_node_ensure = next(n for n in cfg_after_ensure.get("nodes", []) if n.get("id") == "wrapup")
+    assert wrapup_node_ensure.get("delivery_ceiling") is None
+    assert wrapup_node_ensure.get("delivery_ceiling_default") == "pr"
+
+
+def test_legacy_definition_imports_template_root_ceiling_even_when_template_has_node_ceiling(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    template_def = {
+        "name": "template-root-pr-node-workspace",
+        "delivery_ceiling": "pr",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "delivery_ceiling": "workspace",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "template-root-pr-node-workspace.json").write_text(
+        json.dumps(template_def), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    # Fresh creation requires closure because root delivery_ceiling is "pr"
+    fresh_proj = projects.create_project(root, template_name="template-root-pr-node-workspace")
+    projects.register_workflow("wf-fresh-root-pr", fresh_proj)
+    fresh_wrapup_task = {
+        "task_id": "wf-fresh-root-pr-wrapup",
+        "workflow_id": "wf-fresh-root-pr",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, fresh_wrapup_task) is True
+
+    # Simulate legacy definition that lost all ceilings
+    wf_path = Path(fresh_proj["workflow_file"])
+    cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    cfg.pop("delivery_ceiling", None)
+    cfg.pop("delivery_ceiling_default", None)
+    for node in cfg.get("nodes", []):
+        if node.get("id") == "wrapup":
+            node.pop("delivery_ceiling", None)
+            node.pop("delivery_ceiling_default", None)
+    wf_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    # Registration of legacy definition should import template root delivery_ceiling="pr"
+    legacy_proj = dict(fresh_proj)
+    legacy_proj.pop("delivery_ceiling", None)
+    projects.register_workflow("wf-legacy-root-pr", legacy_proj)
+    registered_cfg = projects.workflow_config_for("wf-legacy-root-pr")
+    assert registered_cfg.get("delivery_ceiling") == "pr"
+
+    legacy_wrapup_task = {
+        "task_id": "wf-legacy-root-pr-wrapup",
+        "workflow_id": "wf-legacy-root-pr",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, legacy_wrapup_task) is True
+
+
+def test_recorded_root_default_not_overridden_by_template_or_project_ceilings(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    template_def = {
+        "name": "template-override-workspace",
+        "delivery_ceiling": "workspace",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "delivery_ceiling": "workspace",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "template-override-workspace.json").write_text(
+        json.dumps(template_def), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="template-override-workspace")
+    wf_path = Path(project["workflow_file"])
+
+    # Authoritative definition records root delivery_ceiling_default="pr"
+    cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    cfg.pop("delivery_ceiling", None)
+    cfg["delivery_ceiling_default"] = "pr"
+    for node in cfg.get("nodes", []):
+        if node.get("id") == "wrapup":
+            node.pop("delivery_ceiling", None)
+            node.pop("delivery_ceiling_default", None)
+    wf_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    # Path 1: register_workflow with project having delivery_ceiling="workspace"
+    assert project.get("delivery_ceiling") == "workspace"
+    projects.register_workflow("wf-root-default-pr", project)
+    registered_cfg = projects.workflow_config_for("wf-root-default-pr")
+    assert registered_cfg.get("delivery_ceiling") is None
+    assert registered_cfg.get("delivery_ceiling_default") == "pr"
+    wrapup_node = next(n for n in registered_cfg.get("nodes", []) if n.get("id") == "wrapup")
+    assert wrapup_node.get("delivery_ceiling") is None
+
+    wrapup_task = {
+        "task_id": "wf-root-default-pr-wrapup",
+        "workflow_id": "wf-root-default-pr",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+
+    # Path 2: ensure_project path
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+    updated_project = projects.ensure_project(root, template_name="template-override-workspace")
+    assert updated_project.get("delivery_ceiling") is None
+    assert updated_project.get("delivery_ceiling_default") == "pr"
+    cfg_after_ensure = json.loads(wf_path.read_text(encoding="utf-8"))
+    assert cfg_after_ensure.get("delivery_ceiling") is None
+    assert cfg_after_ensure.get("delivery_ceiling_default") == "pr"
+    wrapup_node_ensure = next(n for n in cfg_after_ensure.get("nodes", []) if n.get("id") == "wrapup")
+    assert wrapup_node_ensure.get("delivery_ceiling") is None
