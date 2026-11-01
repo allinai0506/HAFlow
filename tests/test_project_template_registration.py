@@ -309,7 +309,6 @@ def test_explicit_wrapup_delivery_ceiling_not_overridden_by_template_default(
     }
     assert closure_required(store, wrapup_task) is True
 
-
 def test_replay_run_registration_preserves_frozen_snapshot_without_backfill(
     project_environment, tmp_path,
 ):
@@ -376,3 +375,37 @@ def test_ensure_project_backfill_failure_preserves_original_file(
 
     reloaded = json.loads(wf_path.read_text(encoding="utf-8"))
     assert reloaded == original_cfg
+
+
+def test_create_project_preserves_explicit_wrapup_ceiling_over_template_default(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "explicit-wrapup-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "delivery_ceiling": "pr",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "explicit-wrapup-template.json").write_text(
+        json.dumps(definition), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="explicit-wrapup-template")
+    projects.register_workflow("wf-explicit-wrapup-created", project)
+
+    wrapup_task = {
+        "task_id": "wf-explicit-wrapup-created-wrapup",
+        "workflow_id": "wf-explicit-wrapup-created",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True

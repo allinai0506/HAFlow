@@ -746,19 +746,28 @@ def _recorded_ceiling(config: Any) -> str:
     """Explicit delivery ceiling. An absent field is not a workspace default."""
     if not isinstance(config, dict):
         return ""
-    for key in ("delivery_ceiling", "delivery_ceiling_default"):
-        value = config.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    explicit_root = config.get("delivery_ceiling")
+    if isinstance(explicit_root, str) and explicit_root.strip():
+        return explicit_root.strip()
     for node in config.get("nodes") or []:
         if not isinstance(node, dict):
             continue
         if (node.get("id") or node.get("key")) != "wrapup":
             continue
-        for key in ("delivery_ceiling", "delivery_ceiling_default"):
-            value = node.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        explicit_node = node.get("delivery_ceiling")
+        if isinstance(explicit_node, str) and explicit_node.strip():
+            return explicit_node.strip()
+    default_root = config.get("delivery_ceiling_default")
+    if isinstance(default_root, str) and default_root.strip():
+        return default_root.strip()
+    for node in config.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        if (node.get("id") or node.get("key")) != "wrapup":
+            continue
+        default_node = node.get("delivery_ceiling_default")
+        if isinstance(default_node, str) and default_node.strip():
+            return default_node.strip()
     return ""
 
 

@@ -21,16 +21,17 @@
   3. **存量项目透明修复**：`ensure_project` 读取现有 `workflow.json` 时若缺失字段自动就地回填；
   4. **已冻结快照与重放保护（Codex P1 治理）**：仅在 `not workflow_file`（全新 Run 注册）时执行模板回填；若已显式提供 `workflow_file`（如 replay 历史重放），严格保持不可变历史定义不被模板默认篡改；
   5. **节点级显式上限优先（Codex P1 治理）**：在注入根级默认前，通过 `_has_explicit_node_ceiling` 校验是否存在节点级显式上限（如 wrapup 的 PR 门禁），绝不盲目覆盖子节点的安全授权；
-  6. **原子持久化容灾（Codex P2 治理）**：存量项目定义回填统一使用已有原子替换辅助函数 `_save(wf_path, cfg)`（临时文件写入 + `os.replace` 原地替换），杜绝直接 `write_text` 截断式写入在 ENOSPC 或中断时损坏 JSON 文件；
-  7. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
-  8. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 6 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离与原子替换容灾全生命周期。
+  6. **模板节点交付上限规范化保全（Codex P1 第二轮）**：在 `herdr/workflow.py:_normalize_workflow_body` 显式保全节点级 `delivery_ceiling` 与 `delivery_ceiling_default`，并在 `herdr/review_closure.py:_recorded_ceiling` 确立显式上限（根/节点）严格优先于默认回退（节点/根）的判定链条，消除模板创建项目时的门禁静默降级；
+  7. **原子持久化容灾（Codex P2 治理）**：存量项目定义回填统一使用已有原子替换辅助函数 `_save(wf_path, cfg)`（临时文件写入 + `os.replace` 原地替换），杜绝直接 `write_text` 截断式写入在 ENOSPC 或中断时损坏 JSON 文件；
+  8. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
+  9. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 7 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离、原子替换容灾与模板项目创建显式上限优先全生命周期。
 - 验收结果：
-  - `tests/test_project_template_registration.py` (18 passed)
+  - `tests/test_project_template_registration.py` (19 passed)
   - `tests/test_wrapup_review_closure.py` (58 passed)
   - `tests/test_software_development_v1_template.py` 与 `test_software_development_v1_adapter.py` (54 passed)
   - `tests/test_replay.py`、`test_replay_append_only.py`、`test_replay_engine.py` (58 passed)
   - `python3 -m compileall -q herdr services bin tests` 与 `git diff --check`（Clean）
-  - 独立代码审查子 Agent 输出 APPROVE，Codex 审查 2 项 P1 与 1 项 P2 缺陷全部治理闭环。
+  - 独立代码审查子 Agent 输出 APPROVE，Codex 两轮审查 3 项 P1 与 1 项 P2 缺陷全部治理闭环。
 - 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §220。
 
 ## [2026-11-01] fix | 测试评估器输出解析全局正则跨行污染与 collect-only 误判修复 (§219)
