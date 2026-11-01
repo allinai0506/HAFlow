@@ -507,6 +507,19 @@ def _snapshot_workflow_definition(workflow_id, source_file, sanitize=True):
     return None
 
 
+def _has_explicit_node_ceiling(definition):
+    if not isinstance(definition, dict):
+        return False
+    for node in definition.get("nodes") or []:
+        if isinstance(node, dict):
+            if (node.get("id") or node.get("key")) == "wrapup":
+                if node.get("delivery_ceiling") or node.get("delivery_ceiling_default"):
+                    return True
+            elif node.get("delivery_ceiling"):
+                return True
+    return False
+
+
 def freeze_run_definition(workflow_id, definition=None, *, source_file=None):
     """Freeze one run definition into an immutable run-private file.
 
@@ -573,24 +586,30 @@ def register_workflow(
                 if task and task.get("workflow_id") != workflow_id:
                     raise ValueError(f"required task {task_id} belongs to another workflow; "
                                      "update the project definition before creating a new run")
-        # Backfill delivery_ceiling_default / delivery_ceiling if missing
-        ceiling_default = definition.get("delivery_ceiling_default") or (project or {}).get("delivery_ceiling_default")
-        ceiling_explicit = definition.get("delivery_ceiling") or (project or {}).get("delivery_ceiling")
-        if not ceiling_default and not ceiling_explicit:
-            tmpl_name = definition.get("workflow_template") or (project or {}).get("workflow_template")
-            if tmpl_name:
-                try:
-                    tmpl = load_template(tmpl_name)
-                    if tmpl:
-                        ceiling_default = tmpl.get("delivery_ceiling_default")
-                        ceiling_explicit = tmpl.get("delivery_ceiling")
-                except Exception:
-                    pass
-        if ceiling_default and not definition.get("delivery_ceiling_default"):
-            definition["delivery_ceiling_default"] = ceiling_default
-        if ceiling_explicit and not definition.get("delivery_ceiling"):
-            definition["delivery_ceiling"] = ceiling_explicit
         if not workflow_file:
+            # Backfill delivery_ceiling_default / delivery_ceiling if missing
+            has_ceiling = (
+                definition.get("delivery_ceiling_default")
+                or definition.get("delivery_ceiling")
+                or _has_explicit_node_ceiling(definition)
+            )
+            if not has_ceiling:
+                ceiling_default = (project or {}).get("delivery_ceiling_default")
+                ceiling_explicit = (project or {}).get("delivery_ceiling")
+                if not ceiling_default and not ceiling_explicit:
+                    tmpl_name = definition.get("workflow_template") or (project or {}).get("workflow_template")
+                    if tmpl_name:
+                        try:
+                            tmpl = load_template(tmpl_name)
+                            if tmpl:
+                                ceiling_default = tmpl.get("delivery_ceiling_default")
+                                ceiling_explicit = tmpl.get("delivery_ceiling")
+                        except Exception:
+                            pass
+                if ceiling_default and not definition.get("delivery_ceiling_default"):
+                    definition["delivery_ceiling_default"] = ceiling_default
+                if ceiling_explicit and not definition.get("delivery_ceiling"):
+                    definition["delivery_ceiling"] = ceiling_explicit
             snapshot_file = freeze_run_definition(workflow_id, definition=definition)
             if not snapshot_file:
                 raise RuntimeError("Workflow definition snapshot failed; run was not registered")
@@ -1441,7 +1460,12 @@ def ensure_project(root, template_name=None):
                 wf_path = Path(record["workflow_file"]).expanduser()
                 if wf_path.exists():
                     cfg = _load(wf_path, None)
-                    if isinstance(cfg, dict) and not cfg.get("delivery_ceiling_default"):
+                    if (
+                        isinstance(cfg, dict)
+                        and not cfg.get("delivery_ceiling_default")
+                        and not cfg.get("delivery_ceiling")
+                        and not _has_explicit_node_ceiling(cfg)
+                    ):
                         try:
                             tmpl = load_template(target_tmpl)
                             ceiling_def = tmpl.get("delivery_ceiling_default")

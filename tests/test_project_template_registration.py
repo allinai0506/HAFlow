@@ -270,3 +270,74 @@ def test_delivery_ceiling_survives_workspace_adoption_and_reprovisioning(
     assert proj_b.get("delivery_ceiling_default") == "worktree"
     shared_b = json.loads(Path(proj_b["workflow_file"]).read_text(encoding="utf-8"))
     assert shared_b.get("delivery_ceiling_default") == "worktree"
+
+
+def test_explicit_wrapup_delivery_ceiling_not_overridden_by_template_default(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "ceiling-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "ceiling-template.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="ceiling-template")
+
+    # Author custom workflow definition on project's workflow_file
+    custom_wf = {
+        "project_id": project["project_id"],
+        "workflow_template": "ceiling-template",
+        "nodes": [{"id": "wrapup", "delivery_ceiling": "pr", "review_closure_required": True}],
+    }
+    Path(project["workflow_file"]).write_text(json.dumps(custom_wf), encoding="utf-8")
+
+    projects.register_workflow("wf-wrapup-explicit-pr", project)
+
+    cfg = projects.workflow_config_for("wf-wrapup-explicit-pr")
+    assert "delivery_ceiling_default" not in cfg
+
+    wrapup_task = {
+        "task_id": "wf-wrapup-explicit-pr-wrapup",
+        "workflow_id": "wf-wrapup-explicit-pr",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+
+
+def test_replay_run_registration_preserves_frozen_snapshot_without_backfill(
+    project_environment, tmp_path,
+):
+    store, template_root = project_environment
+    definition = {
+        "name": "ceiling-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "ceiling-template.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="ceiling-template")
+
+    frozen_file = tmp_path / "replay_workflow.json"
+    frozen_def = {
+        "project_id": project["project_id"],
+        "workflow_template": "ceiling-template",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    frozen_file.write_text(json.dumps(frozen_def), encoding="utf-8")
+
+    projects.register_workflow(
+        "wf-replay-run",
+        project,
+        workflow_file=str(frozen_file),
+    )
+
+    registered_cfg = projects.workflow_config_for("wf-replay-run")
+    assert "delivery_ceiling_default" not in registered_cfg
+    assert "delivery_ceiling" not in registered_cfg

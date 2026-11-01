@@ -9234,18 +9234,22 @@ pytest -q tests/test_evaluator_ansi_test_output.py tests/test_evaluator_executio
 | 存量项目未经历重新 provision 导致缺失默认上限 | 仅在创建入口增加字段无法自愈历史已存在的项目配置，导致存量项目上的工作流 Run 仍旧触发误报 | `ensure_project` 读取现有 `workflow.json` 时进行就地自愈补齐；`register_workflow` 在冻结 Run 快照前实现三级回退（`definition` ➔ `project` ➔ `load_template`） |
 | 快照冻结（freeze_run_definition）发生在字段回填之前 | 一旦工作流 Run 被冻结，快照文件即不可变；若冻结后再尝试补齐配置，历史 Run 将永久读取空快照 | 治理字段的回填与规格化必须在 `freeze_run_definition` 执行前完成，确保不可变快照与数据库配置一致获得正确上限 |
 | 路径存在性扫描遇到沙盒限制抛出 PermissionError | 在受限容器或沙盒环境中，扫描宿主候选路径（如 `~/.gemini/config/skills`）会抛出 `PermissionError` (Errno 1)，导致技能加载直接崩溃 | 遍历候选路径时，文件/目录探测必须包裹在 `try ... except OSError: pass` 异常守卫中，保证沙盒隔离下的韧性 |
+| 回放已冻结快照时回填模板默认破坏不可变性与一致性 | 若已显式提供 `workflow_file`（如重放历史运行），回填模板当前默认会悄悄改变重放时的门禁行为，导致文件快照与数据库配置脱节 | 仅在 `not workflow_file`（即全新 Run 注册）时执行回填；对外部传入的已冻结快照严格保持原状，严禁二次注入 |
+| 节点级显式上限（如 wrapup.delivery_ceiling: pr）被模板全局默认覆盖 | 根级 `delivery_ceiling_default` 在门禁检查中优先于节点级检查；若盲目注入根级默认，会把节点显式声明的 PR 门禁静默关掉 | 在注入根级默认前，必须检测子节点是否存在显式上限（`_has_explicit_node_ceiling`）；已具备节点上限的定义绝不盲目覆盖 |
 
 ### 操作规范
 
 1. **治理字段全生命周期透传**：模板声明的字段必须在 `provision_project`、`adopt_workspace_as_project`、`reprovision_project_template` 与 `_register_project_workflow` 中完整穿透，同时写入 `workflow.json` 与 `projects.json`。
-2. **三级自愈与不可变快照对齐**：在 `register_workflow` 入口处，若工作流未显式指定上限，依次从 project 记录和模板中补填 `delivery_ceiling_default`，且必须在 `freeze_run_definition` 前生效。
-3. **Fail-Closed 门禁底线**：当且仅当模板或配置显式指定 `workspace` / `worktree` 时才免除 PR 回执；未指定时严格保持 fail-closed 门禁行为，不随意放宽。
-4. **沙盒环境路径容错**：在公共探测辅助函数中，对外部候选路径的任何 `p.exists()` 访问均须防护 `OSError`。
+2. **三级自愈与不可变快照对齐**：在 `register_workflow` 入口处，若工作流未显式指定上限且 `not workflow_file`，依次从 project 记录和模板中补填 `delivery_ceiling_default`，且必须在 `freeze_run_definition` 前生效。
+3. **显式上限绝对优先**：在尝试补填根级 `delivery_ceiling_default` 前，先检查是否存在根级或节点级（wrapup）显式声明，绝不允许全局默认破坏子节点的强安全约束。
+4. **已冻结快照零变动原则**：凡是携带 `workflow_file` 的已冻结定义（如重放或外部固化快照），跳过任何模板或项目配置注入，保护历史幂等性。
+5. **Fail-Closed 门禁底线**：当且仅当模板或配置显式指定 `workspace` / `worktree` 时才免除 PR 回执；未指定时严格保持 fail-closed 门禁行为，不随意放宽。
+6. **沙盒环境路径容错**：在公共探测辅助函数中，对外部候选路径的任何 `p.exists()` 访问均须防护 `OSError`。
 
 ### 验证命令 / 守护测试
 
 ```bash
-# 验证 delivery_ceiling_default 穿透、历史回填与 adopt/reprovision 状态流转
+# 验证 delivery_ceiling_default 穿透、历史回填、显式上限保护与重放快照只读隔离
 pytest -q tests/test_project_template_registration.py
 
 # 验证适配器与模板解析全套健康
@@ -9257,8 +9261,9 @@ pytest -q tests/test_wrapup_review_closure.py tests/test_runtime_closure.py
 
 ### 相关文档 / 关联证据
 
-- `herdr/projects.py` — `_register_project_workflow`、`provision_project`、`adopt_workspace_as_project`、`reprovision_project_template`、`ensure_project`、`register_workflow`
+- `herdr/projects.py` — `_register_project_workflow`、`_has_explicit_node_ceiling`、`provision_project`、`adopt_workspace_as_project`、`reprovision_project_template`、`ensure_project`、`register_workflow`
 - `herdr/stage_skills.py` — `get_default_skill_search_roots` 沙盒权限防御
-- `tests/test_project_template_registration.py` — 3 项专项回归测试
+- `tests/test_project_template_registration.py` — 5 项专项回归测试（含显式上限保护与重放隔离）
+
 
 ---

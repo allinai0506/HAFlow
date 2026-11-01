@@ -19,14 +19,17 @@
   1. **全生命周期透传**：在 `_register_project_workflow` 增加对应参数并持久化至 `workflow.json` 与 `projects.json`；在项目创建、采用与重置流程中显式传递；
   2. **三级自愈与快照对齐**：`register_workflow` 在执行 `freeze_run_definition` 前，通过 `definition` ➔ `project` ➔ `load_template` 三级回退自动补填 `delivery_ceiling_default` 与 `delivery_ceiling`，确保冻结快照与数据库配置准确一致；
   3. **存量项目透明修复**：`ensure_project` 读取现有 `workflow.json` 时若缺失字段自动就地回填；
-  4. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
-  5. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 3 项测试验证模板创建、历史回填与 adoption/reprovision 全生命周期。
+  4. **已冻结快照与重放保护（Codex P1 治理）**：仅在 `not workflow_file`（全新 Run 注册）时执行模板回填；若已显式提供 `workflow_file`（如 replay 历史重放），严格保持不可变历史定义不被模板默认篡改；
+  5. **节点级显式上限优先（Codex P1 治理）**：在注入根级默认前，通过 `_has_explicit_node_ceiling` 校验是否存在节点级显式上限（如 wrapup 的 PR 门禁），绝不盲目覆盖子节点的安全授权；
+  6. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
+  7. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 5 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护与重放隔离全生命周期。
 - 验收结果：
-  - `tests/test_project_template_registration.py` (15 passed)
+  - `tests/test_project_template_registration.py` (17 passed)
   - `tests/test_wrapup_review_closure.py` (58 passed)
   - `tests/test_software_development_v1_template.py` 与 `test_software_development_v1_adapter.py` (54 passed)
+  - `tests/test_replay.py`、`test_replay_append_only.py`、`test_replay_engine.py` (58 passed)
   - `python3 -m compileall -q herdr services bin tests` 与 `git diff --check`（Clean）
-  - 独立代码审查子 Agent 输出 APPROVE（0 项 P1/P2 缺陷）。
+  - 独立代码审查子 Agent 输出 APPROVE，Codex 审查 2 项 P1 缺陷全部治理闭环。
 - 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §220。
 
 ## [2026-11-01] fix | 测试评估器输出解析全局正则跨行污染与 collect-only 误判修复 (§219)
