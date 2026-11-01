@@ -573,6 +573,23 @@ def register_workflow(
                 if task and task.get("workflow_id") != workflow_id:
                     raise ValueError(f"required task {task_id} belongs to another workflow; "
                                      "update the project definition before creating a new run")
+        # Backfill delivery_ceiling_default / delivery_ceiling if missing
+        ceiling_default = definition.get("delivery_ceiling_default") or (project or {}).get("delivery_ceiling_default")
+        ceiling_explicit = definition.get("delivery_ceiling") or (project or {}).get("delivery_ceiling")
+        if not ceiling_default and not ceiling_explicit:
+            tmpl_name = definition.get("workflow_template") or (project or {}).get("workflow_template")
+            if tmpl_name:
+                try:
+                    tmpl = load_template(tmpl_name)
+                    if tmpl:
+                        ceiling_default = tmpl.get("delivery_ceiling_default")
+                        ceiling_explicit = tmpl.get("delivery_ceiling")
+                except Exception:
+                    pass
+        if ceiling_default and not definition.get("delivery_ceiling_default"):
+            definition["delivery_ceiling_default"] = ceiling_default
+        if ceiling_explicit and not definition.get("delivery_ceiling"):
+            definition["delivery_ceiling"] = ceiling_explicit
         if not workflow_file:
             snapshot_file = freeze_run_definition(workflow_id, definition=definition)
             if not snapshot_file:
@@ -1021,6 +1038,8 @@ def provision_project(root, template_name="software-development-v1", project_nam
         context_contract=template.get("context") if is_context else None,
         context_bindings=context_bindings if is_context else None,
         control_policy=template.get("control_policy"),
+        delivery_ceiling_default=template.get("delivery_ceiling_default"),
+        delivery_ceiling=template.get("delivery_ceiling"),
     )
 
 
@@ -1038,6 +1057,8 @@ def _register_project_workflow(
     context_contract=None,
     context_bindings=None,
     control_policy=None,
+    delivery_ceiling_default=None,
+    delivery_ceiling=None,
 ):
     workflow = {
         "project_id": project_id,
@@ -1063,6 +1084,10 @@ def _register_project_workflow(
         workflow["context_bindings"] = context_bindings
     if control_policy is not None:
         workflow["control_policy"] = control_policy
+    if delivery_ceiling_default:
+        workflow["delivery_ceiling_default"] = delivery_ceiling_default
+    if delivery_ceiling:
+        workflow["delivery_ceiling"] = delivery_ceiling
     workflow = normalize_workflow(workflow)
 
     project_dir = ROOT / "projects" / project_id
@@ -1086,6 +1111,10 @@ def _register_project_workflow(
         record["execution"] = execution
     if context_bindings:
         record["context_bindings"] = context_bindings
+    if delivery_ceiling_default:
+        record["delivery_ceiling_default"] = delivery_ceiling_default
+    if delivery_ceiling:
+        record["delivery_ceiling"] = delivery_ceiling
 
     data = load_projects()
     data.setdefault("projects", {})[root] = record
@@ -1209,6 +1238,8 @@ def adopt_workspace_as_project(
         coordinator_pane_id=coordinator_pane_id,
         runtime_nodes=runtime_nodes,
         control_policy=template.get("control_policy"),
+        delivery_ceiling_default=template.get("delivery_ceiling_default"),
+        delivery_ceiling=template.get("delivery_ceiling"),
     )
 
 
@@ -1356,6 +1387,8 @@ def reprovision_project_template(record, template_name, context_bindings=None):
         context_contract=template.get("context") if is_context else None,
         context_bindings=context_bindings if is_context else None,
         control_policy=template.get("control_policy"),
+        delivery_ceiling_default=template.get("delivery_ceiling_default"),
+        delivery_ceiling=template.get("delivery_ceiling"),
     )
 
 
@@ -1401,6 +1434,23 @@ def ensure_project(root, template_name=None):
             # 未指定模板(template_name=None)保持现状。
             if template_name and template_name != _workflow_template_of(record):
                 return reprovision_project_template(record, template_name)
+
+            # Backfill delivery_ceiling_default if missing in existing project definition
+            target_tmpl = template_name or _workflow_template_of(record)
+            if target_tmpl and record.get("workflow_file"):
+                wf_path = Path(record["workflow_file"]).expanduser()
+                if wf_path.exists():
+                    cfg = _load(wf_path, None)
+                    if isinstance(cfg, dict) and not cfg.get("delivery_ceiling_default"):
+                        try:
+                            tmpl = load_template(target_tmpl)
+                            ceiling_def = tmpl.get("delivery_ceiling_default")
+                            if ceiling_def:
+                                cfg["delivery_ceiling_default"] = ceiling_def
+                                wf_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                                record["delivery_ceiling_default"] = ceiling_def
+                        except Exception:
+                            pass
 
             return record
 

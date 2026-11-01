@@ -9212,4 +9212,53 @@ pytest -q tests/test_evaluator_ansi_test_output.py tests/test_evaluator_executio
 - 诊断报告：Recovery Op `372067` 阻塞根因排查记录
 - `herdr/evaluator.py` — 重构 `_is_failing_test_line`、`_clean_failing_test_line`、`parse_test_output`（行级锚定、耗时后缀、unittest 多段累加、Surefire 多级别支持）
 - `tests/test_evaluator_collect_only_parsing.py` — 11 项专项回归守护测试
+
+---
+
+## 220. 模板交付上限配置（delivery_ceiling_default）在项目实例化与工作流快照中的透传与自愈治理
+
+### 问题背景
+
+在 `software-development-v1.yaml` 中声明了 `delivery_ceiling_default: workspace`，旨在为常规软件开发任务默认使用工作区（workspace）交付上限，避免在未配置 Forge PR 门禁的工作区中误要求代码审查收尾回执（PR 门禁）。
+然而在 `herdr/projects.py` 中，当项目通过 `provision_project`、`adopt_workspace_as_project` 或 `reprovision_project_template` 创建与重置时，内部调用 `_register_project_workflow` 重新拼装项目字典，遗漏了 `delivery_ceiling_default` 和 `delivery_ceiling` 字段的透传与持久化。
+导致后果：
+1. 项目的 `workflow.json` 和 `projects.json` 登记记录中丢失了 `delivery_ceiling_default`；
+2. 派生注册工作流 Run 时，冻结快照 `freeze_run_definition` 与数据库配置中同样缺失该字段；
+3. `herdr/review_closure.py:closure_required` 读取 `_recorded_ceiling` 返回空字符串 `""`，触发 fail-closed 保护，误将工作区交付判定为 `[REVIEW CLOSURE REQUIRED]`，导致真实工作流的 wrapup 节点被误阻塞。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 模板向项目注册字段白名单映射时遗漏新增治理字段 | 手动白名单组装字典若不随模板 Schema 同步更新，会导致新增配置在实例化瞬间丢失 | 核心治理配置（`delivery_ceiling_default`、`delivery_ceiling`、`control_policy` 等）必须在 `_register_project_workflow` 中完整接收、显式透传并持久化 |
+| 存量项目未经历重新 provision 导致缺失默认上限 | 仅在创建入口增加字段无法自愈历史已存在的项目配置，导致存量项目上的工作流 Run 仍旧触发误报 | `ensure_project` 读取现有 `workflow.json` 时进行就地自愈补齐；`register_workflow` 在冻结 Run 快照前实现三级回退（`definition` ➔ `project` ➔ `load_template`） |
+| 快照冻结（freeze_run_definition）发生在字段回填之前 | 一旦工作流 Run 被冻结，快照文件即不可变；若冻结后再尝试补齐配置，历史 Run 将永久读取空快照 | 治理字段的回填与规格化必须在 `freeze_run_definition` 执行前完成，确保不可变快照与数据库配置一致获得正确上限 |
+| 路径存在性扫描遇到沙盒限制抛出 PermissionError | 在受限容器或沙盒环境中，扫描宿主候选路径（如 `~/.gemini/config/skills`）会抛出 `PermissionError` (Errno 1)，导致技能加载直接崩溃 | 遍历候选路径时，文件/目录探测必须包裹在 `try ... except OSError: pass` 异常守卫中，保证沙盒隔离下的韧性 |
+
+### 操作规范
+
+1. **治理字段全生命周期透传**：模板声明的字段必须在 `provision_project`、`adopt_workspace_as_project`、`reprovision_project_template` 与 `_register_project_workflow` 中完整穿透，同时写入 `workflow.json` 与 `projects.json`。
+2. **三级自愈与不可变快照对齐**：在 `register_workflow` 入口处，若工作流未显式指定上限，依次从 project 记录和模板中补填 `delivery_ceiling_default`，且必须在 `freeze_run_definition` 前生效。
+3. **Fail-Closed 门禁底线**：当且仅当模板或配置显式指定 `workspace` / `worktree` 时才免除 PR 回执；未指定时严格保持 fail-closed 门禁行为，不随意放宽。
+4. **沙盒环境路径容错**：在公共探测辅助函数中，对外部候选路径的任何 `p.exists()` 访问均须防护 `OSError`。
+
+### 验证命令 / 守护测试
+
+```bash
+# 验证 delivery_ceiling_default 穿透、历史回填与 adopt/reprovision 状态流转
+pytest -q tests/test_project_template_registration.py
+
+# 验证适配器与模板解析全套健康
+pytest -q tests/test_software_development_v1_template.py tests/test_software_development_v1_adapter.py
+
+# 验证 wrapup 与 review closure 门禁判定精准生效
+pytest -q tests/test_wrapup_review_closure.py tests/test_runtime_closure.py
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/projects.py` — `_register_project_workflow`、`provision_project`、`adopt_workspace_as_project`、`reprovision_project_template`、`ensure_project`、`register_workflow`
+- `herdr/stage_skills.py` — `get_default_skill_search_roots` 沙盒权限防御
+- `tests/test_project_template_registration.py` — 3 项专项回归测试
+
 ---

@@ -154,3 +154,119 @@ def test_control_policy_survives_workspace_adoption(
     assert workflow.resolve_control_policy(cfg, "build", "advance") == {
         "mode": expected_mode, "source": "workflow",
     }
+
+
+def test_delivery_ceiling_survives_template_project_registration(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "ceiling-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "ceiling-template.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="ceiling-template")
+    assert project.get("delivery_ceiling_default") == "workspace"
+
+    shared = json.loads(Path(project["workflow_file"]).read_text(encoding="utf-8"))
+    assert shared.get("delivery_ceiling_default") == "workspace"
+
+    projects.register_workflow("wf-ceiling-created", project)
+
+    cfg = projects.workflow_config_for("wf-ceiling-created")
+    assert cfg.get("delivery_ceiling_default") == "workspace"
+    assert store.get_workflow("wf-ceiling-created")["config"].get("delivery_ceiling_default") == "workspace"
+
+    wrapup_task = {
+        "task_id": "wf-ceiling-created-wrapup",
+        "workflow_id": "wf-ceiling-created",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert not closure_required(store, wrapup_task)
+
+
+def test_delivery_ceiling_backfilled_for_existing_project(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "software-dev-legacy",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "software-dev-legacy.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    control_root = tmp_path / "controller"
+    project_dir = control_root / "projects" / "p-legacy"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    wf_file = project_dir / "workflow.json"
+    legacy_wf = {
+        "project_id": "p-legacy",
+        "project_name": "legacy",
+        "project_root": str(root),
+        "base_branch": "main",
+        "workspace_id": "test-workspace",
+        "workflow_template": "software-dev-legacy",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    wf_file.write_text(json.dumps(legacy_wf), encoding="utf-8")
+    legacy_project = {
+        "project_id": "p-legacy",
+        "project_name": "legacy",
+        "project_root": str(root),
+        "base_branch": "main",
+        "workspace_id": "test-workspace",
+        "coordinator_pane_id": "coordinator-pane",
+        "workflow_file": str(wf_file),
+    }
+
+    projects.register_workflow("wf-legacy-01", legacy_project)
+
+    cfg = projects.workflow_config_for("wf-legacy-01")
+    assert cfg.get("delivery_ceiling_default") == "workspace"
+
+    wrapup_task = {
+        "task_id": "wf-legacy-01-wrapup",
+        "workflow_id": "wf-legacy-01",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert not closure_required(store, wrapup_task)
+
+
+def test_delivery_ceiling_survives_workspace_adoption_and_reprovisioning(
+    project_environment, tmp_path,
+):
+    store, template_root = project_environment
+    def_a = {
+        "name": "tmpl-a",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "step_a"}],
+    }
+    def_b = {
+        "name": "tmpl-b",
+        "delivery_ceiling_default": "worktree",
+        "nodes": [{"id": "step_b"}],
+    }
+    (template_root / "tmpl-a.json").write_text(json.dumps(def_a), encoding="utf-8")
+    (template_root / "tmpl-b.json").write_text(json.dumps(def_b), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    proj_a = projects.adopt_workspace_as_project("test-workspace", root, template_name="tmpl-a")
+    assert proj_a.get("delivery_ceiling_default") == "workspace"
+    shared_a = json.loads(Path(proj_a["workflow_file"]).read_text(encoding="utf-8"))
+    assert shared_a.get("delivery_ceiling_default") == "workspace"
+
+    proj_b = projects.reprovision_project_template(proj_a, "tmpl-b")
+    assert proj_b.get("delivery_ceiling_default") == "worktree"
+    shared_b = json.loads(Path(proj_b["workflow_file"]).read_text(encoding="utf-8"))
+    assert shared_b.get("delivery_ceiling_default") == "worktree"

@@ -99,8 +99,11 @@ def get_default_skill_search_roots() -> List[Path]:
             h / ".codex" / "skills",
             h / ".agents" / "skills",
         ):
-            if p.exists() and p not in roots:
-                roots.append(p)
+            try:
+                if p.exists() and p not in roots:
+                    roots.append(p)
+            except OSError:
+                pass
 
     return roots
 

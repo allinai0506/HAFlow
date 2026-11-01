@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-01] fix | delivery_ceiling_default 模板交付上限配置实例化穿透与历史自愈治理 (§220)
+
+- 背景：`software-development-v1.yaml` 声明了 `delivery_ceiling_default: workspace`，但在 `herdr/projects.py` 中通过模板实例化项目或采用工作区时，`_register_project_workflow` 字典重构遗漏了 `delivery_ceiling_default` 和 `delivery_ceiling` 字段，导致项目快照与工作流 Run 配置中缺失该信息，使得 `herdr/review_closure.py` fail-closed 误判定工作区交付为 `[REVIEW CLOSURE REQUIRED]`。
+- 根因分析：
+  1. `provision_project`、`adopt_workspace_as_project`、`reprovision_project_template` 未将模板中的 `delivery_ceiling_default` 与 `delivery_ceiling` 传给 `_register_project_workflow`；
+  2. `_register_project_workflow` 未将交付上限写入项目 `workflow.json` 与 `projects.json`；
+  3. `register_workflow` 在冻结 Run 快照前缺乏针对历史存量项目的模板回退补齐机制。
+- 治理与修复：
+  1. **全生命周期透传**：在 `_register_project_workflow` 增加对应参数并持久化至 `workflow.json` 与 `projects.json`；在项目创建、采用与重置流程中显式传递；
+  2. **三级自愈与快照对齐**：`register_workflow` 在执行 `freeze_run_definition` 前，通过 `definition` ➔ `project` ➔ `load_template` 三级回退自动补填 `delivery_ceiling_default` 与 `delivery_ceiling`，确保冻结快照与数据库配置准确一致；
+  3. **存量项目透明修复**：`ensure_project` 读取现有 `workflow.json` 时若缺失字段自动就地回填；
+  4. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
+  5. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 3 项测试验证模板创建、历史回填与 adoption/reprovision 全生命周期。
+- 验收结果：
+  - `tests/test_project_template_registration.py` (15 passed)
+  - `tests/test_wrapup_review_closure.py` (58 passed)
+  - `tests/test_software_development_v1_template.py` 与 `test_software_development_v1_adapter.py` (54 passed)
+  - `python3 -m compileall -q herdr services bin tests` 与 `git diff --check`（Clean）
+  - 独立代码审查子 Agent 输出 APPROVE（0 项 P1/P2 缺陷）。
+- 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §220。
+
 ## [2026-11-01] fix | 测试评估器输出解析全局正则跨行污染与 collect-only 误判修复 (§219)
 
 - 背景：真实工作流 `wf-haflow-1101-01` 的测试节点在执行 `pytest --collect-only` 产生健康收集结果（6816 tests collected in 7.15s, exit 0）时，被 `herdr/evaluator.py:parse_test_output` 误判为 `blocked`，触发 Recovery Op `372067`。
