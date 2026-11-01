@@ -46,6 +46,14 @@ class RouterPolicyRejection(RouterRejectionError):
     pass
 
 
+MAX_REMEDIATION_ROUNDS = 2
+
+
+class RouterRemediationExhausted(RouterRejectionError):
+    """Remediation rounds for a node exceeded MAX_REMEDIATION_ROUNDS."""
+    pass
+
+
 DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok", "kimi"]
 
 DEFAULT_STAGE_PREFERENCES = {
@@ -467,9 +475,80 @@ def _consumes_isolation_budget(task):
     return True
 
 
+def _compute_used_agents(
+    workflow_id,
+    exclude_stages,
+    *,
+    store=None,
+    dispatch_round=None,
+    candidate_author=None,
+    candidate_episode_id=None,
+    is_verifier=False,
+):
+    """Calculate the set of agents prohibited by stage isolation rules.
+
+    When round-scoped isolation is enabled (HERDR_ROUTER_ROUND_SCOPED_ISOLATION!=0)
+    and an active round or candidate_author is provided, exclusion is scoped to
+    the active round / candidate author, preventing historical agent pool exhaustion.
+    """
+    stage_used_agents = set()
+    if not (workflow_id and exclude_stages):
+        return stage_used_agents
+
+    if candidate_author and is_verifier:
+        stage_used_agents.add(str(candidate_author))
+
+    round_scoped_enabled = os.environ.get("HERDR_ROUTER_ROUND_SCOPED_ISOLATION", "1").lower() not in ("0", "false", "no")
+    effective_round = None
+    if round_scoped_enabled:
+        raw_round = dispatch_round if dispatch_round is not None else candidate_episode_id
+        if raw_round is not None:
+            try:
+                effective_round = int(raw_round)
+            except (ValueError, TypeError):
+                pass
+
+    if store is None:
+        store = _get_store()
+
+    try:
+        tasks = store.list_tasks(workflow_id=workflow_id)
+    except TypeError:
+        tasks = store.list_tasks()
+
+    exemption = _zero_work_exemption_enabled()
+    target_stages = set(exclude_stages)
+
+    for t in tasks:
+        if t.get("workflow_id") == workflow_id:
+            t_stage = t.get("node") or t.get("stage")
+            if t_stage in target_stages and t.get("agent"):
+                if exemption and not _consumes_isolation_budget(t):
+                    continue
+                if effective_round is not None:
+                    # In round-scoped mode, only exclude agents who participated in target_stages
+                    # in the same round.
+                    t_round = t.get("dispatch_round")
+                    if t_round is None and isinstance(t.get("detail"), dict):
+                        t_round = t["detail"].get("dispatch_round")
+                    if t_round is None:
+                        t_round = t.get("candidate_episode_id")
+                    if t_round is not None:
+                        try:
+                            if int(t_round) != effective_round:
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+                stage_used_agents.add(t.get("agent"))
+
+    return stage_used_agents
+
+
 def _choose_agent_impl(workflow_id, stage, task_type, requested="auto", reservation_key=None,
                        run_id=None, decided_at=None, dispatch_role="worker",
-                       penalize_agents=None, _refresh_budget=1):
+                       penalize_agents=None, _refresh_budget=1,
+                       dispatch_round=None, candidate_author=None,
+                       candidate_episode_id=None):
     ROUTER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(ROUTER_LOCK_FILE, "a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -478,7 +557,10 @@ def _choose_agent_impl(workflow_id, stage, task_type, requested="auto", reservat
                                         reservation_key=reservation_key, run_id=run_id,
                                         decided_at=decided_at, dispatch_role=dispatch_role,
                                         penalize_agents=penalize_agents,
-                                        lock=lock, _refresh_budget=_refresh_budget)
+                                        lock=lock, _refresh_budget=_refresh_budget,
+                                        dispatch_round=dispatch_round,
+                                        candidate_author=candidate_author,
+                                        candidate_episode_id=candidate_episode_id)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -495,6 +577,9 @@ def _choose_agent_locked(
     penalize_agents=None,
     lock=None,
     _refresh_budget=1,
+    dispatch_round=None,
+    candidate_author=None,
+    candidate_episode_id=None,
 ):
     if workflow_id:
         record = workflow_record(workflow_id)
@@ -573,6 +658,20 @@ def _choose_agent_locked(
     is_degraded = False
     degrade_reason = ""
 
+    raw_round = dispatch_round if dispatch_round is not None else candidate_episode_id
+    if raw_round is not None:
+        try:
+            r_int = int(raw_round)
+            if r_int > MAX_REMEDIATION_ROUNDS:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                raise RouterRemediationExhausted(
+                    f"Remediation round limit exceeded for stage '{stage}' in workflow '{workflow_id}': "
+                    f"round {r_int} > MAX_REMEDIATION_ROUNDS ({MAX_REMEDIATION_ROUNDS}). "
+                    "Halting automated re-dispatch to prevent unbounded remediation loops."
+                )
+        except (ValueError, TypeError):
+            pass
+
     exclude_stages = (
         node_policy.get("exclude_stage_agents")
         or node_policy.get("disallow_from_stages")
@@ -582,22 +681,19 @@ def _choose_agent_locked(
         exclude_stages = [exclude_stages]
     # FR-6.1 default: a declared verifier automatically excludes implementation
     # agents even without explicit node_policy (fail-closed by default).
-    if not exclude_stages and is_verifier_node_id(wf_cfg, stage):
+    is_verifier = is_verifier_node_id(wf_cfg, stage)
+    if not exclude_stages and is_verifier:
         exclude_stages = ["implementation"]
 
-    stage_used_agents = set()
-    if workflow_id and exclude_stages:
-        store = _get_store()
-        tasks = store.list_tasks()
-        exemption = _zero_work_exemption_enabled()
-        target_stages = set(exclude_stages)
-        for t in tasks:
-            if t.get("workflow_id") == workflow_id:
-                t_stage = t.get("node") or t.get("stage")
-                if t_stage in target_stages and t.get("agent"):
-                    if exemption and not _consumes_isolation_budget(t):
-                        continue
-                    stage_used_agents.add(t.get("agent"))
+    stage_used_agents = _compute_used_agents(
+        workflow_id,
+        exclude_stages,
+        store=_get_store(),
+        dispatch_round=dispatch_round,
+        candidate_author=candidate_author,
+        candidate_episode_id=candidate_episode_id,
+        is_verifier=is_verifier,
+    )
 
     pool = ensure_pool_for_project(project_id)
     allowed = set(pool.get("allowed_agents", []))
@@ -789,7 +885,10 @@ def _choose_agent_locked(
                                       reservation_key=reservation_key, run_id=run_id,
                                       decided_at=decided_at, dispatch_role=dispatch_role,
                                       penalize_agents=penalize_agents,
-                                      _refresh_budget=_refresh_budget - 1)
+                                      _refresh_budget=_refresh_budget - 1,
+                                      dispatch_round=dispatch_round,
+                                      candidate_author=candidate_author,
+                                      candidate_episode_id=candidate_episode_id)
         verified = set(record.get("healthy_agents", []))
         candidates = [agent for agent in candidates
                       if agent in verified and _agent_request_fresh(record, agent)]
@@ -1168,6 +1267,9 @@ def choose_agent(
     run_id=None,
     dispatch_role="worker",
     penalize_agents=None,
+    dispatch_round=None,
+    candidate_author=None,
+    candidate_episode_id=None,
 ):
     """Select the production agent.
 
@@ -1188,6 +1290,9 @@ def choose_agent(
         decided_at=decided_at,
         dispatch_role=dispatch_role,
         penalize_agents=penalize_agents,
+        dispatch_round=dispatch_round,
+        candidate_author=candidate_author,
+        candidate_episode_id=candidate_episode_id,
     )
     canary = shadow_ctx.get("canary_plan")
     if canary is not None:

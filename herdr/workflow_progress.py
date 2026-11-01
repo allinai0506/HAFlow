@@ -6,7 +6,7 @@ import re
 
 _DEFAULT_GATES = {'test': 'implementation', 'review': 'implementation', 'wrapup': 'implementation'}
 _FACT_FIELDS = ('task_id', 'workflow_id', 'run_id', 'execution_id', 'workflow_run_id',
-                'node', 'stage', 'candidate_sha', 'commit', 'stage_verdict', 'stage_verdict_note',
+                'node', 'stage', 'candidate_sha', 'commit', 'integrated_commit', 'stage_verdict', 'stage_verdict_note',
                 'blocker', 'finalize_escalated', 'finalize_escalate_reason',
                 'affected_task_ids', 'stage_verdict_affected_task_ids', 'supersedes', 'parent_task_id')
 
@@ -59,8 +59,13 @@ def _gate(nodes, node_id):
         gate = node['gate']
         if gate is False:
             return None
-        if gate:
-            return (gate.get('retry_node') or gate.get('retry_target') or 'implementation') if isinstance(gate, dict) else None
+        if gate is True:
+            return _DEFAULT_GATES.get(node_id) or 'implementation'
+        if isinstance(gate, dict):
+            return gate.get('retry_node') or gate.get('retry_target') or 'implementation'
+        if isinstance(gate, str):
+            return gate
+        return None
     return _DEFAULT_GATES.get(node_id)
 
 
@@ -84,14 +89,14 @@ def _launch_refused(task):
     return str(task.get('failure_reason') or '') in _LAUNCH_REFUSAL_REASONS
 
 
-def candidate_responsible_source(workflow, tasks, candidate_sha):
+def candidate_responsible_source(workflow, tasks, candidate_sha, retry_node=None):
     """Identify the legitimate candidate producer node and task(s).
 
     Returns (source_node, target_task_ids).
     When the candidate is produced by wrapup:
       returns ('wrapup', [wrapup_task_id])
-    When the candidate is produced by implementation:
-      returns ('implementation', [impl_task_ids...])
+    When the candidate is produced by an implementation/craft node:
+      returns (source_node, [impl_task_ids...])
     Otherwise returns (None, []).
     """
     if not candidate_sha or not isinstance(candidate_sha, str):
@@ -130,8 +135,9 @@ def candidate_responsible_source(workflow, tasks, candidate_sha):
                     continue
             return 'wrapup', [task['task_id']]
 
-    # 2. Check implementation producer
+    # 2. Check implementation producer (supporting dynamically named nodes like 'craft')
     impl_targets = []
+    matched_nodes = set()
     for task in tasks or []:
         if not isinstance(task, dict):
             continue
@@ -139,20 +145,30 @@ def candidate_responsible_source(workflow, tasks, candidate_sha):
             continue
         if eid and task.get('execution_id') != eid:
             continue
-        if (task.get('node') or task.get('stage')) != 'implementation':
+        task_node = task.get('node') or task.get('stage')
+        if task_node in ('wrapup', 'test', 'review', 'acceptance'):
+            continue
+        if retry_node and task_node not in (retry_node, 'implementation'):
             continue
         if task.get('status') == 'superseded' or task.get('superseded_by'):
             continue
         if not task.get('run_id'):
             continue
+        delivery = task.get('wrapup_delivery') or {}
         matches_candidate = (
             task.get('commit') == candidate_sha
             or task.get('integrated_commit') == candidate_sha
+            or delivery.get('integrated_sha') == candidate_sha
         )
         if matches_candidate:
             impl_targets.append(task['task_id'])
+            if task_node:
+                matched_nodes.add(task_node)
     if impl_targets:
-        return 'implementation', sorted(impl_targets)
+        source_name = retry_node if (retry_node and retry_node in matched_nodes) else (
+            list(matched_nodes)[0] if len(matched_nodes) == 1 else 'implementation'
+        )
+        return source_name, sorted(impl_targets)
 
     # 3. Check workflow snapshot candidate_source_node
     if workflow.get('candidate_source_node') == 'wrapup' and workflow.get('candidate_sha') == candidate_sha:
@@ -192,8 +208,14 @@ def _identity_reason(workflow, facts, candidate):
         if (workflow.get('execution_id')
                 and fact.get('execution_id') != workflow['execution_id']):
             return 'identity_unknown'
-        if (fact.get('commit') or fact.get('candidate_sha')) != candidate:
-            return 'candidate_mismatch' if (fact.get('commit') or fact.get('candidate_sha')) else 'candidate_unknown'
+        cand_values = {
+            fact.get('candidate_sha'),
+            fact.get('commit'),
+            fact.get('integrated_commit'),
+            (fact.get('wrapup_delivery') or {}).get('integrated_sha'),
+        } - {None, ''}
+        if candidate not in cand_values:
+            return 'candidate_mismatch' if cand_values else 'candidate_unknown'
         if (fact.get('workflow_id') != workflow.get('workflow_id') or not fact.get('task_id')
                 or not fact.get('run_id')):
             return 'identity_unknown'
@@ -227,7 +249,7 @@ def assess_workflow(workflow, config, tasks):
         else:
             gate_target = _gate(nodes, node_id)
             if gate_target is not None:
-                source_node, _ = candidate_responsible_source(workflow, current, candidate)
+                source_node, _ = candidate_responsible_source(workflow, current, candidate, retry_node=gate_target)
                 retry = source_node or gate_target
             else:
                 retry = None
@@ -239,15 +261,26 @@ def assess_workflow(workflow, config, tasks):
         for task in failed:
             affected.update(task.get('affected_task_ids') or [])
             affected.update(task.get('stage_verdict_affected_task_ids') or [])
+        used_fallback = False
         if not affected:
-            source_node, source_targets = candidate_responsible_source(workflow, current, candidate)
+            source_node, source_targets = candidate_responsible_source(workflow, current, candidate, retry_node=retry)
             if source_node == retry and source_targets:
                 affected.update(source_targets)
             else:
                 affected.update(task['task_id'] for task in current
                                 if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
-                                and (task.get('commit') or task.get('candidate_sha')
-                                     or (task.get('wrapup_delivery') or {}).get('integrated_sha')) == candidate)
+                                and candidate in {
+                                    task.get('commit'),
+                                    task.get('candidate_sha'),
+                                    task.get('integrated_commit'),
+                                    (task.get('wrapup_delivery') or {}).get('integrated_sha'),
+                                })
+            if not affected and retry:
+                # Fallback for parallel tasks / multi-task DAGs: attribute to all active tasks under retry node
+                affected.update(task['task_id'] for task in current
+                                if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
+                                and task.get('status') not in ('superseded', 'failed'))
+                used_fallback = True
         facts = sorted(failed, key=lambda task: str(task.get('task_id') or ''))
         affected_facts = [task for task in current if task.get('task_id') in affected and task not in facts]
         if kind == 'delivery':
@@ -255,6 +288,15 @@ def assess_workflow(workflow, config, tasks):
             reason = next((r for r in map(repair_reason, facts) if r), None)
             if (not workflow.get('execution_id') or any(t.get('execution_id') != workflow['execution_id'] for t in facts)):
                 reason = 'delivery_identity_unknown'
+        elif used_fallback:
+            reason = _identity_reason(workflow, facts, candidate)
+            if reason is None:
+                for t in affected_facts:
+                    if (workflow.get('execution_id') and t.get('execution_id') != workflow['execution_id']) \
+                            or (t.get('workflow_id') != workflow.get('workflow_id')) \
+                            or not t.get('task_id') or not t.get('run_id'):
+                        reason = 'identity_unknown'
+                        break
         else:
             reason = _identity_reason(workflow, facts + affected_facts, candidate)
         if reason is None and affected - {task.get('task_id') for task in facts + affected_facts}:

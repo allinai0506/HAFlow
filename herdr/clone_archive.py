@@ -48,6 +48,12 @@ BYPASS_IGNORED_DIRS = frozenset({
     ".next",  # Next.js build output
     ".nuxt",  # Nuxt.js build output
     ".cache",  # Generic compiler/indexer cache
+    "test-evidence",  # Test evidence, diagnostics, screenshots, trace recordings
+    "test-results",  # Test runner output results (e.g. Playwright, Jest, Pytest)
+    "playwright-report",  # Playwright HTML and visual reports
+    "coverage",  # Code coverage reports
+    ".coverage",  # Python coverage data cache
+    "htmlcov",  # HTML coverage output
 })
 
 BYPASS_IGNORED_FILE_SUFFIXES = (

@@ -442,7 +442,7 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "inputs": list(node.get("inputs") or []),
                 "required_outputs": list(node.get("required_outputs") or []),
                 "rules": list(node.get("rules") or []),
-                "gate": dict(node.get("gate") or {}),
+                "gate": ({"retry_node": node["gate"]} if isinstance(node.get("gate"), str) else dict(node.get("gate") or {})),
             }
             # marker 收敛规则（Codex #375 P1）：非声明的空 gate 一律落
             # marker——无论来自合成、pre-marker 存量启发式还是已有标记，

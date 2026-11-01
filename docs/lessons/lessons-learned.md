@@ -9050,4 +9050,54 @@ git diff --check
 - `herdr/experience/client.py` — `ExperienceClient` 增加凭据安全回退逻辑（优先 state_db 及 credentials 目录回退，严守 `herdr/state/` 架构冻结锁）
 - `herdr/task_cli_workflow_close.py` — `close_workflow_owned` 挂载 fail-open 经验提炼与恢复同步
 - `tests/test_workflow_experience_closeout.py` — 包含 Schema 兼容、凭据回退与收尾自动触发 3 项全链路守护用例
+
+---
+
+## §217 工作流自主推进与端到端异常停滞治理：测试白名单、轮次路由隔离、动态归因与可见性告警
+
+### 问题现象与根因剖析
+
+排查典型案例 `wf-haflow-1029-02` 及类似流水线发现，工作流本应全自动推进却频繁停滞进入 `waiting_human` 或需人工介入收尾，根因存在四个跨模块联动断点：
+1. **工位清理因测试产物误阻断**：pytest 运行生成的 `test-evidence/`、`coverage/`、`playwright-report/` 等未纳入工位清理白名单，导致退出时被误判为“有未提交业务改动”而阻断销毁，触发 `teardown_hygiene_violation`。
+2. **多轮修复中审查隔离死锁**：在双 Agent 环境下（如 `agent_a` 实现，`agent_b` 审查），首轮审查不通过进入 Round 2 时，原 `agent_router` 累积式排除所有历史使用过的 Agent，导致 Round 2 修复与复审双双陷入“无可用 Agent”的 `RouterIsolationRejection` 死锁。
+3. **动态归因与候选比对逻辑缺陷**：`workflow_progress.py` 中将责任节点硬编码为 `'implementation'`（导致自定义节点如 `'craft'` 完全失效）；同时在候选比对中存在 `(A or B or C) == candidate` 这一 Python 布尔短路运算符优先级经典 Bug，且未考虑多任务集成至单一 `candidate_sha` 的回退映射，导致错误抛出 `candidate_mismatch` 停滞。
+4. **收尾状态机死锁与黑盒静默退避**：工作流在等待物理收尾清理期间如果过早跃迁至 `'closing'` 状态，会导致主循环跳过调和；且物理收尾失败退避时缺乏对具体阻断原因的结构化告警提升。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 测试报告与覆盖率产物阻塞工位销毁 | 测试证据与业务代码变更性质不同；忽略规则必须显式同步至底层清理白名单 | 在 `clone_archive.py` 的 `BYPASS_IGNORED_DIRS` 中扩充测试与覆盖率目录白名单，纯测试输出一律放行 |
+| 跨轮次隔离导致候选池枯竭 | 隔离目标是保证质量独立性（不自审自验），而非惩罚参与过修复的 Agent | 路由隔离按 Round 作用域隔离：Round 2 实现允许原作者修复自身缺陷，复审仅排除本轮作者，严防全池耗尽 |
+| 动态模板与自定义节点名称失效 | 模板规范允许自定义实现节点名称；严禁在底层推演逻辑中写死固有名词 | 根据 DAG 声明的 `gate` 或 `retry_node` 动态反查责任实现节点，支持 string 与 dict 规范 |
+| Python 布尔短路表达式产生伪不匹配 | `(A or B) == C` 会先求值 `A or B` 再对比 `C`，导致备选字段被首个非空值短路遮蔽 | 多候选比对统一使用 `candidate in {fact.get('commit'), fact.get('integrated_commit'), ...} - {None, ''}` |
+| 收尾卡点缺乏诊断线索 | 多轮退避重试如果静默吞没错误输出，运维人员无法得知究竟是哪些文件被占用或阻断 | 连续退避 >= 2 次时必须通过 `attention_note` 升级为结构化告警，携带具体的子进程错误输出与排障命令 |
+
+### 操作规范
+
+1. **白名单分层管理**：测试运行目录（`test-evidence`、`test-results`、`coverage` 等）归入 `BYPASS_IGNORED_DIRS`，已暂存或已跟踪的改动不受白名单影响，确保安全性。
+2. **两轮熔断与特性开关**：轮次级路由隔离受 `HERDR_ROUTER_ROUND_SCOPED_ISOLATION` 特性开关控制（默认开启），修复轮次上限设为 2 轮，超限抛出 `RouterRemediationExhausted`。
+3. **纯函数推演零 I/O**：`workflow_progress.py` 与 `node_dispatch.py` 严格遵守纯函数契约，所有必要事实通过状态快照传入。
+4. **状态机平稳收口**：收尾等待期间工作流保持 `status = 'running'`，物理 close 完成后原子跃迁至 `completed`。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_repo_hygiene_whitelist.py
+pytest -q tests/test_agent_router_rounds.py
+pytest -q tests/test_workflow_recovery_autonomy.py
+pytest -q tests/test_e2e_full_autonomous_flow.py
+pytest -q tests/test_adaptive_router.py tests/test_workflow_stall_regressions.py tests/test_task_cli_workflow_close.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `docs/designs/workflow-autonomy-and-blocker-remediation.md` — 经 EGM 5 阶段完整审计的架构设计定稿
+- `herdr/clone_archive.py` — 追加测试与覆盖率旁路白名单
+- `herdr/agent_router.py` — 实现 `_compute_used_agents` 轮次级作用域隔离与 2 轮熔断
+- `herdr/workflow_progress.py` — 修复动态节点反查、候选集合比对与多任务并行回退
+- `services/controller/workflow_close.py` — 收尾连续退避诊断告警提升
+- `tests/test_e2e_full_autonomous_flow.py` — 端到端全链路闭环仿真守护测试
 ---

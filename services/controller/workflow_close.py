@@ -58,7 +58,7 @@ def close_retry_interval(ports, attempts):
         attempts = 0
     return min(60 * (2 ** attempts), 600)
 
-def _note_close_backoff(ports, workflow_id, close_key):
+def _note_close_backoff(ports, workflow_id, close_key, error_output=""):
     """Record a failed auto-close attempt and throttle the next retry."""
     try:
         episode = ports.attention_get(close_key) or {}
@@ -66,12 +66,23 @@ def _note_close_backoff(ports, workflow_id, close_key):
     except (TypeError, ValueError):
         attempts = 1
     interval = ports.close_retry_interval(attempts - 1)
+    event_type = "auto_close_blocked" if attempts >= 2 else "auto_close_failed"
+    reason = "teardown_hygiene_violation" if attempts >= 2 else "auto_close_failed"
+    detail = None
+    if attempts >= 2:
+        detail = {
+            "error": error_output,
+            "remediation": f"herdr-task close-workflow {workflow_id} --dry-run",
+        }
+    elif error_output:
+        detail = {"error": error_output}
     ports.attention_note(
         close_key,
         {"task_id": f"{workflow_id}:close", "workflow_id": workflow_id},
-        "auto_close_failed",
-        "auto_close_failed",
+        event_type,
+        reason,
         attempts=attempts,
+        detail=detail,
     )
     ports.attention_throttle(close_key, interval=interval)
     print(
@@ -154,17 +165,18 @@ def maybe_close_completed_workflow(ports, workflow_id):
                     f"[WORKFLOW CLOSE ERROR] "
                     f"workflow={workflow_id}: close transport failed: {exc}"
                 )
-                ports._note_close_backoff(workflow_id, close_key)
+                ports._note_close_backoff(workflow_id, close_key, error_output=str(exc))
                 return
             if result.stdout.strip():
                 print(result.stdout.strip())
             if result.returncode != 0:
+                err = result.stderr.strip() or result.stdout.strip()
                 print(
                     f"[WORKFLOW CLOSE ERROR] "
                     f"workflow={workflow_id}: "
-                    f"{result.stderr.strip() or result.stdout.strip()}"
+                    f"{err}"
                 )
-                ports._note_close_backoff(workflow_id, close_key)
+                ports._note_close_backoff(workflow_id, close_key, error_output=err)
             else:
                 ports.attention_clear(close_key)
         finally:
