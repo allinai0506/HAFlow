@@ -341,3 +341,38 @@ def test_replay_run_registration_preserves_frozen_snapshot_without_backfill(
     registered_cfg = projects.workflow_config_for("wf-replay-run")
     assert "delivery_ceiling_default" not in registered_cfg
     assert "delivery_ceiling" not in registered_cfg
+
+
+def test_ensure_project_backfill_failure_preserves_original_file(
+    project_environment, tmp_path, monkeypatch,
+):
+    store, template_root = project_environment
+    definition = {
+        "name": "atomic-template",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "atomic-template.json").write_text(json.dumps(definition), encoding="utf-8")
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="atomic-template")
+    wf_path = Path(project["workflow_file"])
+
+    # Simulate legacy project file without ceiling
+    original_cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    original_cfg.pop("delivery_ceiling_default", None)
+    wf_path.write_text(json.dumps(original_cfg), encoding="utf-8")
+
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+
+    # Simulate write failure during _save
+    def failing_save(path, data):
+        raise OSError("Simulated disk error during save")
+
+    monkeypatch.setattr(projects, "_save", failing_save)
+
+    # ensure_project catches exception; original file must remain intact and valid JSON
+    projects.ensure_project(root, template_name="atomic-template")
+
+    reloaded = json.loads(wf_path.read_text(encoding="utf-8"))
+    assert reloaded == original_cfg

@@ -1471,7 +1471,7 @@ def ensure_project(root, template_name=None):
                             ceiling_def = tmpl.get("delivery_ceiling_default")
                             if ceiling_def:
                                 cfg["delivery_ceiling_default"] = ceiling_def
-                                wf_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                                _save(wf_path, cfg)
                                 record["delivery_ceiling_default"] = ceiling_def
                         except Exception:
                             pass
