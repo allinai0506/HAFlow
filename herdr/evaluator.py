@@ -860,7 +860,7 @@ class MetricVector:
 # 写 "...展示 FAIL 状态..."），此时一条绿色用例会被当成失败项，使
 # failing_tests 非空、内循环永不收敛，把满分 100 的绿色套件压到 95 分
 # 并最终误报 inner_loop_exhausted。故必须先排除带通过标记的行。
-_PASS_MARKERS = ("✓", "√", "PASS", "PASS ")
+_PASS_MARKERS = ("✓", "√", "PASS")
 
 
 def _clean_failing_test_line(line: str) -> str:
@@ -889,7 +889,7 @@ _PYTEST_SUMMARY_LINE_RE = re.compile(
 )
 
 _VITEST_SUMMARY_RE = re.compile(
-    r"^\s*[│|]?\s*Tests\s+(?:(\d+)\s+failed\s*\|\s*)?(?:(\d+)\s+passed\s*)?\((\d+)\)"
+    r"^\s*[│|]?\s*Tests\s+(?:(\d+)\s+failed\s*(?:\|\s*)?)?(?:(\d+)\s+passed\s*)?\((\d+)\)"
 )
 
 _JEST_SUMMARY_RE = re.compile(
@@ -1055,7 +1055,7 @@ def parse_test_output(output: str, exit_code: int) -> Tuple[int, int, List[str]]
             if "::" in line or "[" in line:
                 continue
             if re.match(
-                r"^\s*(=+\s*)?(?:(\d+)\s+tests?\s+collected|no tests collected)\s+in\s+[\d\.]+s(\s*=+)?\s*$",
+                r"^\s*(=+\s*)?(?:(?:\d+(?:/\d+)?)\s+tests?\s+collected|no tests collected)(?:\s*\([^)]*\))?\s+in\s+[\d\.]+s(\s*=+)?\s*$",
                 line,
             ):
                 return 0, 0, []

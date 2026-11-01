@@ -91,6 +91,33 @@ def test_mixed_test_runners_both_accounted():
     assert failing == []
 
 
+def test_collect_only_with_filtered_deselected():
+    """pytest --collect-only with -k filter outputs '1/6 tests collected (5 deselected) in 0.10s'."""
+    output = (
+        "tests/test_foo.py::test_bar\n"
+        "\n"
+        "======================= 1/6 tests collected (5 deselected) in 0.10s =======================\n"
+    )
+    passed, total, failing = parse_test_output(output, 0)
+    assert passed == 0
+    assert total == 0
+    assert failing == []
+
+
+def test_vitest_all_failing_without_pipe():
+    """Vitest with all tests failing outputs 'Tests  2 failed (2)' without a pipe separator."""
+    output = (
+        " ✕ test/broken1.test.ts > fail 1\n"
+        " ✕ test/broken2.test.ts > fail 2\n"
+        " Tests  2 failed (2)\n"
+    )
+    passed, total, failing = parse_test_output(output, 1)
+    assert passed == 0
+    assert total == 2
+    assert "test/broken1.test.ts > fail 1" in failing
+    assert "test/broken2.test.ts > fail 2" in failing
+
+
 def test_real_diagnostic_log_from_workflow_file():
     """If the actual test.log from the workflow run exists on disk, test directly against it."""
     log_path = Path("/Users/user/.herdr-controller/clones/wf-haflow-1101-01-test-auto/.herdr-loop/logs/test.log")
