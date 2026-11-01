@@ -261,6 +261,8 @@ def find_dispatch_task(store, workflow_id, node_id, role, candidate_sha, dispatc
         # matching identity from terminal failed/superseded task history.
         if 'dispatch_role' not in task or 'dispatch_round' not in task:
             continue
+        if task.get('status') == 'superseded' or task.get('launch_not_started'):
+            continue
         if ((execution_id is None or task.get('execution_id') == execution_id)
                 and (task.get('node') or task.get('stage')) == node_id
                 and (task.get('dispatch_role') or 'worker') == role
@@ -300,8 +302,47 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
         old = store.get_task(supersedes)
         if (not old or old.get('workflow_id') != workflow_id
                 or (old.get('node') or old.get('stage')) != node_id
-                or (old.get('dispatch_role') or 'worker') != role
-                or dispatch_round != int(old.get('dispatch_round') or 1) + 1):
+                or (old.get('dispatch_role') or 'worker') != role):
+            raise ValueError('supersedes must bind previous round of same workflow/node/role')
+        cur_cand = candidate_sha or ''
+        old_cand = old.get('candidate_sha') or old.get('commit') or old.get('integrated_commit') or ''
+        is_diff_cand = bool(cur_cand and old_cand and cur_cand != old_cand)
+        if is_diff_cand:
+            node_tasks = store.list_tasks(workflow_id=workflow_id)
+            started_cands = [
+                t for t in (node_tasks or [])
+                if (t.get('node') or t.get('stage')) == node_id
+                and (t.get('dispatch_role') or 'worker') == role
+                and (t.get('candidate_sha') or t.get('commit') or t.get('integrated_commit') or '').strip() == cur_cand
+                and not t.get('launch_not_started')
+                and t.get('pane_dispatched') is not False
+                and t.get('status') != 'pending'
+            ]
+            expected_round = len(started_cands) + 1
+            if dispatch_round != expected_round:
+                if expected_round == 1:
+                    raise ValueError('fresh candidate round requires dispatch_round=1')
+                else:
+                    raise ValueError(f'candidate round mismatch: expected {expected_round}, got {dispatch_round}')
+        elif cur_cand and not old_cand and dispatch_round == 1:
+            node_tasks = store.list_tasks(workflow_id=workflow_id)
+            started_cands = [
+                t for t in (node_tasks or [])
+                if (t.get('node') or t.get('stage')) == node_id
+                and (t.get('dispatch_role') or 'worker') == role
+                and (t.get('candidate_sha') or t.get('commit') or t.get('integrated_commit') or '').strip() == cur_cand
+                and not t.get('launch_not_started')
+                and t.get('pane_dispatched') is not False
+                and t.get('status') != 'pending'
+            ]
+            if started_cands:
+                expected_round = len(started_cands) + 1
+                raise ValueError(f'candidate round mismatch: expected {expected_round}, got {dispatch_round}')
+        elif old.get('launch_not_started'):
+            expected = int(old.get('dispatch_round') or 1)
+            if dispatch_round != expected and dispatch_round != expected + 1:
+                raise ValueError('relaunch after unstarted predecessor must preserve or advance round')
+        elif dispatch_round != int(old.get('dispatch_round') or 1) + 1:
             raise ValueError('supersedes must bind previous round of same workflow/node/role')
     task = find_dispatch_task(store, workflow_id, node_id, role, candidate_sha,
                               dispatch_round, execution_id)

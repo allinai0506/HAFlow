@@ -506,7 +506,7 @@ def _compute_used_agents(
     round_scoped_enabled = os.environ.get("HERDR_ROUTER_ROUND_SCOPED_ISOLATION", "1").lower() not in ("0", "false", "no")
     effective_round = None
     if round_scoped_enabled:
-        raw_round = dispatch_round if dispatch_round is not None else candidate_episode_id
+        raw_round = dispatch_round
         if raw_round is not None:
             try:
                 effective_round = int(raw_round)
@@ -534,8 +534,6 @@ def _compute_used_agents(
                     t_round = t.get("dispatch_round")
                     if t_round is None and isinstance(t.get("detail"), dict):
                         t_round = t["detail"].get("dispatch_round")
-                    if t_round is None:
-                        t_round = t.get("candidate_episode_id")
 
                     t_round_int = None
                     if t_round is not None:
@@ -681,10 +679,9 @@ def _choose_agent_locked(
     is_degraded = False
     degrade_reason = ""
 
-    raw_round = dispatch_round if dispatch_round is not None else candidate_episode_id
-    if raw_round is not None:
+    if dispatch_round is not None:
         try:
-            r_int = int(raw_round)
+            r_int = int(dispatch_round)
             if r_int > MAX_REMEDIATION_ROUNDS:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
                 raise RouterRemediationExhausted(

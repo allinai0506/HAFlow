@@ -540,6 +540,24 @@ node: {node["id"]} ({node["label"]})
 严禁向远程执行 git push 或提 PR，Worker Agent 仅在本地工作区自测，严禁随意切换或重命名 Git 分支，所有代码交付与集成由流水线控制器统一收编。{gate_note}""".strip()
 
 
+def _calculate_redispatch_round(node_tasks, task, candidate_sha):
+    target_cand = (candidate_sha or "").strip()
+    root = lineage_key(task.get("task_id"))[0]
+    if target_cand:
+        started = [
+            t for t in (node_tasks or [])
+            if lineage_key(t.get("task_id"))[0] == root
+            and (t.get("candidate_sha") or t.get("commit") or t.get("integrated_commit") or "").strip() == target_cand
+            and not t.get("launch_not_started")
+            and t.get("pane_dispatched") is not False
+            and t.get("status") not in ("pending",)
+        ]
+        return len(started) + 1
+    if task.get("launch_not_started"):
+        return int(task.get("dispatch_round") or 1)
+    return int(task.get("dispatch_round") or 1) + 1
+
+
 def _dispatch_spec(
     node,
     requirement,
@@ -734,7 +752,7 @@ def plan_stage_dispatch(
                 )
             for spec, task in zip(specs, sorted(awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or ""))):
                 spec["dispatch_role"] = task.get("dispatch_role") or "worker"
-                spec["dispatch_round"] = int(task.get("dispatch_round") or 1) + 1
+                spec["dispatch_round"] = _calculate_redispatch_round(node_tasks, task, candidate_sha)
                 spec["supersedes"] = task["task_id"]
             return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
 

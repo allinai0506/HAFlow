@@ -254,6 +254,100 @@ class PlanStageDispatchTest(unittest.TestCase):
             ["wf-1-test-auto-r4"],
         )
 
+    def test_redispatch_unstarted_predecessor_does_not_increment_round(self):
+        """Pre-allocation refusal (launch_not_started=True) did not consume a round.
+        The replacement must preserve the unconsumed round instead of incrementing."""
+        tasks = [
+            _task("wf-1-test-auto", "superseded", dispatch_round=1, launch_not_started=False, candidate_sha="a" * 40, superseded_by="wf-1-test-auto-r2"),
+            _task(
+                "wf-1-test-auto-r2",
+                "superseded",
+                dispatch_round=2,
+                launch_not_started=True,
+                pane_dispatched=False,
+                candidate_sha="a" * 40,
+                supersedes="wf-1-test-auto",
+            ),
+        ]
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求", candidate_sha="a" * 40)
+        self.assertEqual(plan["mode"], "dispatch")
+        self.assertEqual(len(plan["specs"]), 1)
+        spec = plan["specs"][0]
+        self.assertEqual(spec["task_id"], "wf-1-test-auto-r3")
+        self.assertEqual(spec["supersedes"], "wf-1-test-auto-r2")
+        # Predecessor r2 never started; effective attempt for candidate 'a'*40 is still round 2, NOT 3!
+        self.assertEqual(spec["dispatch_round"], 2)
+
+    def test_redispatch_fresh_candidate_resets_to_round_one(self):
+        """When candidate rotates to a fresh commit, the verifier stage begins at Round 1.
+        The task ID suffix -r3 only provides durable ID uniqueness, not a 3rd rework."""
+        tasks = [
+            _task("wf-1-test-auto", "superseded", dispatch_round=1, launch_not_started=False, candidate_sha="a" * 40, superseded_by="wf-1-test-auto-r2"),
+            _task(
+                "wf-1-test-auto-r2",
+                "superseded",
+                dispatch_round=2,
+                launch_not_started=True,
+                pane_dispatched=False,
+                candidate_sha="a" * 40,
+                supersedes="wf-1-test-auto",
+            ),
+        ]
+        # Dispatch with a fresh candidate SHA
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求", candidate_sha="b" * 40)
+        self.assertEqual(plan["mode"], "dispatch")
+        self.assertEqual(len(plan["specs"]), 1)
+        spec = plan["specs"][0]
+        self.assertEqual(spec["task_id"], "wf-1-test-auto-r3")
+        self.assertEqual(spec["supersedes"], "wf-1-test-auto-r2")
+        # Fresh candidate 'b'*40 has had 0 prior started attempts -> Round 1!
+        self.assertEqual(spec["dispatch_round"], 1)
+
+    def test_redispatch_fresh_candidate_with_sparse_predecessor_candidate(self):
+        """When predecessor task has empty/None candidate_sha (e.g. legacy or unverified),
+        dispatching a new frozen candidate still correctly resolves to Round 1."""
+        tasks = [
+            _task("wf-1-test-auto", "superseded", dispatch_round=1, candidate_sha=None, superseded_by="wf-1-test-auto-r2"),
+            _task(
+                "wf-1-test-auto-r2",
+                "superseded",
+                dispatch_round=2,
+                candidate_sha="",
+                supersedes="wf-1-test-auto",
+            ),
+        ]
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求", candidate_sha="b" * 40)
+        self.assertEqual(plan["mode"], "dispatch")
+        self.assertEqual(len(plan["specs"]), 1)
+        spec = plan["specs"][0]
+        self.assertEqual(spec["task_id"], "wf-1-test-auto-r3")
+        self.assertEqual(spec["dispatch_round"], 1)
+
+
+    def test_same_candidate_circuit_breaker_after_real_reworks(self):
+        """When the SAME candidate has 2 real started failures, the 3rd attempt is Round 3,
+        which will trip MAX_REMEDIATION_ROUNDS = 2 circuit breaker."""
+        tasks = [
+            _task("wf-1-test-auto", "superseded", dispatch_round=1, launch_not_started=False, pane_dispatched=True, candidate_sha="a" * 40, superseded_by="wf-1-test-auto-r2"),
+            _task(
+                "wf-1-test-auto-r2",
+                "superseded",
+                dispatch_round=2,
+                launch_not_started=False,
+                pane_dispatched=True,
+                candidate_sha="a" * 40,
+                supersedes="wf-1-test-auto",
+            ),
+        ]
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求", candidate_sha="a" * 40)
+        self.assertEqual(plan["mode"], "dispatch")
+        self.assertEqual(len(plan["specs"]), 1)
+        spec = plan["specs"][0]
+        self.assertEqual(spec["task_id"], "wf-1-test-auto-r3")
+        # Candidate 'a'*40 had 2 real started attempts -> Next attempt is Round 3!
+        self.assertEqual(spec["dispatch_round"], 3)
+
+
     def test_redispatch_of_plain_base_id(self):
         tasks = [_task("wf-1-test-backend", "superseded")]
         plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求")

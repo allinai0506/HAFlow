@@ -330,3 +330,31 @@ class TestAgentRouterRounds(unittest.TestCase):
                 candidate_author="agent-c",
             )
             self.assertEqual(reviewer, "agent-b")
+
+    def test_candidate_episode_id_not_mistaken_for_rework_round(self):
+        """candidate_episode_id is a database event sequence number (e.g. 106076),
+        NOT a dispatch round counter. It must never trigger RouterRemediationExhausted."""
+        with patch.object(agent_router, "_get_store", return_value=self.store), \
+             patch.object(agent_router, "workflow_config_for", return_value=self.workflow_config), \
+             patch.object(agent_router, "POOLS_FILE", self.pools_file), \
+             patch.object(agent_router, "RESERVATIONS_FILE", self.reservations_file), \
+             patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file):
+
+            # Passing candidate_episode_id=106076 without dispatch_round must NOT raise
+            selected = choose_agent(
+                self.workflow_id,
+                "craft",
+                "task",
+                candidate_episode_id=106076,
+            )
+            self.assertIn(selected, ["agent-a", "agent-b"])
+
+            # Passing candidate_episode_id=106076 with dispatch_round=1 must NOT raise
+            selected_r1 = choose_agent(
+                self.workflow_id,
+                "craft",
+                "task",
+                dispatch_round=1,
+                candidate_episode_id=106076,
+            )
+            self.assertIn(selected_r1, ["agent-a", "agent-b"])

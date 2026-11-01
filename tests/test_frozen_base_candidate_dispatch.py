@@ -27,7 +27,8 @@ def scene(tmp_path, monkeypatch):
     git("branch", "candidate")
     db = tmp_path / "state.db"
     monkeypatch.setenv('HERDR_STATE_DB', str(db))
-    from herdr.state_store import SQLiteStateStore
+    from herdr.state_store import SQLiteStateStore, reset_state_store
+    reset_state_store()
     SQLiteStateStore(db).save_workflow({'workflow_id': 'wf-candidate', 'status': 'running',
         'execution_id': 'gen', 'project_root': str(repo)})
     read_facts = scheduler_facts.list_candidate_frozen_events
