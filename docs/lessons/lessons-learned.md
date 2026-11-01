@@ -9239,18 +9239,18 @@ pytest -q tests/test_evaluator_ansi_test_output.py tests/test_evaluator_executio
 | 模板节点规范化丢弃节点级上限与全局默认优先级错位 | `_normalize_workflow_body` 未将 `delivery_ceiling` 拷贝至规范化节点字典，且 `_recorded_ceiling` 读取全局默认先于节点显式配置 | `_normalize_workflow_body` 显式保留节点级 `delivery_ceiling` 与 `delivery_ceiling_default`；`_recorded_ceiling` 严格按显式上限（根/节点）高于默认回退（节点/根）的顺序判定 |
 | 存量项目定义回填直接使用截断式覆盖导致异常残损风险 | `wf_path.write_text` 会先截断文件再写入内容；若发生 ENOSPC 或写入中断，会遗留空文件或截断损坏，致使后续注册失败 | 必须统一使用已有原子替换写入辅助函数 `_save(path, data)`（临时文件写入 + `os.replace` 原地原子替换）发布回填定义 |
 | 存量项目自愈回填仅复制默认上限遗漏模板显式上限 | 模板若同时声明了 `delivery_ceiling_default` 与 `delivery_ceiling`，回填若仅复制默认，后续注册会将其视为已有上限跳过显式上限导入，破坏 PR 门禁 | `ensure_project` 与 `register_workflow` 保持对称：同时回填 `delivery_ceiling` 与 `delivery_ceiling_default`，守护显式安全授权 |
+| 存量定义回填遗漏模板节点级显式上限导致门禁缺失 | 历史存量定义因早期 normalizer 缺陷遗漏了节点级 `delivery_ceiling: pr`，若仅回填根级字段，仍旧无法恢复 wrapup 的显式 PR 门禁 | 实现 `_backfill_template_ceilings` 对称回填模板 wrapup 节点上限（`delivery_ceiling`）与根级上限，彻底修复存量定义的节点级授权 |
 
 ### 操作规范
 
 1. **治理字段全生命周期透传**：模板声明的字段必须在 `provision_project`、`adopt_workspace_as_project`、`reprovision_project_template` 与 `_register_project_workflow` 中完整穿透，同时写入 `workflow.json` 与 `projects.json`。
 2. **节点级规范化完整保全**：`herdr/workflow.py:_normalize_workflow_body` 必须将节点级 `delivery_ceiling` 与 `delivery_ceiling_default` 完整复制至 `norm_node`，防止模板加载时被静默洗掉。
 3. **显式上限绝对优先**：`herdr/review_closure.py:_recorded_ceiling` 严格按「根显式 ➔ 节点显式 ➔ 根默认 ➔ 节点默认」优先级判定，确保任何显式指定的 PR 授权不被全局工作区默认覆盖。
-4. **三级自愈与不可变快照对齐**：在 `register_workflow` 入口处，若工作流未显式指定上限且 `not workflow_file`，依次从 project 记录和模板中补填 `delivery_ceiling_default` 与 `delivery_ceiling`，且必须在 `freeze_run_definition` 前生效。
-5. **存量自愈对称完整性**：`ensure_project` 回填存量项目定义时，必须对称同步模板的显式上限（`delivery_ceiling`）与默认上限（`delivery_ceiling_default`）。
-6. **已冻结快照零变动原则**：凡是携带 `workflow_file` 的已冻结定义（如重放或外部固化快照），跳过任何模板或项目配置注入，保护历史幂等性。
-7. **配置持久化原子性**：修改与回填现有项目文件（如 `workflow.json`）必须经由 `_save` 临时文件 + `os.replace` 原子替换，防御部分写入导致的 JSON 损坏。
-8. **Fail-Closed 门禁底线**：当且仅当模板或配置显式指定 `workspace` / `worktree` 时才免除 PR 回执；未指定时严格保持 fail-closed 门禁行为，不随意放宽。
-9. **沙盒环境路径容错**：在公共探测辅助函数中，对外部候选路径的任何 `p.exists()` 访问均须防护 `OSError`。
+4. **统一自愈回填助手（_backfill_template_ceilings）**：在 `register_workflow` 与 `ensure_project` 中统一复用 `_backfill_template_ceilings`，对 wrapup 节点显式上限、根显式上限与根默认上限执行原子化对称补齐。
+5. **已冻结快照零变动原则**：凡是携带 `workflow_file` 的已冻结定义（如重放或外部固化快照），跳过任何模板或项目配置注入，保护历史幂等性。
+6. **配置持久化原子性**：修改与回填现有项目文件（如 `workflow.json`）必须经由 `_save` 临时文件 + `os.replace` 原子替换，防御部分写入导致的 JSON 损坏。
+7. **Fail-Closed 门禁底线**：当且仅当模板或配置显式指定 `workspace` / `worktree` 时才免除 PR 回执；未指定时严格保持 fail-closed 门禁行为，不随意放宽。
+8. **沙盒环境路径容错**：在公共探测辅助函数中，对外部候选路径的任何 `p.exists()` 访问均须防护 `OSError`。
 
 ### 验证命令 / 守护测试
 
@@ -9267,11 +9267,12 @@ pytest -q tests/test_wrapup_review_closure.py tests/test_runtime_closure.py
 
 ### 相关文档 / 关联证据
 
-- `herdr/projects.py` — `_register_project_workflow`、`_has_explicit_node_ceiling`、`_save`、`provision_project`、`adopt_workspace_as_project`、`reprovision_project_template`、`ensure_project`、`register_workflow`
+- `herdr/projects.py` — `_register_project_workflow`、`_has_explicit_node_ceiling`、`_backfill_template_ceilings`、`_save`、`provision_project`、`adopt_workspace_as_project`、`reprovision_project_template`、`ensure_project`、`register_workflow`
 - `herdr/workflow.py` — `_normalize_workflow_body` 节点级交付上限字段保全
 - `herdr/review_closure.py` — `_recorded_ceiling` 显式优先判定
 - `herdr/stage_skills.py` — `get_default_skill_search_roots` 沙盒权限防御
-- `tests/test_project_template_registration.py` — 8 项专项回归测试（含节点显式优先、重放隔离、原子替换容灾与模板显式上限回填）
+- `tests/test_project_template_registration.py` — 9 项专项回归测试（含节点显式优先、重放隔离、原子替换容灾、模板显式上限回填与存量节点上限补齐）
+
 
 
 

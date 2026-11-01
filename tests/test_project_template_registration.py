@@ -408,7 +408,6 @@ def test_create_project_preserves_explicit_wrapup_ceiling_over_template_default(
         "clone_path": str(root),
     }
     assert closure_required(store, wrapup_task) is True
-
 def test_ensure_project_backfills_explicit_template_ceiling_alongside_default(
     project_environment, tmp_path, monkeypatch,
 ):
@@ -447,6 +446,55 @@ def test_ensure_project_backfills_explicit_template_ceiling_alongside_default(
     wrapup_task = {
         "task_id": "wf-legacy-explicit-ceiling-wrapup",
         "workflow_id": "wf-legacy-explicit-ceiling",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+
+def test_ensure_project_and_register_workflow_backfill_template_wrapup_ceiling(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "template-wrapup-pr",
+        "delivery_ceiling_default": "workspace",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "delivery_ceiling": "pr",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "template-wrapup-pr.json").write_text(
+        json.dumps(definition), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="template-wrapup-pr")
+    wf_path = Path(project["workflow_file"])
+
+    # Simulate legacy definition created by old normalizer that lost wrapup.delivery_ceiling
+    legacy_cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    legacy_cfg.pop("delivery_ceiling_default", None)
+    legacy_cfg.pop("delivery_ceiling", None)
+    for node in legacy_cfg.get("nodes", []):
+        if node.get("id") == "wrapup":
+            node.pop("delivery_ceiling", None)
+            node.pop("delivery_ceiling_default", None)
+    wf_path.write_text(json.dumps(legacy_cfg), encoding="utf-8")
+
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+
+    # ensure_project should backfill wrapup's delivery_ceiling from template
+    updated_project = projects.ensure_project(root, template_name="template-wrapup-pr")
+    projects.register_workflow("wf-legacy-wrapup-pr", updated_project)
+
+    wrapup_task = {
+        "task_id": "wf-legacy-wrapup-pr-wrapup",
+        "workflow_id": "wf-legacy-wrapup-pr",
         "node": "wrapup",
         "clone_path": str(root),
     }

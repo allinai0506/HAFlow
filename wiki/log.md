@@ -22,12 +22,12 @@
   4. **已冻结快照与重放保护（Codex P1 治理）**：仅在 `not workflow_file`（全新 Run 注册）时执行模板回填；若已显式提供 `workflow_file`（如 replay 历史重放），严格保持不可变历史定义不被模板默认篡改；
   5. **节点级显式上限优先（Codex P1 治理）**：在注入根级默认前，通过 `_has_explicit_node_ceiling` 校验是否存在节点级显式上限（如 wrapup 的 PR 门禁），绝不盲目覆盖子节点的安全授权；
   6. **模板节点交付上限规范化保全（Codex P1 第二轮）**：在 `herdr/workflow.py:_normalize_workflow_body` 显式保全节点级 `delivery_ceiling` 与 `delivery_ceiling_default`，并在 `herdr/review_closure.py:_recorded_ceiling` 确立显式上限（根/节点）严格优先于默认回退（节点/根）的判定链条，消除模板创建项目时的门禁静默降级；
-  7. **存量自愈显式上限对称回填（Codex P2 第二轮）**：`ensure_project` 在自愈存量项目定义时，同步回填模板声明的 `delivery_ceiling` 显式上限与 `delivery_ceiling_default` 默认上限，防止因只写入默认上限而丢失显式 PR 门禁；
+  7. **存量自愈与模板节点上限全量回填（Codex P2 第二轮）**：提取统一自愈回填辅助函数 `_backfill_template_ceilings`，在 `ensure_project` 与 `register_workflow` 中不仅对称回填模板根级上限，更将模板 wrapup 节点的显式上限（`delivery_ceiling: pr`）完整补回存量定义，杜绝因早期 normalizer 缺陷遗留的 PR 门禁静默失效；
   8. **原子持久化容灾（Codex P2 治理）**：存量项目定义回填统一使用已有原子替换辅助函数 `_save(wf_path, cfg)`（临时文件写入 + `os.replace` 原地替换），杜绝直接 `write_text` 截断式写入在 ENOSPC 或中断时损坏 JSON 文件；
   9. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
-  10. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 8 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离、原子替换容灾、模板项目创建显式上限优先与存量对称回填全生命周期。
+  10. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 9 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离、原子替换容灾、模板项目创建显式上限优先、存量对称回填与存量节点上限补齐全生命周期。
 - 验收结果：
-  - `tests/test_project_template_registration.py` (20 passed)
+  - `tests/test_project_template_registration.py` (21 passed)
   - `tests/test_wrapup_review_closure.py` (58 passed)
   - `tests/test_software_development_v1_template.py` 与 `test_software_development_v1_adapter.py` (54 passed)
   - `tests/test_replay.py`、`test_replay_append_only.py`、`test_replay_engine.py` (58 passed)

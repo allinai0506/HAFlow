@@ -520,6 +520,40 @@ def _has_explicit_node_ceiling(definition):
     return False
 
 
+def _backfill_template_ceilings(target_def, tmpl):
+    if not isinstance(target_def, dict) or not isinstance(tmpl, dict):
+        return False
+    changed = False
+
+    tmpl_wrapup = next(
+        (n for n in tmpl.get("nodes") or [] if isinstance(n, dict) and (n.get("id") or n.get("key")) == "wrapup"),
+        None,
+    )
+    if tmpl_wrapup:
+        target_wrapup = next(
+            (n for n in target_def.get("nodes") or [] if isinstance(n, dict) and (n.get("id") or n.get("key")) == "wrapup"),
+            None,
+        )
+        if target_wrapup is not None:
+            if tmpl_wrapup.get("delivery_ceiling") and not target_wrapup.get("delivery_ceiling"):
+                target_wrapup["delivery_ceiling"] = tmpl_wrapup["delivery_ceiling"]
+                changed = True
+            if tmpl_wrapup.get("delivery_ceiling_default") and not target_wrapup.get("delivery_ceiling_default"):
+                target_wrapup["delivery_ceiling_default"] = tmpl_wrapup["delivery_ceiling_default"]
+                changed = True
+
+    if tmpl.get("delivery_ceiling") and not target_def.get("delivery_ceiling"):
+        target_def["delivery_ceiling"] = tmpl["delivery_ceiling"]
+        changed = True
+
+    if tmpl.get("delivery_ceiling_default") and not target_def.get("delivery_ceiling_default"):
+        if not target_def.get("delivery_ceiling") and not _has_explicit_node_ceiling(target_def):
+            target_def["delivery_ceiling_default"] = tmpl["delivery_ceiling_default"]
+            changed = True
+
+    return changed
+
+
 def freeze_run_definition(workflow_id, definition=None, *, source_file=None):
     """Freeze one run definition into an immutable run-private file.
 
@@ -587,29 +621,21 @@ def register_workflow(
                     raise ValueError(f"required task {task_id} belongs to another workflow; "
                                      "update the project definition before creating a new run")
         if not workflow_file:
-            # Backfill delivery_ceiling_default / delivery_ceiling if missing
-            has_ceiling = (
-                definition.get("delivery_ceiling_default")
-                or definition.get("delivery_ceiling")
-                or _has_explicit_node_ceiling(definition)
-            )
-            if not has_ceiling:
-                ceiling_default = (project or {}).get("delivery_ceiling_default")
-                ceiling_explicit = (project or {}).get("delivery_ceiling")
-                if not ceiling_default and not ceiling_explicit:
-                    tmpl_name = definition.get("workflow_template") or (project or {}).get("workflow_template")
-                    if tmpl_name:
-                        try:
-                            tmpl = load_template(tmpl_name)
-                            if tmpl:
-                                ceiling_default = tmpl.get("delivery_ceiling_default")
-                                ceiling_explicit = tmpl.get("delivery_ceiling")
-                        except Exception:
-                            pass
-                if ceiling_default and not definition.get("delivery_ceiling_default"):
-                    definition["delivery_ceiling_default"] = ceiling_default
-                if ceiling_explicit and not definition.get("delivery_ceiling"):
-                    definition["delivery_ceiling"] = ceiling_explicit
+            # Backfill delivery ceilings from project or template if missing
+            if project:
+                if project.get("delivery_ceiling") and not definition.get("delivery_ceiling"):
+                    definition["delivery_ceiling"] = project["delivery_ceiling"]
+                if project.get("delivery_ceiling_default") and not definition.get("delivery_ceiling_default"):
+                    if not definition.get("delivery_ceiling") and not _has_explicit_node_ceiling(definition):
+                        definition["delivery_ceiling_default"] = project["delivery_ceiling_default"]
+            tmpl_name = definition.get("workflow_template") or (project or {}).get("workflow_template")
+            if tmpl_name:
+                try:
+                    tmpl = load_template(tmpl_name)
+                    if tmpl:
+                        _backfill_template_ceilings(definition, tmpl)
+                except Exception:
+                    pass
             snapshot_file = freeze_run_definition(workflow_id, definition=definition)
             if not snapshot_file:
                 raise RuntimeError("Workflow definition snapshot failed; run was not registered")
@@ -1460,24 +1486,17 @@ def ensure_project(root, template_name=None):
                 wf_path = Path(record["workflow_file"]).expanduser()
                 if wf_path.exists():
                     cfg = _load(wf_path, None)
-                    if (
-                        isinstance(cfg, dict)
-                        and not cfg.get("delivery_ceiling_default")
-                        and not cfg.get("delivery_ceiling")
-                        and not _has_explicit_node_ceiling(cfg)
-                    ):
+                    if isinstance(cfg, dict):
                         try:
                             tmpl = load_template(target_tmpl)
-                            ceiling_def = tmpl.get("delivery_ceiling_default")
-                            ceiling_exp = tmpl.get("delivery_ceiling")
-                            if ceiling_def or ceiling_exp:
-                                if ceiling_def:
-                                    cfg["delivery_ceiling_default"] = ceiling_def
-                                    record["delivery_ceiling_default"] = ceiling_def
-                                if ceiling_exp:
-                                    cfg["delivery_ceiling"] = ceiling_exp
-                                    record["delivery_ceiling"] = ceiling_exp
-                                _save(wf_path, cfg)
+                            if tmpl:
+                                changed = _backfill_template_ceilings(cfg, tmpl)
+                                if changed:
+                                    _save(wf_path, cfg)
+                                    if cfg.get("delivery_ceiling_default"):
+                                        record["delivery_ceiling_default"] = cfg["delivery_ceiling_default"]
+                                    if cfg.get("delivery_ceiling"):
+                                        record["delivery_ceiling"] = cfg["delivery_ceiling"]
                         except Exception:
                             pass
 
