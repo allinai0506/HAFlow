@@ -29,9 +29,9 @@
   11. **根级默认防覆写（Codex P2 第五轮）**：当定义已声明根级默认（`delivery_ceiling_default: pr`）时，`_backfill_template_ceilings` 与 `register_workflow` 严格校验 `not had_root_default`，且节点回填校验 `not had_root_ceiling`，杜绝模板/项目的根显式或节点显式 workspace 注入篡改权威根默认；
   12. **原子持久化容灾（Codex P2 治理）**：存量项目定义回填统一使用已有原子替换辅助函数 `_save(wf_path, cfg)`（临时文件写入 + `os.replace` 原地替换），杜绝直接 `write_text` 截断式写入在 ENOSPC 或中断时损坏 JSON 文件；
   13. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
-  14. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 13 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离、原子替换容灾、模板项目创建显式上限优先、存量对称回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写、回填前状态守卫与根级默认防覆写全生命周期。
+  14. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 14 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离、原子替换容灾、模板项目创建显式上限优先、存量对称回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写、回填前状态守卫、根级默认防覆写与未声明上限严格 Fail-Closed 全生命周期。
 - 验收结果：
-  - `tests/test_project_template_registration.py` (25 passed)
+  - `tests/test_project_template_registration.py` (26 passed)
   - `tests/test_wrapup_review_closure.py` (58 passed)
   - `tests/test_software_development_v1_template.py` 与 `test_software_development_v1_adapter.py` (54 passed)
   - `tests/test_replay.py`、`test_replay_append_only.py`、`test_replay_engine.py` (58 passed)

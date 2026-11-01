@@ -9275,7 +9275,7 @@ pytest -q tests/test_wrapup_review_closure.py tests/test_runtime_closure.py
 - `herdr/workflow.py` — `_normalize_workflow_body` 节点级交付上限字段保全
 - `herdr/review_closure.py` — `_recorded_ceiling` 显式优先判定
 - `herdr/stage_skills.py` — `get_default_skill_search_roots` 沙盒权限防御
-- `tests/test_project_template_registration.py` — 13 项专项回归测试（含节点显式优先、重放隔离、原子替换容灾、模板显式上限回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写、回填前状态守卫与根级默认防覆写）
+- `tests/test_project_template_registration.py` — 14 项专项回归测试（含节点显式优先、重放隔离、原子替换容灾、模板显式上限回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写、回填前状态守卫、根级默认防覆写与无上限模板严格 Fail-Closed）
 
 
 

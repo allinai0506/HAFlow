@@ -750,3 +750,43 @@ def test_recorded_root_default_not_overridden_by_template_or_project_ceilings(
     assert cfg_after_ensure.get("delivery_ceiling_default") == "pr"
     wrapup_node_ensure = next(n for n in cfg_after_ensure.get("nodes", []) if n.get("id") == "wrapup")
     assert wrapup_node_ensure.get("delivery_ceiling") is None
+
+
+def test_template_without_delivery_ceiling_preserves_fail_closed_gate(
+    project_environment, tmp_path,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    # Template without any delivery ceiling declaration
+    template_def = {
+        "name": "custom-no-ceiling",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "custom-no-ceiling.json").write_text(
+        json.dumps(template_def), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="custom-no-ceiling")
+    assert project.get("delivery_ceiling") is None
+    assert project.get("delivery_ceiling_default") is None
+
+    projects.register_workflow("wf-no-ceiling-custom", project)
+    registered_cfg = projects.workflow_config_for("wf-no-ceiling-custom")
+    assert registered_cfg.get("delivery_ceiling") is None
+    assert registered_cfg.get("delivery_ceiling_default") is None
+
+    wrapup_task = {
+        "task_id": "wf-no-ceiling-custom-wrapup",
+        "workflow_id": "wf-no-ceiling-custom",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    # Fail-closed: missing or unspecified delivery authorization strictly requires review closure receipt
+    assert closure_required(store, wrapup_task) is True
