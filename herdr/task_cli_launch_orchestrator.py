@@ -120,7 +120,7 @@ def launch_task_orchestrated(args, *, deps):
                     or ""
                 )
                 cur_cand = getattr(args, "candidate_sha", None) or ""
-                if cur_cand and pred_cand and cur_cand != pred_cand:
+                if cur_cand and cur_cand != pred_cand:
                     args.dispatch_round = 1
                 elif predecessor.get("launch_not_started"):
                     args.dispatch_round = int(predecessor.get("dispatch_round") or 1)

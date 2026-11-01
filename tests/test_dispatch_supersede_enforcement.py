@@ -158,6 +158,7 @@ class TestDispatchSupersedeEnforcement(unittest.TestCase):
         """When rotating to a fresh candidate SHA, begin_launch_intent permits dispatch_round=1."""
         from herdr.task_resources import begin_launch_intent
         mock_store = MagicMock()
+        mock_store.read_workflow_snapshot.return_value = ({}, {}, [])
         mock_store.get_task.return_value = {
             "task_id": "task-old",
             "workflow_id": "wf-1",
@@ -189,6 +190,124 @@ class TestDispatchSupersedeEnforcement(unittest.TestCase):
             )
             self.assertEqual(claim["status"], "claimed")
             self.assertEqual(claim["intent"]["dispatch_round"], 1)
+
+    def test_begin_launch_intent_non_candidate_stage_requires_round_advancement(self):
+        """Non-candidate stage (empty candidate_sha on both old and new) must enforce round increment."""
+        from herdr.task_resources import begin_launch_intent
+        mock_store = MagicMock()
+        mock_store.read_workflow_snapshot.return_value = ({}, {}, [])
+        mock_store.get_task.return_value = {
+            "task_id": "task-old",
+            "workflow_id": "wf-1",
+            "node": "craft",
+            "stage": "craft",
+            "status": "failed",
+            "dispatch_role": "worker",
+            "dispatch_round": 1,
+            "candidate_sha": "",
+        }
+        mock_conn = MagicMock()
+        with patch("herdr.state_db.get_readonly_db_connection", return_value=mock_conn), \
+             patch("herdr.dispatch_recovery.require_authorization"), \
+             self.assertRaises(ValueError) as ctx:
+            begin_launch_intent(
+                mock_store,
+                workflow_id="wf-1",
+                node_id="craft",
+                role="worker",
+                candidate_sha="",
+                dispatch_round=1,  # Attempting round 1 when predecessor was round 1
+                task_id="task-new",
+                supersedes="task-old",
+            )
+        self.assertIn("supersedes must bind previous round", str(ctx.exception))
+
+    def test_begin_launch_intent_fresh_candidate_rotation_rejects_round_greater_than_one(self):
+        """Fresh candidate rotation must strictly require dispatch_round=1."""
+        from herdr.task_resources import begin_launch_intent
+        mock_store = MagicMock()
+        mock_store.read_workflow_snapshot.return_value = ({}, {}, [])
+        mock_store.get_task.return_value = {
+            "task_id": "task-old",
+            "workflow_id": "wf-1",
+            "node": "review",
+            "stage": "review",
+            "status": "superseded",
+            "dispatch_role": "worker",
+            "dispatch_round": 2,
+            "candidate_sha": "a" * 40,
+        }
+        mock_store.list_tasks.return_value = []
+        mock_conn = MagicMock()
+        with patch("herdr.state_db.get_readonly_db_connection", return_value=mock_conn), \
+             patch("herdr.dispatch_recovery.require_authorization"), \
+             self.assertRaises(ValueError) as ctx:
+            begin_launch_intent(
+                mock_store,
+                workflow_id="wf-1",
+                node_id="review",
+                role="worker",
+                candidate_sha="b" * 40,
+                dispatch_round=2,  # Fresh candidate must be round 1, not 2
+                task_id="task-new",
+                supersedes="task-old",
+            )
+        self.assertIn("fresh candidate round requires dispatch_round=1", str(ctx.exception))
+
+    def test_orchestrator_candidate_rotation_with_sparse_predecessor_resets_round_to_one(self):
+        """When predecessor has sparse candidate field, fresh candidate resets dispatch_round to 1."""
+        from collections import defaultdict
+        from types import SimpleNamespace
+        from herdr.task_cli_launch_orchestrator import launch_task_orchestrated
+        args = SimpleNamespace(
+            workflow_id="wf-1",
+            node="review",
+            task_id="task-new",
+            supersedes="task-old",
+            candidate_sha="b" * 40,
+            dispatch_round=None,
+            dispatch_role="worker",
+            agent="auto",
+            task_type="review",
+            integration_mode="none",
+            onto=None,
+            source=None,
+            goal="review",
+            acceptance=[],
+            prompt="review",
+            agent_policy=None,
+            dry_run=True,
+        )
+        mock_store = MagicMock()
+        mock_store.read_workflow_snapshot.return_value = ({}, {}, [])
+        mock_store.get_task.return_value = {
+            "task_id": "task-old",
+            "workflow_id": "wf-1",
+            "node": "review",
+            "dispatch_round": 2,
+            "candidate_sha": "",  # sparse predecessor candidate
+        }
+        deps = defaultdict(MagicMock)
+        deps["BranchOwnershipError"] = Exception
+        deps["_get_store"] = lambda: mock_store
+        deps["get_store"] = lambda: mock_store
+        deps["_is_isolation_rejection"] = lambda exc: False
+        deps["_is_gate_task"] = lambda *a: False
+        deps["execution_fields_from_workflow"] = lambda *a: {"execution_mode": "none"}
+        deps["project_for_workflow"] = lambda *a: {"project_id": "p", "project_root": "/tmp", "execution": {"mode": "none"}}
+        deps["workflow_config_for"] = lambda *a: {"nodes": [{"id": "review"}]}
+        deps["find_dispatch_task"] = lambda *a, **k: None
+        deps["find_task"] = lambda *a, **k: None
+        mock_conn = MagicMock()
+        with patch("herdr.state_db.get_readonly_db_connection", return_value=mock_conn), \
+             patch("herdr.dispatch_recovery.require_authorization"), \
+             patch("herdr.task_resources.find_dispatch_task", return_value=None), \
+             patch("herdr.task_resources._latest_intent", return_value=None), \
+             patch("herdr.task_resources._launch_event"), \
+             patch("herdr.task_resources.record_launch_resources", side_effect=SystemExit(0)):
+            with self.assertRaises(SystemExit):
+                launch_task_orchestrated(args, deps=deps)
+        self.assertEqual(args.dispatch_round, 1)
 
 
 if __name__ == "__main__":

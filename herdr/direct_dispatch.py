@@ -547,7 +547,7 @@ def _calculate_redispatch_round(node_tasks, task, candidate_sha):
         started = [
             t for t in (node_tasks or [])
             if lineage_key(t.get("task_id"))[0] == root
-            and (t.get("candidate_sha") or "").strip() == target_cand
+            and (t.get("candidate_sha") or t.get("commit") or t.get("integrated_commit") or "").strip() == target_cand
             and not t.get("launch_not_started")
             and t.get("pane_dispatched") is not False
             and t.get("status") not in ("pending",)

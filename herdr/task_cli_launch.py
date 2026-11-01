@@ -216,16 +216,30 @@ def resolve_launch_agent(args, node_id, store, *, choose_agent, workflow_config_
 
 def _release_after_router_rejection(args, node_id, store, error, release_agent_reservation, *,
                                     record_unexpected=False, record_router_failure_task=None):
-    from herdr.task_resources import record_launch_rejection
-    try:
-        record_launch_rejection(
-            store,
-            args,
-            reason=f"router_rejected: {error}",
-            resources_absent=True,
+    recorded = False
+    if record_unexpected and record_router_failure_task:
+        from herdr.agent_router import (
+            RouterHealthRejection,
+            RouterPolicyRejection,
+            RouterRemediationExhausted,
         )
-    except Exception:
-        pass
+        if not isinstance(
+            error,
+            (RouterHealthRejection, RouterPolicyRejection, RouterRemediationExhausted),
+        ):
+            record_router_failure_task(args, node_id, error)
+            recorded = True
+    if not recorded:
+        from herdr.task_resources import record_launch_rejection
+        try:
+            record_launch_rejection(
+                store,
+                args,
+                reason=f"router_rejected: {error}",
+                resources_absent=True,
+            )
+        except Exception:
+            pass
     try:
         release_agent_reservation(args.task_id)
     except Exception:
@@ -398,6 +412,8 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
             artifact_mode=getattr(args, "artifact_mode", None),
             launch_intent_id=launch_intent["intent_id"],
         )
+        if (launch_intent.get("resources") or {}).get("run_id"):
+            task["run_id"] = launch_intent["resources"]["run_id"]
         if launch_intent.get("execution_id"):
             # 意图是身份权威:行必须与之一致,否则任何后续保存都会被
             # 登记身份护栏拒绝(半写身份砖死行)。
