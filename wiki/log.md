@@ -26,11 +26,12 @@
   8. **根级显式上限防覆盖节点上限（Codex P2 第三轮）**：在 `_backfill_template_ceilings` 与 `register_workflow` 的项目记录回退中，注入根级显式上限（`delivery_ceiling`）时同样强制要求 `not _has_explicit_node_ceiling`，防止模板或项目的全局工作区显式上限在 `_recorded_ceiling` 判定链中遮蔽 wrapup 节点的显式 PR 授权；`ensure_project` 中同步清理内存项目记录中冲突的根级上限；
   9. **节点级默认防覆写（Codex P2 第四轮）**：当定义包含 `wrapup.delivery_ceiling_default: pr` 时，`_backfill_template_ceilings` 严格检查目标节点既有声明，绝不导入模板节点的显式上限（`wrapup.delivery_ceiling: workspace`），消除因显式优先于默认导致的 PR 门禁误关；
   10. **基于回填前初始状态守卫根级上限（Codex P2 第四轮）**：在 `_backfill_template_ceilings` 与 `register_workflow` 中，根级上限回填守卫统一基于 `had_node_ceiling`（回填前初始状态）判定，防止导入模板节点字段后反向抑制模板自身的根级显式上限（如根 PR、节点 workspace）；
-  11. **原子持久化容灾（Codex P2 治理）**：存量项目定义回填统一使用已有原子替换辅助函数 `_save(wf_path, cfg)`（临时文件写入 + `os.replace` 原地替换），杜绝直接 `write_text` 截断式写入在 ENOSPC 或中断时损坏 JSON 文件；
-  12. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
-  13. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 12 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离、原子替换容灾、模板项目创建显式上限优先、存量对称回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写与回填前状态守卫全生命周期。
+  11. **根级默认防覆写（Codex P2 第五轮）**：当定义已声明根级默认（`delivery_ceiling_default: pr`）时，`_backfill_template_ceilings` 与 `register_workflow` 严格校验 `not had_root_default`，且节点回填校验 `not had_root_ceiling`，杜绝模板/项目的根显式或节点显式 workspace 注入篡改权威根默认；
+  12. **原子持久化容灾（Codex P2 治理）**：存量项目定义回填统一使用已有原子替换辅助函数 `_save(wf_path, cfg)`（临时文件写入 + `os.replace` 原地替换），杜绝直接 `write_text` 截断式写入在 ENOSPC 或中断时损坏 JSON 文件；
+  13. **沙盒权限容错**：`herdr/stage_skills.py` 在 `get_default_skill_search_roots` 中增加 `try ... except OSError: pass` 防护沙盒受限环境下的 `PermissionError`；
+  14. **TDD 专项守护**：`tests/test_project_template_registration.py` 新增 13 项测试验证模板创建、历史回填、adoption/reprovision、显式节点上限保护、重放隔离、原子替换容灾、模板项目创建显式上限优先、存量对称回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写、回填前状态守卫与根级默认防覆写全生命周期。
 - 验收结果：
-  - `tests/test_project_template_registration.py` (24 passed)
+  - `tests/test_project_template_registration.py` (25 passed)
   - `tests/test_wrapup_review_closure.py` (58 passed)
   - `tests/test_software_development_v1_template.py` 与 `test_software_development_v1_adapter.py` (54 passed)
   - `tests/test_replay.py`、`test_replay_append_only.py`、`test_replay_engine.py` (58 passed)

@@ -686,3 +686,67 @@ def test_legacy_definition_imports_template_root_ceiling_even_when_template_has_
         "clone_path": str(root),
     }
     assert closure_required(store, legacy_wrapup_task) is True
+
+
+def test_recorded_root_default_not_overridden_by_template_or_project_ceilings(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    template_def = {
+        "name": "template-override-workspace",
+        "delivery_ceiling": "workspace",
+        "nodes": [
+            {
+                "id": "wrapup",
+                "delivery_ceiling": "workspace",
+                "review_closure_required": True,
+            }
+        ],
+    }
+    (template_root / "template-override-workspace.json").write_text(
+        json.dumps(template_def), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="template-override-workspace")
+    wf_path = Path(project["workflow_file"])
+
+    # Authoritative definition records root delivery_ceiling_default="pr"
+    cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    cfg.pop("delivery_ceiling", None)
+    cfg["delivery_ceiling_default"] = "pr"
+    for node in cfg.get("nodes", []):
+        if node.get("id") == "wrapup":
+            node.pop("delivery_ceiling", None)
+            node.pop("delivery_ceiling_default", None)
+    wf_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    # Path 1: register_workflow with project having delivery_ceiling="workspace"
+    assert project.get("delivery_ceiling") == "workspace"
+    projects.register_workflow("wf-root-default-pr", project)
+    registered_cfg = projects.workflow_config_for("wf-root-default-pr")
+    assert registered_cfg.get("delivery_ceiling") is None
+    assert registered_cfg.get("delivery_ceiling_default") == "pr"
+    wrapup_node = next(n for n in registered_cfg.get("nodes", []) if n.get("id") == "wrapup")
+    assert wrapup_node.get("delivery_ceiling") is None
+
+    wrapup_task = {
+        "task_id": "wf-root-default-pr-wrapup",
+        "workflow_id": "wf-root-default-pr",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+
+    # Path 2: ensure_project path
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+    updated_project = projects.ensure_project(root, template_name="template-override-workspace")
+    assert updated_project.get("delivery_ceiling") is None
+    assert updated_project.get("delivery_ceiling_default") == "pr"
+    cfg_after_ensure = json.loads(wf_path.read_text(encoding="utf-8"))
+    assert cfg_after_ensure.get("delivery_ceiling") is None
+    assert cfg_after_ensure.get("delivery_ceiling_default") == "pr"
+    wrapup_node_ensure = next(n for n in cfg_after_ensure.get("nodes", []) if n.get("id") == "wrapup")
+    assert wrapup_node_ensure.get("delivery_ceiling") is None

@@ -526,6 +526,9 @@ def _backfill_template_ceilings(target_def, tmpl):
     changed = False
 
     had_node_ceiling = _has_explicit_node_ceiling(target_def)
+    had_root_explicit = bool(target_def.get("delivery_ceiling"))
+    had_root_default = bool(target_def.get("delivery_ceiling_default"))
+    had_root_ceiling = had_root_explicit or had_root_default
 
     tmpl_wrapup = next(
         (n for n in tmpl.get("nodes") or [] if isinstance(n, dict) and (n.get("id") or n.get("key")) == "wrapup"),
@@ -540,7 +543,7 @@ def _backfill_template_ceilings(target_def, tmpl):
             target_has_node_ceiling = bool(
                 target_wrapup.get("delivery_ceiling") or target_wrapup.get("delivery_ceiling_default")
             )
-            if not target_has_node_ceiling:
+            if not target_has_node_ceiling and not had_root_ceiling:
                 if tmpl_wrapup.get("delivery_ceiling"):
                     target_wrapup["delivery_ceiling"] = tmpl_wrapup["delivery_ceiling"]
                     changed = True
@@ -549,12 +552,12 @@ def _backfill_template_ceilings(target_def, tmpl):
                     changed = True
 
     if tmpl.get("delivery_ceiling") and not target_def.get("delivery_ceiling"):
-        if not had_node_ceiling:
+        if not had_node_ceiling and not had_root_default:
             target_def["delivery_ceiling"] = tmpl["delivery_ceiling"]
             changed = True
 
     if tmpl.get("delivery_ceiling_default") and not target_def.get("delivery_ceiling_default"):
-        if not target_def.get("delivery_ceiling") and not had_node_ceiling:
+        if not had_node_ceiling and not had_root_explicit:
             target_def["delivery_ceiling_default"] = tmpl["delivery_ceiling_default"]
             changed = True
 
@@ -629,13 +632,15 @@ def register_workflow(
                                      "update the project definition before creating a new run")
         if not workflow_file:
             had_node_ceiling = _has_explicit_node_ceiling(definition)
+            had_root_explicit = bool(definition.get("delivery_ceiling"))
+            had_root_default = bool(definition.get("delivery_ceiling_default"))
             # Backfill delivery ceilings from project or template if missing
             if project:
                 if project.get("delivery_ceiling") and not definition.get("delivery_ceiling"):
-                    if not had_node_ceiling:
+                    if not had_node_ceiling and not had_root_default:
                         definition["delivery_ceiling"] = project["delivery_ceiling"]
                 if project.get("delivery_ceiling_default") and not definition.get("delivery_ceiling_default"):
-                    if not definition.get("delivery_ceiling") and not had_node_ceiling:
+                    if not had_node_ceiling and not had_root_explicit:
                         definition["delivery_ceiling_default"] = project["delivery_ceiling_default"]
             tmpl_name = definition.get("workflow_template") or (project or {}).get("workflow_template")
             if tmpl_name:
@@ -1502,11 +1507,11 @@ def ensure_project(root, template_name=None):
                                 changed = _backfill_template_ceilings(cfg, tmpl)
                                 if changed:
                                     _save(wf_path, cfg)
-                                if _has_explicit_node_ceiling(cfg) and not cfg.get("delivery_ceiling"):
+                                if (cfg.get("delivery_ceiling_default") or _has_explicit_node_ceiling(cfg)) and not cfg.get("delivery_ceiling"):
                                     record.pop("delivery_ceiling", None)
                                 elif cfg.get("delivery_ceiling"):
                                     record["delivery_ceiling"] = cfg["delivery_ceiling"]
-                                if _has_explicit_node_ceiling(cfg) and not cfg.get("delivery_ceiling_default"):
+                                if not cfg.get("delivery_ceiling_default") and _has_explicit_node_ceiling(cfg):
                                     record.pop("delivery_ceiling_default", None)
                                 elif cfg.get("delivery_ceiling_default"):
                                     record["delivery_ceiling_default"] = cfg["delivery_ceiling_default"]
