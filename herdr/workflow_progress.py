@@ -57,9 +57,11 @@ def _gate(nodes, node_id):
     node = nodes.get(node_id)
     if node is None:
         return None
+    if node.get('gate_placeholder_normalized'):
+        return _DEFAULT_GATES.get(node_id)
     if 'gate' in node:
         gate = node['gate']
-        if gate is False:
+        if gate is False or not gate:
             return None
         if gate is True:
             return _DEFAULT_GATES.get(node_id) or 'implementation'

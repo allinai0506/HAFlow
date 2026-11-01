@@ -1,7 +1,7 @@
 """Pure node dispatch identity, registration evidence and wait projection."""
 import hashlib
 import json
-from .transitions import COMPLETED_TASK_STATUSES
+from .transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
 
 WAIT_SECONDS = 900
 CHECK_SECONDS = 30
@@ -207,7 +207,7 @@ def result(operation, workflow, config, tasks, now):
                      'decision_needed': '前序任务连续重规划达到上限(2次)，请人工核对任务谱系'})
         running_tasks = [
             t for t in registered_tasks(operation, workflow, tasks)
-            if t.get('status') in {'running', 'assigned', 'started'}
+            if t.get('status') in ACTIVE_TASK_STATUSES
         ]
         if operation['started'] and running_tasks:
             return ('waiting_human',

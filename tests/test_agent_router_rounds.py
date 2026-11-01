@@ -210,3 +210,52 @@ class TestAgentRouterRounds(unittest.TestCase):
                     "test",
                     dispatch_round=2,
                 )
+
+    def test_resolve_launch_agent_forwards_round_and_author_isolation(self):
+        """Verify the real CLI launch path (resolve_launch_agent) forwards dispatch_round
+        and candidate_author to choose_agent, enforcing author exclusion in production."""
+        from types import SimpleNamespace
+        from herdr.task_cli_launch import resolve_launch_agent
+
+        # Seed round 1 implementation authored by agent-a
+        self.store.save_task({
+            "task_id": "t-craft-seed",
+            "workflow_id": self.workflow_id,
+            "node": "craft",
+            "stage": "craft",
+            "agent": "agent-a",
+            "status": "completed",
+            "commit": "a" * 40,
+            "integrated_commit": "c" * 40,
+            "dispatch_round": 1,
+        })
+
+        args = SimpleNamespace(
+            workflow_id=self.workflow_id,
+            task_id="t-review-launch",
+            task_type="test",
+            agent="auto",
+            dispatch_role="worker",
+            dispatch_round=2,
+            candidate_sha="c" * 40,  # Matches agent-a's integrated_commit
+        )
+
+        with patch.object(agent_router, "_get_store", return_value=self.store), \
+             patch.object(agent_router, "workflow_config_for", return_value=self.workflow_config), \
+             patch.object(agent_router, "POOLS_FILE", self.pools_file), \
+             patch.object(agent_router, "RESERVATIONS_FILE", self.reservations_file), \
+             patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file):
+
+            resolved, requested = resolve_launch_agent(
+                args,
+                "review",
+                self.store,
+                choose_agent=choose_agent,
+                workflow_config_for=lambda _: self.workflow_config,
+                is_isolation_rejection=lambda _: False,
+                record_router_failure_task=lambda *a, **k: None,
+                release_agent_reservation=lambda *a, **k: None,
+            )
+
+            # agent-a authored candidate "c"*40; verifier in round 2 MUST exclude agent-a and pick agent-b!
+            self.assertEqual(resolved, "agent-b")

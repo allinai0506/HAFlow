@@ -271,8 +271,8 @@ def test_node_dispatch_replan_exhaustion():
 
 
 def test_node_dispatch_waits_for_active_worker():
-    """Verify that when an operation's worker task is actively running, it does not supersede
-    immediately to prevent concurrent git conflicts."""
+    """Verify that when an operation's worker task is actively running (working or dispatched),
+    it does not supersede immediately to prevent concurrent git conflicts."""
     wid = "wf-active-worker"
     eid = "exec-5"
     op_id = "op-active"
@@ -301,36 +301,129 @@ def test_node_dispatch_waits_for_active_worker():
         },
     }
 
-    tasks = [
-        {
-            "task_id": "t-pred",
-            "workflow_id": wid,
-            "node": "node-1",
-            "stage": "node-1",
-            "execution_id": eid,
-            "run_id": "r-1",
-            "status": "superseded",
-            "superseded_by": "t-other",
-            "replacement_pending": True,
-        },
-        # Task launched by this operation is actively executing in a pane
-        {
-            "task_id": "t-active-task",
-            "workflow_id": wid,
-            "node": "node-1",
-            "stage": "node-1",
-            "execution_id": eid,
-            "dispatch_operation_id": op_id,
-            "run_id": "r-active",
-            "launch_intent_id": "intent-active",
-            "status": "running",
-        },
-    ]
+    # Verify both 'working' and 'dispatched' statuses (authoritative ACTIVE_TASK_STATUSES)
+    for active_status in ("working", "dispatched", "rework"):
+        tasks = [
+            {
+                "task_id": "t-pred",
+                "workflow_id": wid,
+                "node": "node-1",
+                "stage": "node-1",
+                "execution_id": eid,
+                "run_id": "r-1",
+                "status": "superseded",
+                "superseded_by": "t-other",
+                "replacement_pending": True,
+            },
+            {
+                "task_id": "t-active-task",
+                "workflow_id": wid,
+                "node": "node-1",
+                "stage": "node-1",
+                "execution_id": eid,
+                "dispatch_operation_id": op_id,
+                "run_id": "r-active",
+                "launch_intent_id": "intent-active",
+                "status": active_status,
+            },
+        ]
 
-    outcome = core.result(operation, workflow, config, tasks, time.time())
-    assert outcome is not None
-    status, detail = outcome
+        outcome = core.result(operation, workflow, config, tasks, time.time())
+        assert outcome is not None
+        status, detail = outcome
 
-    assert status == "waiting_human"
-    assert detail["reason"] == "dispatch_predecessor_changed"
-    assert "仍在执行" in detail["decision_needed"]
+        assert status == "waiting_human"
+        assert detail["reason"] == "dispatch_predecessor_changed"
+        assert "仍在执行" in detail["decision_needed"]
+
+
+def test_gate_placeholder_normalized_distinction():
+    """Verify that normalized empty gate {} with gate_placeholder_normalized=True
+    is never mistaken for a declared gate targeting 'implementation'."""
+    from herdr.workflow_progress import gate_retry_node, _gate
+
+    nodes = {
+        "craft": {"id": "craft"},
+        "docs": {"id": "docs", "gate": {}, "gate_placeholder_normalized": True},
+        "review": {"id": "review", "gate": {"retry_node": "craft"}},
+    }
+    cfg = {"nodes": list(nodes.values())}
+
+    # docs has no declared gate
+    assert _gate(nodes, "docs") is None
+    assert gate_retry_node(cfg, "docs") == ""
+
+    # review has an explicit gate
+    assert _gate(nodes, "review") == "craft"
+    assert gate_retry_node(cfg, "review") == "craft"
+
+
+def test_replan_budget_carried_across_replacement_operations(tmp_path):
+    """Verify that node_dispatch_store carries replan_count across successive
+    replacement operations until the circuit breaker (2) is reached in the store."""
+    from herdr import node_dispatch_store, recovery_store
+    from herdr.state_store import SQLiteStateStore
+
+    db_path = tmp_path / "replan.db"
+    store = SQLiteStateStore(db_path)
+
+    wid = "wf-replan-carry"
+    eid = "exec-replan"
+    workflow = {
+        "workflow_id": wid,
+        "execution_id": eid,
+        "status": "running",
+        "config": {
+            "nodes": [
+                {"id": "node-0"},
+                {"id": "node-1", "depends_on": ["node-0"]},
+            ]
+        },
+    }
+    store.save_workflow(workflow)
+
+    # Initial upstream task
+    store.save_task({
+        "task_id": "t-up-1",
+        "workflow_id": wid,
+        "execution_id": eid,
+        "node": "node-0",
+        "stage": "node-0",
+        "status": "completed",
+        "stage_verdict": "pass",
+    })
+
+    # Initial node-1 task failed and needs redispatch
+    store.save_task({
+        "task_id": "t-node1-1",
+        "workflow_id": wid,
+        "execution_id": eid,
+        "node": "node-1",
+        "stage": "node-1",
+        "run_id": "r-1",
+        "status": "superseded",
+        "replacement_pending": True,
+    })
+
+    # First reconciliation creates initial operation (generation 1)
+    node_dispatch_store.reconcile_workflow(db_path, wid, now=10)
+    ops = [op for op in recovery_store.list_operations(db_path, wid)
+           if op['payload'].get('kind') == 'node_dispatch']
+    assert len(ops) == 1
+    op1 = ops[0]
+    assert op1['detail'].get('replan_count', 0) == 0
+
+    # Mark op1 superseded with replan_count = 1 (simulating result() after predecessor changed)
+    with recovery_store._transaction(db_path) as conn:
+        node_dispatch_store._write(
+            conn, op1, 'superseded',
+            {'reason': 'dispatch_predecessor_changed', 'replan_count': 1},
+            now=15,
+        )
+
+    # Reconcile again: new replacement operation (generation 2) MUST inherit replan_count = 1
+    node_dispatch_store.reconcile_workflow(db_path, wid, now=20)
+    op2 = node_dispatch_store.operation_for_node(db_path, wid, 'node-1')
+    assert op2 is not None
+    assert op2['id'] != op1['id']
+    assert op2['detail'].get('replan_count') == 1, "Replacement operation must inherit replan_count!"
