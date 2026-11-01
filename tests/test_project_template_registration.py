@@ -308,7 +308,6 @@ def test_explicit_wrapup_delivery_ceiling_not_overridden_by_template_default(
         "clone_path": str(root),
     }
     assert closure_required(store, wrapup_task) is True
-
 def test_replay_run_registration_preserves_frozen_snapshot_without_backfill(
     project_environment, tmp_path,
 ):
@@ -405,6 +404,49 @@ def test_create_project_preserves_explicit_wrapup_ceiling_over_template_default(
     wrapup_task = {
         "task_id": "wf-explicit-wrapup-created-wrapup",
         "workflow_id": "wf-explicit-wrapup-created",
+        "node": "wrapup",
+        "clone_path": str(root),
+    }
+    assert closure_required(store, wrapup_task) is True
+
+def test_ensure_project_backfills_explicit_template_ceiling_alongside_default(
+    project_environment, tmp_path, monkeypatch,
+):
+    from herdr.review_closure import closure_required
+
+    store, template_root = project_environment
+    definition = {
+        "name": "explicit-template",
+        "delivery_ceiling_default": "workspace",
+        "delivery_ceiling": "pr",
+        "nodes": [{"id": "wrapup", "review_closure_required": True}],
+    }
+    (template_root / "explicit-template.json").write_text(
+        json.dumps(definition), encoding="utf-8"
+    )
+
+    root = project_root(tmp_path, "git")
+    project = projects.create_project(root, template_name="explicit-template")
+    wf_path = Path(project["workflow_file"])
+
+    # Simulate legacy project file that lost ceilings
+    cfg = json.loads(wf_path.read_text(encoding="utf-8"))
+    cfg.pop("delivery_ceiling_default", None)
+    cfg.pop("delivery_ceiling", None)
+    wf_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    monkeypatch.setattr(projects, "_coordinator_alive", lambda pane_id: True)
+    updated = projects.ensure_project(root, template_name="explicit-template")
+    assert updated.get("delivery_ceiling") == "pr"
+    assert updated.get("delivery_ceiling_default") == "workspace"
+
+    projects.register_workflow("wf-legacy-explicit-ceiling", updated)
+    registered_cfg = projects.workflow_config_for("wf-legacy-explicit-ceiling")
+    assert registered_cfg.get("delivery_ceiling") == "pr"
+
+    wrapup_task = {
+        "task_id": "wf-legacy-explicit-ceiling-wrapup",
+        "workflow_id": "wf-legacy-explicit-ceiling",
         "node": "wrapup",
         "clone_path": str(root),
     }

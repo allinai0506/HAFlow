@@ -1469,10 +1469,15 @@ def ensure_project(root, template_name=None):
                         try:
                             tmpl = load_template(target_tmpl)
                             ceiling_def = tmpl.get("delivery_ceiling_default")
-                            if ceiling_def:
-                                cfg["delivery_ceiling_default"] = ceiling_def
+                            ceiling_exp = tmpl.get("delivery_ceiling")
+                            if ceiling_def or ceiling_exp:
+                                if ceiling_def:
+                                    cfg["delivery_ceiling_default"] = ceiling_def
+                                    record["delivery_ceiling_default"] = ceiling_def
+                                if ceiling_exp:
+                                    cfg["delivery_ceiling"] = ceiling_exp
+                                    record["delivery_ceiling"] = ceiling_exp
                                 _save(wf_path, cfg)
-                                record["delivery_ceiling_default"] = ceiling_def
                         except Exception:
                             pass
 
