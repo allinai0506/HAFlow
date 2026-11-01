@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-01] fix | 测试评估器输出解析全局正则跨行污染与 collect-only 误判修复 (§219)
+
+- 背景：真实工作流 `wf-haflow-1101-01` 的测试节点在执行 `pytest --collect-only` 产生健康收集结果（6816 tests collected in 7.15s, exit 0）时，被 `herdr/evaluator.py:parse_test_output` 误判为 `blocked`，触发 Recovery Op `372067`。
+- 根因分析：
+  1. `herdr/evaluator.py` 早期使用跨行非锚定正则扫描 pytest、Vitest、Jest 摘要，匹配到了测试参数名中的 `[1-4015 passed in 3.00s]` 与 `[...Tests 1 passed (1)]`；
+  2. 虚假匹配导致 collect-only 分支被短路，并激活了 Vitest 失败行扫描；
+  3. `_is_failing_test_line` 使用 `"FAIL " in line` 泛匹配将绿色参数名 `[展示 FAIL 状态]` 误判为失败，向 `failing_tests` 注入 4 项假失败用例，导致 `herdr-loop eval` 退出码 1。
+- 治理与修复：
+  1. **行级正则锚定与用例标识隔离**：对 pytest、Vitest、Jest 摘要匹配增加行级锚定（`^`、`$`）并显式跳过包含 `::`、`[` 的用例行；
+  2. **失败行首标记约束与前缀安全剥离**：`_is_failing_test_line` 仅判定行首标记（`✕`、`×`、`●`、`FAIL `），`_clean_failing_test_line` 仅切除行首匹配前缀，防止篡改用例名称本身；
+  3. **收集成功零执行原则**：collect-only 正常退出（exit 0）严格返回 `(0, 0, [])`，不伪造通过数；真实失败依然准确识别；
+  4. **Codex 深度审查缺陷治理**：支持 pytest >60s 耗时括号后缀（`(?:\s*\([\d:]+\))?`）防止失败项丢失；移除 unittest 短路 break 实现多段统计累加；Maven Surefire 正则支持 `[ERROR]` 与 `[WARNING]` 前缀防止 Java 失败统计失效；
+  5. **TDD 专项守护**：新增 `tests/test_evaluator_collect_only_parsing.py`，完整覆盖真实场景 11 项测试。
+- 验收结果：
+  - `tests/test_evaluator_collect_only_parsing.py` (11 passed)
+  - `tests/test_evaluator_ansi_test_output.py`、`tests/test_evaluator_execution_status.py`、`tests/test_evaluator_multi_runner_metrics.py`、`tests/test_loop_suite_smoke_default.py`、`tests/test_loop_evaluator.py`、`tests/test_c07_test_count_fix.py` (71 passed, 套件累计 82 passed)
+  - 真实 `herdr-loop eval` 端到端验证：初始化与评估在 collect-only 命令下退出码 0，score 100.0，converged True；真实失败用例准确捕获退出码 1；
+  - `compileall` 与 `git diff --check`（Clean）。
+- 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §219。
+
+
 ## [2026-11-01] review | PR #384 CI 单点修复、两轮 Codex 深度缺陷治理与经验沉淀 (§218)
 
 - 背景：PR #384 在 EGM 宏观设计论证后，CI 全量测试与两轮 Codex 自动化代码审查暴露出 1 个存量哈希基线漂移与 5 个微观物理接线缺陷。为防止“架构设计完备但生产接线脱节”，完成全部代码修复、新增针对性回归测试并将系统性教训沉淀至 `docs/lessons/lessons-learned.md` (§218)。
