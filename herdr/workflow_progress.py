@@ -6,7 +6,7 @@ import re
 
 _DEFAULT_GATES = {'test': 'implementation', 'review': 'implementation', 'wrapup': 'implementation'}
 _FACT_FIELDS = ('task_id', 'workflow_id', 'run_id', 'execution_id', 'workflow_run_id',
-                'node', 'stage', 'candidate_sha', 'commit', 'integrated_commit', 'stage_verdict', 'stage_verdict_note',
+                'node', 'stage', 'candidate_sha', 'commit', 'stage_verdict', 'stage_verdict_note',
                 'blocker', 'finalize_escalated', 'finalize_escalate_reason',
                 'affected_task_ids', 'stage_verdict_affected_task_ids', 'supersedes', 'parent_task_id')
 
@@ -24,6 +24,8 @@ def recovery_identity(workflow, facts):
     normalized = []
     for fact in facts:
         value = {key: fact.get(key) for key in _FACT_FIELDS}
+        if fact.get('integrated_commit'):
+            value['integrated_commit'] = fact['integrated_commit']
         if 'delivery_failure' in fact:
             value.update(delivery_failure=fact['delivery_failure'], delivery_rework_attempts=fact.get('delivery_rework_attempts'))
         value['affected_task_ids'] = sorted(set(value.get('affected_task_ids') or []))
@@ -322,6 +324,7 @@ def assess_workflow(workflow, config, tasks):
         if reason is None and kind == 'fix_loop' and not affected:
             reason = 'affected_tasks_unknown'
         identity_facts = [{**{key: task.get(key) for key in _FACT_FIELDS},
+                           **({'integrated_commit': task['integrated_commit']} if task.get('integrated_commit') else {}),
                            'affected_task_ids': sorted(affected)} for task in facts + affected_facts]
         if kind == 'delivery':
             for fact, task in zip(identity_facts, facts + affected_facts):
