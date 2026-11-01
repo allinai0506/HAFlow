@@ -542,7 +542,6 @@ node: {node["id"]} ({node["label"]})
 
 def _calculate_redispatch_round(node_tasks, task, candidate_sha):
     target_cand = (candidate_sha or "").strip()
-    pred_cand = (task.get("candidate_sha") or "").strip()
     root = lineage_key(task.get("task_id"))[0]
     if target_cand:
         started = [

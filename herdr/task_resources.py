@@ -306,7 +306,7 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
             raise ValueError('supersedes must bind previous round of same workflow/node/role')
         cur_cand = candidate_sha or ''
         old_cand = old.get('candidate_sha') or ''
-        if cur_cand and old_cand and cur_cand != old_cand:
+        if cur_cand and cur_cand != old_cand:
             if dispatch_round != 1:
                 raise ValueError('fresh candidate round requires dispatch_round=1')
         elif old.get('launch_not_started'):

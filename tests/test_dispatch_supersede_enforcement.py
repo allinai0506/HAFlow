@@ -154,6 +154,43 @@ class TestDispatchSupersedeEnforcement(unittest.TestCase):
         # Should not raise
         validate_supersedes_for_launch(args_with_supersedes, "review", mock_store)
 
+    def test_begin_launch_intent_candidate_rotation_with_empty_predecessor_candidate(self):
+        """When predecessor task has empty candidate_sha, begin_launch_intent with fresh
+        candidate_sha permits dispatch_round=1."""
+        from herdr.task_resources import begin_launch_intent
+        mock_store = MagicMock()
+        mock_store.get_task.return_value = {
+            "task_id": "task-old",
+            "workflow_id": "wf-1",
+            "node": "review",
+            "stage": "review",
+            "status": "superseded",
+            "dispatch_role": "worker",
+            "dispatch_round": 2,
+            "candidate_sha": "",
+        }
+        mock_store.list_tasks.return_value = []
+        mock_store.list_events.return_value = []
+        mock_conn = MagicMock()
+        with patch("herdr.state_db.get_readonly_db_connection", return_value=mock_conn), \
+             patch("herdr.task_resources.find_dispatch_task", return_value=None), \
+             patch("herdr.task_resources._latest_intent", return_value=None), \
+             patch("herdr.task_resources._launch_event"), \
+             patch("herdr.dispatch_recovery.require_authorization"):
+            # dispatch_round=1 on fresh candidate "b"*40 superseding task-old with "" candidate
+            claim = begin_launch_intent(
+                mock_store,
+                workflow_id="wf-1",
+                node_id="review",
+                role="worker",
+                candidate_sha="b" * 40,
+                dispatch_round=1,
+                task_id="task-new",
+                supersedes="task-old",
+            )
+            self.assertEqual(claim["status"], "claimed")
+            self.assertEqual(claim["intent"]["dispatch_round"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

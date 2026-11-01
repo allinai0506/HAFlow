@@ -303,6 +303,27 @@ class PlanStageDispatchTest(unittest.TestCase):
         # Fresh candidate 'b'*40 has had 0 prior started attempts -> Round 1!
         self.assertEqual(spec["dispatch_round"], 1)
 
+    def test_redispatch_fresh_candidate_with_sparse_predecessor_candidate(self):
+        """When predecessor task has empty/None candidate_sha (e.g. legacy or unverified),
+        dispatching a new frozen candidate still correctly resolves to Round 1."""
+        tasks = [
+            _task("wf-1-test-auto", "superseded", dispatch_round=1, candidate_sha=None, superseded_by="wf-1-test-auto-r2"),
+            _task(
+                "wf-1-test-auto-r2",
+                "superseded",
+                dispatch_round=2,
+                candidate_sha="",
+                supersedes="wf-1-test-auto",
+            ),
+        ]
+        plan = dd.plan_stage_dispatch("wf-1", _node(), tasks, "需求", candidate_sha="b" * 40)
+        self.assertEqual(plan["mode"], "dispatch")
+        self.assertEqual(len(plan["specs"]), 1)
+        spec = plan["specs"][0]
+        self.assertEqual(spec["task_id"], "wf-1-test-auto-r3")
+        self.assertEqual(spec["dispatch_round"], 1)
+
+
     def test_same_candidate_circuit_breaker_after_real_reworks(self):
         """When the SAME candidate has 2 real started failures, the 3rd attempt is Round 3,
         which will trip MAX_REMEDIATION_ROUNDS = 2 circuit breaker."""
