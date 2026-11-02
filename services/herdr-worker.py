@@ -1543,7 +1543,7 @@ def main():
             elif agent_start_attempted and not agent_started and pane_rolled_back:
                 failure.update(disposition='rolled_back', recovery_required=False, agent_started=False)
             elif not agent_start_attempted and not pane_id:
-                failure.update(recovery_required=False)
+                failure.update(disposition='not_started', recovery_required=False)
         else:
             failure.update(recovery_required=True)
 

@@ -752,6 +752,189 @@ class TestAgentQuotaHandover(unittest.TestCase):
         self.assertEqual(usage["active_task_count"], 1)
         self.assertFalse(usage["overflow"])
 
+    def test_preflight_refresh_concurrent_race_with_token_exhausted_preserves_failure(self):
+        """P1 verification: Preflight health refresh must not overwrite concurrent TOKEN_EXHAUSTED."""
+        from herdr import deep_preflight as dp
+        from herdr.agent_router import choose_agent
+        import herdr.agent_router as router
+
+        workflow_id = "wf-preflight-race-01"
+        self.store.save_workflow({
+            "workflow_id": workflow_id,
+            "project_id": "proj-race",
+            "project_root": str(self.tmp_path),
+            "status": "running",
+            "healthy_agents": ["opencode", "codex"],
+            "unhealthy_agents": {},
+        })
+
+        # 模拟 Preflight 探测过程：在 inspect 返回前（或返回后写回前），另一线程/进程写入 opencode 的 TOKEN_EXHAUSTED
+        orig_inspect = dp.inspect
+        orig_preflight_identity = dp.preflight_identity
+        orig_resolve_binary = dp.resolve_binary
+
+        def concurrent_inspect(project, deep=True, target_agents=None):
+            # 模拟检查期间，实时工作流发生额度耗尽并原子记录进 SQLite
+            other_store = SQLiteStateStore(self.db_path)
+            other_store.record_agent_unhealthy(workflow_id, "opencode", status="TOKEN_EXHAUSTED")
+            # inspect 自身可能认为 opencode 本地探测是 READY 的（瞬态/过时结果）
+            all_rows = [
+                {
+                    "agent": "opencode",
+                    "final_status": "READY",
+                    "request_verified": True,
+                    "preflight_identity": {"verifiable": True, "fingerprint": "fp-opencode"},
+                },
+                {
+                    "agent": "codex",
+                    "final_status": "READY",
+                    "request_verified": True,
+                    "preflight_identity": {"verifiable": True, "fingerprint": "fp-codex"},
+                },
+            ]
+            if target_agents is not None:
+                return [r for r in all_rows if r["agent"] in target_agents]
+            return all_rows
+
+        dp.inspect = concurrent_inspect
+        dp.preflight_identity = lambda agent, *a, **k: {"verifiable": True, "fingerprint": f"fp-{agent}"}
+        dp.resolve_binary = lambda a: f"/bin/{a}"
+        try:
+            dp.refresh_workflow_preflight(workflow_id, target_agents=["opencode", "codex"], store=self.store)
+
+            # 验证：并发写入的 opencode TOKEN_EXHAUSTED 必须保留在 SQLite 中，不可被 Preflight 冲刷掉
+            wf = self.store.get_workflow(workflow_id)
+            self.assertEqual(wf["unhealthy_agents"].get("opencode"), "TOKEN_EXHAUSTED")
+            self.assertNotIn("opencode", wf.get("healthy_agents", []))
+            self.assertIn("codex", wf.get("healthy_agents", []))
+
+            # 验证：Router 不可复活选择 opencode，只能选择健康可用的 codex
+            orig_wf_config = router.workflow_config_for
+            orig_get_store_router = router._get_store
+            orig_ensure_pool = router.ensure_pool_for_project
+            router.workflow_config_for = lambda wid: {
+                "workflow_id": wid,
+                "project_id": "proj-race",
+                "nodes": [{"id": "impl", "agent_policy": {"pool": ["opencode", "codex"]}}],
+            }
+            router.ensure_pool_for_project = lambda pid: {"allowed_agents": ["opencode", "codex"]}
+            router._get_store = lambda: self.store
+            try:
+                chosen = choose_agent(workflow_id, "impl", "code", "auto")
+                self.assertEqual(chosen, "codex")
+            finally:
+                router.workflow_config_for = orig_wf_config
+                router._get_store = orig_get_store_router
+                router.ensure_pool_for_project = orig_ensure_pool
+        finally:
+            dp.inspect = orig_inspect
+            dp.preflight_identity = orig_preflight_identity
+            dp.resolve_binary = orig_resolve_binary
+
+    def test_worker_pre_pane_preflight_failure_disposition_and_automatic_agent_handover(self):
+        """P2 verification: Pre-pane worker failure returns disposition=not_started, aborts intent, and enables handover."""
+        from herdr.task_cli_launch_worker import run_launch_worker, WorkerStartupHealthFailure
+        from herdr.task_resources import begin_launch_intent, _latest_intent
+
+        workflow_id = "wf-pre-pane-01"
+        self.store.save_workflow({
+            "workflow_id": workflow_id,
+            "project_id": "proj-pre-pane",
+            "status": "running",
+            "healthy_agents": ["opencode", "codex"],
+            "unhealthy_agents": {},
+        })
+
+        task_id = "wf-pre-pane-task-01"
+        self.store.save_task({
+            "task_id": task_id,
+            "workflow_id": workflow_id,
+            "node": "impl",
+            "agent": "auto",
+            "status": "pending",
+            "version": 1,
+        })
+
+        claim = begin_launch_intent(
+            self.store,
+            workflow_id=workflow_id,
+            node_id="impl",
+            role="worker",
+            candidate_sha="abc1234",
+            dispatch_round=1,
+            task_id=task_id,
+        )
+        self.assertEqual(claim["status"], "claimed")
+        launch_intent = claim["intent"]
+
+        args = SimpleNamespace(
+            workflow_id=workflow_id,
+            task_id=task_id,
+            agent="auto",
+            node="impl",
+            task_type="code",
+            source=str(self.tmp_path),
+            execution_mode="noninteractive",
+            timeout=120,
+        )
+
+        # 模拟 Worker 在创建 Pane 之前的 verify_request_preflight 阶段识别到 TOKEN_EXHAUSTED
+        # 此时 pane_id 为 None，clone 目录已被安全清理 (clone_absent=True)，agent 未启动
+        failure_payload = {
+            "launch_intent_id": launch_intent["intent_id"],
+            "task_id": task_id,
+            "run_id": "run-01",
+            "agent_name": "opencode",
+            "pane_id": None,
+            "pane_source": None,
+            "clone": None,
+            "agent_started": False,
+            "agent_start_attempted": False,
+            "disposition": "not_started",
+            "recovery_required": False,
+            "failure_type": "RuntimeError",
+        }
+        worker_output = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Worker Deep Preflight TOKEN_EXHAUSTED: request not verified\n"
+                f"HERDR_WORKER_FAILURE={json.dumps(failure_payload)}\n"
+            ),
+        )
+
+        # 运行 run_launch_worker，验证其识别 not_started disposition，安全释放意图并触发 WorkerStartupHealthFailure
+        with self.assertRaises(WorkerStartupHealthFailure) as ctx:
+            run_launch_worker(
+                args,
+                "impl",
+                "run-01",
+                self.store,
+                launch_intent,
+                None,
+                "opencode",
+                {"execution_mode": "git"},
+                "main",
+                "main",
+                None,
+                None,
+                Path("/herdr"),
+                run_worker=lambda *a, **kw: worker_output,
+                get_store=lambda: self.store,
+            )
+
+        self.assertEqual(ctx.exception.agent, "opencode")
+        self.assertEqual(ctx.exception.status, "TOKEN_EXHAUSTED")
+
+        # 验证意图已安全回滚至 resources_absent，未留下任何孤儿资源或挂起恢复
+        intent_status = _latest_intent(self.store, launch_intent["key"])
+        self.assertEqual(intent_status.get("phase"), "resources_absent")
+
+        # 验证 opencode 已被标记为 TOKEN_EXHAUSTED，为后续在同一任务内平滑交接给备选 Agent 提供保障
+        wf = self.store.get_workflow(workflow_id)
+        self.assertEqual(wf["unhealthy_agents"].get("opencode"), "TOKEN_EXHAUSTED")
+        self.assertNotIn("opencode", wf.get("healthy_agents", []))
+
 
 if __name__ == "__main__":
     unittest.main()

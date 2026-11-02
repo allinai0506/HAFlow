@@ -7,6 +7,9 @@ import sys
 from pathlib import Path
 
 
+SAFE_CLEANUP_DISPOSITIONS = ("rolled_back", "pane_reclaimed", "not_started")
+
+
 class WorkerStartupHealthFailure(RuntimeError):
     """Raised when worker startup fails due to an agent health condition and is cleanly rolled back."""
     def __init__(self, agent, status, failure_data=None):
@@ -89,7 +92,7 @@ def run_launch_worker(args, node_id, run_id, store, launch_intent, planned_clone
             health_status
             and failure_dict
             and failure_dict.get("recovery_required") is False
-            and failure_dict.get("disposition") in ("rolled_back", "pane_reclaimed")
+            and failure_dict.get("disposition") in SAFE_CLEANUP_DISPOSITIONS
             and (getattr(args, "agent", None) or "auto") == "auto"
         ):
             raise WorkerStartupHealthFailure(resolved_agent, health_status, failure_dict)
@@ -164,7 +167,7 @@ def _record_worker_failure_intent(store, get_store, args, node_id, run_id,
                 continue
             matched_failure = failure
             if (failure.get("recovery_required") is False
-                    and failure.get("disposition") in ("rolled_back", "pane_reclaimed")):
+                    and failure.get("disposition") in SAFE_CLEANUP_DISPOSITIONS):
                 from herdr.task_resources import abort_launch_intent
                 abort_launch_intent(store, launch_intent,
                                    reason=failure.get("failure_type", "worker_startup_failed"))

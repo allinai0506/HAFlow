@@ -730,36 +730,59 @@ def refresh_workflow_preflight(workflow_id, target_agents=None, *, store=None):
                 or current_allowed != allowed):
             raise RuntimeError("Workflow preflight configuration changed during probe; retry")
         record = latest
-        healthy = set(record.get("healthy_agents", []))
-        unhealthy = dict(record.get("unhealthy_agents") or {})
-        checked = dict(record.get("preflight_agent_checked_at") or {})
-        identities = dict(record.get("preflight_identities") or {})
         now = time.time()
         observed = set()
-        applied = set()
+        probed_results = {}
         for row in rows:
             agent = row.get("agent")
             if agent not in targets or agent in observed:
                 raise ValueError("Unexpected preflight result identity")
             observed.add(agent)
-            if _agent_result_watermark(record, agent) != watermarks[agent]:
-                continue  # A concurrent refresh already committed fresher evidence.
-            applied.add(agent)
             identity = row.get("preflight_identity") or {}
             current_identity = preflight_identity(agent, resolve_binary(AGENT_BINARIES.get(agent, agent)), root)
             identity_matches = (current_identity.get("verifiable") is True
                                 and current_identity.get("fingerprint") == identity.get("fingerprint"))
             ready = (row.get("final_status") == "READY" and row.get("request_verified") is True
                      and identity.get("verifiable") is True and identity_matches)
+            status = row.get("final_status", "UNKNOWN") if identity_matches else "UNKNOWN"
+            probed_results[agent] = {
+                "ready": ready,
+                "status": status,
+                "identity": identity,
+            }
+
+        unobserved = list(set(targets) - observed)
+
+        if hasattr(store, "record_preflight_results"):
+            record = store.record_preflight_results(
+                workflow_id,
+                probed_results,
+                unobserved_targets=unobserved,
+                watermarks=watermarks,
+                now=now,
+                is_full_sweep=(set(targets) == set(allowed)),
+                allowed=allowed,
+            )
+            return record
+
+        healthy = set(record.get("healthy_agents", []))
+        unhealthy = dict(record.get("unhealthy_agents") or {})
+        checked = dict(record.get("preflight_agent_checked_at") or {})
+        identities = dict(record.get("preflight_identities") or {})
+        applied = set()
+        for agent, res in probed_results.items():
+            if _agent_result_watermark(record, agent) != watermarks.get(agent):
+                continue  # A concurrent refresh already committed fresher evidence.
+            applied.add(agent)
             healthy.discard(agent)
-            if ready:
+            if res["ready"]:
                 healthy.add(agent); unhealthy.pop(agent, None)
             else:
-                unhealthy[agent] = row.get("final_status", "UNKNOWN") if identity_matches else "UNKNOWN"
+                unhealthy[agent] = res["status"]
             checked[agent] = now
-            identities[agent] = identity
-        for agent in set(targets) - observed:
-            if _agent_result_watermark(record, agent) == watermarks[agent]:
+            identities[agent] = res["identity"]
+        for agent in unobserved:
+            if _agent_result_watermark(record, agent) == watermarks.get(agent):
                 healthy.discard(agent); unhealthy[agent] = "UNKNOWN"
                 checked[agent] = now
                 identities[agent] = {}

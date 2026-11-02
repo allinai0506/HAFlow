@@ -183,6 +183,20 @@ class StateStore(ABC):
     ) -> dict[str, Any]:
         """Atomically mark an agent as unhealthy in workflow metadata inside an immediate transaction."""
 
+    @abstractmethod
+    def record_preflight_results(
+        self,
+        workflow_id: str,
+        probed_results: dict[str, dict[str, Any]],
+        *,
+        unobserved_targets: list[str] | None = None,
+        watermarks: dict[str, Any] | None = None,
+        now: float | None = None,
+        is_full_sweep: bool = False,
+        allowed: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically record preflight probe results under an immediate transaction."""
+
     # Tasks
     @abstractmethod
     def save_task(self, task: dict[str, Any], fail_if_exists: bool = False) -> None:
@@ -756,6 +770,121 @@ class SQLiteStateStore(StateStore):
             unhealthy, healthy = merge_trust_failure_unhealthy(wf, agent, status=status)
             wf["unhealthy_agents"] = unhealthy
             wf["healthy_agents"] = healthy
+
+            self.save_workflow(wf, conn=conn)
+            conn.execute("COMMIT;")
+
+            try:
+                from herdr.state_store import sync_workflows_projection
+                sync_workflows_projection(store=self)
+            except Exception:
+                pass
+
+            return wf
+        except Exception:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+    def record_preflight_results(
+        self,
+        workflow_id: str,
+        probed_results: dict[str, dict[str, Any]],
+        *,
+        unobserved_targets: list[str] | None = None,
+        watermarks: dict[str, Any] | None = None,
+        now: float | None = None,
+        is_full_sweep: bool = False,
+        allowed: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically record preflight probe results under an exclusive transaction.
+
+        Under BEGIN IMMEDIATE:
+        1. Reads current workflow metadata from SQLite.
+        2. Compares watermark for each probed agent; if watermark changed concurrently
+           (e.g. record_agent_unhealthy marked it TOKEN_EXHAUSTED), skips updating that agent
+           to preserve the fresher failure evidence.
+        3. For agents with matching watermarks, applies the probe verdict.
+        4. Leaves agents NOT in targets untouched in both healthy and unhealthy sets.
+        5. Commits and syncs projection.
+        """
+        if now is None:
+            now = time.time()
+        if watermarks is None:
+            watermarks = {}
+        if unobserved_targets is None:
+            unobserved_targets = []
+        if allowed is None:
+            allowed = []
+
+        conn = state_db.get_db_connection(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cur = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"Workflow '{workflow_id}' not found")
+
+            meta = json.loads(row["metadata_json"] or "{}")
+            cfg = json.loads(row["config_json"] or "{}")
+            wf = dict(meta)
+            wf.update({
+                "workflow_id": row["workflow_id"],
+                "title": row["title"],
+                "status": row["status"],
+                "template_name": row["template_name"],
+                "current_stage": row["current_stage"],
+                "config": cfg,
+                "created_at": row["created_at"],
+                "updated_at": now,
+            })
+
+            from herdr.deep_preflight import _agent_result_watermark
+
+            cur_healthy = set(wf.get("healthy_agents") or [])
+            cur_unhealthy = dict(wf.get("unhealthy_agents") or {})
+            cur_checked = dict(wf.get("preflight_agent_checked_at") or {})
+            cur_identities = dict(wf.get("preflight_identities") or {})
+
+            applied = set()
+            for agent, res in probed_results.items():
+                expected_wm = watermarks.get(agent)
+                curr_wm = _agent_result_watermark(wf, agent)
+                if expected_wm is not None and curr_wm != expected_wm:
+                    # Agent was concurrently modified (e.g. newly marked unhealthy);
+                    # discard stale probe verdict to avoid lost updates.
+                    continue
+
+                applied.add(agent)
+                cur_healthy.discard(agent)
+                if res.get("ready"):
+                    cur_healthy.add(agent)
+                    cur_unhealthy.pop(agent, None)
+                else:
+                    cur_unhealthy[agent] = res.get("status", "UNKNOWN")
+                cur_checked[agent] = now
+                cur_identities[agent] = res.get("identity") or {}
+
+            for agent in unobserved_targets:
+                expected_wm = watermarks.get(agent)
+                curr_wm = _agent_result_watermark(wf, agent)
+                if expected_wm is None or curr_wm == expected_wm:
+                    cur_healthy.discard(agent)
+                    cur_unhealthy[agent] = "UNKNOWN"
+                    cur_checked[agent] = now
+                    cur_identities[agent] = {}
+
+            wf["healthy_agents"] = sorted(cur_healthy)
+            wf["unhealthy_agents"] = cur_unhealthy
+            wf["preflight_agent_checked_at"] = cur_checked
+            wf["preflight_identities"] = cur_identities
+
+            if is_full_sweep and applied == set(allowed):
+                wf["preflight_checked_at"] = now
 
             self.save_workflow(wf, conn=conn)
             conn.execute("COMMIT;")
