@@ -523,20 +523,26 @@ def verify_plan_and_challenger(
 
     # 校验 challenger 审查闭环
     if require_challenger:
+        base_plan_details = {
+            "plan_id": plan_nid or meta.get("plan_id") or (sorted(valid_plan_ids)[0] if valid_plan_ids else ""),
+            "valid_plan_ids": sorted(valid_plan_ids),
+            "plan_text": plan_text,
+        }
+
         # 优先检查显式阻断（task stage_verdict 或 文本包含 blocked 裁决）
         verdict, verdict_reason = extract_challenger_verdict(challenger_text or "", chal_task)
         if verdict == "blocked":
             return (
                 False,
                 f"challenger_blocked: {verdict_reason}",
-                {"challenger_preview": (challenger_text or "")[:300]},
+                {**base_plan_details, "challenger_preview": (challenger_text or "")[:300]},
             )
 
         if not challenger_text:
             return (
                 False,
                 "challenger_missing: challenger review deliverable missing; adversarial review closed loop not satisfied",
-                {"missing": "challenger_text"},
+                {**base_plan_details, "missing": "challenger_text"},
             )
 
         chal_ok, chal_missing = validate_plan_deliverable_content(challenger_text, role="challenger")
@@ -544,14 +550,14 @@ def verify_plan_and_challenger(
             return (
                 False,
                 f"challenger_invalid: challenger review missing required sections: {', '.join(chal_missing)}",
-                {"missing_sections": chal_missing},
+                {**base_plan_details, "missing_sections": chal_missing},
             )
 
         if verdict != "pass":
             return (
                 False,
                 f"challenger_verdict_missing: {verdict_reason}",
-                {"challenger_preview": challenger_text[:300]},
+                {**base_plan_details, "challenger_preview": challenger_text[:300]},
             )
 
         if valid_plan_ids:
@@ -559,14 +565,14 @@ def verify_plan_and_challenger(
                 return (
                     False,
                     "challenger_plan_ref_missing: challenger approved without specifying Plan-Ref (<note_id> or plan file)",
-                    {"valid_plan_ids": sorted(valid_plan_ids)},
+                    {**base_plan_details, "valid_plan_ids": sorted(valid_plan_ids)},
                 )
             matches_ref = any(target_ref.lower() == pid.lower() or target_ref == pid for pid in valid_plan_ids)
             if not matches_ref:
                 return (
                     False,
                     f"challenger_plan_version_mismatch: challenger review targets {target_ref} but selected plan is {plan_nid or sorted(valid_plan_ids)}",
-                    {"target_plan": target_ref, "selected_plan": plan_nid or sorted(valid_plan_ids)},
+                    {**base_plan_details, "target_plan": target_ref, "selected_plan": plan_nid or sorted(valid_plan_ids)},
                 )
 
         plan_ts = float((plan_note or {}).get("ts") or 0.0)
@@ -575,7 +581,7 @@ def verify_plan_and_challenger(
             return (
                 False,
                 f"challenger_outdated: plan was updated (ts={plan_ts}) after challenger review was published (ts={chal_ts}); new plan requires re-review",
-                {"plan_ts": plan_ts, "challenger_ts": chal_ts, "plan_id": plan_nid},
+                {**base_plan_details, "plan_ts": plan_ts, "challenger_ts": chal_ts, "plan_id": plan_nid or base_plan_details["plan_id"]},
             )
 
     plan_ref = target_ref or plan_nid or (valid_plan_ids and sorted(valid_plan_ids)[0]) or ""

@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-02] fix | 计划阶段角色因果分步派发、持久化调度代次串联与质询审查自愈闭环（PR #390 / §222）
+
+- 背景：真实工作流 `wf-haflow-1102-02` 的 `plan` 阶段在推进至 `implementation` 时因审查时序倒挂（Executor 尚未写完方案前 Challenger 已提前退出）陷入 `challenger_outdated` 拒绝死锁；后续计划更新后无法自动触发重审，直接进入 `waiting_human` 挂起。
+- 根因分析：
+  1. `software-development-v1.yaml` 计划阶段同时声明 `executor` 与 `challenger` 且 `parallel: true`，缺乏角色依赖导致两工位无序并发；
+  2. `herdr/node_dispatch_store.py` 在首个角色完成且操作处于 `TERMINAL` 后未为后置依赖角色生成新的持久化派发代次，导致 Controller 无法 claim；
+  3. `services/controller/stage_state.py` 的 `is_node_complete` 与 `reconcile_stage_advance_states` 判定节点完成时缺少对多角色的完备性核验与审查有效性校验，且 `notified` 锁在空任务时撤销破坏了未知交付幂等；
+  4. 审查替代任务在 `max_tasks_per_node` 达到硬上限（如 2）时，准入判定未将携带 `--supersedes` 的待退役前驱计入释放，导致被容量硬拦截；
+  5. 角色识别采用 `task_id` 模糊匹配，当 Workflow ID 包含角色名（如 `wf-challenger-fix`）时引发跨角色错误绑定。
+- 治理与修复：
+  1. **因果分步派发**：模板为 `challenger` 配置 `depends_on_role: executor`；`direct_dispatch.py` 初始仅派发无依赖角色，前置有效方案持久化后自动派发后置角色，并注入 `plan_ref` 与 `plan_chunk`；
+  2. **持久化代次生成**：`node_dispatch_store.reconcile_workflow` 将已完成前置角色的多角色节点识别为分步派发，以 `prior_id = previous['id']` 生成新代次供 Controller 抢占；
+  3. **就绪判定与过期重审**：`is_node_complete` 增加计划审查有效性判定，审查过期时节点保持就绪，驱动 Controller 正常 sweep 并以 `redispatch_of` 自动重派；
+  4. **容量准入与替换退役**：`check_launch_capacity` 校验 `--supersedes` 并透传至 `node_usage(..., retiring_task_ids=...)`，使替代任务安全获得预算槽位；
+  5. **显式角色身份优先**：全流程强化显式元数据优先于 `task_id` 子串推断，根除误判。
+- 验收结果：
+  - `tests/test_plan_causal_dispatch.py` (7 passed)
+  - `tests/test_node_capacity.py` (29 passed)
+  - `tests/test_node_dispatch_contract.py` + `tests/test_selective_replan_controller.py` 全部 148 项测试全量 PASS
+  - 沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §222。
+
 ## [2026-11-02] fix | Agent 额度耗尽与运行时故障交接的原子并发契约与回退闭环（PR #388 / §221）
 
 - 背景：真实工作流在执行中遭遇 Agent（如 OpenCode）额度耗尽（"Free messages reset in ..."）或在 Pane 创建前探针失败时，未能自动透明交接改派，卡滞节点；同时旧任务退役状态被错误识别，导致 `verifier_budget_exhausted` 虚假拦截健康返工，或相反破坏了节点全生命周期累计硬预算。
@@ -4024,10 +4045,17 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 生产现场补齐：成功提取积压的 45 条工程教训资产（§165 ~ §213）并同步推送到 Experience Hub，经验总数从 7 条恢复至 52 条。
 - 验证：新增 `tests/test_workflow_experience_closeout.py` 专项守护测试，全量 126 项经验回归测试全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §216。
 
+## [2026-11-02] Fix | 计划阶段架构师与质询者角色因果解耦与过期重裁自愈（消除 plan -> implementation 时序死锁与挂起）
+- 角色因果分步派发（消除时序竞态）：`workflow_templates/software-development-v1.yaml` 中为 `challenger` 角色标注 `depends_on_role: executor`；`herdr/direct_dispatch.py` 在初始派发时仅启动无依赖前置角色，前置角色产出方案并落定后，自动触发后置依赖角色，并在提示词与规格中直接注入 `plan_ref` 与 `plan_chunk`，从根本上杜绝 Challenger 早于 Executor 退出导致的时序倒挂与 `Plan-Ref` 缺失。
+- 持久化派发代次接入与分步闭环：`herdr/node_dispatch_store.py` 在前置角色完成后以 `prior_id = previous['id']` 创建后置角色专属派发代次，`herdr/node_dispatch.py` 阻止既有任务误作废新角色代次，确保 Controller 能正常 claim 并在 Coordinator 队列中推进 Challenger。
+- 精准撤销锁与未知交付防护：`services/controller/stage_state.py` 严格限制 `notified` 锁撤销条件，无任务登记或结果未知的节点完整保留闩锁；仅在确凿前置交付落定且后置角色就绪时撤销。
+- 计划版本就绪判定与过期重裁自愈：`services/controller/stage_state.py:is_node_complete` 校验计划与质询结论有效性，过期/无效审查使计划节点保持未完成，通过 Controller 正常 sweep 将质询工位纳入重审，`herdr/plan_parser.py` 统一补齐各失败码的数据契约。
+- 验证：新增 `tests/test_plan_causal_dispatch.py` 覆盖 6 项单元与 Controller 全链路测试；全量回归套件全部通过；`compileall` 与 `git diff --check` clean。教训见 lessons §222。
+
 ## [2026-11-02] Fix | Staged 自动验收失败恢复闭环 V1（wf-haflow-1102-02）
 - 自动验收结论结构化：`services/controller/auto_acceptance.py` 的 `try_auto_accept()` 返回 `AutoAcceptResult`（`reason_code`/`missing`/`detail`），新增 `task_changes_evidence()` 区分 `changed`/`no_changes`/`unavailable`，`auto_rework_attempts()` 从 `status_history` 的 `auto_acceptance_rework:` 规范条目计数；成功路径 CAS 与 metadata 不变。
 - 受控恢复路由：`services/controller/task_events.py` 的 `_route_staged_auto_acceptance_failure()` 只把缺段落/无受控变更等白名单原因经既有 `herdr-task rework` 反馈到同一 Task/Pane；门禁证据缺失/冲突、关闭开关、reviewer、身份不完整、CAS 竞争升级并停止重投。
 - 升级闩与重投：`services/controller/attention.py#attention_escalated` 绑定 `version`/`run_id`/`execution_id`，episode 变化即清除；`done_events.py` 与事件处理在闩生效时提前返回，消除周期性空转。
 - rework 快照：`herdr/task_cli_rework.py` 接受 `--expected-status/version/run-id/execution-id`，快照不匹配 fail-closed，防止陈旧 done 事件把新执行拉回 rework；request-id 保持幂等。
 - 验证：新增 `tests/test_auto_acceptance_rework_recovery.py`（真实 SQLite、真实 CLI 解析、kernel 与 attention store，25 项）；受影响四文件 `112 passed`；`compileall`、`git diff --check` clean；候选 `4110731` 经独立 test/review 同 SHA pass。
-- 教训见 lessons §222。
+- 教训见 lessons §223。

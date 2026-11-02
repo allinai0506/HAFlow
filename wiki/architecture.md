@@ -164,7 +164,7 @@ Evidence:
   （`BASELINE_MATCH`）、配置不可判定的场景在非 staged 流程回落总指挥，绝不自动翻案；
   `HERDR_AUTO_ACCEPT=0` 整体关闭。背景：agent_done→completed 的总指挥验收
   等待实测占用 2.6h/8h，且其长回合会阻塞排在后面的门禁事件投递。
-- `FACT` **staged 自动验收失败的受控返工与升级（2026-11-02 引入，lessons §222）**:
+- `FACT` **staged 自动验收失败的受控返工与升级（2026-11-02 引入，lessons §223）**:
   `coordinator_required=false` 的 staged 流程没有总指挥可回落。`try_auto_accept()` 返回
   结构化 `AutoAcceptResult`（`reason_code`/`missing`/`detail`）：缺段落与
   `implementation_no_controlled_changes` 等白名单原因经 `herdr-task rework`（带
