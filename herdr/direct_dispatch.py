@@ -793,7 +793,13 @@ def plan_stage_dispatch(
                 )
                 if not verif_ok:
                     refusal_code = verif_reason.split(":")[0].strip()
-                    if refusal_code in ("challenger_outdated", "challenger_plan_ref_missing", "challenger_invalid", "challenger_verdict_missing") and (details.get("plan_id") or details.get("valid_plan_ids")):
+                    if refusal_code in (
+                        "challenger_outdated",
+                        "challenger_plan_ref_missing",
+                        "challenger_plan_version_mismatch",
+                        "challenger_invalid",
+                        "challenger_verdict_missing",
+                    ) and (details.get("plan_id") or details.get("valid_plan_ids")):
                         roles_needing_redispatch.append("challenger")
                         completed_role_tasks.pop("challenger", None)
 
@@ -804,12 +810,29 @@ def plan_stage_dispatch(
                 dep_role = str(r.get("depends_on_role") or "").strip().lower()
                 if dep_role:
                     if dep_role in completed_role_tasks:
+                        if dep_role == "executor" or (node_id == "plan" and r_name == "challenger"):
+                            from herdr.plan_parser import find_plan_deliverables, validate_plan_deliverable_content
+                            deliv = find_plan_deliverables(workflow_id, tasks, project_root)
+                            p_text = deliv[0] if deliv else None
+                            p_meta = getattr(deliv, "meta", {})
+                            p_ref = str(p_meta.get("plan_id") or "").strip()
+                            if not p_text or not p_ref:
+                                continue
+                            p_ok, _ = validate_plan_deliverable_content(p_text, role="executor")
+                            if not p_ok:
+                                continue
                         roles_to_dispatch.append(r)
                 else:
                     roles_to_dispatch.append(r)
 
             if roles_to_dispatch:
                 has_pending_roles = True
+            elif not all(str(r.get("name") or "").strip().lower() in completed_role_tasks for r in roles):
+                return {
+                    "mode": "wait",
+                    "reason": "waiting for prerequisite deliverables before dispatching next role",
+                    "specs": [],
+                }
 
         if not has_pending_roles and active:
             return {

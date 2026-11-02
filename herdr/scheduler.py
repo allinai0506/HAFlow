@@ -203,21 +203,26 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
                 if isinstance(r, dict) and r.get("name")
             }
             if required_roles:
-                completed_roles = {
-                    str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+                any_role_aware = any(
+                    t.get("dispatch_role") or t.get("role") or any(r in str(t.get("task_id") or "").lower() for r in required_roles)
                     for t in active
-                    if str(t.get("status") or "") in NODE_DONE_STATUSES
-                    and (t.get("integration_mode") != "git"
-                         or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
-                }
-                for t in active:
-                    if str(t.get("status") or "") in NODE_DONE_STATUSES:
-                        tid = str(t.get("task_id") or "").lower()
-                        for r_name in required_roles:
-                            if r_name in tid:
-                                completed_roles.add(r_name)
-                if not required_roles.issubset(completed_roles):
-                    return False
+                )
+                if any_role_aware:
+                    completed_roles = {
+                        str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+                        for t in active
+                        if str(t.get("status") or "") in NODE_DONE_STATUSES
+                        and (t.get("integration_mode") != "git"
+                             or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
+                    }
+                    for t in active:
+                        if str(t.get("status") or "") in NODE_DONE_STATUSES:
+                            tid = str(t.get("task_id") or "").lower()
+                            for r_name in required_roles:
+                                if r_name in tid:
+                                    completed_roles.add(r_name)
+                    if not required_roles.issubset(completed_roles):
+                        return False
     obligations = list(required_task_ids or []) + [
         t.get("task_id") for t in tasks if t.get("replacement_pending")]
     if obligations:

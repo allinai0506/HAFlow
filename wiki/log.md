@@ -4027,6 +4027,7 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 
 ## [2026-11-02] Fix | 计划阶段架构师与质询者角色因果解耦与过期重裁自愈（消除 plan -> implementation 时序死锁与挂起）
 - 角色因果分步派发（消除时序竞态）：`workflow_templates/software-development-v1.yaml` 中为 `challenger` 角色标注 `depends_on_role: executor`；`herdr/direct_dispatch.py` 在初始派发时仅启动无依赖前置角色，前置角色产出方案并落定后，自动触发后置依赖角色，并在提示词与规格中直接注入 `plan_ref` 与 `plan_chunk`，从根本上杜绝 Challenger 早于 Executor 退出导致的时序倒挂与 `Plan-Ref` 缺失。
-- 多角色全量落定守卫与锁状态自愈：`herdr/scheduler.py` 与 `services/controller/stage_state.py` 的 `node_is_complete` 支持接收 `node` 配置，严格校验节点声明的所有 `roles` 均有已完成的任务存在；`reconcile_stage_advance_states` 在节点未全量完成且无运行中任务时自动撤销 `notified` 锁，确保后续依赖角色顺利入队派发。
-- 计划更新后旧审查自动重裁闭环：`herdr/direct_dispatch.py` 在 `verify_plan_and_challenger` 识别到 `challenger_outdated`、`challenger_plan_ref_missing` 或 `challenger_invalid` 且最新方案存在时，自动将其转换为针对旧 Challenger 的补派规格（`dispatch_round += 1`，继承 `redispatch_of`），彻底消除进入 `waiting_human` 的挂起死锁。
-- 验证：新增 `tests/test_plan_causal_dispatch.py` 覆盖 4 项全链路测试；`tests/test_software_development_v1_template.py`、`test_software_development_v1_adapter.py`、`test_software_development_v1_e2e_isolated.py`、`test_direct_stage_dispatch.py` 与 `test_workflow_engine.py` 全部 100% 通过；`compileall` 与 `git diff --check` clean。教训见 lessons §222。
+- 持久化派发代次接入与分步闭环：`herdr/node_dispatch_store.py` 在前置角色完成后以 `prior_id = previous['id']` 创建后置角色专属派发代次，`herdr/node_dispatch.py` 阻止既有任务误作废新角色代次，确保 Controller 能正常 claim 并在 Coordinator 队列中推进 Challenger。
+- 精准撤销锁与未知交付防护：`services/controller/stage_state.py` 严格限制 `notified` 锁撤销条件，无任务登记或结果未知的节点完整保留闩锁；仅在确凿前置交付落定且后置角色就绪时撤销。
+- 计划版本就绪判定与过期重裁自愈：`services/controller/stage_state.py:is_node_complete` 校验计划与质询结论有效性，过期/无效审查使计划节点保持未完成，通过 Controller 正常 sweep 将质询工位纳入重审，`herdr/plan_parser.py` 统一补齐各失败码的数据契约。
+- 验证：新增 `tests/test_plan_causal_dispatch.py` 覆盖 6 项单元与 Controller 全链路测试；全量回归套件全部通过；`compileall` 与 `git diff --check` clean。教训见 lessons §222。

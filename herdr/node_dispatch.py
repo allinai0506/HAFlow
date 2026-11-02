@@ -244,6 +244,28 @@ def result(operation, workflow, config, tasks, now):
         required = operation['payload'].get('required_task_ids')
         inventory_owned = _valid_required(required) and (required is None
             or set(required).issubset({t['task_id'] for t in existing}))
+        if operation['payload'].get('prior_operation_id') is not None:
+            inventory_owned = False
+        node = next((n for n in config.get('nodes') or [] if n.get('id') == operation['payload']['node_id']), None)
+        policy = (node.get('agent_policy') or node.get('worker_policy') or {}) if node else {}
+        roles = {str(r['name']).strip().lower() for r in (policy.get('roles') or (node.get('roles') if node else None) or []) if isinstance(r, dict) and r.get('name')}
+        if roles:
+            existing_roles = {
+                str(t.get('dispatch_role') or t.get('role') or '').strip().lower()
+                for t in existing
+                if str(t.get('status') or '') in COMPLETED_TASK_STATUSES
+            }
+            for t in existing:
+                if str(t.get('status') or '') in COMPLETED_TASK_STATUSES:
+                    tid = str(t.get('task_id') or '').lower()
+                    for r_name in roles:
+                        if r_name in tid:
+                            existing_roles.add(r_name)
+            inventory_owned = inventory_owned and roles.issubset(existing_roles)
+            if 'challenger' in roles and operation['payload']['node_id'] == 'plan':
+                from herdr.plan_parser import verify_plan_and_challenger
+                verif_ok, _, _ = verify_plan_and_challenger(operation['workflow_id'], tasks=tasks, require_challenger=True)
+                inventory_owned = inventory_owned and verif_ok
         if waiting_for_prior:
             node = next(n for n in config['nodes'] if n['id'] == operation['payload']['node_id'])
             roles = {r['name'] for r in (node.get('agent_policy') or {}).get('roles', [])}

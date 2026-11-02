@@ -169,38 +169,35 @@ def is_node_complete(ports, workflow_id, node_id):
 
     if ports.scheduler_core is not None:
         try:
-            return ports.scheduler_core.node_is_complete(tasks, required_ids, node=node)
+            complete = ports.scheduler_core.node_is_complete(tasks, required_ids, node=node)
         except TypeError:
-            return ports.scheduler_core.node_is_complete(tasks, required_ids)
-    if required_ids is not None or any(t.get("replacement_pending") for t in tasks):
+            complete = ports.scheduler_core.node_is_complete(tasks, required_ids)
+    else:
+        complete = all(
+            t.get("status") in (
+                "completed", "committed", "integrated", "cleanup_ready", "cleaned"
+            )
+            and (t.get("integration_mode") != "git"
+                 or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
+            for t in active
+        )
+    if not complete:
         return False
 
-    roles = (node.get("agent_policy") or {}).get("roles") or node.get("roles") or []
-    if isinstance(roles, list) and roles:
-        required_roles = {str(r.get("name") or "").strip().lower() for r in roles if isinstance(r, dict) and r.get("name")}
-        if required_roles:
-            completed_roles = {
-                str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
-                for t in active
-                if t.get("status") in ("completed", "committed", "integrated", "cleanup_ready", "cleaned")
-            }
-            for t in active:
-                if t.get("status") in ("completed", "committed", "integrated", "cleanup_ready", "cleaned"):
-                    tid = str(t.get("task_id") or "").lower()
-                    for r_name in required_roles:
-                        if r_name in tid:
-                            completed_roles.add(r_name)
-            if not required_roles.issubset(completed_roles):
+    if node_id == "plan":
+        has_challenger_task = any(
+            str(t.get("dispatch_role") or t.get("role") or "").strip().lower() == "challenger"
+            or "challenger" in str(t.get("task_id") or "").lower()
+            for t in active
+        )
+        if has_challenger_task:
+            from herdr.plan_parser import verify_plan_and_challenger
+            all_wf_tasks = ports.load_tasks()
+            verif_ok, _, _ = verify_plan_and_challenger(workflow_id, tasks=all_wf_tasks, require_challenger=True)
+            if not verif_ok:
                 return False
 
-    return all(
-        t.get("status") in (
-            "completed", "committed", "integrated", "cleanup_ready", "cleaned"
-        )
-        and (t.get("integration_mode") != "git"
-             or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
-        for t in active
-    )
+    return True
 
 
 def dispatch_awaiting_human(ports, workflow_id, node_id):
@@ -281,10 +278,79 @@ def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
                     reason = "own lineage fully superseded with no live task"
                 elif not ports.is_node_complete(workflow_id, node_id):
                     node_t = [t for t in (wf_tasks or []) if t.get("workflow_id") == workflow_id and (t.get("node") == node_id or t.get("stage") == node_id)]
-                    from herdr.transitions import ACTIVE_TASK_STATUSES
+                    # Must have known registered tasks: absence of tasks alone must NOT authorize revocation!
+                    if not node_t:
+                        continue
+                    from herdr.transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
                     has_running = any(str(t.get("status") or "") in ACTIVE_TASK_STATUSES for t in node_t)
-                    if not has_running and not ports.dispatch_awaiting_human(workflow_id, node_id):
-                        reason = "node not complete with pending roles to dispatch"
+                    if has_running or ports.dispatch_awaiting_human(workflow_id, node_id):
+                        continue
+
+                    # Check if the node defines staged roles
+                    roles = (node.get("agent_policy") or {}).get("roles") or node.get("roles") or []
+                    if not (isinstance(roles, list) and len(roles) > 1):
+                        continue
+
+                    # Verify known prior delivery: at least one prerequisite role is completed
+                    completed_roles = {
+                        str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+                        for t in node_t
+                        if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by")
+                    }
+                    for t in node_t:
+                        if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by"):
+                            tid = str(t.get("task_id") or "").lower()
+                            for r in roles:
+                                r_n = str(r.get("name") or "").strip().lower()
+                                if r_n and r_n in tid:
+                                    completed_roles.add(r_n)
+
+                    if not completed_roles:
+                        continue
+
+                    # Check if plan review is outdated or invalid (reopening review)
+                    needs_redispatch = False
+                    if node_id == "plan" and "challenger" in completed_roles:
+                        from herdr.plan_parser import verify_plan_and_challenger
+                        verif_ok, verif_reason, details = verify_plan_and_challenger(
+                            workflow_id, tasks=wf_tasks, require_challenger=True
+                        )
+                        if not verif_ok:
+                            refusal_code = verif_reason.split(":")[0].strip()
+                            if refusal_code in (
+                                "challenger_outdated",
+                                "challenger_plan_ref_missing",
+                                "challenger_plan_version_mismatch",
+                                "challenger_invalid",
+                                "challenger_verdict_missing",
+                            ) and (details.get("plan_id") or details.get("valid_plan_ids")):
+                                completed_roles.discard("challenger")
+                                needs_redispatch = True
+
+                    # Verify there is an un-dispatched (or needs redispatch) role whose prerequisites are met
+                    pending_ready = False
+                    for r in roles:
+                        r_name = str(r.get("name") or "").strip().lower()
+                        if r_name in completed_roles:
+                            continue
+                        dep_role = str(r.get("depends_on_role") or "").strip().lower()
+                        if not dep_role or dep_role in completed_roles:
+                            if dep_role == "executor" or (node_id == "plan" and r_name == "challenger"):
+                                from herdr.plan_parser import find_plan_deliverables, validate_plan_deliverable_content
+                                deliv = find_plan_deliverables(workflow_id, wf_tasks)
+                                p_text = deliv[0] if deliv else None
+                                p_meta = getattr(deliv, "meta", {})
+                                p_ref = str(p_meta.get("plan_id") or "").strip()
+                                if not p_text or not p_ref:
+                                    continue
+                                p_ok, _ = validate_plan_deliverable_content(p_text, role="executor")
+                                if not p_ok:
+                                    continue
+                            pending_ready = True
+                            break
+
+                    if pending_ready:
+                        reason = "staged role pending redispatch" if needs_redispatch else "node not complete with pending roles to dispatch"
                     else:
                         continue
                 else:
