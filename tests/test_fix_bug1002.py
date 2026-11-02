@@ -33,9 +33,9 @@ def test_auto_accept_does_not_complete_blocked_or_review_task(extra):
     task = {**_task(), **extra}
     with patch.object(ctrl, 'get_task', return_value=task), \
          patch.object(ctrl, 'node_is_gate', return_value=False), \
-         patch.object(ctrl, 'task_changes_recorded', return_value=True), \
+         patch.object(ctrl, 'task_changes_evidence', return_value=('changed', '')), \
          patch.object(ctrl, 'set_task_status') as transition:
-        assert ctrl.try_auto_accept('t1') is False
+        assert not ctrl.try_auto_accept('t1')
         transition.assert_not_called()
 
 
@@ -71,7 +71,7 @@ def test_auto_accept_persists_explicit_evidence_and_rejects_stale_snapshot(tmp_p
     with patch.object(ctrl, '_get_store', return_value=store), \
          patch.object(ctrl, 'get_task', side_effect=store.get_task), \
          patch.object(ctrl, 'node_is_gate', return_value=False), \
-         patch.object(ctrl, 'task_changes_recorded', return_value=True):
+         patch.object(ctrl, 'task_changes_evidence', return_value=('changed', '')):
         assert ctrl.try_auto_accept('t1')
     saved = store.get_task('t1')
     assert saved['status'] == 'completed'
@@ -85,12 +85,12 @@ def test_auto_accept_persists_explicit_evidence_and_rejects_stale_snapshot(tmp_p
     def changes_then_block(task):
         result = kernel.transition_task('t2', 'rework', 'concurrent-blocker', store=store)
         assert result.get('accepted', True)
-        return True
+        return ('changed', '')
     with patch.object(ctrl, '_get_store', return_value=store), \
          patch.object(ctrl, 'get_task', return_value=stale), \
          patch.object(ctrl, 'node_is_gate', return_value=False), \
-         patch.object(ctrl, 'task_changes_recorded', side_effect=changes_then_block):
-        assert ctrl.try_auto_accept('t2') is False
+         patch.object(ctrl, 'task_changes_evidence', side_effect=changes_then_block):
+        assert not ctrl.try_auto_accept('t2')
     assert store.get_task('t2')['status'] == 'rework'
 
 

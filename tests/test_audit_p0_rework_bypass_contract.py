@@ -2,20 +2,8 @@
 Test-first contract verification for P0-1:
 Task events rejection handling in staged workflows and rework dispatch feasibility.
 
-Demonstrates:
-1. Current Behavior: When try_auto_accept() and try_auto_verdict() return False,
-   task_events._handle_task_event() records an attention_note and immediately returns,
-   leaving the task in 'agent_done' indefinitely (no state transition, no retry).
-2. Existing Contract Feasibility: The existing TASK_TRANSITIONS supports transitioning
-   from 'agent_done' to 'rework'.
-3. Real Persistence & Delivery Feasibility: Verifies that existing herdr.task_cli_rework.handle_rework
-   can be directly reused with real SQLiteStateStore persistence to transition agent_done -> rework,
-   update task metadata (rework_delivery='delivered', rework_prompt), dispatch prompt to Worker
-   transport, and allow downstream completion.
-4. Rework Budget Exhaustion Guard: Verifies that when delivery_rework_attempts reaches budget
-   limit (>= 3), repair_reason() returns 'delivery_repair_budget_exhausted', blocking further
-   auto-rework dispatch. This prevents the infinite-rework loop that would occur when using
-   the non-existent 'auto_rework_count' field (which has no write path in the codebase).
+Checks unknown staged rejection escalation, the existing transition matrix,
+real SQLite rework delivery, and the separate delivery repair budget.
 """
 
 import os
@@ -34,8 +22,8 @@ from services.controller import task_events
 
 class TestAuditP0ReworkBypassContract(unittest.TestCase):
 
-    def test_current_behavior_stalled_in_agent_done_without_transition(self):
-        """Verify that current implementation returns early without transitioning task out of agent_done."""
+    def test_unknown_failure_escalates_without_transition(self):
+        """Unknown failures escalate, retaining the task and coordinator bypass."""
         mock_ports = mock.MagicMock()
         mock_ports.get_task.return_value = {
             "task_id": "task-audit-p0-1",
@@ -43,6 +31,8 @@ class TestAuditP0ReworkBypassContract(unittest.TestCase):
             "status": "agent_done",
         }
         mock_ports.workflow_config_for.return_value = {"workflow_template": "software-development-v1"}
+        mock_ports.attention_escalated.return_value = False
+        mock_ports.auto_rework_attempts.return_value = 0
         mock_ports.try_auto_accept.return_value = False
         mock_ports.try_auto_verdict.return_value = False
         mock_ports.verdict_defer_reason.return_value = "deliverable regex mismatch"
@@ -61,7 +51,11 @@ class TestAuditP0ReworkBypassContract(unittest.TestCase):
         _, kwargs = mock_ports.attention_note.call_args
         self.assertIn("auto_acceptance_rejected", kwargs.get("reason", ""))
 
-        # 2. Verified Defect: set_task_status is NEVER called, task remains stuck in agent_done
+        self.assertTrue(kwargs["escalated"])
+        self.assertEqual(kwargs["reason_code"], "task_identity_incomplete")
+        mock_ports.subprocess.run.assert_not_called()
+
+        # Fail closed without inventing a terminal task status.
         mock_ports.set_task_status.assert_not_called()
 
     def test_existing_transition_matrix_supports_agent_done_to_rework(self):
@@ -142,7 +136,7 @@ class TestAuditP0ReworkBudgetExhaustion(unittest.TestCase):
         non-existent 'auto_rework_count' field (which has no write path in the repository:
         handle_rework() does not increment it, and no other code writes it).
 
-        The correct budget field is 'delivery_rework_attempts', which is atomically
+        For the separate delivery repair path the budget field is 'delivery_rework_attempts', which is atomically
         incremented and persisted by herdr/delivery_rework.py::repair_delivery().
         """
         from herdr.delivery_rework import repair_reason

@@ -728,10 +728,16 @@ Evidence:
 
 `FACT` 非门禁任务的自动验收拒绝已有 blocked 裁决及 review/reviewer/adversarial 角色。受控变更只证明变更验收，不产生评审 pass；状态转换使用 agent_done 与版本 CAS，既有状态事件和任务 metadata 记录 `acceptance_mode=auto`、`auto_accept_reason=controlled_changes`。
 
+`FACT` staged 流程（`coordinator_required=false`）的自动验收失败不再只写 attention 后空转：可修复白名单（需求/计划缺段落、challenger 交付物缺内容、实现无受控变更）经既有 `herdr-task rework` 在同一 Task/Pane 返工并重新验收；次数从 `status_history` 的 `auto_acceptance_rework:` 规范条目持久化计数，上限 2。门禁证据缺失/冲突、`stage_verdict=blocked`、关闭开关、reviewer 角色、身份不完整与 CAS 竞争不返工，写含 `attempts/limit` 的升级 attention，并以绑定 `version`/`run_id`/`execution_id` 的升级闩停止 `done` 重投；快照不匹配的陈旧事件按 stale 丢弃，不强制写入。
+
 `FACT` Worker已取得pane后，未尝试Agent start且能证明本进程私有动态分配时可rollback；无法证明或已经尝试start则保留clone和私有身份文件。失败回执包含pane来源及恢复标记。身份文件不是成功启动或完成凭据，未知实例不自动关闭。Git 工位 context 明确留在分配分支、集成前不得自行 push/创建 PR。
 
 Evidence:
 - `services/herdr-controller.py#try_auto_accept`
+- `services/controller/task_events.py#_route_staged_auto_acceptance_failure`
+- `services/controller/attention.py#attention_escalated`
+- `herdr/task_cli_rework.py#handle_rework`
+- `tests/test_auto_acceptance_rework_recovery.py`
 - `services/herdr-worker.py#main`
 - `services/herdr-worker.py#write_task_context`
 - `tests/test_fix_bug1002.py#test_auto_accept_persists_explicit_evidence_and_rejects_stale_snapshot`

@@ -75,6 +75,8 @@ def redeliver_done_event(ports, task, now=None):
     with ports.lock:
         if key in ports.queued_events:
             return False
+    if ports.attention_escalated(key, task):
+        return False
     if ports.attention_blocks_retry(key, now):
         return False
     print(
@@ -94,7 +96,7 @@ DEPENDENCIES = {'emit_done_if_allowed': ('_get_store', '_observer_terminal_check
                           '_supervisor_log_pending', 'enqueue_coordinator_event',
                           'recover_pending_interventions', 'supervisor_checkpoint',
                           'supervisor_continue_flow', 'supervisor_harness', 'threading'),
- 'redeliver_done_event': ('attention_blocks_retry', 'attention_get', 'attention_throttle',
+ 'redeliver_done_event': ('attention_escalated', 'attention_blocks_retry', 'attention_get', 'attention_throttle',
                           'emit_done_if_allowed', 'lock', 'queued_events', 'time')}
 
 __all__ = tuple(DEPENDENCIES)

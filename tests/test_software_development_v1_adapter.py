@@ -1064,21 +1064,26 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
         self.assertTrue(is_staged_dev_flow_workflow({"coordinator_required": False}))
 
         # 2. task event rejection bypasses coordinator
+        from services.controller.auto_acceptance import AutoAcceptResult
         mock_ports = mock.MagicMock()
         mock_ports.get_task.return_value = {
             "task_id": "t-done-fail",
             "workflow_id": "wf-staged-01",
-            "status": "agent_done",
+            "status": "agent_done", "node": "plan", "version": 1,
+            "run_id": "r", "execution_id": "e",
         }
         mock_ports.workflow_config_for.return_value = {"workflow_template": "software-development-v1"}
-        mock_ports.try_auto_accept.return_value = False
+        mock_ports.try_auto_accept.return_value = AutoAcceptResult(False, "plan_missing_sections", missing=("Files",))
+        mock_ports.attention_escalated.return_value = False
+        mock_ports.auto_rework_attempts.return_value = 0
+        mock_ports.TASK_MANAGER = "bin/herdr-task"
         mock_ports.try_auto_verdict.return_value = False
         mock_ports.verdict_defer_reason.return_value = "plan deliverable incomplete"
 
         # Coordinator interfaces must NOT be invoked
         mock_ports.coordinator_status.side_effect = AssertionError("coordinator_status should not be called!")
         mock_ports.coordinator_pane_for_workflow.side_effect = AssertionError("coordinator_pane_for_workflow should not be called!")
-        mock_ports.subprocess.run.side_effect = AssertionError("subprocess prompt should not be called!")
+        mock_ports.subprocess.run.return_value = mock.Mock(returncode=0)
 
         item = {
             "key": "t-done-fail:event",
@@ -1087,9 +1092,10 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
             "workflow_id": "wf-staged-01",
         }
         task_events._handle_task_event(mock_ports, item)
-        mock_ports.attention_note.assert_called_once()
-        args, kwargs = mock_ports.attention_note.call_args
-        self.assertIn("auto_acceptance_rejected", kwargs.get("reason", ""))
+        mock_ports.attention_note.assert_not_called()
+        cmd = mock_ports.subprocess.run.call_args.args[0]
+        self.assertEqual(cmd[:3], ["bin/herdr-task", "rework", "t-done-fail"])
+        self.assertIn("Files", cmd[cmd.index("--prompt") + 1])
 
     def test_30_unattributed_review_note_and_historic_plan_files_isolation(self):
         """Scenario 30: Unattributed review notes cannot bypass [BLOCKED] and historic plan files do not override notes."""
