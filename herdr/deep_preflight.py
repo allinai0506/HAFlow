@@ -57,6 +57,9 @@ TOKEN_PATTERNS = [
     r"billing.*(limit|exhaust|issue)",
     r"payment required",
     r"\b402\b",
+    r"used (today's|all your) free messages",
+    r"free messages?.*(limit|reset|exhaust)",
+    r"upgrade to opencode go",
 ]
 AUTH_PATTERNS = [
     r"not logged in",
@@ -253,6 +256,55 @@ def classify_text(text):
     for status, patterns in checks:
         if any(re.search(p, low, re.I) for p in patterns):
             return status
+    return None
+
+
+RUNTIME_TOKEN_PATTERNS = [
+    # Explicit quota / billing exhaustion errors:
+    r"used (?:today's|all your) free messages",
+    r"upgrade to opencode go",
+    r"free messages?.*(?:limit|reset|exhaust)",
+    r"open_?code free message(?:s)? limit reached",
+    r"you(?:'ve| have) reached your (?:current )?usage limit",
+    r"you exceeded your current quota",
+    r"insufficient_quota",
+    r"credit balance is too low",
+    r"billing hard limit has been reached",
+    r"you have exceeded your monthly budget",
+    r"check your plan and billing details",
+    r"out of credits?",
+    r"(?:credit|quota)\s*(?:balance\s*)?(?:is\s*)?depleted",
+    r"insufficient\s*(?:quota|credits?)",
+    r"(?:quota|credits?)\s*(?:exhausted|exceeded|insufficient)",
+    # Rate limit and token limit ERRORS (not ordinary variable/prompt usage):
+    r"(?:rate\s*limit|rate_limit)\s*(?:exceeded|reached|error)",
+    r"(?:hit|reached)\s*(?:a\s*)?rate\s*limit",
+    r"rate limit reached for requests",
+    r"(?:token\s*limit|tokens?\s*quota)\s*(?:exhausted|exceeded|reached)",
+    r"(?:exceeded|reached)\s*(?:your\s*)?(?:token\s*limit|quota)",
+    # HTTP 402 Payment Required:
+    r"(?:http|status|error|code)[:\s]+402\b",
+    r"\b402\s+payment\s+required\b",
+    r"payment required",
+]
+
+
+def classify_runtime_token_exhausted(text, agent=None):
+    """Classify whether visible runtime pane text proves quota exhaustion.
+
+    Unlike preflight CLI probing (which matches broad tokens on isolated error output),
+    runtime evaluation runs against full terminal buffers containing user prompts,
+    code files, and test summaries. It requires concrete error phrasing to avoid
+    false-positive blacklisting on prompts ('Implement rate-limit middleware') or
+    successful test counts ('402 passed in 12s').
+    """
+    if not text:
+        return None
+    cleaned = strip_known_status_chrome(agent or "", text)
+    low = cleaned.lower()
+    for pattern in RUNTIME_TOKEN_PATTERNS:
+        if re.search(pattern, low, re.I):
+            return "TOKEN_EXHAUSTED"
     return None
 
 
@@ -678,36 +730,59 @@ def refresh_workflow_preflight(workflow_id, target_agents=None, *, store=None):
                 or current_allowed != allowed):
             raise RuntimeError("Workflow preflight configuration changed during probe; retry")
         record = latest
-        healthy = set(record.get("healthy_agents", []))
-        unhealthy = dict(record.get("unhealthy_agents") or {})
-        checked = dict(record.get("preflight_agent_checked_at") or {})
-        identities = dict(record.get("preflight_identities") or {})
         now = time.time()
         observed = set()
-        applied = set()
+        probed_results = {}
         for row in rows:
             agent = row.get("agent")
             if agent not in targets or agent in observed:
                 raise ValueError("Unexpected preflight result identity")
             observed.add(agent)
-            if _agent_result_watermark(record, agent) != watermarks[agent]:
-                continue  # A concurrent refresh already committed fresher evidence.
-            applied.add(agent)
             identity = row.get("preflight_identity") or {}
             current_identity = preflight_identity(agent, resolve_binary(AGENT_BINARIES.get(agent, agent)), root)
             identity_matches = (current_identity.get("verifiable") is True
                                 and current_identity.get("fingerprint") == identity.get("fingerprint"))
             ready = (row.get("final_status") == "READY" and row.get("request_verified") is True
                      and identity.get("verifiable") is True and identity_matches)
+            status = row.get("final_status", "UNKNOWN") if identity_matches else "UNKNOWN"
+            probed_results[agent] = {
+                "ready": ready,
+                "status": status,
+                "identity": identity,
+            }
+
+        unobserved = list(set(targets) - observed)
+
+        if hasattr(store, "record_preflight_results"):
+            record = store.record_preflight_results(
+                workflow_id,
+                probed_results,
+                unobserved_targets=unobserved,
+                watermarks=watermarks,
+                now=now,
+                is_full_sweep=(set(targets) == set(allowed)),
+                allowed=allowed,
+            )
+            return record
+
+        healthy = set(record.get("healthy_agents", []))
+        unhealthy = dict(record.get("unhealthy_agents") or {})
+        checked = dict(record.get("preflight_agent_checked_at") or {})
+        identities = dict(record.get("preflight_identities") or {})
+        applied = set()
+        for agent, res in probed_results.items():
+            if _agent_result_watermark(record, agent) != watermarks.get(agent):
+                continue  # A concurrent refresh already committed fresher evidence.
+            applied.add(agent)
             healthy.discard(agent)
-            if ready:
+            if res["ready"]:
                 healthy.add(agent); unhealthy.pop(agent, None)
             else:
-                unhealthy[agent] = row.get("final_status", "UNKNOWN") if identity_matches else "UNKNOWN"
+                unhealthy[agent] = res["status"]
             checked[agent] = now
-            identities[agent] = identity
-        for agent in set(targets) - observed:
-            if _agent_result_watermark(record, agent) == watermarks[agent]:
+            identities[agent] = res["identity"]
+        for agent in unobserved:
+            if _agent_result_watermark(record, agent) == watermarks.get(agent):
                 healthy.discard(agent); unhealthy[agent] = "UNKNOWN"
                 checked[agent] = now
                 identities[agent] = {}

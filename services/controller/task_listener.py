@@ -107,6 +107,36 @@ def handle_event(ports, task_id, agent_status):
             "dispatched",
             "rework"
         ):
+            has_done_marker, screen = ports._completion_marker_snapshot(task)
+            from herdr.task_resources import owned_live_pane
+            try:
+                owned, _ = owned_live_pane(task)
+            except Exception:
+                owned = False
+            if owned:
+                from herdr.deep_preflight import classify_runtime_token_exhausted
+                if screen and classify_runtime_token_exhausted(screen, task.get("agent") or "") == "TOKEN_EXHAUSTED":
+                    agent = task.get("agent")
+                    workflow_id = task.get("workflow_id")
+                    if agent and workflow_id and hasattr(ports, "_get_store"):
+                        try:
+                            store = ports._get_store()
+                            if hasattr(store, "record_agent_unhealthy"):
+                                store.record_agent_unhealthy(workflow_id, agent, status="TOKEN_EXHAUSTED")
+                            else:
+                                workflow = store.get_workflow(workflow_id) or {}
+                                from herdr.workspace_trust import merge_trust_failure_unhealthy
+                                unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
+                                store.update_workflow_metadata(workflow_id, {
+                                    "healthy_agents": healthy, "unhealthy_agents": unhealthy,
+                                })
+                                from herdr.state_store import sync_workflows_projection
+                                sync_workflows_projection(store=store)
+                        except Exception:
+                            pass
+                    ports._set_observed_status(task, "failed", "token_exhausted")
+                    return
+
             if ports._set_observed_status(task, "blocked", "agent_status_blocked"):
                 task = ports.get_task(task_id)
 
@@ -269,7 +299,7 @@ def stop_task_listener(ports, task_id):
 
 
 DEPENDENCIES = {'handle_event': ('_completion_marker_snapshot', '_gate_verdict_is_fresh',
-                  '_record_completion_sample',
+                  '_get_store', '_record_completion_sample',
                   '_retry_execution_complete_for_rework', '_set_observed_status',
                   '_verification_execution_complete_for_rework', 'blocked_event_type',
                   'check_task_deliverables_ready', 'emit_done_if_allowed',

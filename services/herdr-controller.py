@@ -224,7 +224,7 @@ REWORKABLE_STATUSES = {"blocked", "agent_done", "working", "rework", "paused", "
 # 质量类失败结论(如总指挥判定 failed)绝不自动翻案。
 # wf-haflow-1024-02: 看门狗判死若只能等人工,恢复操作整夜停在 waiting_human 零进展;
 # 看门狗补派同样受谱系次数上限与补派 SLA 核验约束。
-AUTO_RECOVER_REASONS = {"dispatch_delivery_fuse", "agent_process_crash", "hard_timeout_watchdog"}
+AUTO_RECOVER_REASONS = {"dispatch_delivery_fuse", "agent_process_crash", "hard_timeout_watchdog", "token_exhausted"}
 AUTO_RECOVER_MAX_ATTEMPTS = int(os.environ.get("HERDR_AUTO_RECOVER_MAX", "2"))
 
 # 终化重试上限：commit 门禁瞬时失败(flaky)/集成冲突时按注意力退避自动重试；

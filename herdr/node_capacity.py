@@ -4,6 +4,28 @@ from .transitions import ACTIVE_TASK_STATUSES
 CONCURRENT_STATUSES = ACTIVE_TASK_STATUSES | {'pending'}
 
 
+def _is_task_retired(t, all_selected):
+    """A task is retired if and only if it has been superseded.
+
+    max_tasks_per_node is the cumulative lifetime task budget for a node.
+    In-service terminal tasks (failed/completed/cleaned) that have not been superseded
+    still count against the hard node budget, preventing infinite remediation rounds.
+    Only superseded tasks (status=='superseded', explicit superseded_by, or replacement
+    pointers via supersedes/redispatch_of) release their budget slot to their successor.
+    """
+    if t.get('status') == 'superseded':
+        return True
+    if t.get('superseded_by'):
+        return True
+
+    tid = str(t.get('task_id') or '')
+    if any(other.get('supersedes') == tid or other.get('redispatch_of') == tid
+           for other in all_selected):
+        return True
+
+    return False
+
+
 def pane_reference(task):
     runtime = task.get('runtime')
     if isinstance(runtime, dict) and 'pane_id' in runtime:
@@ -36,9 +58,9 @@ def node_usage(node, tasks, workflow_id=None):
     panes = sorted({str(pane_reference(t)) for t in selected if pane_reference(t)})
     total_overflow = total_limit is not None and len(selected) > total_limit
     concurrent_overflow = concurrency is not None and len(active) > concurrency
-    # Unified retirement predicate (status==superseded or superseded_by):
+    # Unified retirement predicate:
     # a retired row can never revive, so it must not hold the hard budget.
-    retired = [t for t in selected if t.get('status') == 'superseded' or t.get('superseded_by')]
+    retired = [t for t in selected if _is_task_retired(t, selected)]
     budget_tasks = [t for t in selected if t not in retired]
     locked_overflow = total_limit is not None and len(budget_tasks) + 1 > total_limit
     return {

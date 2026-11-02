@@ -95,6 +95,41 @@ def _blocked_sla_step(ports, task, now, poll_seconds=3.0):
 def process_blocked_sla_task(ports, task, now=None, send_prompt=None):
     """Run one Controller-owned blocked SLA step, including prompt delivery."""
     now = ports.time.time() if now is None else float(now)
+    if hasattr(ports, "_completion_marker_snapshot"):
+        try:
+            from herdr.task_resources import owned_live_pane
+            try:
+                owned, _ = owned_live_pane(task)
+            except Exception:
+                owned = False
+            if owned:
+                _, screen = ports._completion_marker_snapshot(task)
+                from herdr.deep_preflight import classify_runtime_token_exhausted
+                if screen and classify_runtime_token_exhausted(screen, task.get("agent") or "") == "TOKEN_EXHAUSTED":
+                    agent = task.get("agent")
+                    workflow_id = task.get("workflow_id")
+                    if agent and workflow_id and hasattr(ports, "_get_store"):
+                        try:
+                            store = ports._get_store()
+                            if hasattr(store, "record_agent_unhealthy"):
+                                store.record_agent_unhealthy(workflow_id, agent, status="TOKEN_EXHAUSTED")
+                            else:
+                                workflow = store.get_workflow(workflow_id) or {}
+                                from herdr.workspace_trust import merge_trust_failure_unhealthy
+                                unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
+                                store.update_workflow_metadata(workflow_id, {
+                                    "healthy_agents": healthy, "unhealthy_agents": unhealthy,
+                                })
+                                from herdr.state_store import sync_workflows_projection
+                                sync_workflows_projection(store=store)
+                        except Exception:
+                            pass
+                    if hasattr(ports, "_set_observed_status"):
+                        ports._set_observed_status(task, "failed", "token_exhausted")
+                    return {"action": "token_exhausted", "claimed": False}
+        except Exception:
+            pass
+
     _episode, decision = ports._claim_blocked_sla_action(task, now, poll_seconds=3.0)
     if decision.get("claimed"):
         current, reason = ports._blocked_task_claim_is_current(task, decision)
@@ -142,8 +177,9 @@ DEPENDENCIES = {'schedule_blocked_sla_task': ('_BLOCKED_SLA_EXECUTOR', '_blocked
  '_blocked_sla_step': ('_attention_store', '_blocked_episode_matches_task', '_blocked_sla_key'),
  'process_blocked_sla_task': ('_blocked_sla_record_action', '_blocked_sla_record_escalation',
                               '_blocked_sla_record_repush', '_blocked_task_claim_is_current',
-                              '_claim_blocked_sla_action', '_notify_blocked_human_upgrade',
+                              '_claim_blocked_sla_action', '_completion_marker_snapshot',
+                              '_get_store', '_notify_blocked_human_upgrade',
                               '_release_stale_blocked_claim', '_send_blocked_repush',
-                              'enqueue_coordinator_event', 'time')}
+                              '_set_observed_status', 'enqueue_coordinator_event', 'time')}
 
 __all__ = tuple(DEPENDENCIES)

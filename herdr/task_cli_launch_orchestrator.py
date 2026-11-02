@@ -392,73 +392,133 @@ def launch_task_orchestrated(args, *, deps):
                 )
                 sys.exit(2)
     from herdr.task_cli_launch import resolve_launch_agent
+    from herdr.task_cli_launch_worker import WorkerStartupHealthFailure, run_launch_worker
 
-    resolved_agent, requested_agent = resolve_launch_agent(
-        args,
-        node_id,
-        store,
-        choose_agent=choose_agent,
-        workflow_config_for=workflow_config_for,
-        is_isolation_rejection=_is_isolation_rejection,
-        record_router_failure_task=_record_router_failure_task,
-        release_agent_reservation=release_agent_reservation,
-    )
-    args._launch_reservation_acquired = True
-    _preflight_delivery_identity(
-        args.workflow_id,
-        node_id,
-        args.task_id,
-        claim=getattr(args, "candidate_sha", None),
-    )
-    _preflight_baseline_freshness(args, source_repo, base_branch)
-    args._launch_resources_started = True
-    stage_config = ensure_stage_topology(args.workflow_id, node_id)
-    workspace_id = stage_config["workspace_id"]
-    parent_pane = stage_config["anchor_pane_id"]
-    prebuilt_pane = acquire_pane_for_task(args.workflow_id, node_id, resolved_agent)
-    if args.integration_mode == "git":
-        source = os.path.realpath(os.path.expanduser(args.source))
-        tracked_status = subprocess.check_output(
-            ["git", "-C", source, "status", "--porcelain", "--untracked-files=no"],
-            text=True,
-        ).strip()
-        if tracked_status:
-            try:
-                from herdr import repo_hygiene as _pre_hygiene
+    while True:
+        resolved_agent, requested_agent = resolve_launch_agent(
+            args,
+            node_id,
+            store,
+            choose_agent=choose_agent,
+            workflow_config_for=workflow_config_for,
+            is_isolation_rejection=_is_isolation_rejection,
+            record_router_failure_task=_record_router_failure_task,
+            release_agent_reservation=release_agent_reservation,
+        )
+        args._launch_reservation_acquired = True
+        _preflight_delivery_identity(
+            args.workflow_id,
+            node_id,
+            args.task_id,
+            claim=getattr(args, "candidate_sha", None),
+        )
+        _preflight_baseline_freshness(args, source_repo, base_branch)
+        args._launch_resources_started = True
+        stage_config = ensure_stage_topology(args.workflow_id, node_id)
+        workspace_id = stage_config["workspace_id"]
+        parent_pane = stage_config["anchor_pane_id"]
+        prebuilt_pane = acquire_pane_for_task(args.workflow_id, node_id, resolved_agent)
+        if args.integration_mode == "git":
+            source = os.path.realpath(os.path.expanduser(args.source))
+            tracked_status = subprocess.check_output(
+                ["git", "-C", source, "status", "--porcelain", "--untracked-files=no"],
+                text=True,
+            ).strip()
+            if tracked_status:
+                try:
+                    from herdr import repo_hygiene as _pre_hygiene
 
-                _warn = _pre_hygiene.launch_precheck_message(
-                    porcelain=tracked_status,
-                    task_id=args.task_id,
-                    integration_mode=args.integration_mode,
-                )
-            except (ImportError, AttributeError, ValueError):
-                _warn = None
-            if _warn:
-                print(_warn)
-            else:
+                    _warn = _pre_hygiene.launch_precheck_message(
+                        porcelain=tracked_status,
+                        task_id=args.task_id,
+                        integration_mode=args.integration_mode,
+                    )
+                except (ImportError, AttributeError, ValueError):
+                    _warn = None
+                if _warn:
+                    print(_warn)
+                else:
+                    print(
+                        "[PRECHECK WARNING] source has tracked changes; launch continues, integrate will gate with exit 5."
+                    )
+                print(tracked_status)
+
+        try:
+            worker_result, launch_intent = run_launch_worker(
+                args,
+                node_id,
+                run_id,
+                store,
+                launch_intent,
+                planned_clone,
+                resolved_agent,
+                exec_fields,
+                base_branch,
+                onto_branch,
+                parent_pane,
+                prebuilt_pane,
+                HERDR_ROOT,
+                run_worker=subprocess.run,
+                get_store=_get_store,
+            )
+            break
+        except WorkerStartupHealthFailure as exc:
+            if requested_agent != "auto":
+                raise
+            release_agent_reservation(args.task_id)
+            args._launch_reservation_acquired = False
+            args._launch_resources_started = False
+            claim = begin_launch_intent(
+                store,
+                workflow_id=args.workflow_id,
+                node_id=node_id,
+                role=args.dispatch_role,
+                candidate_sha=candidate,
+                dispatch_round=args.dispatch_round,
+                task_id=args.task_id,
+                supersedes=getattr(args, "supersedes", None),
+                dispatch_operation_id=getattr(args, "dispatch_operation_id", None),
+                dispatch_attempt=getattr(args, "dispatch_attempt", None),
+                run_id=run_id,
+                execution_id=getattr(args, "execution_id", None),
+            )
+            if claim["status"] == "recovery_required":
+                from herdr.task_resources import recover_launch_resources
+
+                recovered = recover_launch_resources(store, claim["intent"])
+                if recovered["status"] == "resources_absent":
+                    release_agent_reservation(claim["intent"]["task_id"])
+                    claim = begin_launch_intent(
+                        store,
+                        workflow_id=args.workflow_id,
+                        node_id=node_id,
+                        role=args.dispatch_role,
+                        candidate_sha=candidate,
+                        dispatch_round=args.dispatch_round,
+                        task_id=args.task_id,
+                        supersedes=getattr(args, "supersedes", None),
+                        dispatch_operation_id=getattr(args, "dispatch_operation_id", None),
+                        dispatch_attempt=getattr(args, "dispatch_attempt", None),
+                        run_id=run_id,
+                        execution_id=getattr(args, "execution_id", None),
+                    )
+            if claim["status"] != "claimed":
                 print(
-                    "[PRECHECK WARNING] source has tracked changes; launch continues, integrate will gate with exit 5."
+                    f"[LAUNCH HANDOVER ERROR] unable to reclaim intent: {claim['status']}"
                 )
-            print(tracked_status)
-    from herdr.task_cli_launch_worker import run_launch_worker
+                sys.exit(75)
+            launch_intent = claim["intent"]
+            args._launch_intent = launch_intent
+            from herdr.task_resources import record_launch_resources
 
-    worker_result, launch_intent = run_launch_worker(
-        args,
-        node_id,
-        run_id,
-        store,
-        launch_intent,
-        planned_clone,
-        resolved_agent,
-        exec_fields,
-        base_branch,
-        onto_branch,
-        parent_pane,
-        prebuilt_pane,
-        HERDR_ROOT,
-        run_worker=subprocess.run,
-        get_store=_get_store,
-    )
+            launch_intent = record_launch_resources(
+                store,
+                launch_intent,
+                {"planned_clone_path": str(planned_clone), "run_id": run_id},
+            )
+            print(
+                f"[LAUNCH HANDOVER] {exc.agent} failed startup ({exc.status}); handover to next candidate agent..."
+            )
     clone_path = worker_result["clone"]
     branch = worker_result["branch"]
     try:

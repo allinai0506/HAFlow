@@ -78,13 +78,16 @@ def _set_observed_status(ports, task, status, reason):
     task = task or {}
     if ports.os.environ.get("HERDR_CONTROLLER_TEST") or ports._task_version(task) is None:
         return ports.set_task_status(task.get("task_id"), status)
+    metadata = {"controller_reason": reason}
+    if status == "failed":
+        metadata["failure_reason"] = reason
     return ports.set_task_status(
         task.get("task_id"),
         status,
         expected_status=task.get("status"),
         expected_version=ports._task_version(task),
         source="herdr-controller",
-        metadata={"controller_reason": reason},
+        metadata=metadata,
     )
 
 def _completion_elapsed(ports, task, now):
