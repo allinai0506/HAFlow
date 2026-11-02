@@ -9355,6 +9355,8 @@ pytest -q tests/test_task_cli_launch_worker.py
 | 持久化派发未串联后续角色代次 | 持久化调度（`node_dispatch_store`）在前置任务完成且 `previous` 标为 `resolved` 后，若跳过该节点将无法为后续角色生成新的派发代次 | `node_dispatch_store.reconcile_workflow` 必须将前置角色已完成、存在待派发后置角色的状态识别为分步派发，继承 `prior_id = previous['id']` 生成新的派发代次 |
 | 盲目撤销 `notified` 锁导致重叠派发 | 若节点无注册任务便撤销 `notified` 锁，会把真实派发未明状态当成可重派，破坏幂等性 | `notified` 锁撤销必须严格受限于存在确凿前置任务交付、节点具备多角色且后置角色就绪的场景；空任务或结果未知状态严禁撤销 |
 | 过期审查结论导致流程挂起 | 计划发生修改（`plan_ts > chal_ts`）或审查缺少引用时，直接返回拒绝会使流水线卡死在 `waiting_human` | 调度器与 Controller 就绪判定必须将版本过期/无效审查识别为节点未完成，在 sweep 中自动触发 Challenger 重审（`redispatch_of`） |
+| 重审替代任务受限累计容量拦截 | 当节点已耗尽 `max_tasks_per_node`（如 2）时，若准入判定未将 incoming 替代的旧任务纳入退休集，会导致替代任务被虚假容量溢出拦截 | `check_launch_capacity` 与 `node_usage` 必须识别 `--supersedes` 携带的替换关系，将待退役旧任务槽位释放给后继替代者（`retiring_task_ids`） |
+| 任务 ID 包含角色关键词误绑定前驱 | 当 Workflow ID 包含 `challenger` 时，`task_id` 模糊匹配会将 executor 误判为 challenger，引发跨角色 supersedes 绑定被拒 | 角色判定必须显式元数据优先（`dispatch_role` / `role`），仅在显式角色缺失时才回退至 `task_id` 子串推断 |
 
 ### 操作规范
 
@@ -9362,11 +9364,13 @@ pytest -q tests/test_task_cli_launch_worker.py
 2. **持久化派发代次串联**：`herdr/node_dispatch_store.py` 在 `reconcile_workflow` 中识别多角色分步派发状态，在 `previous['status'] in TERMINAL` 且后置角色物料就绪时，以 `prior_id = previous['id']` 生成新派发代次供 Controller 抢占（claim）。
 3. **精准撤销锁与未知交付防护**：`services/controller/stage_state.py` 的 `reconcile_stage_advance_states` 仅在已有前置角色交付、无运行中任务、且后置角色物料完备时撤销 `notified` 锁；空任务节点严格保留闩锁。
 4. **计划就绪与过期重审闭环**：`services/controller/stage_state.py:is_node_complete` 对 `plan` 节点执行 `verify_plan_and_challenger`，若审查过期或无效则判定节点未完成，驱动 Controller 正常 sweep 将其重新纳入就绪节点并派发审查自愈。
+5. **容量准入与替换退役对齐**：`herdr/task_cli_resources.py:check_launch_capacity` 校验 `--supersedes` 有效性，并将待替换任务 ID 透传至 `herdr/node_capacity.py:node_usage(..., retiring_task_ids=...)`，确保在 `max_tasks_per_node` 约束下替代任务能正常获得已释放的预算槽位。
+6. **角色身份推断防御**：在 `herdr/direct_dispatch.py`、`services/controller/stage_state.py` 中严格贯彻显式角色优先原则，避免因为 Workflow ID 或 Task ID 包含角色子串而导致跨角色绑定或虚假门禁阻塞。
 
 ### 验证命令 / 守护测试
 
 ```bash
-# 验证计划阶段分步因果派发、持久化派发代次、Plan-Ref 自动注入、多角色节点完成判定与过期审查自愈
+# 验证计划阶段分步因果派发、持久化派发代次、Plan-Ref 自动注入、多角色节点完成判定、容量替换准入与过期审查自愈
 pytest -q tests/test_plan_causal_dispatch.py
 ```
 
@@ -9374,7 +9378,8 @@ pytest -q tests/test_plan_causal_dispatch.py
 
 - 架构审计缺陷 F-02 — `docs/audits/workflow-decision-audit-v1/complexity-findings.md`
 - `workflow_templates/software-development-v1.yaml` — `challenger` 角色配置 `depends_on_role: executor`
-- `herdr/direct_dispatch.py` — 支持多角色分阶段因果派发、`plan_ref` 上下文注入与审查过期自愈
+- `herdr/direct_dispatch.py` — 支持多角色分阶段因果派发、`plan_ref` 上下文注入、显式角色优先与审查过期自愈
 - `herdr/node_dispatch_store.py` & `herdr/node_dispatch.py` — 多角色分步派发持久化代次生成与 inventory 守卫
+- `herdr/node_capacity.py` & `herdr/task_cli_resources.py` — 替换任务预算准入（`retiring_task_ids`）与 `--supersedes` 槽位释放
 - `herdr/scheduler.py` & `services/controller/stage_state.py` — `node_is_complete` 角色完备性与计划审查有效性判定、精准锁撤销
-- `tests/test_plan_causal_dispatch.py` — 6 项全链路因果派发、Controller 调度与自愈守护测试
+- `tests/test_plan_causal_dispatch.py` — 7 项全链路因果派发、Controller 调度、容量准入与自愈守护测试

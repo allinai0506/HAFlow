@@ -449,7 +449,107 @@ class TestControllerPlanCausalIntegration(unittest.TestCase):
         self.assertEqual(plan_res["specs"][0]["redispatch_of"], f"{self.wf_id}-plan-challenger")
         self.assertEqual(plan_res["specs"][0]["plan_ref"], note_plan2["note_id"])
 
+        # 5. Capacity admission on real boundary: max_tasks_per_node=2 allows replacement
+        from types import SimpleNamespace
+        from herdr.task_cli_resources import check_launch_capacity
+        self.wf_cfg["nodes"][1]["max_tasks_per_node"] = 2
+        tasks_in_store = self.store.list_tasks(workflow_id=self.wf_id)
+        # Verify 2 tasks already in store
+        self.assertEqual(len([t for t in tasks_in_store if t.get("node") == "plan"]), 2)
+        args = SimpleNamespace(
+            workflow_id=self.wf_id,
+            node="plan",
+            task_id=f"{self.wf_id}-plan-challenger-r2",
+            supersedes=f"{self.wf_id}-plan-challenger",
+            supersede_reason="redispatch outdated review",
+            dispatch_role="challenger",
+            ack_overflow=False,
+        )
+        # Should NOT raise ValueError (task count 3 exceeds max_tasks_per_node=2)
+        check_launch_capacity(args, self.wf, tasks_in_store, "plan", get_store=lambda: self.store)
+
+    def test_explicit_role_priority_when_workflow_id_contains_challenger_substring(self):
+        """Workflow ID containing 'challenger' does not misidentify executor as challenger."""
+        wf_chal_id = "wf-challenger-fix"
+        plan_node = {
+            "id": "plan",
+            "label": "3计划",
+            "purpose": "把需求拆解为工程方案与任务",
+            "required_outputs": ["技术架构与解耦任务拆解", "方案对抗审查与可行性风险评估"],
+            "agent_policy": {
+                "max_concurrency": 2,
+                "parallel": True,
+                "roles": [
+                    {"name": "executor", "label": "架构", "goal": "方案", "outputs": ["技术架构与解耦任务拆解"]},
+                    {"name": "challenger", "label": "对抗", "depends_on_role": "executor", "goal": "审查", "outputs": ["方案对抗审查与可行性风险评估"]},
+                ],
+            },
+        }
+        # Executor task with explicit role metadata 'executor'
+        exec_task = {
+            "task_id": f"{wf_chal_id}-plan-executor",
+            "workflow_id": wf_chal_id,
+            "node": "plan",
+            "dispatch_role": "executor",
+            "status": "completed",
+        }
+        # Challenger task with explicit role metadata 'challenger'
+        chal_task = {
+            "task_id": f"{wf_chal_id}-plan-challenger",
+            "workflow_id": wf_chal_id,
+            "node": "plan",
+            "dispatch_role": "challenger",
+            "status": "completed",
+        }
+        tasks = [exec_task, chal_task]
+
+        # In stage_state is_node_complete: single completed executor with explicit role does not trigger require_challenger
+        from types import SimpleNamespace
+        ports = SimpleNamespace(
+            load_tasks=lambda: [exec_task],
+            workflow_config_for=lambda wid: {"nodes": [{"id": "plan"}]},
+            scheduler_core=None,
+            _reverification_reused_node=lambda wid, nid: False,
+        )
+        from services.controller.stage_state import is_node_complete
+        # When only executor is active/completed and scheduler considers complete (single-role or unroled fallback)
+        self.assertTrue(is_node_complete(ports, wf_chal_id, "plan"))
+
+        # Create outdated plan/review history to trigger challenger redispatch
+        from herdr import workflow_docs
+        n1 = workflow_docs.append_note(
+            wf_chal_id, kind="plan", title="初始计划",
+            body="## 技术方案与架构设计\n方案1\n## 任务拆分与依赖关系\n- Task 1\n## 修改文件范围清单\n- Modify: f.py\n## 每个 Task 目标与验收标准\n- pytest\n## 风险与应对策略\n无",
+            node="plan", task_id=f"{wf_chal_id}-plan-executor"
+        )
+        c1 = workflow_docs.append_note(
+            wf_chal_id, kind="review", title="审查",
+            body=f"## 方案对抗性审查与可行性评估\n审查\nPlan-Ref: {n1['note_id']}\nHERDR_GATE_VERDICT: pass",
+            node="plan", task_id=f"{wf_chal_id}-plan-challenger"
+        )
+        n2 = workflow_docs.append_note(
+            wf_chal_id, kind="plan", title="更新计划",
+            body="## 技术方案与架构设计\n方案2\n## 任务拆分与依赖关系\n- Task 1\n## 修改文件范围清单\n- Modify: f.py\n## 每个 Task 目标与验收标准\n- pytest\n## 风险与应对策略\n无",
+            node="plan", task_id=f"{wf_chal_id}-plan-executor"
+        )
+
+        # When redispatching challenger, ensure predecessor selected is challenger, not executor
+        res = plan_stage_dispatch(
+            wf_chal_id,
+            plan_node,
+            tasks,
+            "需求",
+            project_root=self.tmp_dir,
+        )
+        self.assertEqual(res["mode"], "dispatch")
+        self.assertEqual(len(res["specs"]), 1)
+        spec = res["specs"][0]
+        self.assertEqual(spec["dispatch_role"], "challenger")
+        self.assertEqual(spec["supersedes"], f"{wf_chal_id}-plan-challenger", "Must bind previous round of same role")
+        self.assertNotEqual(spec["supersedes"], f"{wf_chal_id}-plan-executor")
+
 
 if __name__ == "__main__":
+
 
     unittest.main()

@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-02] fix | 计划阶段角色因果分步派发、持久化调度代次串联与质询审查自愈闭环（PR #390 / §222）
+
+- 背景：真实工作流 `wf-haflow-1102-02` 的 `plan` 阶段在推进至 `implementation` 时因审查时序倒挂（Executor 尚未写完方案前 Challenger 已提前退出）陷入 `challenger_outdated` 拒绝死锁；后续计划更新后无法自动触发重审，直接进入 `waiting_human` 挂起。
+- 根因分析：
+  1. `software-development-v1.yaml` 计划阶段同时声明 `executor` 与 `challenger` 且 `parallel: true`，缺乏角色依赖导致两工位无序并发；
+  2. `herdr/node_dispatch_store.py` 在首个角色完成且操作处于 `TERMINAL` 后未为后置依赖角色生成新的持久化派发代次，导致 Controller 无法 claim；
+  3. `services/controller/stage_state.py` 的 `is_node_complete` 与 `reconcile_stage_advance_states` 判定节点完成时缺少对多角色的完备性核验与审查有效性校验，且 `notified` 锁在空任务时撤销破坏了未知交付幂等；
+  4. 审查替代任务在 `max_tasks_per_node` 达到硬上限（如 2）时，准入判定未将携带 `--supersedes` 的待退役前驱计入释放，导致被容量硬拦截；
+  5. 角色识别采用 `task_id` 模糊匹配，当 Workflow ID 包含角色名（如 `wf-challenger-fix`）时引发跨角色错误绑定。
+- 治理与修复：
+  1. **因果分步派发**：模板为 `challenger` 配置 `depends_on_role: executor`；`direct_dispatch.py` 初始仅派发无依赖角色，前置有效方案持久化后自动派发后置角色，并注入 `plan_ref` 与 `plan_chunk`；
+  2. **持久化代次生成**：`node_dispatch_store.reconcile_workflow` 将已完成前置角色的多角色节点识别为分步派发，以 `prior_id = previous['id']` 生成新代次供 Controller 抢占；
+  3. **就绪判定与过期重审**：`is_node_complete` 增加计划审查有效性判定，审查过期时节点保持就绪，驱动 Controller 正常 sweep 并以 `redispatch_of` 自动重派；
+  4. **容量准入与替换退役**：`check_launch_capacity` 校验 `--supersedes` 并透传至 `node_usage(..., retiring_task_ids=...)`，使替代任务安全获得预算槽位；
+  5. **显式角色身份优先**：全流程强化显式元数据优先于 `task_id` 子串推断，根除误判。
+- 验收结果：
+  - `tests/test_plan_causal_dispatch.py` (7 passed)
+  - `tests/test_node_capacity.py` (29 passed)
+  - `tests/test_node_dispatch_contract.py` + `tests/test_selective_replan_controller.py` 全部 148 项测试全量 PASS
+  - 沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §222。
+
 ## [2026-11-02] fix | Agent 额度耗尽与运行时故障交接的原子并发契约与回退闭环（PR #388 / §221）
 
 - 背景：真实工作流在执行中遭遇 Agent（如 OpenCode）额度耗尽（"Free messages reset in ..."）或在 Pane 创建前探针失败时，未能自动透明交接改派，卡滞节点；同时旧任务退役状态被错误识别，导致 `verifier_budget_exhausted` 虚假拦截健康返工，或相反破坏了节点全生命周期累计硬预算。

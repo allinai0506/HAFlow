@@ -625,6 +625,8 @@ def _dispatch_spec(
     if redispatch_of:
         spec["redispatch_of"] = redispatch_of
         spec["supersedes"] = redispatch_of
+        if not spec.get("supersede_reason"):
+            spec["supersede_reason"] = f"redispatch of {redispatch_of}"
     if onto_branch:
         spec["onto_branch"] = onto_branch
     elif is_verifier_node(node) and candidate_sha and context_branch:
@@ -1032,7 +1034,13 @@ def plan_stage_dispatch(
 
                 redispatch_of = None
                 if r_name.lower() in roles_needing_redispatch:
-                    old_t = next((t for t in node_tasks if any(r_name.lower() in str(t.get(k) or "").lower() for k in ("dispatch_role", "task_id")) and not t.get("superseded_by")), None)
+                    def _matches_role(task, target_role):
+                        role_str = str(task.get("dispatch_role") or task.get("role") or "").strip().lower()
+                        if role_str:
+                            return role_str == target_role.lower()
+                        return target_role.lower() in str(task.get("task_id") or "").lower()
+
+                    old_t = next((t for t in node_tasks if _matches_role(t, r_name) and not t.get("superseded_by")), None)
                     if old_t:
                         redispatch_of = old_t.get("task_id")
 
@@ -1065,6 +1073,7 @@ def plan_stage_dispatch(
                     old_task = next((t for t in node_tasks if t.get("task_id") == redispatch_of), {})
                     spec["dispatch_round"] = _calculate_redispatch_round(node_tasks, old_task, candidate_sha)
                     spec["supersedes"] = redispatch_of
+                    spec["supersede_reason"] = f"redispatch outdated {r_name} review"
                 specs.append(spec)
 
             reason_str = "redispatch outdated role" if roles_needing_redispatch else ("staged role dispatch" if has_pending_roles else "initial node dispatch with roles")
