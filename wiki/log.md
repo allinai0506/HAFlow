@@ -4023,3 +4023,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 工作流收尾提炼通道闭环：`herdr/task_cli_workflow_close.py` 的 `close_workflow_owned` 在工作流物理收尾完成后，以 100% fail-open 方式自动触发 `collect_and_sync_lessons`、`collect_workflow_tasks` 与 `recover_and_sync`，确保每次工作流收尾均自动沉淀并同步经验资产。
 - 生产现场补齐：成功提取积压的 45 条工程教训资产（§165 ~ §213）并同步推送到 Experience Hub，经验总数从 7 条恢复至 52 条。
 - 验证：新增 `tests/test_workflow_experience_closeout.py` 专项守护测试，全量 126 项经验回归测试全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §216。
+
+## [2026-11-02] Fix | Staged 自动验收失败恢复闭环 V1（wf-haflow-1102-02）
+- 自动验收结论结构化：`services/controller/auto_acceptance.py` 的 `try_auto_accept()` 返回 `AutoAcceptResult`（`reason_code`/`missing`/`detail`），新增 `task_changes_evidence()` 区分 `changed`/`no_changes`/`unavailable`，`auto_rework_attempts()` 从 `status_history` 的 `auto_acceptance_rework:` 规范条目计数；成功路径 CAS 与 metadata 不变。
+- 受控恢复路由：`services/controller/task_events.py` 的 `_route_staged_auto_acceptance_failure()` 只把缺段落/无受控变更等白名单原因经既有 `herdr-task rework` 反馈到同一 Task/Pane；门禁证据缺失/冲突、关闭开关、reviewer、身份不完整、CAS 竞争升级并停止重投。
+- 升级闩与重投：`services/controller/attention.py#attention_escalated` 绑定 `version`/`run_id`/`execution_id`，episode 变化即清除；`done_events.py` 与事件处理在闩生效时提前返回，消除周期性空转。
+- rework 快照：`herdr/task_cli_rework.py` 接受 `--expected-status/version/run-id/execution-id`，快照不匹配 fail-closed，防止陈旧 done 事件把新执行拉回 rework；request-id 保持幂等。
+- 验证：新增 `tests/test_auto_acceptance_rework_recovery.py`（真实 SQLite、真实 CLI 解析、kernel 与 attention store，25 项）；受影响四文件 `112 passed`；`compileall`、`git diff --check` clean；候选 `4110731` 经独立 test/review 同 SHA pass。
+- 教训见 lessons §222。

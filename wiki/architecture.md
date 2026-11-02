@@ -161,9 +161,24 @@ Evidence:
   `done` 事件不再必须排队等总指挥 LLM 回合：`herdr-task verify-baseline` 报告
   `TASK_CHANGED`（至少一个受控文件变更）即直接置 `completed` 并走既有
   finalize 链路（`[AUTO ACCEPT]`）。门禁节点（test/review/wrapup）与证据不足
-  （`BASELINE_MATCH`）、配置不可判定的场景一律回落总指挥，绝不自动翻案；
+  （`BASELINE_MATCH`）、配置不可判定的场景在非 staged 流程回落总指挥，绝不自动翻案；
   `HERDR_AUTO_ACCEPT=0` 整体关闭。背景：agent_done→completed 的总指挥验收
   等待实测占用 2.6h/8h，且其长回合会阻塞排在后面的门禁事件投递。
+- `FACT` **staged 自动验收失败的受控返工与升级（2026-11-02 引入，lessons §222）**:
+  `coordinator_required=false` 的 staged 流程没有总指挥可回落。`try_auto_accept()` 返回
+  结构化 `AutoAcceptResult`（`reason_code`/`missing`/`detail`）：缺段落与
+  `implementation_no_controlled_changes` 等白名单原因经 `herdr-task rework`（带
+  `--expected-version/run-id/execution-id` 快照与 request-id）在同一 Task/Pane 返工，
+  次数从 `status_history` 的 `auto_acceptance_rework:` 条目持久化计数，上限 2；
+  门禁证据缺失/冲突、关闭开关、reviewer 角色、身份不完整、CAS 竞争等不返工，
+  写含 `attempts/limit` 的升级 attention 并以 episode 级升级闩（版本 + run/execution）
+  停止 `done` 重投。成功路径的 CAS 与 metadata 保持不变。
+  Evidence:
+  - `services/controller/auto_acceptance.py#AutoAcceptResult` / `#auto_rework_attempts`
+  - `services/controller/task_events.py#_route_staged_auto_acceptance_failure`
+  - `services/controller/attention.py#attention_escalated`
+  - `herdr/task_cli_rework.py#handle_rework`
+  - `tests/test_auto_acceptance_rework_recovery.py`
 - `FACT` **被作废子集补派按谱系去重（2026-09-17 引入，lessons §61）**:
   `herdr/direct_dispatch.py#lineage_redispatch_candidates` 保证同一替换谱系
   （`x` / `x-r2` / …）最多只补派一发；旧逻辑会把历史作废任务反复补派，

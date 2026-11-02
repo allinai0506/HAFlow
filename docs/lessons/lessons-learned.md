@@ -9330,3 +9330,61 @@ pytest -q tests/test_task_cli_launch_worker.py
 - `herdr/node_capacity.py` — 回缩 `_is_task_retired` 为严格 `superseded` 语义
 - `services/herdr-worker.py` & `herdr/task_cli_launch_worker.py` — Pane 前失败返回 `not_started` 并安全回滚改派
 - `tests/test_agent_quota_handover.py` — 12 项并发与全链路自动交接专项守护测试
+
+---
+
+## 222. Staged 自动验收失败必须分类后受控返工，升级闩按任务 episode 绑定（2026-11-02）
+
+### 问题背景
+
+`software-development-v1` 的 staged 流程（`coordinator_required: false`）没有常驻总指挥。非门禁节点
+`agent_done` 后，`services/controller/task_events.py` 的 staged bypass 在 `try_auto_accept()` 与
+`try_auto_verdict()` 都失败时只写一条 `attention_note(reason="auto_acceptance_rejected: ...")` 就
+`return`：没有推进、没有返工、没有通知，失败原因只有布尔结果和粗分类日志。由于 `agent_done` 的
+`done` 事件会被周期性重投，任务每隔约 600 秒重复「重投 → bypass → 再写 attention」，形成长期停留在
+`agent_done` 的空转，必须人工干预。wf-haflow-1102-02 在基线 `431a975` 上复现该缺陷并完成修复
+（候选 `4110731`）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| `try_auto_accept()` 只返回 `bool`，真实缺失段落只打印在日志 | 验收结论是恢复决策的唯一输入，布尔值无法区分「缺交付物」（可修复）与「证据不可得/身份不符」（不可修复） | 自动验收返回结构化结果（`accepted`、稳定 `reason_code`、`missing`、`detail`）；成功语义与 CAS/metadata 不得变化 |
+| 全部拒绝共用一条 attention，原因不可诊断 | 恢复动作必须由确定性分类驱动，不能让模型或重投频率猜可修复性 | 显式白名单才允许 rework（缺段落、无受控变更）；门禁缺失/冲突、`stage_verdict=blocked`、关闭开关、reviewer、身份不完整、CAS 竞争一律升级或按 stale 丢弃 |
+| 代码库没有 `auto_rework_count` 写路径，`handle_rework()` 也不递增 `delivery_rework_attempts` | 次数必须从真实持久化事实读取，不能虚构字段或复用交付预算 | 复用 `status_history` 中 `agent_done -> rework` 且 reason 以 `auto_acceptance_rework:` 开头的规范条目计数；上界 2 次（最多 3 次验收尝试），与交付返工/fix-loop 预算隔离 |
+| 升级 attention 若只按键（task+event）记忆，会把旧 episode 的终态带到新运行 | 终止闩必须绑定任务 episode，否则新版本/新 run 会被旧闩误挡，或旧 done 事件在新执行里复活 | `attention_escalated` 校验 `task_version`/`run_id`/`execution_id`，不匹配即清除 episode；`done` 重投与事件处理都在闩生效时提前返回 |
+| rework CLI 原有无快照参数，陈旧 done 事件可能把新执行重新拉回 rework | 任何自动状态写入都必须带 CAS 快照；超时或身份变化时不得盲目重派 | `herdr-task rework` 增加 `--expected-status/version/run-id/execution-id`；Controller 在调用前捕获快照，失败后仅在身份一致且 `rework_delivery=pending` 时按待恢复升级，否则丢弃陈旧事件 |
+| 调用失败时若回传原生输出可能泄露 Pane 内容/凭据 | 诊断信息必须有界且不含敏感内容 | 只记录稳定退出码或异常类型；detail 截断 400 字符；prompt 只含内部 reason code 与缺失项 |
+
+### 操作规范（已固化到 `services/controller/task_events.py` / `services/controller/auto_acceptance.py` / `herdr/task_cli_rework.py`）
+
+1. **先分类再恢复**：自动验收失败必须携带稳定 `reason_code`；只有白名单原因进入同 Task/Pane rework，其余写含 `reason_code/attempts/limit/detail` 的升级 attention 并停止重投，不伪造 completed/blocked/failed。
+2. **复用既有状态机与返工入口**：只使用既有 `agent_done -> rework`、`handle_rework()`、CAS 与 request-id 幂等；不新增 Controller、状态机、恢复框架或第二套工作流。
+3. **次数持久化有界**：从 `status_history` 规范条目计数并随 CAS 转移落库，Controller 重启后不归零；达到上界只升级不再派发。
+4. **闩绑定 episode**：`attention_escalated` 必须同时匹配版本与 run/execution 身份；任何一项变化都清除旧 episode。
+5. **证据不可得 fail-closed**：`verify-baseline` 不可执行、输出无法解析时返回 `unavailable`，既不判「无变更」也不放行；`gate_signal_missing_or_conflict` 只做有限退避重试（3 次）后升级。
+6. **验证用真实链路**：必须使用真实 SQLite、真实 `handle_rework` CLI 解析、kernel 与 attention store；只替换 Pane 传输与时钟，不 mock 被验收的状态机与持久化。
+
+### 验证命令 / 守护测试
+
+```bash
+# 自动验收恢复闭环（结构化结果矩阵、episode 闩、真实 SQLite rework、预算耗尽、并发 done、陈旧执行隔离）
+pytest -q tests/test_auto_acceptance_rework_recovery.py
+
+# 调用方契约：unknown 失败升级、agent_done -> rework 转移矩阵、真实交付预算隔离
+pytest -q tests/test_audit_p0_rework_bypass_contract.py tests/test_fix_bug1002.py
+
+# staged 适配与 bypass 行为
+pytest -q tests/test_software_development_v1_adapter.py
+```
+
+本候选实测：以上四文件共 `112 passed`（`71 + 41`）。期望 `112 passed` 且无 rework/attention 泄漏副作用。
+
+### 相关文档 / 关联证据
+
+- 候选 `411073182d9c821f6eeab772c8cad3a986789004`（基线 `431a975e8789571a23ce18ea71c44106f88244aa`）
+- `services/controller/auto_acceptance.py#AutoAcceptResult` / `#auto_rework_attempts` / `#task_changes_evidence`
+- `services/controller/task_events.py#_route_staged_auto_acceptance_failure`
+- `services/controller/attention.py#attention_escalated`
+- `herdr/task_cli_rework.py#handle_rework`（expected snapshot 参数）
+- `tests/test_auto_acceptance_rework_recovery.py` — 25 项专项守护测试（含真实链路与并发）
