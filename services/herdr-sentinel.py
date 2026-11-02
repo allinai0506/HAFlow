@@ -915,6 +915,44 @@ def observe_crash_pattern(task, *, changes, expected, versions):
     return True
 
 
+def observe_token_exhausted_pattern(task, *, changes, expected, versions):
+    """Record and enqueue an infrastructure token_exhausted transition atomically later."""
+    task_id = (task or {}).get("task_id")
+    if not task_id:
+        return False
+    store = _get_store()
+    _record_sentinel_event(
+        store,
+        task,
+        "agent_token_exhausted_observed",
+        {
+            "next_status": "failed",
+            "reason": "token_exhausted",
+            "observed_status": task.get("status"),
+            "observed_version": task.get("version"),
+        },
+    )
+    changes[task_id] = ("failed", "token_exhausted")
+    expected[task_id] = task.get("status")
+    versions[task_id] = task.get("version")
+    agent = task.get("agent")
+    workflow_id = task.get("workflow_id")
+    if agent and workflow_id:
+        try:
+            workflow = store.get_workflow(workflow_id) or {}
+            from herdr.workspace_trust import merge_trust_failure_unhealthy
+            unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
+            store.update_workflow_metadata(workflow_id, {
+                "healthy_agents": healthy, "unhealthy_agents": unhealthy,
+            })
+            from herdr.state_store import sync_workflows_projection
+            sync_workflows_projection(store=store)
+            print(f"[SENTINEL HEALTH] {agent} marked TOKEN_EXHAUSTED in workflow={workflow_id}", flush=True)
+        except Exception as exc:
+            print(f"[SENTINEL HEALTH WARN] token exhausted write-back failed: {exc}", file=sys.stderr, flush=True)
+    return True
+
+
 def _record_sentinel_event(store, task, event_type, payload):
     """Best-effort observation event (never blocks the sweep)."""
     try:
@@ -1644,11 +1682,22 @@ def main():
 
             done_marker_present = _comp.marker_present(screen, task_id)
 
-            # Infrastructure crash first: a crashed process outranks blocker
-            # sampling, and a screen that carries crash text must not feed
-            # the blocker fingerprint (PR #161 review).
+            # Infrastructure crash / token exhaustion first: a crashed or
+            # quota-exhausted process outranks blocker sampling, and a screen
+            # that carries infrastructure failure text must not feed the blocker fingerprint.
             if any(pattern in screen for pattern in CRASH_PATTERNS):
                 observe_crash_pattern(
+                    task,
+                    changes=changes,
+                    expected=state.setdefault("crash_expected", {}),
+                    versions=state.setdefault("crash_versions", {}),
+                )
+                continue
+
+            from herdr.deep_preflight import classify_text, strip_known_status_chrome
+            token_blocker = classify_text(strip_known_status_chrome(task.get("agent") or "", screen))
+            if token_blocker == "TOKEN_EXHAUSTED":
+                observe_token_exhausted_pattern(
                     task,
                     changes=changes,
                     expected=state.setdefault("crash_expected", {}),

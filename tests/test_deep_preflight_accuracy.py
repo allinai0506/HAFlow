@@ -44,6 +44,11 @@ class TestClassifyAccuracy(unittest.TestCase):
             "Out of credits for this billing period",
             "credit balance depleted",
             "Free tier limit exhausted",
+            "You've used today's free messages. They reset at 8:58 AM.",
+            "Upgrade to OpenCode Go → /connect · Switch model → /models",
+            "You have used all your free messages for today. Reset at midnight.",
+            "Daily free message limit reached",
+            "free messages reset at 08:58",
         ]:
             self.assertEqual(
                 self.m.classify_text(text), "TOKEN_EXHAUSTED", msg=text

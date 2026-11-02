@@ -386,11 +386,14 @@ def task_lineage_root(task_id) -> str:
 
 
 def _failure_reasons(task: Dict[str, Any]) -> List[str]:
-    return [
+    reasons = [
         str(entry.get("reason") or "")
         for entry in (task.get("status_history") or [])
         if entry.get("to") == "failed"
     ]
+    if task.get("failure_reason"):
+        reasons.append(str(task.get("failure_reason")))
+    return reasons
 
 
 def select_infra_failures_for_recovery(

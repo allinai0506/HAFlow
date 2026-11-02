@@ -57,6 +57,9 @@ TOKEN_PATTERNS = [
     r"billing.*(limit|exhaust|issue)",
     r"payment required",
     r"\b402\b",
+    r"used (today's|all your) free messages",
+    r"free messages?.*(limit|reset|exhaust)",
+    r"upgrade to opencode go",
 ]
 AUTH_PATTERNS = [
     r"not logged in",

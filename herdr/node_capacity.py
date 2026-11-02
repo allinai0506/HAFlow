@@ -1,7 +1,56 @@
 """Pure node dispatch budgets; cumulative history is separate from concurrency."""
-from .transitions import ACTIVE_TASK_STATUSES
+import re
+from .transitions import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 
 CONCURRENT_STATUSES = ACTIVE_TASK_STATUSES | {'pending'}
+
+
+def _is_task_retired(t, all_selected):
+    status = t.get('status')
+    if status in {'superseded', 'cleaned'}:
+        return True
+    if t.get('superseded_by'):
+        return True
+
+    tid = str(t.get('task_id') or '')
+    if any(other.get('supersedes') == tid or other.get('redispatch_of') == tid
+           for other in all_selected):
+        return True
+
+    # 终态非当前轮次任务纳入退役统计:
+    # 任务必须处于终态；若所属候选回合已有后续候选(candidate_episode_id)、
+    # 或所属谱系内已有更新轮次/序号的任务，则属于已退役的历史返工记录，不占硬预算。
+    if status not in TERMINAL_TASK_STATUSES:
+        return False
+
+    ep_id = t.get('candidate_episode_id')
+    if ep_id is not None:
+        try:
+            curr_ep = int(ep_id)
+            if any(int(other.get('candidate_episode_id') or 0) > curr_ep for other in all_selected):
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    root_id = re.sub(r'(-r\d+|-v\d+final|-v\d+)$', '', tid)
+    lineage_tasks = [other for other in all_selected
+                     if re.sub(r'(-r\d+|-v\d+final|-v\d+)$', '', str(other.get('task_id') or '')) == root_id]
+
+    try:
+        t_round = int(t.get('dispatch_round') or 1)
+        if any(int(other.get('dispatch_round') or 1) > t_round for other in lineage_tasks):
+            return True
+    except (ValueError, TypeError):
+        pass
+
+    if len(lineage_tasks) > 1:
+        def _suffix_order(task_id_str):
+            m = re.search(r'-r(\d+)$', task_id_str)
+            return int(m.group(1)) if m else 1
+        if any(_suffix_order(str(other.get('task_id') or '')) > _suffix_order(tid) for other in lineage_tasks):
+            return True
+
+    return False
 
 
 def pane_reference(task):
@@ -36,9 +85,9 @@ def node_usage(node, tasks, workflow_id=None):
     panes = sorted({str(pane_reference(t)) for t in selected if pane_reference(t)})
     total_overflow = total_limit is not None and len(selected) > total_limit
     concurrent_overflow = concurrency is not None and len(active) > concurrency
-    # Unified retirement predicate (status==superseded or superseded_by):
+    # Unified retirement predicate:
     # a retired row can never revive, so it must not hold the hard budget.
-    retired = [t for t in selected if t.get('status') == 'superseded' or t.get('superseded_by')]
+    retired = [t for t in selected if _is_task_retired(t, selected)]
     budget_tasks = [t for t in selected if t not in retired]
     locked_overflow = total_limit is not None and len(budget_tasks) + 1 > total_limit
     return {

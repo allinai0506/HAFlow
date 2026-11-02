@@ -7,6 +7,15 @@ import sys
 from pathlib import Path
 
 
+class WorkerStartupHealthFailure(RuntimeError):
+    """Raised when worker startup fails due to an agent health condition and is cleanly rolled back."""
+    def __init__(self, agent, status, failure_data=None):
+        super().__init__(f"Worker startup health failure for {agent}: {status}")
+        self.agent = agent
+        self.status = status
+        self.failure_data = failure_data or {}
+
+
 def run_launch_worker(args, node_id, run_id, store, launch_intent, planned_clone,
                       resolved_agent, exec_fields, base_branch, onto_branch,
                       parent_pane, prebuilt_pane, herdr_root, *, run_worker,
@@ -73,9 +82,18 @@ def run_launch_worker(args, node_id, run_id, store, launch_intent, planned_clone
         sys.exit(75)
 
     if worker.returncode != 0:
-        _record_worker_failure_health(store, args, resolved_agent, worker)
-        _record_worker_failure_intent(store, get_store, args, node_id, run_id,
-                                      launch_intent, worker.stderr)
+        health_status = _record_worker_failure_health(store, args, resolved_agent, worker)
+        failure_dict = _record_worker_failure_intent(store, get_store, args, node_id, run_id,
+                                                     launch_intent, worker.stderr)
+        if (
+            health_status
+            and failure_dict
+            and failure_dict.get("recovery_required") is False
+            and failure_dict.get("disposition") in ("rolled_back", "pane_reclaimed")
+            and getattr(args, "agent", "auto") == "auto"
+        ):
+            raise WorkerStartupHealthFailure(resolved_agent, health_status, failure_dict)
+
         print("Worker failed:", worker.stderr.strip() or worker.stdout.strip())
         sys.exit(1)
 
@@ -107,9 +125,15 @@ def _record_worker_failure_health(store, args, resolved_agent, worker):
             merge_trust_failure_unhealthy,
         )
         worker_output = (worker.stderr or "") + "\n" + (worker.stdout or "")
-        if is_trust_required_failure(worker_output):
+        detected_status = None
+        if "TOKEN_EXHAUSTED" in worker_output:
+            detected_status = "TOKEN_EXHAUSTED"
+        elif is_trust_required_failure(worker_output):
+            detected_status = "TRUST_REQUIRED"
+
+        if detected_status:
             workflow = store.get_workflow(args.workflow_id) or {}
-            unhealthy, healthy = merge_trust_failure_unhealthy(workflow, resolved_agent)
+            unhealthy, healthy = merge_trust_failure_unhealthy(workflow, resolved_agent, status=detected_status)
             store.update_workflow_metadata(args.workflow_id, {
                 "healthy_agents": healthy, "unhealthy_agents": unhealthy,
             })
@@ -118,13 +142,16 @@ def _record_worker_failure_health(store, args, resolved_agent, worker):
                 sync_workflows_projection(store=store)
             except Exception:
                 pass
-            print(f"[ROUTER HEALTH] {resolved_agent} marked TRUST_REQUIRED; auto retry will pick another agent")
+            print(f"[ROUTER HEALTH] {resolved_agent} marked {detected_status}; auto retry will pick another agent")
+            return detected_status
     except Exception as exc:
-        print(f"[ROUTER HEALTH WARN] trust failure write-back failed: {exc}")
+        print(f"[ROUTER HEALTH WARN] failure write-back failed: {exc}")
+    return None
 
 
 def _record_worker_failure_intent(store, get_store, args, node_id, run_id,
                                   launch_intent, stderr):
+    matched_failure = None
     for line in stderr.splitlines():
         if not line.startswith("HERDR_WORKER_FAILURE="):
             continue
@@ -132,6 +159,7 @@ def _record_worker_failure_intent(store, get_store, args, node_id, run_id,
             failure = json.loads(line.split("=", 1)[1])
             if failure.get("task_id") != args.task_id or failure.get("run_id") != run_id:
                 continue
+            matched_failure = failure
             if (failure.get("recovery_required") is False
                     and failure.get("disposition") in ("rolled_back", "pane_reclaimed")):
                 from herdr.task_resources import abort_launch_intent
@@ -152,3 +180,4 @@ def _record_worker_failure_intent(store, get_store, args, node_id, run_id,
                 )
         except (ValueError, TypeError):
             pass
+    return matched_failure

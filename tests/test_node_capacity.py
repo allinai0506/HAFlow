@@ -357,3 +357,48 @@ def test_superseded_tasks_do_not_consume_hard_budget(scene, limit):
     assert usage['budget_task_count'] == 1
     assert usage['superseded_task_count'] == 1
     assert launch_capacity_error(usage) is None
+
+
+def test_cleaned_tasks_do_not_consume_budget(scene):
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    _, store, config, _, _ = scene
+    node = config['nodes'][0]
+    node['max_tasks_per_node'] = 2
+    store.save_task({'task_id': 'cleaned-task', 'workflow_id': 'wf', 'node': 'plan',
+                     'status': 'cleaned'})
+    usage = node_usage(node, store.list_tasks(), 'wf')
+    # 原始 1 个 superseded + 1 个 failed + 1 个 cleaned -> registered 3, retired 2, live budget 1
+    assert usage['registered_task_count'] == 3
+    assert usage['retired_task_count'] == 2
+    assert usage['budget_task_count'] == 1
+    assert launch_capacity_error(usage) is None
+
+
+def test_terminal_prior_round_tasks_do_not_consume_budget():
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    node = {'id': 'test', 'max_tasks_per_node': 2}
+    tasks = [
+        {'task_id': 'wf-test-auto', 'node': 'test', 'status': 'failed', 'dispatch_round': 1},
+        {'task_id': 'wf-test-auto-r2', 'node': 'test', 'status': 'failed', 'dispatch_round': 2},
+        {'task_id': 'wf-test-auto-r3', 'node': 'test', 'status': 'working', 'dispatch_round': 3},
+    ]
+    usage = node_usage(node, tasks)
+    # 前两轮终态任务属于非当前轮次，退役统计应当包含它们；当前活跃任务为 1 个
+    assert usage['registered_task_count'] == 3
+    assert usage['retired_task_count'] == 2
+    assert usage['budget_task_count'] == 1
+    assert launch_capacity_error(usage) is None
+
+
+def test_prior_candidate_episode_terminal_tasks_do_not_consume_budget():
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    node = {'id': 'test', 'max_tasks_per_node': 2}
+    tasks = [
+        {'task_id': 'wf-test-cand0', 'node': 'test', 'status': 'failed', 'candidate_episode_id': 0},
+        {'task_id': 'wf-test-cand1', 'node': 'test', 'status': 'working', 'candidate_episode_id': 1},
+    ]
+    usage = node_usage(node, tasks)
+    assert usage['registered_task_count'] == 2
+    assert usage['retired_task_count'] == 1
+    assert usage['budget_task_count'] == 1
+    assert launch_capacity_error(usage) is None
