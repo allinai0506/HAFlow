@@ -110,14 +110,18 @@ def process_blocked_sla_task(ports, task, now=None, send_prompt=None):
                     workflow_id = task.get("workflow_id")
                     if agent and workflow_id and hasattr(ports, "_get_store"):
                         try:
-                            workflow = ports._get_store().get_workflow(workflow_id) or {}
-                            from herdr.workspace_trust import merge_trust_failure_unhealthy
-                            unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
-                            ports._get_store().update_workflow_metadata(workflow_id, {
-                                "healthy_agents": healthy, "unhealthy_agents": unhealthy,
-                            })
-                            from herdr.state_store import sync_workflows_projection
-                            sync_workflows_projection(store=ports._get_store())
+                            store = ports._get_store()
+                            if hasattr(store, "record_agent_unhealthy"):
+                                store.record_agent_unhealthy(workflow_id, agent, status="TOKEN_EXHAUSTED")
+                            else:
+                                workflow = store.get_workflow(workflow_id) or {}
+                                from herdr.workspace_trust import merge_trust_failure_unhealthy
+                                unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
+                                store.update_workflow_metadata(workflow_id, {
+                                    "healthy_agents": healthy, "unhealthy_agents": unhealthy,
+                                })
+                                from herdr.state_store import sync_workflows_projection
+                                sync_workflows_projection(store=store)
                         except Exception:
                             pass
                     if hasattr(ports, "_set_observed_status"):

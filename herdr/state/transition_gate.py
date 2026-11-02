@@ -346,7 +346,14 @@ def update_workflow_metadata(
         })
 
         for k, v in updates.items():
-            if v is None:
+            if k == "unhealthy_agents" and isinstance(v, dict):
+                cur_unhealthy = dict(wf.get("unhealthy_agents") or {})
+                cur_unhealthy.update(v)
+                wf["unhealthy_agents"] = cur_unhealthy
+            elif k == "healthy_agents" and isinstance(v, (list, tuple, set)):
+                cur_unhealthy = set(wf.get("unhealthy_agents") or {})
+                wf["healthy_agents"] = [a for a in v if a not in cur_unhealthy]
+            elif v is None:
                 wf.pop(k, None)
             else:
                 wf[k] = v
@@ -358,6 +365,80 @@ def update_workflow_metadata(
 
         if should_close:
             conn.execute("COMMIT;")
+
+        return wf
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
+def record_agent_unhealthy(
+    workflow_id: str,
+    agent: str,
+    status: str = "TOKEN_EXHAUSTED",
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+    save_workflow_fn: Any | None = None,
+) -> Dict[str, Any]:
+    """Atomically record an agent as unhealthy in workflow metadata inside an immediate transaction.
+
+    Under an exclusive SQLite transaction (BEGIN IMMEDIATE), reads the current workflow metadata,
+    merges the failed agent into unhealthy_agents, evicts it from healthy_agents, writes back,
+    and commits. Prevents concurrent lost updates across Sentinel, Controller, and Workers.
+    """
+    should_close = False
+    if conn is None:
+        conn = _facade().get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Workflow '{workflow_id}' not found")
+
+        meta = json.loads(row["metadata_json"] or "{}")
+        cfg = json.loads(row["config_json"] or "{}")
+        wf = dict(meta)
+        wf.update({
+            "workflow_id": row["workflow_id"],
+            "title": row["title"],
+            "status": row["status"],
+            "template_name": row["template_name"],
+            "current_stage": row["current_stage"],
+            "config": cfg,
+            "created_at": row["created_at"],
+            "updated_at": time.time(),
+        })
+
+        from herdr.workspace_trust import merge_trust_failure_unhealthy
+        unhealthy, healthy = merge_trust_failure_unhealthy(wf, agent, status=status)
+        wf["unhealthy_agents"] = unhealthy
+        wf["healthy_agents"] = healthy
+
+        if save_workflow_fn is not None:
+            save_workflow_fn(wf, conn=conn)
+        else:
+            _facade().save_workflow(wf, db_path=None, conn=conn)
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        try:
+            from herdr.state_store import sync_workflows_projection
+            sync_workflows_projection(store=_facade().get_state_store(db_path))
+        except Exception:
+            pass
 
         return wf
     except Exception:

@@ -939,14 +939,17 @@ def observe_token_exhausted_pattern(task, *, changes, expected, versions):
     workflow_id = task.get("workflow_id")
     if agent and workflow_id:
         try:
-            workflow = store.get_workflow(workflow_id) or {}
-            from herdr.workspace_trust import merge_trust_failure_unhealthy
-            unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
-            store.update_workflow_metadata(workflow_id, {
-                "healthy_agents": healthy, "unhealthy_agents": unhealthy,
-            })
-            from herdr.state_store import sync_workflows_projection
-            sync_workflows_projection(store=store)
+            if hasattr(store, "record_agent_unhealthy"):
+                store.record_agent_unhealthy(workflow_id, agent, status="TOKEN_EXHAUSTED")
+            else:
+                workflow = store.get_workflow(workflow_id) or {}
+                from herdr.workspace_trust import merge_trust_failure_unhealthy
+                unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
+                store.update_workflow_metadata(workflow_id, {
+                    "healthy_agents": healthy, "unhealthy_agents": unhealthy,
+                })
+                from herdr.state_store import sync_workflows_projection
+                sync_workflows_projection(store=store)
             print(f"[SENTINEL HEALTH] {agent} marked TOKEN_EXHAUSTED in workflow={workflow_id}", flush=True)
         except Exception as exc:
             print(f"[SENTINEL HEALTH WARN] token exhausted write-back failed: {exc}", file=sys.stderr, flush=True)

@@ -132,16 +132,19 @@ def _record_worker_failure_health(store, args, resolved_agent, worker):
             detected_status = "TRUST_REQUIRED"
 
         if detected_status:
-            workflow = store.get_workflow(args.workflow_id) or {}
-            unhealthy, healthy = merge_trust_failure_unhealthy(workflow, resolved_agent, status=detected_status)
-            store.update_workflow_metadata(args.workflow_id, {
-                "healthy_agents": healthy, "unhealthy_agents": unhealthy,
-            })
-            try:
-                from herdr.state_store import sync_workflows_projection
-                sync_workflows_projection(store=store)
-            except Exception:
-                pass
+            if hasattr(store, "record_agent_unhealthy"):
+                store.record_agent_unhealthy(args.workflow_id, resolved_agent, status=detected_status)
+            else:
+                workflow = store.get_workflow(args.workflow_id) or {}
+                unhealthy, healthy = merge_trust_failure_unhealthy(workflow, resolved_agent, status=detected_status)
+                store.update_workflow_metadata(args.workflow_id, {
+                    "healthy_agents": healthy, "unhealthy_agents": unhealthy,
+                })
+                try:
+                    from herdr.state_store import sync_workflows_projection
+                    sync_workflows_projection(store=store)
+                except Exception:
+                    pass
             print(f"[ROUTER HEALTH] {resolved_agent} marked {detected_status}; auto retry will pick another agent")
             return detected_status
     except Exception as exc:

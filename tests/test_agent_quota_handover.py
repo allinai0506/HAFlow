@@ -554,6 +554,204 @@ class TestAgentQuotaHandover(unittest.TestCase):
             )
             self.assertEqual(res["pane_id"], "pane-codex")
 
+    def test_concurrent_dual_agent_quota_exhaustion_on_real_sqlite(self):
+        """Problem 1: Concurrent dual-agent quota exhaustion on real SQLite must preserve both records without lost updates."""
+        from concurrent.futures import ThreadPoolExecutor
+        from herdr.agent_router import choose_agent, RouterHealthRejection, RouterPolicyRejection
+        import herdr.agent_router as router
+
+        workflow_id = "wf-concurrent-01"
+        self.store.save_workflow({
+            "workflow_id": workflow_id,
+            "project_id": "proj-1",
+            "status": "running",
+            "healthy_agents": ["opencode", "codex", "claude"],
+            "unhealthy_agents": {},
+        })
+
+        # 并发执行两路独立的额度耗尽写入
+        def mark_unhealthy(agent_name):
+            # 每个线程独立获取 StateStore 连接，访问同一真实 SQLite 文件
+            store_instance = SQLiteStateStore(self.db_path)
+            return store_instance.record_agent_unhealthy(workflow_id, agent_name, status="TOKEN_EXHAUSTED")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut1 = executor.submit(mark_unhealthy, "opencode")
+            fut2 = executor.submit(mark_unhealthy, "codex")
+            fut1.result()
+            fut2.result()
+
+        # 验证两个失败记录全部持久化在 SQLite 中，没有被覆盖
+        wf = self.store.get_workflow(workflow_id)
+        self.assertEqual(wf["unhealthy_agents"].get("opencode"), "TOKEN_EXHAUSTED")
+        self.assertEqual(wf["unhealthy_agents"].get("codex"), "TOKEN_EXHAUSTED")
+        self.assertNotIn("opencode", wf.get("healthy_agents", []))
+        self.assertNotIn("codex", wf.get("healthy_agents", []))
+        self.assertIn("claude", wf.get("healthy_agents", []))
+
+        # 验证 Router 不会重新选择任何一个耗尽额度的 Agent，只能选 claude
+        orig_wf_config = router.workflow_config_for
+        orig_get_store_router = router._get_store
+        orig_ensure_pool = router.ensure_pool_for_project
+        router.workflow_config_for = lambda wid: {
+            "workflow_id": wid,
+            "project_id": "proj-1",
+            "nodes": [{"id": "impl", "agent_policy": {"pool": ["opencode", "codex", "claude"]}}],
+        }
+        router.ensure_pool_for_project = lambda pid: {"allowed_agents": ["opencode", "codex", "claude"]}
+        router._get_store = lambda: self.store
+        try:
+            chosen = choose_agent(workflow_id, "impl", "code", "auto")
+            self.assertEqual(chosen, "claude")
+
+            # 若 claude 也耗尽，Router 必须触发门禁拒绝，不可复活 opencode 或 codex
+            self.store.record_agent_unhealthy(workflow_id, "claude", status="TOKEN_EXHAUSTED")
+            with self.assertRaises(RouterPolicyRejection):
+                choose_agent(workflow_id, "impl", "code", "auto")
+            with self.assertRaises(RouterHealthRejection):
+                choose_agent(workflow_id, "impl", "code", "claude")
+        finally:
+            router.workflow_config_for = orig_wf_config
+            router._get_store = orig_get_store_router
+            router.ensure_pool_for_project = orig_ensure_pool
+
+    def test_full_chain_quota_exhaustion_detection_to_handover_launch(self):
+        """End-to-end wiring: detection -> failure persistence -> auto-recovery -> safe supersede -> router exclusion -> new agent launch."""
+        from services.controller.infra_recovery import recover_infra_failed_tasks
+        from herdr.agent_router import choose_agent
+        import herdr.agent_router as router
+        from herdr.node_capacity import node_usage
+
+        workflow_id = "wf-fullchain-01"
+        self.store.save_workflow({
+            "workflow_id": workflow_id,
+            "project_id": "proj-chain",
+            "status": "running",
+            "healthy_agents": ["opencode", "codex"],
+            "unhealthy_agents": {},
+        })
+
+        node_cfg = {"id": "impl", "max_tasks_per_node": 2, "agent_policy": {"pool": ["opencode", "codex"]}}
+        task_id = "wf-fullchain-impl"
+        self.store.save_task({
+            "task_id": task_id,
+            "workflow_id": workflow_id,
+            "node": "impl",
+            "agent": "opencode",
+            "status": "working",
+            "pane_id": "p-chain-1",
+            "version": 1,
+            "dispatch_round": 1,
+        })
+
+        # 1. 检测：现场屏幕出现真实配额耗尽证据，Sentinel 进行识别并持久化
+        sentinel_mod = importlib.import_module("services.herdr-sentinel")
+        orig_get_store = sentinel_mod._get_store
+        sentinel_mod._get_store = lambda: self.store
+        try:
+            task = self.store.get_task(task_id)
+            changes = {}
+            expected = {}
+            versions = {}
+            sentinel_mod.observe_token_exhausted_pattern(task, changes=changes, expected=expected, versions=versions)
+            self.assertEqual(changes.get(task_id), ("failed", "token_exhausted"))
+
+            # 持久化失败状态与原因
+            self.store.compare_and_set_task_transition(
+                task_id=task_id,
+                to_status="failed",
+                reason="token_exhausted",
+                source="herdr-sentinel",
+                metadata={"failure_reason": "token_exhausted"},
+                expected_status="working",
+                expected_version=1,
+            )
+        finally:
+            sentinel_mod._get_store = orig_get_store
+
+        # 验证失败原因与 Agent 不健康状态已稳固持久化
+        failed_task = self.store.get_task(task_id)
+        self.assertEqual(failed_task["status"], "failed")
+        self.assertEqual(failed_task["failure_reason"], "token_exhausted")
+        wf = self.store.get_workflow(workflow_id)
+        self.assertEqual(wf["unhealthy_agents"].get("opencode"), "TOKEN_EXHAUSTED")
+
+        # 2. 自动恢复：Controller 发现 infra 故障任务，安全将其 supersede
+        controller_ports = SimpleNamespace(
+            TASK_MANAGER="bin/herdr-task",
+            AUTO_RECOVER_REASONS={"token_exhausted", "agent_process_crash", "hard_timeout_watchdog"},
+            AUTO_RECOVER_MAX_ATTEMPTS=2,
+            _get_store=lambda: self.store,
+            load_tasks=self.store.list_tasks,
+            get_task=self.store.get_task,
+            workflow_closed=lambda _: False,
+            _workflow_entry=lambda _: {"status": "running"},
+            clear_stage_advance=lambda *a, **k: None,
+            _attention_store=SimpleNamespace(
+                transaction=lambda: unittest.mock.MagicMock(__enter__=lambda s: {}, __exit__=lambda *a: None)
+            ),
+            attention_note=lambda *a, **k: None,
+            notify_attention=lambda *a, **k: True,
+            time=SimpleNamespace(time=lambda: 1000.0),
+            liveness=__import__("herdr.liveness", fromlist=["select_infra_failures_for_recovery"]),
+            subprocess=SimpleNamespace(
+                run=lambda cmd, **kw: (
+                    # 真实模拟 herdr-task supersede 将旧任务转为 superseded
+                    self.store.compare_and_set_task_transition(
+                        task_id=task_id,
+                        to_status="superseded",
+                        reason="auto-recover: infrastructure failure",
+                        source="herdr-task:supersede",
+                        expected_status=self.store.get_task(task_id)["status"],
+                        expected_version=self.store.get_task(task_id)["version"],
+                    ),
+                    SimpleNamespace(returncode=0, stdout="", stderr="")
+                )[1]
+            ),
+        )
+
+        recovered = recover_infra_failed_tasks(controller_ports, workflow_id, tasks=self.store.list_tasks())
+        self.assertTrue(recovered)
+        superseded_task = self.store.get_task(task_id)
+        self.assertEqual(superseded_task["status"], "superseded")
+
+        # 3. Router 排除不可用 Agent 并交接给 codex
+        orig_wf_config = router.workflow_config_for
+        orig_get_store_router = router._get_store
+        router.workflow_config_for = lambda wid: {
+            "workflow_id": wid,
+            "project_id": "proj-chain",
+            "nodes": [node_cfg],
+        }
+        router._get_store = lambda: self.store
+        try:
+            chosen = choose_agent(workflow_id, "impl", "code", "auto")
+            self.assertEqual(chosen, "codex")
+        finally:
+            router.workflow_config_for = orig_wf_config
+            router._get_store = orig_get_store_router
+
+        # 4. 新 Agent (codex) 实际启动并登记任务
+        replacement_task_id = "wf-fullchain-impl-r2"
+        self.store.save_task({
+            "task_id": replacement_task_id,
+            "workflow_id": workflow_id,
+            "node": "impl",
+            "agent": chosen,
+            "status": "working",
+            "supersedes": task_id,
+            "dispatch_round": 2,
+            "version": 1,
+        })
+
+        # 5. 验证容量契约：旧任务因已被 supersede 成功退役，新任务占槽，总预算符合 max_tasks_per_node
+        usage = node_usage(node_cfg, self.store.list_tasks(), workflow_id)
+        self.assertEqual(usage["registered_task_count"], 2)
+        self.assertEqual(usage["retired_task_count"], 1)  # 旧任务 superseded 退役
+        self.assertEqual(usage["budget_task_count"], 1)   # 当前仅新任务计入在役预算
+        self.assertEqual(usage["active_task_count"], 1)
+        self.assertFalse(usage["overflow"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,13 +1,19 @@
 """Pure node dispatch budgets; cumulative history is separate from concurrency."""
-import re
-from .transitions import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
+from .transitions import ACTIVE_TASK_STATUSES
 
 CONCURRENT_STATUSES = ACTIVE_TASK_STATUSES | {'pending'}
 
 
 def _is_task_retired(t, all_selected):
-    status = t.get('status')
-    if status == 'superseded':
+    """A task is retired if and only if it has been superseded.
+
+    max_tasks_per_node is the cumulative lifetime task budget for a node.
+    In-service terminal tasks (failed/completed/cleaned) that have not been superseded
+    still count against the hard node budget, preventing infinite remediation rounds.
+    Only superseded tasks (status=='superseded', explicit superseded_by, or replacement
+    pointers via supersedes/redispatch_of) release their budget slot to their successor.
+    """
+    if t.get('status') == 'superseded':
         return True
     if t.get('superseded_by'):
         return True
@@ -16,39 +22,6 @@ def _is_task_retired(t, all_selected):
     if any(other.get('supersedes') == tid or other.get('redispatch_of') == tid
            for other in all_selected):
         return True
-
-    # 终态非当前轮次任务纳入退役统计:
-    # 任务必须处于终态；若所属候选回合已有后续候选(candidate_episode_id)、
-    # 或所属谱系内已有更新轮次/序号的任务，则属于已退役的历史返工记录，不占硬预算。
-    if status not in TERMINAL_TASK_STATUSES:
-        return False
-
-    ep_id = t.get('candidate_episode_id')
-    if ep_id is not None:
-        try:
-            curr_ep = int(ep_id)
-            if any(int(other.get('candidate_episode_id') or 0) > curr_ep for other in all_selected):
-                return True
-        except (ValueError, TypeError):
-            pass
-
-    root_id = re.sub(r'(-r\d+|-v\d+final|-v\d+)$', '', tid)
-    lineage_tasks = [other for other in all_selected
-                     if re.sub(r'(-r\d+|-v\d+final|-v\d+)$', '', str(other.get('task_id') or '')) == root_id]
-
-    try:
-        t_round = int(t.get('dispatch_round') or 1)
-        if any(int(other.get('dispatch_round') or 1) > t_round for other in lineage_tasks):
-            return True
-    except (ValueError, TypeError):
-        pass
-
-    if len(lineage_tasks) > 1:
-        def _suffix_order(task_id_str):
-            m = re.search(r'-r(\d+)$', task_id_str)
-            return int(m.group(1)) if m else 1
-        if any(_suffix_order(str(other.get('task_id') or '')) > _suffix_order(tid) for other in lineage_tasks):
-            return True
 
     return False
 

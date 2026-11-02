@@ -173,6 +173,15 @@ class StateStore(ABC):
     ) -> dict[str, Any]:
         """Atomically update non-protected metadata fields of a workflow without touching status."""
 
+    @abstractmethod
+    def record_agent_unhealthy(
+        self,
+        workflow_id: str,
+        agent: str,
+        status: str = "TOKEN_EXHAUSTED",
+    ) -> dict[str, Any]:
+        """Atomically mark an agent as unhealthy in workflow metadata inside an immediate transaction."""
+
     # Tasks
     @abstractmethod
     def save_task(self, task: dict[str, Any], fail_if_exists: bool = False) -> None:
@@ -705,6 +714,20 @@ class SQLiteStateStore(StateStore):
             updates=updates,
             db_path=self.db_path,
             expected_status=expected_status,
+            save_workflow_fn=self.save_workflow,
+        )
+
+    def record_agent_unhealthy(
+        self,
+        workflow_id: str,
+        agent: str,
+        status: str = "TOKEN_EXHAUSTED",
+    ) -> dict[str, Any]:
+        return state_db.record_agent_unhealthy(
+            workflow_id=workflow_id,
+            agent=agent,
+            status=status,
+            db_path=self.db_path,
             save_workflow_fn=self.save_workflow,
         )
 
