@@ -9330,3 +9330,47 @@ pytest -q tests/test_task_cli_launch_worker.py
 - `herdr/node_capacity.py` — 回缩 `_is_task_retired` 为严格 `superseded` 语义
 - `services/herdr-worker.py` & `herdr/task_cli_launch_worker.py` — Pane 前失败返回 `not_started` 并安全回滚改派
 - `tests/test_agent_quota_handover.py` — 12 项并发与全链路自动交接专项守护测试
+
+
+---
+
+## 222. 计划阶段架构师与质询者角色因果时序倒挂死锁与质询审查自愈
+
+### 问题背景
+
+真实工作流 `wf-haflow-1102-02` 在 `plan` 阶段运行正常，但在推进至 `implementation` 节点时发生持久性停滞拒绝（`DIRECT DISPATCH REFUSAL: plan_and_challenger_verified=False`，`reason: challenger_outdated: plan was updated after challenger review was published`），系统进入 `STAGE ADVANCE REFUSED` -> `waiting_human` 死锁。
+
+根因排查确认：
+1. **拓扑结构与并发语义矛盾**：`software-development-v1.yaml` 中 `plan` 阶段同时声明了 `executor`（主架构师规划）和 `challenger`（对抗性质询）两个角色并设置 `parallel: true`。调度引擎在 $t=0$ 同时拉起两任务。
+2. **审查工位缺乏物料导致过早退出**：Challenger 启动时 Executor 尚未产出方案文本，Challenger 无法审查，在几秒内输出 `HOLD_FOR_MAIN_PLAN` 并调用 `agent_done` 结束；Executor 则在数分钟后写完方案落盘。
+3. **严格时序门禁拒绝放行**：`herdr/plan_parser.py:verify_plan_and_challenger` 强制要求 `chal_ts >= plan_ts` 且审查必须携带最新 `Plan-Ref`。由于 Challenger 先于 Executor 完成，系统判定审查过期（`challenger_outdated`）。
+4. **调度引擎缺乏角色因果时序与自愈重裁机制**：`direct_dispatch.py` 将已完成任务视为节点繁忙而拒绝派发后续角色；同时当发现审查过期时直接进入 `mode: "refusal"`，导致流程挂起需人工干预。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 审查角色与生产角色盲目并发 | 审查工位强依赖被审物料，无依赖同时拉起必然导致审查者空转或时序倒挂 | 声明了 `depends_on_role`（或对抗审查角色）的工位必须等待前置角色交付物落盘后再派发，并在提示词中显式注入前置产物元数据与引用契约 |
+| 节点完成判定忽略多角色完备性 | 仅按「活跃任务全进入完成状态」判定节点完成，会导致仅完成了部分角色的节点被误判为全部完成 | `node_is_complete` 必须校验节点声明的 `roles` 是否全量在完成集合中，未全部落定前严禁允许下游阶段推进 |
+| 过期审查结论导致流程挂起 | 计划发生修改（`plan_ts > chal_ts`）或审查缺少引用时，直接返回拒绝会使流水线卡死在 `waiting_human` | 调度器应将 `challenger_outdated`、`challenger_plan_ref_missing` 与 `challenger_invalid` 识别为自愈补审信号，自动针对最新计划重派 Challenger（`redispatch_of`） |
+
+### 操作规范
+
+1. **角色依赖声明与因果分步派发**：在模板中为 `challenger` 角色标注 `depends_on_role: executor`；`direct_dispatch.py` 在初始派发时仅启动无前置依赖的角色，前置角色落定交付后自动启动依赖角色并注入 `plan_ref` 与 `plan_chunk`。
+2. **多角色全量完成守卫**：`herdr/scheduler.py` 与 `services/controller/stage_state.py` 的 `node_is_complete` 传入 `node` 配置，严格核验 `required_roles.issubset(completed_roles)`。
+3. **过期审查自愈重审**：当检测到 `challenger_outdated` 时，自动生成针对旧 Challenger 的补派规格（`dispatch_round += 1`，继承 `redispatch_of`），消除人工唤醒死锁。
+
+### 验证命令 / 守护测试
+
+```bash
+# 验证计划阶段分步因果派发、Plan-Ref 自动注入、多角色节点完成判定与过期审查自愈
+pytest -q tests/test_plan_causal_dispatch.py
+```
+
+### 相关文档 / 关联证据
+
+- 架构审计缺陷 F-02 — `docs/audits/workflow-decision-audit-v1/complexity-findings.md`
+- `workflow_templates/software-development-v1.yaml` — `challenger` 角色配置 `depends_on_role: executor`
+- `herdr/direct_dispatch.py` — 支持多角色分阶段因果派发、`plan_ref` 上下文注入与审查过期自愈
+- `herdr/scheduler.py` & `services/controller/stage_state.py` — `node_is_complete` 支持 `roles` 完备性核验与 `reconcile_stage_advance_states` 锁自愈
+- `tests/test_plan_causal_dispatch.py` — 4 项全链路因果派发与自愈守护测试

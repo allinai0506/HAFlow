@@ -4023,3 +4023,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 工作流收尾提炼通道闭环：`herdr/task_cli_workflow_close.py` 的 `close_workflow_owned` 在工作流物理收尾完成后，以 100% fail-open 方式自动触发 `collect_and_sync_lessons`、`collect_workflow_tasks` 与 `recover_and_sync`，确保每次工作流收尾均自动沉淀并同步经验资产。
 - 生产现场补齐：成功提取积压的 45 条工程教训资产（§165 ~ §213）并同步推送到 Experience Hub，经验总数从 7 条恢复至 52 条。
 - 验证：新增 `tests/test_workflow_experience_closeout.py` 专项守护测试，全量 126 项经验回归测试全绿；`compileall` 与 `git diff --check` clean。教训见 lessons §216。
+
+
+## [2026-11-02] Fix | 计划阶段架构师与质询者角色因果解耦与过期重裁自愈（消除 plan -> implementation 时序死锁与挂起）
+- 角色因果分步派发（消除时序竞态）：`workflow_templates/software-development-v1.yaml` 中为 `challenger` 角色标注 `depends_on_role: executor`；`herdr/direct_dispatch.py` 在初始派发时仅启动无依赖前置角色，前置角色产出方案并落定后，自动触发后置依赖角色，并在提示词与规格中直接注入 `plan_ref` 与 `plan_chunk`，从根本上杜绝 Challenger 早于 Executor 退出导致的时序倒挂与 `Plan-Ref` 缺失。
+- 多角色全量落定守卫与锁状态自愈：`herdr/scheduler.py` 与 `services/controller/stage_state.py` 的 `node_is_complete` 支持接收 `node` 配置，严格校验节点声明的所有 `roles` 均有已完成的任务存在；`reconcile_stage_advance_states` 在节点未全量完成且无运行中任务时自动撤销 `notified` 锁，确保后续依赖角色顺利入队派发。
+- 计划更新后旧审查自动重裁闭环：`herdr/direct_dispatch.py` 在 `verify_plan_and_challenger` 识别到 `challenger_outdated`、`challenger_plan_ref_missing` 或 `challenger_invalid` 且最新方案存在时，自动将其转换为针对旧 Challenger 的补派规格（`dispatch_round += 1`，继承 `redispatch_of`），彻底消除进入 `waiting_human` 的挂起死锁。
+- 验证：新增 `tests/test_plan_causal_dispatch.py` 覆盖 4 项全链路测试；`tests/test_software_development_v1_template.py`、`test_software_development_v1_adapter.py`、`test_software_development_v1_e2e_isolated.py`、`test_direct_stage_dispatch.py` 与 `test_workflow_engine.py` 全部 100% 通过；`compileall` 与 `git diff --check` clean。教训见 lessons §222。

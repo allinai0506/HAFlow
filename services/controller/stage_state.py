@@ -168,9 +168,31 @@ def is_node_complete(ports, workflow_id, node_id):
         return ports._reverification_satisfies_node(workflow_id, node_id)
 
     if ports.scheduler_core is not None:
-        return ports.scheduler_core.node_is_complete(tasks, required_ids)
+        try:
+            return ports.scheduler_core.node_is_complete(tasks, required_ids, node=node)
+        except TypeError:
+            return ports.scheduler_core.node_is_complete(tasks, required_ids)
     if required_ids is not None or any(t.get("replacement_pending") for t in tasks):
         return False
+
+    roles = (node.get("agent_policy") or {}).get("roles") or node.get("roles") or []
+    if isinstance(roles, list) and roles:
+        required_roles = {str(r.get("name") or "").strip().lower() for r in roles if isinstance(r, dict) and r.get("name")}
+        if required_roles:
+            completed_roles = {
+                str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+                for t in active
+                if t.get("status") in ("completed", "committed", "integrated", "cleanup_ready", "cleaned")
+            }
+            for t in active:
+                if t.get("status") in ("completed", "committed", "integrated", "cleanup_ready", "cleaned"):
+                    tid = str(t.get("task_id") or "").lower()
+                    for r_name in required_roles:
+                        if r_name in tid:
+                            completed_roles.add(r_name)
+            if not required_roles.issubset(completed_roles):
+                return False
+
     return all(
         t.get("status") in (
             "completed", "committed", "integrated", "cleanup_ready", "cleaned"
@@ -257,6 +279,14 @@ def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
                     if ports.dispatch_awaiting_human(workflow_id, node_id):
                         continue
                     reason = "own lineage fully superseded with no live task"
+                elif not ports.is_node_complete(workflow_id, node_id):
+                    node_t = [t for t in (wf_tasks or []) if t.get("workflow_id") == workflow_id and (t.get("node") == node_id or t.get("stage") == node_id)]
+                    from herdr.transitions import ACTIVE_TASK_STATUSES
+                    has_running = any(str(t.get("status") or "") in ACTIVE_TASK_STATUSES for t in node_t)
+                    if not has_running and not ports.dispatch_awaiting_human(workflow_id, node_id):
+                        reason = "node not complete with pending roles to dispatch"
+                    else:
+                        continue
                 else:
                     continue
             else:

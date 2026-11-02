@@ -464,12 +464,13 @@ def _prompt(
     docs_section = f"\n{docs_block}\n" if docs_block else ""
 
     plan_section = ""
-    if plan_chunk:
-        ref_text = f"（已批准计划版本: {plan_ref}）\n" if plan_ref else ""
+    if plan_chunk or plan_ref:
+        ref_text = f"（Plan-Ref: {plan_ref}）\n" if plan_ref else ""
+        chunk_text = plan_chunk.strip() if plan_chunk else ""
         plan_section = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 已审计划约束与任务规格 {ref_text}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{plan_chunk.strip()}
+{chunk_text}
 """
 
     stage_context_section = ""
@@ -631,6 +632,8 @@ def _dispatch_spec(
     frozen_sha = str(candidate_sha or "").strip()
     if frozen_sha:
         spec["candidate_sha"] = frozen_sha
+    if plan_ref:
+        spec["plan_ref"] = plan_ref
     return spec
 
 
@@ -756,7 +759,59 @@ def plan_stage_dispatch(
                 spec["supersedes"] = task["task_id"]
             return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
 
-        if active:
+        roles = normalized.get("roles") or []
+        has_pending_roles = False
+        roles_to_dispatch = []
+        roles_needing_redispatch = []
+        if roles:
+            from herdr.transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
+            running_tasks = [t for t in node_tasks if str(t.get("status") or "") in ACTIVE_TASK_STATUSES]
+            if running_tasks:
+                return {
+                    "mode": "wait",
+                    "reason": f"node has active tasks ({len(running_tasks)} running)",
+                    "specs": [],
+                }
+
+            completed_role_tasks = {}
+            for t in node_tasks:
+                if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by"):
+                    r_name = str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+                    if not r_name:
+                        for ro in roles:
+                            ron = str(ro.get("name") or "").strip().lower()
+                            if ron in str(t.get("task_id") or "").lower():
+                                r_name = ron
+                                break
+                    if r_name:
+                        completed_role_tasks[r_name] = t
+
+            if node_id == "plan" and "challenger" in completed_role_tasks:
+                from herdr.plan_parser import verify_plan_and_challenger
+                verif_ok, verif_reason, details = verify_plan_and_challenger(
+                    workflow_id, tasks=tasks, project_root=project_root, require_challenger=True
+                )
+                if not verif_ok:
+                    refusal_code = verif_reason.split(":")[0].strip()
+                    if refusal_code in ("challenger_outdated", "challenger_plan_ref_missing", "challenger_invalid", "challenger_verdict_missing") and (details.get("plan_id") or details.get("valid_plan_ids")):
+                        roles_needing_redispatch.append("challenger")
+                        completed_role_tasks.pop("challenger", None)
+
+            for r in roles:
+                r_name = str(r.get("name") or "").strip().lower()
+                if r_name in completed_role_tasks:
+                    continue
+                dep_role = str(r.get("depends_on_role") or "").strip().lower()
+                if dep_role:
+                    if dep_role in completed_role_tasks:
+                        roles_to_dispatch.append(r)
+                else:
+                    roles_to_dispatch.append(r)
+
+            if roles_to_dispatch:
+                has_pending_roles = True
+
+        if not has_pending_roles and active:
             return {
                 "mode": "wait",
                 "reason": "node has active tasks",
@@ -927,8 +982,9 @@ def plan_stage_dispatch(
 
         roles = normalized.get("roles") or []
         if roles:
+            target_roles = roles_to_dispatch if has_pending_roles else roles
             specs = []
-            for r in roles:
+            for r in target_roles:
                 r_name = str(r.get("name") or "worker").strip()
                 r_label = str(r.get("label") or r_name).strip()
                 r_goal = str(r.get("goal") or "").strip()
@@ -938,29 +994,58 @@ def plan_stage_dispatch(
                 r_outputs = _as_list(r.get("outputs")) or list(normalized["required_outputs"])
                 r_acceptance = _acceptance_lines(normalized, r_outputs)
 
-                task_id = f"{workflow_id}-{node_id}-{r_name}"
-                if task_id in existing_ids:
-                    task_id = initial_task_id(workflow_id, f"{node_id}-{r_name}", existing_ids)
+                dep_role = str(r.get("depends_on_role") or "").strip().lower()
+                plan_chunk = None
+                plan_ref = None
+                if dep_role == "executor" or (node_id == "plan" and r_name.lower() in ("challenger", "review", "adversarial")):
+                    from herdr.plan_parser import find_plan_deliverables
+                    deliverables = find_plan_deliverables(workflow_id, tasks, project_root)
+                    meta = getattr(deliverables, "meta", {})
+                    plan_ref = str(meta.get("plan_id") or "").strip()
+                    plan_chunk = deliverables[0]
+                    if plan_ref:
+                        r_goal += f" (被审计划: {plan_ref})"
+                        r_acceptance = [f"显式引用被审计划 Plan-Ref: {plan_ref}", "输出明确裁决结论 [PASS] 或 [BLOCKED]"] + list(r_acceptance)
+
+                redispatch_of = None
+                if r_name.lower() in roles_needing_redispatch:
+                    old_t = next((t for t in node_tasks if any(r_name.lower() in str(t.get(k) or "").lower() for k in ("dispatch_role", "task_id")) and not t.get("superseded_by")), None)
+                    if old_t:
+                        redispatch_of = old_t.get("task_id")
+
+                if redispatch_of:
+                    task_id = next_replacement_id(redispatch_of, existing_ids)
+                else:
+                    task_id = f"{workflow_id}-{node_id}-{r_name}"
+                    if task_id in existing_ids:
+                        task_id = initial_task_id(workflow_id, f"{node_id}-{r_name}", existing_ids)
                 existing_ids.add(task_id)
 
-                specs.append(
-                    _dispatch_spec(
-                        normalized,
-                        requirement.strip(),
-                        r_goal,
-                        r_acceptance,
-                        task_id,
-                        role_outputs=r_outputs,
-                        context_branch=context_branch,
-                        gate_contract=gate_contract,
-                        docs_block=docs_block,
-                        candidate_sha=candidate_sha,
-                        gate_inventory_block=gate_inventory_block,
-                    )
+                spec = _dispatch_spec(
+                    normalized,
+                    requirement.strip(),
+                    r_goal,
+                    r_acceptance,
+                    task_id,
+                    redispatch_of=redispatch_of,
+                    role_outputs=r_outputs,
+                    context_branch=context_branch,
+                    gate_contract=gate_contract,
+                    docs_block=docs_block,
+                    candidate_sha=candidate_sha,
+                    gate_inventory_block=gate_inventory_block,
+                    plan_chunk=plan_chunk,
+                    plan_ref=plan_ref,
                 )
-            for spec, role in zip(specs, roles):
-                spec["dispatch_role"] = str(role["name"]).strip()
-            return {"mode": "dispatch", "reason": "initial node dispatch with roles", "specs": specs}
+                spec["dispatch_role"] = r_name
+                if redispatch_of:
+                    old_task = next((t for t in node_tasks if t.get("task_id") == redispatch_of), {})
+                    spec["dispatch_round"] = _calculate_redispatch_round(node_tasks, old_task, candidate_sha)
+                    spec["supersedes"] = redispatch_of
+                specs.append(spec)
+
+            reason_str = "redispatch outdated role" if roles_needing_redispatch else ("staged role dispatch" if has_pending_roles else "initial node dispatch with roles")
+            return {"mode": "dispatch", "reason": reason_str, "specs": specs}
 
         acceptance = _acceptance_lines(normalized, None)
         goal = f"{normalized['label']}: {normalized['purpose']}"
