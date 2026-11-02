@@ -173,6 +173,8 @@ def is_node_complete(ports, workflow_id, node_id):
         except TypeError:
             complete = ports.scheduler_core.node_is_complete(tasks, required_ids)
     else:
+        if required_ids is not None or any(t.get("replacement_pending") for t in tasks):
+            return False
         complete = all(
             t.get("status") in (
                 "completed", "committed", "integrated", "cleanup_ready", "cleaned"
