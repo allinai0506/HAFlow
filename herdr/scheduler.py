@@ -179,11 +179,12 @@ def required_task_issues(tasks_for_node, required_task_ids, *, all_tasks=(), wor
     return issues
 
 
-def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids=None) -> bool:
+def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids=None, *, node=None) -> bool:
     """节点完成判定(与控制器 is_node_complete 同口径的纯函数版本)。
 
     - 零任务 -> 未完成;
     - 任一活跃任务不在完成集合 -> 未完成。
+    - 声明了 roles 时 -> 所有必要角色均已在完成集合中。
     """
     tasks = [t for t in (tasks_for_node or []) if isinstance(t, dict)]
     active = [t for t in tasks if t.get("status") != "superseded" and not t.get("superseded_by")]
@@ -191,6 +192,37 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
         return False
     if required_task_issues(tasks, required_task_ids):
         return False
+
+    if node and isinstance(node, dict):
+        policy = node.get("agent_policy") or node.get("worker_policy") or {}
+        roles = policy.get("roles") or node.get("roles") or []
+        if isinstance(roles, list) and roles:
+            required_roles = {
+                str(r.get("name") or "").strip().lower()
+                for r in roles
+                if isinstance(r, dict) and r.get("name")
+            }
+            if required_roles:
+                any_role_aware = any(
+                    t.get("dispatch_role") or t.get("role") or any(r in str(t.get("task_id") or "").lower() for r in required_roles)
+                    for t in active
+                )
+                if any_role_aware:
+                    completed_roles = {
+                        str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+                        for t in active
+                        if str(t.get("status") or "") in NODE_DONE_STATUSES
+                        and (t.get("integration_mode") != "git"
+                             or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
+                    }
+                    for t in active:
+                        if str(t.get("status") or "") in NODE_DONE_STATUSES:
+                            tid = str(t.get("task_id") or "").lower()
+                            for r_name in required_roles:
+                                if r_name in tid:
+                                    completed_roles.add(r_name)
+                    if not required_roles.issubset(completed_roles):
+                        return False
     obligations = list(required_task_ids or []) + [
         t.get("task_id") for t in tasks if t.get("replacement_pending")]
     if obligations:

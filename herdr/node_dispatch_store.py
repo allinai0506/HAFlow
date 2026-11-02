@@ -130,9 +130,69 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
                 node_tasks = [t for t in current_tasks if (t.get('node') or t.get('stage')) == node['id']]
                 candidates = lineage_redispatch_candidates(node_tasks)
                 predecessors = None
+                has_staged_dispatch = False
+                if node_tasks and previous and previous['status'] in core.TERMINAL:
+                    policy = node.get("agent_policy") or node.get("worker_policy") or {}
+                    roles = policy.get("roles") or node.get("roles") or []
+                    if isinstance(roles, list) and len(roles) > 1:
+                        from herdr.transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
+                        active_running = [t for t in node_tasks if str(t.get("status") or "") in ACTIVE_TASK_STATUSES]
+                        if not active_running:
+                            completed_role_tasks = {}
+                            for t in node_tasks:
+                                if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by"):
+                                    r_name = str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+                                    if not r_name:
+                                        for ro in roles:
+                                            ron = str(ro.get("name") or "").strip().lower()
+                                            if ron in str(t.get("task_id") or "").lower():
+                                                r_name = ron
+                                                break
+                                    if r_name:
+                                        completed_role_tasks[r_name] = t
+
+                            if completed_role_tasks:
+                                if node['id'] == 'plan' and 'challenger' in completed_role_tasks:
+                                    from herdr.plan_parser import verify_plan_and_challenger
+                                    verif_ok, verif_reason, details = verify_plan_and_challenger(
+                                        wid, tasks=current_tasks, require_challenger=True
+                                    )
+                                    if not verif_ok:
+                                        refusal_code = verif_reason.split(":")[0].strip()
+                                        if refusal_code in (
+                                            "challenger_outdated",
+                                            "challenger_plan_ref_missing",
+                                            "challenger_plan_version_mismatch",
+                                            "challenger_invalid",
+                                            "challenger_verdict_missing",
+                                        ) and (details.get("plan_id") or details.get("valid_plan_ids")):
+                                            completed_role_tasks.pop('challenger', None)
+
+                                for r in roles:
+                                    r_name = str(r.get("name") or "").strip().lower()
+                                    if r_name in completed_role_tasks:
+                                        continue
+                                    dep_role = str(r.get("depends_on_role") or "").strip().lower()
+                                    if not dep_role or dep_role in completed_role_tasks:
+                                        if dep_role == "executor" or (node['id'] == 'plan' and r_name == 'challenger'):
+                                            from herdr.plan_parser import find_plan_deliverables, validate_plan_deliverable_content
+                                            deliv = find_plan_deliverables(wid, current_tasks)
+                                            p_text = deliv[0] if deliv else None
+                                            p_meta = getattr(deliv, 'meta', {})
+                                            p_ref = str(p_meta.get('plan_id') or '').strip()
+                                            if not p_text or not p_ref:
+                                                continue
+                                            p_ok, _ = validate_plan_deliverable_content(p_text, role="executor")
+                                            if not p_ok:
+                                                continue
+                                        has_staged_dispatch = True
+                                        break
+
                 if candidates and (not previous or previous['status'] in core.TERMINAL):
                     predecessors = sorted(({'task_id': t['task_id'], 'run_id': t.get('run_id')}
                                            for t in candidates), key=lambda t: t['task_id'])
+                elif has_staged_dispatch:
+                    pass
                 elif node_tasks and (not node.get('depends_on') or not core.cancelled_inventory(node_tasks)):
                     continue
                 prior_id = previous['id'] if previous and previous['status'] in core.TERMINAL else None
