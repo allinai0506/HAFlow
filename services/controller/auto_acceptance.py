@@ -4,6 +4,9 @@ Dependencies are explicit inputs; importing this module creates no runtime state
 """
 
 
+from dataclasses import dataclass
+
+
 # 规则化验收 (auto-accept) — 非门禁节点免除总指挥 LLM 回合
 # 背景(lessons §61)：agent_done 后的总指挥验收回合实测占用 2.6h/8h。非门禁
 # 节点(需求/计划/实现)的验收标准本就是"产物落盘 + 变更受控"，可由
@@ -12,32 +15,58 @@ def auto_accept_enabled(ports):
     value = ports.os.environ.get("HERDR_AUTO_ACCEPT", "1")
     return value.strip().lower() not in ("0", "false", "off", "no")
 
-def task_changes_recorded(ports, task):
-    """verify-baseline 铁证：至少一个受控文件变更(TASK_CHANGED)。"""
-    task_id = task.get("task_id")
-    if not task_id:
-        return False
+AUTO_REWORK_REASON_PREFIX = "auto_acceptance_rework:"
+AUTO_ACCEPT_REWORK_LIMIT = 2
+
+
+@dataclass(frozen=True)
+class AutoAcceptResult:
+    accepted: bool
+    reason_code: str = ""
+    detail: str = ""
+    missing: tuple[str, ...] = ()
+
+    def __bool__(self):
+        return self.accepted
+
+
+def auto_rework_attempts(ports, task):
+    return sum(1 for entry in (task.get("status_history") or [])
+               if isinstance(entry, dict) and entry.get("from") == "agent_done"
+               and entry.get("to") == "rework"
+               and str(entry.get("reason") or "").startswith(AUTO_REWORK_REASON_PREFIX))
+
+
+def task_changes_evidence(ports, task):
+    """Read baseline once; only an explicit empty changes list proves no changes."""
+    if not task.get("task_id"):
+        return "unavailable", "task_id missing"
     try:
         result = ports.subprocess.run(
-            [ports.TASK_MANAGER, "verify-baseline", task_id],
-            text=True,
-            capture_output=True,
-            timeout=60,
+            [ports.TASK_MANAGER, "verify-baseline", task["task_id"]],
+            text=True, capture_output=True, timeout=60,
         )
-    except Exception:
-        return False
-
+    except Exception as exc:
+        return "unavailable", type(exc).__name__
     if result.returncode != 0:
-        return False
+        return "unavailable", f"verify-baseline exit={result.returncode}"
     output = result.stdout or ""
     for line in output.splitlines():
         if line.startswith("HERDR_BASELINE_RESULT="):
             try:
                 payload = ports.json.loads(line.split("=", 1)[1])
-            except (ValueError, IndexError):
-                continue
-            return bool(payload.get("changes"))
-    return "TASK_CHANGED" in output
+            except ValueError:
+                return "unavailable", "invalid baseline JSON"
+            if not isinstance(payload, dict) or not isinstance(payload.get("changes"), list):
+                return "unavailable", "baseline changes list missing"
+            return ("changed" if payload["changes"] else "no_changes"), ""
+    if any(line == "TASK_CHANGED" or line.startswith("TASK_CHANGED:") for line in output.splitlines()):
+        return "changed", ""
+    return "unavailable", "baseline result missing"
+
+
+def task_changes_recorded(ports, task):
+    return ports.task_changes_evidence(task)[0] == "changed"
 
 def try_auto_accept(ports, task_id):
     """非门禁节点规则化验收：变更铁证齐备即 completed，免总指挥回合。
@@ -46,21 +75,21 @@ def try_auto_accept(ports, task_id):
     门禁节点、被显式关闭(HERDR_AUTO_ACCEPT=0)时返回 False，走原路径。
     """
     if not ports.auto_accept_enabled():
-        return False
+        return AutoAcceptResult(False, "auto_accept_disabled")
 
     task = ports.get_task(task_id)
     if not task or task.get("status") != "agent_done":
-        return False
+        return AutoAcceptResult(False, "task_not_agent_done")
 
     workflow_id = task.get("workflow_id")
     node_id = task.get("node") or task.get("stage")
     if not workflow_id or not node_id:
-        return False
+        return AutoAcceptResult(False, "task_identity_incomplete")
 
     if ports.node_is_gate(workflow_id, node_id):
-        return False
+        return AutoAcceptResult(False, "gate_node")
     if task.get("stage_verdict") == "blocked":
-        return False
+        return AutoAcceptResult(False, "stage_verdict_blocked")
 
     role_text = " ".join(str(task.get(key) or "").lower() for key in
                          ("dispatch_role", "agent_role", "role", "task_id"))
@@ -84,6 +113,8 @@ def try_auto_accept(ports, task_id):
     is_staged = is_staged_dev_flow_workflow(wf_cfg)
 
     if is_staged:
+        if is_challenger and node_id != "plan":
+            return AutoAcceptResult(False, "review_role")
         clone_path = task.get("clone_path") or ""
         role = "challenger" if is_challenger else "executor"
 
@@ -114,7 +145,7 @@ def try_auto_accept(ports, task_id):
             ok, missing = validate_requirements_deliverable_content(deliverable_text)
             if not ok:
                 print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} requirements invalid: {missing}")
-                return False
+                return AutoAcceptResult(False, "requirements_missing_sections", missing=tuple(missing))
 
         elif node_id == "plan":
             deliverable_text = ""
@@ -161,32 +192,35 @@ def try_auto_accept(ports, task_id):
             ok, missing = validate_plan_deliverable_content(deliverable_text, role=role)
             if not ok:
                 print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} plan ({role}) invalid: {missing}")
-                return False
+                return AutoAcceptResult(False, "plan_challenger_missing_sections" if is_challenger else "plan_missing_sections", missing=tuple(missing))
 
-        elif node_id == "implementation":
-            if not ports.task_changes_recorded(task):
-                return False
         else:
-            if not ports.task_changes_recorded(task):
-                return False
+            evidence, detail = ports.task_changes_evidence(task)
+            if evidence != "changed":
+                reason = ("verification_unavailable" if evidence == "unavailable" else
+                          "implementation_no_controlled_changes" if node_id == "implementation" else
+                          "no_controlled_changes_other")
+                return AutoAcceptResult(False, reason, detail)
     else:
         if is_challenger:
-            return False
-        if not ports.task_changes_recorded(task):
-            return False
+            return AutoAcceptResult(False, "review_role")
+        evidence, detail = ports.task_changes_evidence(task)
+        if evidence != "changed":
+            return AutoAcceptResult(False, "verification_unavailable" if evidence == "unavailable"
+                                    else "no_controlled_changes_other", detail)
 
     if not ports.set_task_status(
         task_id, "completed", expected_status="agent_done",
         expected_version=ports._task_version(task), source="herdr-controller:auto-accept",
         metadata={"auto_accept_reason": "controlled_changes", "acceptance_mode": "auto"},
     ):
-        return False
+        return AutoAcceptResult(False, "cas_mismatch")
 
     print(
         f"[AUTO ACCEPT] task={task_id} "
         f"node={node_id} -> completed"
     )
-    return True
+    return AutoAcceptResult(True)
 
 def check_task_deliverables_ready(ports, task):
     """Check whether deliverables required by the task or node are present and non-empty."""
@@ -246,9 +280,11 @@ def gate_verdict_ready(ports, task):
 
 
 DEPENDENCIES = {'auto_accept_enabled': ('os',),
- 'task_changes_recorded': ('TASK_MANAGER', 'json', 'subprocess'),
+ 'auto_rework_attempts': (),
+ 'task_changes_evidence': ('TASK_MANAGER', 'json', 'subprocess'),
+ 'task_changes_recorded': ('task_changes_evidence',),
  'try_auto_accept': ('_task_version', 'auto_accept_enabled', 'get_task', 'node_is_gate', 're',
-                     'set_task_status', 'task_changes_recorded', 'workflow_config_for'),
+                     'set_task_status', 'task_changes_evidence', 'workflow_config_for'),
  'check_task_deliverables_ready': ('find_node', 'os', 'subprocess', 'workflow_config_for'),
  'gate_verdict_ready': ('node_is_gate', 'read_gate_verdict')}
 

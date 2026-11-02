@@ -2,7 +2,6 @@
 
 import os
 import subprocess
-import subprocess
 import sys
 import time
 import uuid
@@ -29,6 +28,14 @@ def handle_rework(
         sys.exit(2)
     with workflow_launch_lock(store.db_path, task["workflow_id"]):
         task = store.get_task(args.task_id)
+        for field in ("status", "version", "run_id", "execution_id"):
+            expected = getattr(args, f"expected_{field}", None)
+            actual = task.get(field) if task else None
+            if expected is not None and expected != (actual if field == "version" else str(actual or "")):
+                print(f"Rework refused: expected snapshot mismatch ({field})")
+                sys.exit(2)
+        expected_status = getattr(args, "expected_status", None)
+        expected_version = getattr(args, "expected_version", None)
         if task["status"] not in {
             "blocked",
             "agent_done",
@@ -90,8 +97,8 @@ def handle_rework(
                     reason=args.reason,
                     source="herdr-task",
                     conn=conn,
-                    expected_status=current["status"],
-                    expected_version=current["version"],
+                    expected_status=expected_status if expected_status is not None else current["status"],
+                    expected_version=expected_version if expected_version is not None else current["version"],
                     metadata={
                         "stage_verdict": None,
                         "stage_verdict_note": None,
@@ -142,8 +149,8 @@ def handle_rework(
             reason=args.reason,
             source="herdr-task",
             store=store,
-            expected_status=task["status"],
-            expected_version=task.get("version"),
+            expected_status=expected_status if expected_status is not None else task["status"],
+            expected_version=expected_version if expected_version is not None else task.get("version"),
             metadata={
                 "rework_prompt": prompt,
                 "rework_delivery": "pending",

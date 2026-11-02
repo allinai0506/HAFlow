@@ -6,7 +6,8 @@ Dependencies are explicit inputs; importing this module creates no runtime state
 def attention_get(ports, key):
     return ports._attention_store.get(key)
 
-def attention_note(ports, key, task, event_type, reason, attempts=None, next_retry_at=None, detail=None):
+def attention_note(ports, key, task, event_type, reason, attempts=None, next_retry_at=None, detail=None,
+                   reason_code=None, limit=None, escalated=None):
     """Record/refresh an attention episode for a stalled or undeliverable event."""
     episode = ports._attention_store.get(key) or {}
     now = ports.time.time()
@@ -17,8 +18,11 @@ def attention_note(ports, key, task, event_type, reason, attempts=None, next_ret
         "reason": reason,
         "last_attempt_at": now,
     }
-    if task.get("execution_id"):
-        fields["execution_id"] = task["execution_id"]
+    fields.update(task_version=task.get("version"), run_id=task.get("run_id"),
+                  execution_id=task.get("execution_id"))
+    for name, value in (("reason_code", reason_code), ("limit", limit), ("escalated", escalated)):
+        if value is not None:
+            fields[name] = value
     if attempts is not None:
         fields["attempts"] = int(attempts)
     if next_retry_at is not None:
@@ -28,6 +32,18 @@ def attention_note(ports, key, task, event_type, reason, attempts=None, next_ret
     if not episode.get("first_seen_at"):
         fields["first_seen_at"] = now
     return ports._attention_store.upsert(key, fields)
+
+def attention_escalated(ports, key, task):
+    episode = ports.attention_get(key) or {}
+    same_epoch = all(episode.get(field) in (None, task.get(task_field))
+                     for field, task_field in (("task_version", "version"),
+                                               ("run_id", "run_id"),
+                                               ("execution_id", "execution_id")))
+    if not same_epoch:
+        ports.attention_clear(key)
+        return False
+    return bool(episode.get("escalated"))
+
 
 def attention_clear(ports, key):
     episode = ports._attention_store.get(key) or {}
@@ -81,7 +97,8 @@ def _blocked_sla_key(ports, task_id):
     return f"{task_id}:blocked_sla"
 
 
-DEPENDENCIES = {'attention_get': ('_attention_store',),
+DEPENDENCIES = {'attention_escalated': ('attention_get', 'attention_clear'),
+ 'attention_get': ('_attention_store',),
  'attention_note': ('_attention_store', 'time'),
  'attention_clear': ('_attention_store', 'clear_stage_advance'),
  'mark_stage_advance_notified': ('attention_clear', 'load_stage_state', 'lock',
