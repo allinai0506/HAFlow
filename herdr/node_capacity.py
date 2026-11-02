@@ -7,7 +7,7 @@ CONCURRENT_STATUSES = ACTIVE_TASK_STATUSES | {'pending'}
 
 def _is_task_retired(t, all_selected):
     status = t.get('status')
-    if status in {'superseded', 'cleaned'}:
+    if status == 'superseded':
         return True
     if t.get('superseded_by'):
         return True

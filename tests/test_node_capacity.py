@@ -359,18 +359,21 @@ def test_superseded_tasks_do_not_consume_hard_budget(scene, limit):
     assert launch_capacity_error(usage) is None
 
 
-def test_cleaned_tasks_do_not_consume_budget(scene):
+def test_cleaned_prior_round_tasks_do_not_consume_budget(scene):
     from herdr.node_capacity import node_usage, launch_capacity_error
     _, store, config, _, _ = scene
     node = config['nodes'][0]
-    node['max_tasks_per_node'] = 2
-    store.save_task({'task_id': 'cleaned-task', 'workflow_id': 'wf', 'node': 'plan',
-                     'status': 'cleaned'})
+    node['max_tasks_per_node'] = 3
+    store.save_task({'task_id': 'plan-task', 'workflow_id': 'wf', 'node': 'plan',
+                     'status': 'cleaned', 'dispatch_round': 1})
+    store.save_task({'task_id': 'plan-task-r2', 'workflow_id': 'wf', 'node': 'plan',
+                     'status': 'working', 'dispatch_round': 2})
     usage = node_usage(node, store.list_tasks(), 'wf')
-    # 原始 1 个 superseded + 1 个 failed + 1 个 cleaned -> registered 3, retired 2, live budget 1
-    assert usage['registered_task_count'] == 3
+    # 原始 1 个 superseded (old-0) + 1 个 failed (old-1) + 1 个 cleaned prior-round (plan-task) + 1 个 working (plan-task-r2)
+    # retired: old-0 (superseded) + plan-task (cleaned prior-round) -> 2 retired
+    assert usage['registered_task_count'] == 4
     assert usage['retired_task_count'] == 2
-    assert usage['budget_task_count'] == 1
+    assert usage['budget_task_count'] == 2
     assert launch_capacity_error(usage) is None
 
 
