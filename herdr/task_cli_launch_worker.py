@@ -90,7 +90,7 @@ def run_launch_worker(args, node_id, run_id, store, launch_intent, planned_clone
             and failure_dict
             and failure_dict.get("recovery_required") is False
             and failure_dict.get("disposition") in ("rolled_back", "pane_reclaimed")
-            and getattr(args, "agent", "auto") == "auto"
+            and (getattr(args, "agent", None) or "auto") == "auto"
         ):
             raise WorkerStartupHealthFailure(resolved_agent, health_status, failure_dict)
 

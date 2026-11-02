@@ -248,6 +248,51 @@ class TestAgentQuotaHandover(unittest.TestCase):
         wf = self.store.get_workflow(workflow_id)
         self.assertEqual(wf["unhealthy_agents"].get("opencode"), "TOKEN_EXHAUSTED")
 
+    def test_controller_set_observed_status_populates_failure_reason_for_recovery(self):
+        """Verify Controller's _set_observed_status preserves failure_reason so select_infra_failures_for_recovery matches it."""
+        from services.controller.task_state import _set_observed_status
+        from herdr.liveness import select_infra_failures_for_recovery
+
+        task_id = "wf-ctrl-fail-impl"
+        self.store.save_task({
+            "task_id": task_id,
+            "workflow_id": "wf-ctrl-fail",
+            "node": "impl",
+            "agent": "opencode",
+            "status": "working",
+            "pane_id": "p-500",
+            "version": 1,
+        })
+        task = self.store.get_task(task_id)
+
+        ports = SimpleNamespace(
+            os=__import__("os"),
+            _task_version=lambda t: t.get("version"),
+            set_task_status=lambda tid, status, **kw: self.store.compare_and_set_task_transition(
+                task_id=tid,
+                to_status=status,
+                reason=kw.get("metadata", {}).get("failure_reason") or kw.get("metadata", {}).get("controller_reason"),
+                source=kw.get("source", "test"),
+                metadata=kw.get("metadata"),
+                expected_status=kw.get("expected_status"),
+                expected_version=kw.get("expected_version"),
+            ),
+        )
+
+        success = _set_observed_status(ports, task, "failed", "token_exhausted")
+        self.assertTrue(success)
+
+        updated_task = self.store.get_task(task_id)
+        self.assertEqual(updated_task["status"], "failed")
+
+        candidates = select_infra_failures_for_recovery(
+            [updated_task],
+            {"token_exhausted", "dispatch_delivery_fuse"},
+            max_attempts=2,
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["task_id"], task_id)
+
     def test_startup_token_exhausted_handover_flow(self):
         """Case 2: Startup quota exhaustion raises WorkerStartupHealthFailure and allows orchestrator handover."""
         from herdr.task_cli_launch_worker import run_launch_worker, WorkerStartupHealthFailure
