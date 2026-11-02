@@ -107,9 +107,17 @@ def reconcile_task_state(ports, task_id):
     # Agent 当前 blocked
     # --------------------------------
     if runtime == "blocked":
+        from herdr.task_resources import owned_live_pane
+        try:
+            owned, _ = owned_live_pane(task)
+        except Exception:
+            owned = False
+        if not owned:
+            return
+
         has_done_marker, screen = ports._completion_marker_snapshot(task)
-        from herdr.deep_preflight import classify_text, strip_known_status_chrome
-        if screen and classify_text(strip_known_status_chrome(task.get("agent") or "", screen)) == "TOKEN_EXHAUSTED":
+        from herdr.deep_preflight import classify_runtime_token_exhausted
+        if screen and classify_runtime_token_exhausted(screen, task.get("agent") or "") == "TOKEN_EXHAUSTED":
             agent = task.get("agent")
             workflow_id = task.get("workflow_id")
             if agent and workflow_id and hasattr(ports, "_get_store"):

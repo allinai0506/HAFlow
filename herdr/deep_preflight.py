@@ -259,6 +259,55 @@ def classify_text(text):
     return None
 
 
+RUNTIME_TOKEN_PATTERNS = [
+    # Explicit quota / billing exhaustion errors:
+    r"used (?:today's|all your) free messages",
+    r"upgrade to opencode go",
+    r"free messages?.*(?:limit|reset|exhaust)",
+    r"open_?code free message(?:s)? limit reached",
+    r"you(?:'ve| have) reached your (?:current )?usage limit",
+    r"you exceeded your current quota",
+    r"insufficient_quota",
+    r"credit balance is too low",
+    r"billing hard limit has been reached",
+    r"you have exceeded your monthly budget",
+    r"check your plan and billing details",
+    r"out of credits?",
+    r"(?:credit|quota)\s*(?:balance\s*)?(?:is\s*)?depleted",
+    r"insufficient\s*(?:quota|credits?)",
+    r"(?:quota|credits?)\s*(?:exhausted|exceeded|insufficient)",
+    # Rate limit and token limit ERRORS (not ordinary variable/prompt usage):
+    r"(?:rate\s*limit|rate_limit)\s*(?:exceeded|reached|error)",
+    r"(?:hit|reached)\s*(?:a\s*)?rate\s*limit",
+    r"rate limit reached for requests",
+    r"(?:token\s*limit|tokens?\s*quota)\s*(?:exhausted|exceeded|reached)",
+    r"(?:exceeded|reached)\s*(?:your\s*)?(?:token\s*limit|quota)",
+    # HTTP 402 Payment Required:
+    r"(?:http|status|error|code)[:\s]+402\b",
+    r"\b402\s+payment\s+required\b",
+    r"payment required",
+]
+
+
+def classify_runtime_token_exhausted(text, agent=None):
+    """Classify whether visible runtime pane text proves quota exhaustion.
+
+    Unlike preflight CLI probing (which matches broad tokens on isolated error output),
+    runtime evaluation runs against full terminal buffers containing user prompts,
+    code files, and test summaries. It requires concrete error phrasing to avoid
+    false-positive blacklisting on prompts ('Implement rate-limit middleware') or
+    successful test counts ('402 passed in 12s').
+    """
+    if not text:
+        return None
+    cleaned = strip_known_status_chrome(agent or "", text)
+    low = cleaned.lower()
+    for pattern in RUNTIME_TOKEN_PATTERNS:
+        if re.search(pattern, low, re.I):
+            return "TOKEN_EXHAUSTED"
+    return None
+
+
 # agy (Antigravity CLI) >= 1.4.0 renders a persistent status line that can
 # carry a spurious "AI: Out of credits" badge (upstream changelog: an empty
 # credits response is read as a zero balance). The badge is terminal chrome

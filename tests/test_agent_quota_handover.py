@@ -194,7 +194,8 @@ class TestAgentQuotaHandover(unittest.TestCase):
             _record_completion_sample=lambda *a, **k: None,
         )
 
-        reconcile_task_state(ports, "wf-rec-01-impl")
+        with unittest.mock.patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
+            reconcile_task_state(ports, "wf-rec-01-impl")
 
         task = self.store.get_task("wf-rec-01-impl")
         self.assertEqual(task["status"], "failed")
@@ -241,12 +242,165 @@ class TestAgentQuotaHandover(unittest.TestCase):
             _claim_blocked_sla_action=lambda *a, **k: self.fail("Should not claim SLA action"),
         )
 
-        decision = process_blocked_sla_task(ports, self.store.get_task("wf-sla-01-impl"))
+        with unittest.mock.patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
+            decision = process_blocked_sla_task(ports, self.store.get_task("wf-sla-01-impl"))
         self.assertEqual(decision["action"], "token_exhausted")
         task = self.store.get_task("wf-sla-01-impl")
         self.assertEqual(task["status"], "failed")
         wf = self.store.get_workflow(workflow_id)
         self.assertEqual(wf["unhealthy_agents"].get("opencode"), "TOKEN_EXHAUSTED")
+
+    def test_mismatched_pane_session_leaves_task_status_and_workflow_health_unchanged(self):
+        """Invariant 11: Mismatched live session rejects quota evidence, preserving status and health."""
+        from services.controller.runtime_reconciliation import reconcile_task_state
+
+        workflow_id = "wf-mismatch-01"
+        self.store.save_workflow({
+            "workflow_id": workflow_id,
+            "status": "running",
+            "healthy_agents": ["opencode", "codex"],
+            "unhealthy_agents": {},
+        })
+        self.store.save_task({
+            "task_id": "wf-mismatch-01-impl",
+            "workflow_id": workflow_id,
+            "node": "impl",
+            "agent": "opencode",
+            "status": "working",
+            "pane_id": "reused-pane-999",
+            "version": 1,
+        })
+
+        # The pane text contains genuine quota error from another session/agent
+        foreign_screen = "You've used today's free messages. They reset at 8:58 AM.\n"
+
+        ports = SimpleNamespace(
+            get_task=self.store.get_task,
+            get_agent_runtime_status=lambda pane_id: "blocked",
+            _completion_marker_snapshot=lambda task: (False, foreign_screen),
+            _get_store=lambda: self.store,
+            _set_observed_status=lambda task, status, reason: (
+                self.store.compare_and_set_task_transition(
+                    task_id=task["task_id"],
+                    to_status=status,
+                    reason=reason,
+                    source="reconcile",
+                    expected_status=task["status"],
+                    expected_version=task["version"],
+                ) is not None
+            ),
+            blocked_event_type=lambda task: "blocked",
+            enqueue_coordinator_event=lambda *a: None,
+            emit_done_if_allowed=lambda *a: None,
+            _record_completion_sample=lambda *a, **k: None,
+        )
+
+        # Session mismatch: owned_live_pane returns False
+        with unittest.mock.patch("herdr.task_resources.owned_live_pane", return_value=(False, "session_mismatch")):
+            reconcile_task_state(ports, "wf-mismatch-01-impl")
+
+        task = self.store.get_task("wf-mismatch-01-impl")
+        self.assertEqual(task["status"], "working")
+        wf = self.store.get_workflow(workflow_id)
+        self.assertEqual(wf["unhealthy_agents"], {})
+        self.assertIn("opencode", wf["healthy_agents"])
+
+    def test_sentinel_rejects_quota_on_unowned_pane_or_working_agent(self):
+        """Sentinel must not fail a working agent or an unowned pane on quota evidence."""
+        sentinel_mod = importlib.import_module("services.herdr-sentinel")
+
+        workflow_id = "wf-sentinel-guard"
+        self.store.save_workflow({
+            "workflow_id": workflow_id,
+            "status": "running",
+            "healthy_agents": ["opencode"],
+            "unhealthy_agents": {},
+        })
+        self.store.save_task({
+            "task_id": "wf-sentinel-guard-impl",
+            "workflow_id": workflow_id,
+            "node": "impl",
+            "agent": "opencode",
+            "status": "working",
+            "pane_id": "pane-guard",
+            "version": 1,
+        })
+
+        task = self.store.get_task("wf-sentinel-guard-impl")
+        changes = {}
+        expected = {}
+        versions = {}
+
+        # 1. 模拟 agent 正在 working，即使屏幕包含真正的 quota 文本，Sentinel 也不应误判
+        with unittest.mock.patch.object(sentinel_mod, "agent_status", return_value="working"), \
+             unittest.mock.patch.object(sentinel_mod, "_owned_pane", return_value=(True, "identity_match")):
+            # 屏幕包含 quota 耗尽文本
+            screen = "You've used today's free messages. They reset at 8:58 AM.\n"
+            from herdr.deep_preflight import classify_runtime_token_exhausted
+            if sentinel_mod.agent_status("pane-guard") != "working":
+                owned, _ = sentinel_mod._owned_pane(task)
+                if owned and classify_runtime_token_exhausted(screen, "opencode") == "TOKEN_EXHAUSTED":
+                    sentinel_mod.observe_token_exhausted_pattern(task, changes=changes, expected=expected, versions=versions)
+            self.assertEqual(changes, {})
+
+        # 2. 模拟 pane 所有权不匹配 (session_mismatch)，Sentinel 拒绝采信
+        with unittest.mock.patch.object(sentinel_mod, "agent_status", return_value="blocked"), \
+             unittest.mock.patch.object(sentinel_mod, "_owned_pane", return_value=(False, "session_mismatch")):
+            screen = "You've used today's free messages. They reset at 8:58 AM.\n"
+            from herdr.deep_preflight import classify_runtime_token_exhausted
+            if sentinel_mod.agent_status("pane-guard") != "working":
+                owned, _ = sentinel_mod._owned_pane(task)
+                if owned and classify_runtime_token_exhausted(screen, "opencode") == "TOKEN_EXHAUSTED":
+                    sentinel_mod.observe_token_exhausted_pattern(task, changes=changes, expected=expected, versions=versions)
+            self.assertEqual(changes, {})
+
+        # 3. 模拟普通任务 prompt 包含 rate-limit，Sentinel 不应匹配
+        with unittest.mock.patch.object(sentinel_mod, "agent_status", return_value="blocked"), \
+             unittest.mock.patch.object(sentinel_mod, "_owned_pane", return_value=(True, "identity_match")):
+            prompt_screen = "Working: Implement a rate-limit middleware and add tests.\n"
+            from herdr.deep_preflight import classify_runtime_token_exhausted
+            if sentinel_mod.agent_status("pane-guard") != "working":
+                owned, _ = sentinel_mod._owned_pane(task)
+                if owned and classify_runtime_token_exhausted(prompt_screen, "opencode") == "TOKEN_EXHAUSTED":
+                    sentinel_mod.observe_token_exhausted_pattern(task, changes=changes, expected=expected, versions=versions)
+            self.assertEqual(changes, {})
+
+        # 确保 workflow 和 task 均未被标记或修改
+        wf = self.store.get_workflow(workflow_id)
+        self.assertEqual(wf["unhealthy_agents"], {})
+        self.assertEqual(self.store.get_task("wf-sentinel-guard-impl")["status"], "working")
+
+    def test_runtime_token_exhausted_negative_cases_for_prompts_and_test_output(self):
+        """Negative cases: user prompts and successful test outputs must NOT match runtime quota exhaustion."""
+        from herdr.deep_preflight import classify_runtime_token_exhausted
+
+        negative_screens = [
+            "Working: Implement a rate-limit middleware and add tests.",
+            "Tests: 402 passed in 12s",
+            "def check_token_limit(token, limit):\n    return token <= limit\n",
+            "class RateLimiter:\n    def __init__(self, rate_limit=100):\n        self.rate_limit = rate_limit",
+            "pytest output: 402 passed, 0 failed in 3.5s",
+        ]
+        for screen in negative_screens:
+            self.assertIsNone(
+                classify_runtime_token_exhausted(screen, "opencode"),
+                msg=f"Should not classify as TOKEN_EXHAUSTED: {screen}"
+            )
+
+        positive_screens = [
+            "You've used today's free messages. They reset at 8:58 AM.\nUpgrade to OpenCode Go",
+            "You exceeded your current quota, please check your plan and billing details",
+            "insufficient_quota",
+            "Rate limit reached for requests",
+            "status code: 402 Payment Required",
+            "Out of credits: payment required 402",
+        ]
+        for screen in positive_screens:
+            self.assertEqual(
+                classify_runtime_token_exhausted(screen, "opencode"),
+                "TOKEN_EXHAUSTED",
+                msg=f"Should classify as TOKEN_EXHAUSTED: {screen}"
+            )
 
     def test_controller_set_observed_status_populates_failure_reason_for_recovery(self):
         """Verify Controller's _set_observed_status preserves failure_reason so select_infra_failures_for_recovery matches it."""

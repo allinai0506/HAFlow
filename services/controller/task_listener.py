@@ -108,24 +108,30 @@ def handle_event(ports, task_id, agent_status):
             "rework"
         ):
             has_done_marker, screen = ports._completion_marker_snapshot(task)
-            from herdr.deep_preflight import classify_text, strip_known_status_chrome
-            if screen and classify_text(strip_known_status_chrome(task.get("agent") or "", screen)) == "TOKEN_EXHAUSTED":
-                agent = task.get("agent")
-                workflow_id = task.get("workflow_id")
-                if agent and workflow_id and hasattr(ports, "_get_store"):
-                    try:
-                        workflow = ports._get_store().get_workflow(workflow_id) or {}
-                        from herdr.workspace_trust import merge_trust_failure_unhealthy
-                        unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
-                        ports._get_store().update_workflow_metadata(workflow_id, {
-                            "healthy_agents": healthy, "unhealthy_agents": unhealthy,
-                        })
-                        from herdr.state_store import sync_workflows_projection
-                        sync_workflows_projection(store=ports._get_store())
-                    except Exception:
-                        pass
-                ports._set_observed_status(task, "failed", "token_exhausted")
-                return
+            from herdr.task_resources import owned_live_pane
+            try:
+                owned, _ = owned_live_pane(task)
+            except Exception:
+                owned = False
+            if owned:
+                from herdr.deep_preflight import classify_runtime_token_exhausted
+                if screen and classify_runtime_token_exhausted(screen, task.get("agent") or "") == "TOKEN_EXHAUSTED":
+                    agent = task.get("agent")
+                    workflow_id = task.get("workflow_id")
+                    if agent and workflow_id and hasattr(ports, "_get_store"):
+                        try:
+                            workflow = ports._get_store().get_workflow(workflow_id) or {}
+                            from herdr.workspace_trust import merge_trust_failure_unhealthy
+                            unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
+                            ports._get_store().update_workflow_metadata(workflow_id, {
+                                "healthy_agents": healthy, "unhealthy_agents": unhealthy,
+                            })
+                            from herdr.state_store import sync_workflows_projection
+                            sync_workflows_projection(store=ports._get_store())
+                        except Exception:
+                            pass
+                    ports._set_observed_status(task, "failed", "token_exhausted")
+                    return
 
             if ports._set_observed_status(task, "blocked", "agent_status_blocked"):
                 task = ports.get_task(task_id)

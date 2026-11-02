@@ -1694,16 +1694,20 @@ def main():
                 )
                 continue
 
-            from herdr.deep_preflight import classify_text, strip_known_status_chrome
-            token_blocker = classify_text(strip_known_status_chrome(task.get("agent") or "", screen))
-            if token_blocker == "TOKEN_EXHAUSTED":
-                observe_token_exhausted_pattern(
-                    task,
-                    changes=changes,
-                    expected=state.setdefault("crash_expected", {}),
-                    versions=state.setdefault("crash_versions", {}),
-                )
-                continue
+            from herdr.deep_preflight import classify_runtime_token_exhausted
+            if agent_status(pane_id) != "working":
+                try:
+                    owned, _ = _owned_pane(task)
+                except Exception:
+                    owned = False
+                if owned and classify_runtime_token_exhausted(screen, task.get("agent") or "") == "TOKEN_EXHAUSTED":
+                    observe_token_exhausted_pattern(
+                        task,
+                        changes=changes,
+                        expected=state.setdefault("crash_expected", {}),
+                        versions=state.setdefault("crash_versions", {}),
+                    )
+                    continue
 
             # Inner loop exhausted: record the observation only.  The
             # Controller transitions the task to blocked and owns arbitration.
