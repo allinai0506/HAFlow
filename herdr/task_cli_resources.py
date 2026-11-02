@@ -282,7 +282,6 @@ def check_launch_capacity(
             ),
             {"id": node_id},
         )
-        usage = node_usage(node, tasks, args.workflow_id)
         old_id = getattr(args, "supersedes", None)
         old = (
             next((task for task in tasks if task.get("task_id") == old_id), None)
@@ -301,6 +300,8 @@ def check_launch_capacity(
             raise ValueError(
                 "Replacement requires --supersede-reason; prefer herdr-task rework"
             )
+        retiring_ids = {old_id} if old_id else None
+        usage = node_usage(node, tasks, args.workflow_id, retiring_task_ids=retiring_ids)
         error = launch_capacity_error(usage)
         if error:
             raise ValueError(error)

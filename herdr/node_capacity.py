@@ -4,7 +4,7 @@ from .transitions import ACTIVE_TASK_STATUSES
 CONCURRENT_STATUSES = ACTIVE_TASK_STATUSES | {'pending'}
 
 
-def _is_task_retired(t, all_selected):
+def _is_task_retired(t, all_selected, retiring_task_ids=None):
     """A task is retired if and only if it has been superseded.
 
     max_tasks_per_node is the cumulative lifetime task budget for a node.
@@ -19,6 +19,8 @@ def _is_task_retired(t, all_selected):
         return True
 
     tid = str(t.get('task_id') or '')
+    if retiring_task_ids and tid in retiring_task_ids:
+        return True
     if any(other.get('supersedes') == tid or other.get('redispatch_of') == tid
            for other in all_selected):
         return True
@@ -41,7 +43,7 @@ def _positive_limit(value, field):
     return value
 
 
-def node_usage(node, tasks, workflow_id=None):
+def node_usage(node, tasks, workflow_id=None, *, retiring_task_ids=None):
     nid = node.get('id') or node.get('key')
     selected = [t for t in tasks if (t.get('node') or t.get('stage')) == nid
                 and (workflow_id is None or t.get('workflow_id') == workflow_id)]
@@ -60,7 +62,7 @@ def node_usage(node, tasks, workflow_id=None):
     concurrent_overflow = concurrency is not None and len(active) > concurrency
     # Unified retirement predicate:
     # a retired row can never revive, so it must not hold the hard budget.
-    retired = [t for t in selected if _is_task_retired(t, selected)]
+    retired = [t for t in selected if _is_task_retired(t, selected, retiring_task_ids=retiring_task_ids)]
     budget_tasks = [t for t in selected if t not in retired]
     locked_overflow = total_limit is not None and len(budget_tasks) + 1 > total_limit
     return {

@@ -187,11 +187,16 @@ def is_node_complete(ports, workflow_id, node_id):
         return False
 
     if node_id == "plan":
-        has_challenger_task = any(
-            str(t.get("dispatch_role") or t.get("role") or "").strip().lower() == "challenger"
-            or "challenger" in str(t.get("task_id") or "").lower()
-            for t in active
-        )
+        has_challenger_task = False
+        for t in active:
+            explicit_role = str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+            if explicit_role:
+                if explicit_role == "challenger":
+                    has_challenger_task = True
+                    break
+            elif "challenger" in str(t.get("task_id") or "").lower():
+                has_challenger_task = True
+                break
         if has_challenger_task:
             from herdr.plan_parser import verify_plan_and_challenger
             all_wf_tasks = ports.load_tasks()
@@ -294,18 +299,18 @@ def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
                         continue
 
                     # Verify known prior delivery: at least one prerequisite role is completed
-                    completed_roles = {
-                        str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
-                        for t in node_t
-                        if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by")
-                    }
+                    completed_roles = set()
                     for t in node_t:
                         if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by"):
-                            tid = str(t.get("task_id") or "").lower()
-                            for r in roles:
-                                r_n = str(r.get("name") or "").strip().lower()
-                                if r_n and r_n in tid:
-                                    completed_roles.add(r_n)
+                            explicit_role = str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
+                            if explicit_role:
+                                completed_roles.add(explicit_role)
+                            else:
+                                tid = str(t.get("task_id") or "").lower()
+                                for r in roles:
+                                    r_n = str(r.get("name") or "").strip().lower()
+                                    if r_n and r_n in tid:
+                                        completed_roles.add(r_n)
 
                     if not completed_roles:
                         continue
