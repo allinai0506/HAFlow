@@ -357,3 +357,70 @@ def test_superseded_tasks_do_not_consume_hard_budget(scene, limit):
     assert usage['budget_task_count'] == 1
     assert usage['superseded_task_count'] == 1
     assert launch_capacity_error(usage) is None
+
+
+def test_terminal_failed_or_cleaned_tasks_do_not_bypass_cumulative_budget():
+    """Invariant: In-service terminal tasks (failed/cleaned) that are not superseded still count against max_tasks_per_node."""
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    node = {'id': 'plan', 'max_tasks_per_node': 2}
+    tasks = [
+        {'task_id': 'plan-1', 'node': 'plan', 'status': 'cleaned'},
+        {'task_id': 'plan-2', 'node': 'plan', 'status': 'failed'},
+    ]
+    usage = node_usage(node, tasks)
+    # Neither task is superseded, so retired is 0 and budget is 2
+    assert usage['registered_task_count'] == 2
+    assert usage['retired_task_count'] == 0
+    assert usage['budget_task_count'] == 2
+    # Attempting to launch a 3rd task must be blocked by the cumulative budget
+    error = launch_capacity_error(usage)
+    assert error is not None
+    assert 'task count 3 exceeds max_tasks_per_node=2' in error
+
+
+def test_new_candidate_episode_does_not_bypass_cumulative_budget():
+    """Invariant: A new candidate episode cannot bypass cumulative max_tasks_per_node budget."""
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    node = {'id': 'test', 'max_tasks_per_node': 2}
+    tasks = [
+        {'task_id': 'wf-test-cand0', 'node': 'test', 'status': 'failed', 'candidate_episode_id': 0},
+        {'task_id': 'wf-test-cand1', 'node': 'test', 'status': 'working', 'candidate_episode_id': 1},
+    ]
+    usage = node_usage(node, tasks)
+    assert usage['registered_task_count'] == 2
+    assert usage['retired_task_count'] == 0
+    assert usage['budget_task_count'] == 2
+    error = launch_capacity_error(usage)
+    assert error is not None
+    assert 'task count 3 exceeds max_tasks_per_node=2' in error
+
+
+def test_superseded_replacement_safely_releases_budget_slot():
+    """Compatible: Superseded tasks (status, superseded_by, or supersedes/redispatch_of) release their budget slot."""
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    node = {'id': 'test', 'max_tasks_per_node': 2}
+    tasks = [
+        {'task_id': 'wf-test-old', 'node': 'test', 'status': 'superseded'},
+        {'task_id': 'wf-test-r2', 'node': 'test', 'status': 'working', 'supersedes': 'wf-test-old'},
+    ]
+    usage = node_usage(node, tasks)
+    assert usage['registered_task_count'] == 2
+    assert usage['retired_task_count'] == 1
+    assert usage['budget_task_count'] == 1
+    assert launch_capacity_error(usage) is None
+
+
+def test_multi_round_real_failures_eventually_exhaust_budget():
+    """Bound: Repeated un-superseded failures cannot infinitely consume budget."""
+    from herdr.node_capacity import node_usage, launch_capacity_error
+    node = {'id': 'review', 'max_tasks_per_node': 3}
+    tasks = [
+        {'task_id': 'wf-rev-1', 'node': 'review', 'status': 'cleaned'},
+        {'task_id': 'wf-rev-2', 'node': 'review', 'status': 'failed'},
+        {'task_id': 'wf-rev-3', 'node': 'review', 'status': 'failed'},
+    ]
+    usage = node_usage(node, tasks)
+    assert usage['budget_task_count'] == 3
+    error = launch_capacity_error(usage)
+    assert error is not None
+    assert 'task count 4 exceeds max_tasks_per_node=3' in error

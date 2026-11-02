@@ -130,6 +130,7 @@ from .state.transition_gate import (
     transition_workflow,
     update_task_metadata,
     update_workflow_metadata,
+    record_agent_unhealthy,
     force_pass_gate,
 )
 
@@ -320,5 +321,6 @@ __all__ = [
     'save_steer', 'save_task', 'save_user_token', 'save_workflow',
     'save_working_context', 'trajectory_event_exists', 'transact_rollout_stage', 'transition_task',
     'register_workflow', 'transition_workflow', 'update_steer_status', 'update_task_metadata', 'update_workflow_metadata',
+    'record_agent_unhealthy',
     'upsert_trajectory_finding', 'working_context_source_is_current',
 ]

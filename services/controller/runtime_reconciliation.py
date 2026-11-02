@@ -107,6 +107,38 @@ def reconcile_task_state(ports, task_id):
     # Agent 当前 blocked
     # --------------------------------
     if runtime == "blocked":
+        from herdr.task_resources import owned_live_pane
+        try:
+            owned, _ = owned_live_pane(task)
+        except Exception:
+            owned = False
+        if not owned:
+            return
+
+        has_done_marker, screen = ports._completion_marker_snapshot(task)
+        from herdr.deep_preflight import classify_runtime_token_exhausted
+        if screen and classify_runtime_token_exhausted(screen, task.get("agent") or "") == "TOKEN_EXHAUSTED":
+            agent = task.get("agent")
+            workflow_id = task.get("workflow_id")
+            if agent and workflow_id and hasattr(ports, "_get_store"):
+                try:
+                    store = ports._get_store()
+                    if hasattr(store, "record_agent_unhealthy"):
+                        store.record_agent_unhealthy(workflow_id, agent, status="TOKEN_EXHAUSTED")
+                    else:
+                        workflow = store.get_workflow(workflow_id) or {}
+                        from herdr.workspace_trust import merge_trust_failure_unhealthy
+                        unhealthy, healthy = merge_trust_failure_unhealthy(workflow, agent, status="TOKEN_EXHAUSTED")
+                        store.update_workflow_metadata(workflow_id, {
+                            "healthy_agents": healthy, "unhealthy_agents": unhealthy,
+                        })
+                        from herdr.state_store import sync_workflows_projection
+                        sync_workflows_projection(store=store)
+                except Exception:
+                    pass
+            ports._set_observed_status(task, "failed", "token_exhausted")
+            return
+
         if current in (
             "dispatched",
             "working",
@@ -217,7 +249,7 @@ def reconcile_task_state(ports, task_id):
 
 DEPENDENCIES = {'get_agent_runtime_status': ('json', 'subprocess'),
  'reconcile_task_state': ('_completion_marker_snapshot', '_gate_verdict_is_fresh',
-                          '_record_completion_sample', '_set_observed_status',
+                          '_get_store', '_record_completion_sample', '_set_observed_status',
                           'blocked_event_type', 'emit_done_if_allowed',
                           'enqueue_coordinator_event', 'gate_verdict_ready',
                           'get_agent_runtime_status', 'get_task',
