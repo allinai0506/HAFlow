@@ -16,6 +16,7 @@ import fcntl
 import json
 import os
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -723,13 +724,57 @@ class SQLiteStateStore(StateStore):
         agent: str,
         status: str = "TOKEN_EXHAUSTED",
     ) -> dict[str, Any]:
-        return state_db.record_agent_unhealthy(
-            workflow_id=workflow_id,
-            agent=agent,
-            status=status,
-            db_path=self.db_path,
-            save_workflow_fn=self.save_workflow,
-        )
+        """Atomically record an agent as unhealthy in workflow metadata inside an immediate transaction.
+
+        Under an exclusive SQLite transaction (BEGIN IMMEDIATE), reads current workflow metadata,
+        merges the failed agent into unhealthy_agents, evicts it from healthy_agents, writes back,
+        and commits. Prevents concurrent lost updates across Sentinel, Controller, and Workers.
+        """
+        conn = state_db.get_db_connection(self.db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cur = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"Workflow '{workflow_id}' not found")
+
+            meta = json.loads(row["metadata_json"] or "{}")
+            cfg = json.loads(row["config_json"] or "{}")
+            wf = dict(meta)
+            wf.update({
+                "workflow_id": row["workflow_id"],
+                "title": row["title"],
+                "status": row["status"],
+                "template_name": row["template_name"],
+                "current_stage": row["current_stage"],
+                "config": cfg,
+                "created_at": row["created_at"],
+                "updated_at": time.time(),
+            })
+
+            from herdr.workspace_trust import merge_trust_failure_unhealthy
+            unhealthy, healthy = merge_trust_failure_unhealthy(wf, agent, status=status)
+            wf["unhealthy_agents"] = unhealthy
+            wf["healthy_agents"] = healthy
+
+            self.save_workflow(wf, conn=conn)
+            conn.execute("COMMIT;")
+
+            try:
+                from herdr.state_store import sync_workflows_projection
+                sync_workflows_projection(store=self)
+            except Exception:
+                pass
+
+            return wf
+        except Exception:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
 
     # Tasks
     def save_task(self, task: dict[str, Any], fail_if_exists: bool = False) -> None:
