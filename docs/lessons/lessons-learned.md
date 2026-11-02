@@ -9277,9 +9277,56 @@ pytest -q tests/test_wrapup_review_closure.py tests/test_runtime_closure.py
 - `herdr/stage_skills.py` — `get_default_skill_search_roots` 沙盒权限防御
 - `tests/test_project_template_registration.py` — 13 项专项回归测试（含节点显式优先、重放隔离、原子替换容灾、模板显式上限回填、存量节点上限补齐、根级显式上限防覆盖、节点默认防覆写、回填前状态守卫与根级默认防覆写）
 
-
-
-
-
-
 ---
+
+## 221. Agent 额度耗尽与运行时故障交接的原子并发契约与回退闭环（PR #388）
+
+### 问题背景
+
+真实工作流在执行过程中，当特定 Agent（如 OpenCode）遭遇配额耗尽（"Free messages reset in ..."）或在启动前探活校验失败时，系统未能在不卡死节点的情况下自动透明交接给其他可用 Agent；同时，在多次返工与故障交接过程中，旧任务退役状态被错误识别，导致 `verifier_budget_exhausted` 虚假拦截健康返工，或者相反破坏了全生命周期的节点任务硬上限。
+
+根因分析确认：
+1. **配额耗尽特征未识别**：`herdr/liveness.py` 的 `TOKEN_PATTERNS` 缺少 OpenCode 免费消息重置特征（`Free messages reset in`），导致额度枯竭未能被实时识别为不可用；
+2. **健康状态并发覆写冲刷（P1）**：Sentinel、Controller、Blocked SLA 与 Worker 启动失败入口各自写入 `unhealthy_agents`。尤其是 `herdr/deep_preflight.py` 先读取全局健康状态快照，在耗时探针完成后通过 `update_workflow_metadata` 全量写回元数据，将探测期间由 Sentinel 写入的 `token_exhausted` 故障记录冲刷覆盖，致使 Router 再次误选不可用 Agent；
+3. **启动前失败交接断链（P2）**：当 Agent 额度不足在创建 Tmux Pane 之前的 `verify_request_preflight` 阶段被识别时，Worker 返回 `disposition='unknown', recovery_required=False`，导致 `task_cli_launch_orchestrator.py` 无法进入安全清理分支，回滚意图受阻且无法在同一调度轮次内透明改派；
+4. **`max_tasks_per_node` 累计预算语义偏离**：此前逻辑错误地将 `cleaned` 状态或非当前 Episode 任务视为已退役从累计预算中扣减，破坏了节点全生命周期累计硬预算契约。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 慢速探活全量回写冲刷并发故障写入 | 读-测-写全量字典的慢操作（Deep Preflight）会在写回时覆盖快操作（Sentinel / Worker）写入的实时故障 | 探活结果写回必须使用细粒度增量更新与 CAS 水印机制（`record_preflight_results`），只更新受测目标 Agent，探测期间若发生故障变更则立即丢弃过期探针结果 |
+| 跨进程健康状态并发写入产生丢失覆盖 | 多进程并发写入 SQLite 中的 JSON 字段容易产生读改写丢失 | 涉及 Agent 故障标记的写入必须收敛至统一助手 `record_agent_unhealthy`，并在 `BEGIN IMMEDIATE` 排他事务下完成原子更新 |
+| Pane 创建前启动失败 disposition 缺失导致改派阻塞 | Worker 若在创建 Pane 前（如参数校验或探针失败）崩溃或拒绝，未设置 disposition 会默认回退为 unknown，阻塞 Orchestrator 意图重置 | 启动前失败必须明确返回 `disposition='not_started', recovery_required=False`；Orchestrator 将其纳入 `SAFE_CLEANUP_DISPOSITIONS` 自动安全回滚至 `resources_absent` 并直接交接改派 |
+| 累计预算混淆瞬态并发占用与全生命周期硬额度 | 为支持返工而将 cleaned / 历史 Episode 任务当成已退役从 `max_tasks_per_node` 扣除，会使节点任务数无限膨胀击穿预算 | `max_tasks_per_node` 严格代表节点全生命周期累计派发任务上限，唯有真正被新任务替换的 `superseded` 任务才可退役；瞬态并发控制与累计上限必须严格解耦 |
+| 额度耗尽提示词规则未覆盖新版 Agent 报错模板 | LLM 客户端不断更新报错提示（如 OpenCode 的 Free messages 提示），若正则特征滞后会导致配额枯竭被误判为普通超时 | 统一在 `herdr/liveness.py` 的 `TOKEN_PATTERNS` 维护全量主流 Agent（OpenCode、Claude、Codex 等）的配额与重置正则特征 |
+
+### 操作规范
+
+1. **统一健康故障写入入口**：Sentinel、Task Listener、Runtime Reconciliation、Blocked SLA、Worker Launch 统一调用 `store.record_agent_unhealthy(agent, reason, failure_type)`，禁止在各业务模块内手写裸 SQL 拼装或直接全量覆盖元数据。
+2. **带水印的增量 CAS 探活更新**：`record_preflight_results` 在独占事务内校验目标 Agent 的变更水印（`_agent_result_watermark`），若该 Agent 在探测期间已被标记为故障，放弃旧探活结果；未探活的 Agent 原样保留。
+3. **未建 Pane 失败安全释放与透明改派**：Worker 在 Pane 未创建分支规范化返回 `disposition='not_started', recovery_required=False`；Launcher 将其纳入安全释放列表，回滚意图至 `resources_absent`，并在同一调度任务内透明选择下一个健康 Agent 派发。
+4. **纯净退役语义与硬预算守护**：`herdr/node_capacity.py` 中退役判定仅认 `task.get('status') == 'superseded'`，彻底移除 `cleaned` 与 `candidate_episode_id` 绕过逻辑，严格守卫全生命周期累计硬预算。
+
+### 验证命令 / 守护测试
+
+```bash
+# 验证额度耗尽自动交接、双线程并发安全写入与 Preflight CAS 水印防冲刷
+pytest -q tests/test_agent_quota_handover.py
+
+# 验证 node_capacity 累计硬预算契约与纯净 superseded 退役语义
+pytest -q tests/test_node_capacity.py
+
+# 验证 Pane 未创建前失败返回 not_started 与 Orchestrator 安全改派
+pytest -q tests/test_task_cli_launch_worker.py
+```
+
+### 相关文档 / 关联证据
+
+- PR #388 — `fix(dispatch): auto handover on agent quota exhaustion and correct verifier budget retirement`
+- Merge Commit `45ec95cc2cb6f0ffde27dbf59714af17558177d2`
+- `herdr/state_store.py` — `record_agent_unhealthy`（`BEGIN IMMEDIATE` 原子更新）与 `record_preflight_results`（CAS 水印比对）
+- `herdr/deep_preflight.py` — 增量只更新受测 Agent，杜绝全量覆写
+- `herdr/node_capacity.py` — 回缩 `_is_task_retired` 为严格 `superseded` 语义
+- `services/herdr-worker.py` & `herdr/task_cli_launch_worker.py` — Pane 前失败返回 `not_started` 并安全回滚改派
+- `tests/test_agent_quota_handover.py` — 12 项并发与全链路自动交接专项守护测试

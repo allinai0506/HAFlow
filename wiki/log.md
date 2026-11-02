@@ -8,6 +8,28 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-02] fix | Agent 额度耗尽与运行时故障交接的原子并发契约与回退闭环（PR #388 / §221）
+
+- 背景：真实工作流在执行中遭遇 Agent（如 OpenCode）额度耗尽（"Free messages reset in ..."）或在 Pane 创建前探针失败时，未能自动透明交接改派，卡滞节点；同时旧任务退役状态被错误识别，导致 `verifier_budget_exhausted` 虚假拦截健康返工，或相反破坏了节点全生命周期累计硬预算。
+- 根因分析：
+  1. `herdr/liveness.py:TOKEN_PATTERNS` 缺少 OpenCode 免额重置模式（`Free messages reset in`），未识别出额度枯竭；
+  2. `herdr/deep_preflight.py` 慢速探活后全量覆写工作流元数据，冲刷了并发由 Sentinel 写入的实时故障记录，引发竞争（Codex P1）；
+  3. `services/herdr-worker.py` 在 Pane 未创建前失败未返回明确 disposition，保留为 unknown 阻塞了 launcher 回滚与改派（Codex P2）；
+  4. `herdr/node_capacity.py` 错误将 `cleaned` 状态与非当前 Episode 任务视为已退役从累计预算中扣减，破坏了 `max_tasks_per_node` 累计硬预算。
+- 治理与修复：
+  1. **模式补充**：`herdr/liveness.py` 补充 OpenCode 免额重置匹配特征；
+  2. **并发原子写入与 CAS 水印**：`herdr/state_store.py:SQLiteStateStore` 引入排他事务（`BEGIN IMMEDIATE`）更新 `record_agent_unhealthy`；引入 `record_preflight_results` 结合变更水印（`_agent_result_watermark`）实现局部 CAS 探活结果更新，绝不覆写并发故障；
+  3. **未建 Pane 失败安全改派**：Worker 在 Pane 未创建分支规范化返回 `disposition='not_started', recovery_required=False`；Orchestrator 识别为 `SAFE_CLEANUP_DISPOSITIONS` 自动安全回滚至 `resources_absent` 并直接交接改派；
+  4. **硬预算纯净退役**：回缩 `_is_task_retired` 为纯净的 `superseded` 语义，消除以 cleaned 或轮次/Episode 为由绕过累计硬预算的漏洞。
+- 验收结果：
+  - `tests/test_agent_quota_handover.py` (12 passed)
+  - `tests/test_node_capacity.py` (29 passed)
+  - `tests/test_task_cli_launch_worker.py` (4 passed)
+  - 全量 CI 检查 4/4 项全部 PASS（含 Codex P1 Gate 与 Pytest）
+  - 独立代码审查子 Agent 裁决 APPROVE (MERGE_READY)
+  - PR #388 已通过 GitHub Squash-Merge 合并入 `main` (commit `45ec95c`)
+- 交付产物：沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §221。
+
 ## [2026-11-01] fix | delivery_ceiling_default 模板交付上限配置实例化穿透与历史自愈治理 (§220)
 
 - 背景：`software-development-v1.yaml` 声明了 `delivery_ceiling_default: workspace`，但在 `herdr/projects.py` 中通过模板实例化项目或采用工作区时，`_register_project_workflow` 字典重构遗漏了 `delivery_ceiling_default` 和 `delivery_ceiling` 字段，导致项目快照与工作流 Run 配置中缺失该信息，使得 `herdr/review_closure.py` fail-closed 误判定工作区交付为 `[REVIEW CLOSURE REQUIRED]`。
