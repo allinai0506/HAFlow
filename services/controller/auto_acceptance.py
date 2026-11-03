@@ -91,9 +91,12 @@ def try_auto_accept(ports, task_id):
     if task.get("stage_verdict") == "blocked":
         return AutoAcceptResult(False, "stage_verdict_blocked")
 
-    role_text = " ".join(str(task.get(key) or "").lower() for key in
-                         ("dispatch_role", "agent_role", "role", "task_id"))
-    is_challenger = bool(ports.re.search(r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])", role_text))
+    role_pattern = r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])"
+    explicit_role = " ".join(str(task.get(key) or "").lower() for key in ("dispatch_role", "agent_role", "role")).strip()
+    if explicit_role:
+        is_challenger = bool(ports.re.search(role_pattern, explicit_role))
+    else:
+        is_challenger = bool(ports.re.search(role_pattern, str(task.get("task_id") or "").lower()))
 
     wf_cfg = None
     if hasattr(ports, "workflow_config_for"):
@@ -148,51 +151,38 @@ def try_auto_accept(ports, task_id):
                 return AutoAcceptResult(False, "requirements_missing_sections", missing=tuple(missing))
 
         elif node_id == "plan":
-            deliverable_text = ""
-            if is_challenger:
-                if clone_path:
-                    for fname in ("challenger-review.md", "challenge.md", "plan-review.md"):
-                        fpath = os.path.join(clone_path, fname)
-                        if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
-                            try:
-                                with open(fpath, "r", encoding="utf-8") as f:
-                                    deliverable_text = f.read()
-                                break
-                            except Exception:
-                                pass
-                if not deliverable_text:
-                    try:
-                        notes = load_notes(workflow_id)
-                        for n in notes:
-                            if n.get("stale"):
-                                continue
-                            matches = (n.get("task_id") == task_id) if task_id else bool(task.get("agent") and n.get("agent") == task.get("agent"))
-                            if matches:
-                                if n.get("node") == "plan" or n.get("kind") in ("plan", "review", "challenge"):
-                                    deliverable_text += "\n" + str(n.get("title", "")) + "\n" + str(n.get("body", ""))
-                    except Exception:
-                        pass
-            else:
-                if clone_path:
-                    from herdr.plan_parser import read_plan_file_from_dir
-                    deliverable_text = read_plan_file_from_dir(clone_path)
-                if not deliverable_text:
-                    try:
-                        notes = load_notes(workflow_id)
-                        for n in notes:
-                            if n.get("stale"):
-                                continue
-                            matches = (n.get("task_id") == task_id) if task_id else bool(task.get("agent") and n.get("agent") == task.get("agent"))
-                            if matches:
-                                if n.get("node") == "plan" or n.get("kind") in ("plan", "spec"):
-                                    deliverable_text += "\n" + str(n.get("title", "")) + "\n" + str(n.get("body", ""))
-                    except Exception:
-                        pass
+            from herdr.plan_parser import find_plan_deliverables
+            task_copy = dict(task)
+            task_copy.setdefault("task_id", task_id)
+            task_copy.setdefault("node", "plan")
+            task_copy.setdefault("workflow_id", workflow_id)
+            if clone_path:
+                task_copy.setdefault("clone_path", clone_path)
+
+            deliv = find_plan_deliverables(workflow_id, tasks=[task_copy], project_root=clone_path)
+            selected_note = getattr(deliv, "meta", {}).get("challenger_note" if is_challenger else "plan_note")
+            if selected_note and selected_note.get("source") != "file":
+                note_task = selected_note.get("task_id") or selected_note.get("author")
+                if note_task and note_task != task_id:
+                    print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} note {selected_note.get('note_id')} belongs to task {note_task}, not {task_id}")
+                    return AutoAcceptResult(False, "plan_challenger_missing_sections" if is_challenger else "plan_missing_sections")
+
+            deliverable_text = deliv.challenger_text if is_challenger else deliv.plan_text
 
             ok, missing = validate_plan_deliverable_content(deliverable_text, role=role)
             if not ok:
                 print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} plan ({role}) invalid: {missing}")
                 return AutoAcceptResult(False, "plan_challenger_missing_sections" if is_challenger else "plan_missing_sections", missing=tuple(missing))
+
+            if is_challenger:
+                from herdr.plan_parser import extract_challenger_verdict
+                verdict, verdict_reason = extract_challenger_verdict(deliverable_text, task)
+                if verdict == "blocked":
+                    print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} challenger verdict blocked: {verdict_reason}")
+                    return AutoAcceptResult(False, "challenger_blocked", detail=verdict_reason)
+                if verdict != "pass":
+                    print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} challenger verdict missing or non-pass: {verdict_reason}")
+                    return AutoAcceptResult(False, "challenger_verdict_missing", detail=verdict_reason)
 
         else:
             evidence, detail = ports.task_changes_evidence(task)

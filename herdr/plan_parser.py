@@ -529,15 +529,6 @@ def verify_plan_and_challenger(
             "plan_text": plan_text,
         }
 
-        # 优先检查显式阻断（task stage_verdict 或 文本包含 blocked 裁决）
-        verdict, verdict_reason = extract_challenger_verdict(challenger_text or "", chal_task)
-        if verdict == "blocked":
-            return (
-                False,
-                f"challenger_blocked: {verdict_reason}",
-                {**base_plan_details, "challenger_preview": (challenger_text or "")[:300]},
-            )
-
         if not challenger_text:
             return (
                 False,
@@ -545,28 +536,8 @@ def verify_plan_and_challenger(
                 {**base_plan_details, "missing": "challenger_text"},
             )
 
-        chal_ok, chal_missing = validate_plan_deliverable_content(challenger_text, role="challenger")
-        if not chal_ok:
-            return (
-                False,
-                f"challenger_invalid: challenger review missing required sections: {', '.join(chal_missing)}",
-                {**base_plan_details, "missing_sections": chal_missing},
-            )
-
-        if verdict != "pass":
-            return (
-                False,
-                f"challenger_verdict_missing: {verdict_reason}",
-                {**base_plan_details, "challenger_preview": challenger_text[:300]},
-            )
-
-        if valid_plan_ids:
-            if not target_ref:
-                return (
-                    False,
-                    "challenger_plan_ref_missing: challenger approved without specifying Plan-Ref (<note_id> or plan file)",
-                    {**base_plan_details, "valid_plan_ids": sorted(valid_plan_ids)},
-                )
+        # 若审查明确指向了不同计划，或计划在审查发布后发生了更新，旧审查（无论通过还是阻断）均属于针对旧/错配版本的历史记录
+        if valid_plan_ids and target_ref:
             matches_ref = any(target_ref.lower() == pid.lower() or target_ref == pid for pid in valid_plan_ids)
             if not matches_ref:
                 return (
@@ -582,6 +553,37 @@ def verify_plan_and_challenger(
                 False,
                 f"challenger_outdated: plan was updated (ts={plan_ts}) after challenger review was published (ts={chal_ts}); new plan requires re-review",
                 {**base_plan_details, "plan_ts": plan_ts, "challenger_ts": chal_ts, "plan_id": plan_nid or base_plan_details["plan_id"]},
+            )
+
+        verdict, verdict_reason = extract_challenger_verdict(challenger_text or "", chal_task)
+        if verdict == "blocked":
+            return (
+                False,
+                f"challenger_blocked: {verdict_reason}",
+                {**base_plan_details, "challenger_preview": (challenger_text or "")[:300]},
+            )
+
+        chal_ok, chal_missing = validate_plan_deliverable_content(challenger_text, role="challenger")
+        if not chal_ok:
+            return (
+                False,
+                f"challenger_invalid: challenger review missing required sections: {', '.join(chal_missing)}",
+                {**base_plan_details, "missing_sections": chal_missing},
+            )
+
+        if valid_plan_ids:
+            if not target_ref:
+                return (
+                    False,
+                    "challenger_plan_ref_missing: challenger review missing Plan-Ref (<note_id> or plan file)",
+                    {**base_plan_details, "valid_plan_ids": sorted(valid_plan_ids)},
+                )
+
+        if verdict != "pass":
+            return (
+                False,
+                f"challenger_verdict_missing: {verdict_reason}",
+                {**base_plan_details, "challenger_preview": challenger_text[:300]},
             )
 
     plan_ref = target_ref or plan_nid or (valid_plan_ids and sorted(valid_plan_ids)[0]) or ""

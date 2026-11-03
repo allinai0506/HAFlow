@@ -35,6 +35,276 @@ class TestPlanCausalDispatch(unittest.TestCase):
             },
         }
 
+    def test_plan_node_inherently_requires_executor_before_challenger_even_without_depends_on_role(self):
+        """Even if depends_on_role is omitted from plan node configuration, challenger inherently depends on executor."""
+        legacy_plan_node = {
+            "id": "plan",
+            "label": "3计划",
+            "purpose": "把需求拆解为工程方案与任务",
+            "required_outputs": ["技术架构与解耦任务拆解", "方案对抗审查与可行性风险评估"],
+            "agent_policy": {
+                "max_concurrency": 2,
+                "parallel": True,
+                "roles": [
+                    {
+                        "name": "executor",
+                        "label": "技术架构与解耦拆分",
+                        "goal": "技术方案设计与任务拆解",
+                        "outputs": ["技术架构与解耦任务拆解"],
+                    },
+                    {
+                        "name": "challenger",
+                        "label": "方案对抗性质询与可行性评估",
+                        # NO depends_on_role specified!
+                        "goal": "对抗性质询与可行性审查",
+                        "outputs": ["方案对抗审查与可行性风险评估"],
+                    },
+                ],
+            },
+        }
+        res = plan_stage_dispatch(self.wf_id, legacy_plan_node, [], "用户需求文本")
+        self.assertEqual(res.get("mode"), "dispatch")
+        specs = res.get("specs", [])
+        self.assertEqual(len(specs), 1, "Must ONLY dispatch executor initially even if depends_on_role is missing")
+        self.assertEqual(specs[0]["dispatch_role"], "executor")
+
+    def test_plan_node_without_executor_does_not_inject_impossible_executor_dependency(self):
+        """When a custom plan node only configures a reviewer/challenger without executor, do not inject impossible dependency."""
+        reviewer_only_plan_node = {
+            "id": "plan",
+            "label": "3计划",
+            "purpose": "审查计划",
+            "required_outputs": ["方案对抗审查与可行性风险评估"],
+            "agent_policy": {
+                "max_concurrency": 1,
+                "roles": [
+                    {
+                        "name": "reviewer",
+                        "label": "方案审查",
+                        "goal": "审查",
+                        "outputs": ["方案对抗审查与可行性风险评估"],
+                    },
+                ],
+            },
+        }
+        res = plan_stage_dispatch(self.wf_id, reviewer_only_plan_node, [], "用户需求文本")
+        self.assertEqual(res.get("mode"), "dispatch", "Must dispatch configured role without stalling on non-existent executor")
+        specs = res.get("specs", [])
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["dispatch_role"], "reviewer")
+
+    def test_auto_acceptance_rejects_challenger_with_blocked_verdict(self):
+        """Auto acceptance must strictly reject challenger reviews that contain [BLOCKED] verdict."""
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr import workflow_docs
+        import tempfile, os
+
+        chal_task_id = f"{self.wf_id}-plan-challenger"
+        chal_task = {
+            "task_id": chal_task_id,
+            "workflow_id": self.wf_id,
+            "node": "plan",
+            "stage": "plan",
+            "dispatch_role": "challenger",
+            "status": "agent_done",
+            "version": 1,
+            "run_id": "run-1",
+            "execution_id": "exec-1",
+        }
+        blocked_body = (
+            "## 方案对抗性审查与可行性评估\n"
+            "对主方案进行破防性质询与审查，重点核查架构耦合度、死锁与复杂度风险。\n"
+            "经过详细排查，当前方案存在严重的架构死锁与错配风险，无法支撑后续工程实现。\n"
+            "Plan-Ref: n-plan-1\n"
+            "HERDR_GATE_VERDICT: blocked"
+        )
+        workflow_docs.append_note(
+            self.wf_id, kind="review", title="对抗质询审查", body=blocked_body,
+            node="plan", task_id=chal_task_id
+        )
+
+        import re as re_mod
+        class DummyPorts:
+            auto_accept_enabled = lambda self: True
+            get_task = lambda self, tid: chal_task
+            node_is_gate = lambda self, *a: False
+            workflow_config_for = lambda self, wid: {"workflow_template": "software-development-v1"}
+            _task_version = lambda self, t: 1
+            set_task_status = mock.MagicMock(return_value=True)
+        DummyPorts.re = re_mod
+
+        res = try_auto_accept(DummyPorts(), chal_task_id)
+        self.assertFalse(res.accepted, "Auto-acceptance must NOT accept a blocked challenger review")
+        self.assertEqual(res.reason_code, "challenger_blocked")
+        DummyPorts.set_task_status.assert_not_called()
+
+    def test_plan_parser_prioritizes_mismatch_and_outdated_over_blocked_verdict(self):
+        """When challenger review has [BLOCKED] but targets a mismatched or outdated plan, parser reports mismatch/outdated."""
+        from herdr.plan_parser import verify_plan_and_challenger
+        from herdr import workflow_docs
+
+        chal_task = {
+            "task_id": f"{self.wf_id}-plan-challenger",
+            "workflow_id": self.wf_id,
+            "node": "plan",
+            "dispatch_role": "challenger",
+            "status": "completed",
+        }
+        # Valid fresh plan at ts=200
+        plan_note = workflow_docs.append_note(
+            self.wf_id, kind="plan", title="新实施计划",
+            body="## 技术方案与架构设计\n新架构方案\n## 任务拆分与依赖关系\n- Task 1: 实现\n## 修改文件范围清单\n- Modify: a.py\n## 每个 Task 目标与验收标准\n- pytest\n## 风险与应对策略\n无风险",
+            node="plan", task_id=f"{self.wf_id}-plan-executor"
+        )
+        # Blocked review on old plan at ts=100
+        workflow_docs.append_note(
+            self.wf_id, kind="review", title="审查错配旧计划",
+            body="## 方案对抗性审查与可行性评估\n[BLOCKED] 方案对抗审查：被审计划错配。\nPlan-Ref: old-legacy-plan.md\nHERDR_GATE_VERDICT: blocked",
+            node="plan", task_id=f"{self.wf_id}-plan-challenger"
+        )
+
+        ok, reason, details = verify_plan_and_challenger(self.wf_id, [chal_task])
+        self.assertFalse(ok)
+        # Must report version mismatch (or outdated), NOT challenger_blocked
+        self.assertIn("challenger_plan_version_mismatch", reason, "Review targeting old-legacy-plan.md must be diagnosed as version mismatch, not blocked")
+
+    def test_auto_acceptance_uses_notes_as_authoritative_over_older_clone_review_file(self):
+        """When challenger publishes passing review in shared notes, auto-acceptance accepts it even if clone file has old blocked review."""
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr import workflow_docs
+        import tempfile, os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Old blocked review in clone file
+            with open(os.path.join(tmpdir, "challenger-review.md"), "w", encoding="utf-8") as f:
+                f.write("## 方案对抗性审查与可行性评估\n[BLOCKED] 存在严重问题\nHERDR_GATE_VERDICT: blocked")
+
+            chal_task_id = f"{self.wf_id}-plan-chal-updated"
+            chal_task = {
+                "task_id": chal_task_id,
+                "workflow_id": self.wf_id,
+                "node": "plan",
+                "stage": "plan",
+                "dispatch_role": "challenger",
+                "clone_path": tmpdir,
+                "status": "agent_done",
+                "version": 1,
+                "run_id": "run-1",
+                "execution_id": "exec-1",
+            }
+
+            # Updated passing review published in shared notes
+            passing_body = (
+                "## 方案对抗性审查与可行性评估\n"
+                "### 1. 计划完备性评估\n合格\n"
+                "### 2. 潜在单点故障\n无\n"
+                "### 3. 回退方案评估\n可行\n"
+                "### 4. 边界条件覆盖\n完整\n"
+                "### 5. 验收方案可行性\n可行\n\n"
+                "最终裁决：通过\n[PASS]"
+            )
+            workflow_docs.append_note(
+                self.wf_id, kind="review", title="最新通过审查", body=passing_body,
+                node="plan", task_id=chal_task_id
+            )
+
+            import re as re_mod
+            class DummyPorts:
+                auto_accept_enabled = lambda self: True
+                get_task = lambda self, tid: chal_task
+                node_is_gate = lambda self, *a: False
+                workflow_config_for = lambda self, wid: {"workflow_template": "software-development-v1"}
+                _task_version = lambda self, t: 1
+                set_task_status = mock.MagicMock(return_value=True)
+            DummyPorts.re = re_mod
+
+            res = try_auto_accept(DummyPorts(), chal_task_id)
+            self.assertTrue(res.accepted, f"Auto-acceptance should accept updated note review over older clone file: {res.reason_code} {res.detail}")
+            DummyPorts.set_task_status.assert_called_once()
+
+    def test_auto_acceptance_role_detection_prioritizes_explicit_metadata_over_workflow_id(self):
+        """When workflow ID contains 'review' (e.g. wf-review-fix), explicit executor role is not misclassified as challenger."""
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr import workflow_docs
+
+        wf_id = f"{self.wf_id}-review-fix"
+        exec_task_id = f"{wf_id}-plan-executor"
+        exec_task = {
+            "task_id": exec_task_id,
+            "workflow_id": wf_id,
+            "node": "plan",
+            "stage": "plan",
+            "dispatch_role": "executor",
+            "status": "agent_done",
+            "version": 1,
+            "run_id": "run-1",
+            "execution_id": "exec-1",
+        }
+
+        # Another task published a passing review note
+        workflow_docs.append_note(
+            wf_id, kind="review", title="审查结论通过",
+            body="## 方案对抗性审查与可行性评估\n[PASS] 通过",
+            node="plan", task_id=f"{wf_id}-plan-challenger"
+        )
+
+        import re as re_mod
+        class DummyPorts:
+            auto_accept_enabled = lambda self: True
+            get_task = lambda self, tid: exec_task
+            node_is_gate = lambda self, *a: False
+            workflow_config_for = lambda self, wid: {"workflow_template": "software-development-v1"}
+            _task_version = lambda self, t: 1
+            set_task_status = mock.MagicMock(return_value=True)
+        DummyPorts.re = re_mod
+
+        # Executor has not produced a plan; it must NOT be accepted using challenger's passing review!
+        res = try_auto_accept(DummyPorts(), exec_task_id)
+        self.assertFalse(res.accepted, "Executor must not be accepted using another task's passing review")
+        DummyPorts.set_task_status.assert_not_called()
+
+    def test_plan_stage_dispatch_preserves_genuine_blocked_verdict_without_blind_redispatch(self):
+        """When challenger legitimately blocks the CURRENT plan, direct dispatch preserves refusal and does NOT blind redispatch."""
+        from herdr import workflow_docs
+
+        plan_task = {
+            "task_id": f"{self.wf_id}-plan-executor",
+            "workflow_id": self.wf_id,
+            "node": "plan",
+            "dispatch_role": "executor",
+            "status": "completed",
+        }
+        chal_task = {
+            "task_id": f"{self.wf_id}-plan-challenger",
+            "workflow_id": self.wf_id,
+            "node": "plan",
+            "dispatch_role": "challenger",
+            "status": "completed",
+        }
+
+        # Plan note published at ts=100
+        plan_note = workflow_docs.append_note(
+            self.wf_id, kind="plan", title="当前实施方案",
+            body="## 技术方案与架构设计\n当前方案\n## 任务拆分与依赖关系\n- Task 1\n## 修改文件范围清单\n- Modify: x.py\n## 每个 Task 目标与验收标准\n- pytest\n## 风险与应对策略\n无",
+            node="plan", task_id=plan_task["task_id"]
+        )
+
+        # Challenger review genuinely blocks the current plan at ts=200
+        workflow_docs.append_note(
+            self.wf_id, kind="review", title="针对当前方案的阻断审查",
+            body=f"## 方案对抗性审查与可行性评估\n发现不可接受的死锁缺陷，拒绝放行。\nPlan-Ref: {plan_note['note_id']}\nHERDR_GATE_VERDICT: blocked",
+            node="plan", task_id=chal_task["task_id"]
+        )
+
+        res = plan_stage_dispatch(self.wf_id, self.plan_node, [plan_task, chal_task], "需求文本")
+        self.assertNotEqual(res.get("mode"), "dispatch", "Must NOT dispatch when current plan is legitimately blocked")
+        self.assertEqual(len(res.get("specs", [])), 0, "Must NOT emit specs to redispatch challenger against unchanged blocked plan")
+
+        from herdr.plan_parser import verify_plan_and_challenger
+        ok, reason, details = verify_plan_and_challenger(self.wf_id, [plan_task, chal_task])
+        self.assertFalse(ok)
+        self.assertIn("challenger_blocked", reason, "Verification must report challenger_blocked for the current plan")
+
     def test_initial_dispatch_only_dispatches_executor_when_dependent_role_exists(self):
         """Initial dispatch of a node with dependent roles dispatches only the prerequisite role."""
         res = plan_stage_dispatch(self.wf_id, self.plan_node, [], "用户需求文本")
@@ -448,6 +718,61 @@ class TestControllerPlanCausalIntegration(unittest.TestCase):
         self.assertEqual(plan_res["specs"][0]["dispatch_role"], "challenger")
         self.assertEqual(plan_res["specs"][0]["redispatch_of"], f"{self.wf_id}-plan-challenger")
         self.assertEqual(plan_res["specs"][0]["plan_ref"], note_plan2["note_id"])
+
+    def test_controller_redispatches_challenger_when_previous_review_was_blocked_and_new_plan_exists(self):
+        """When challenger previously gave [BLOCKED] on stale/mismatched plan and executor delivered new plan, controller redispatches challenger."""
+        from herdr import node_dispatch_store, workflow_docs
+        from herdr.task_resources import begin_launch_intent, finish_launch_intent
+
+        # Setup executor and challenger
+        self.ctrl.check_workflow_stage_advance(self.wf_id)
+        q1 = self.ctrl.coordinator_queue.get(block=False)
+        op1_id = q1["dispatch_operation_id"]
+        owner1 = q1["dispatch_owner"]
+        node_dispatch_store.start(self.store.db_path, op1_id, owner1)
+        intent1 = begin_launch_intent(
+            self.store, workflow_id=self.wf_id, node_id="plan", role="executor",
+            candidate_sha=None, task_id=f"{self.wf_id}-plan-executor",
+            dispatch_operation_id=op1_id, execution_id="exec-1", run_id="run-exec-1"
+        )["intent"]
+        self.store.save_task({
+            "task_id": f"{self.wf_id}-plan-executor", "workflow_id": self.wf_id, "node": "plan",
+            "dispatch_role": "executor", "status": "completed", "run_id": "run-exec-1",
+            "launch_intent_id": intent1["intent_id"], "execution_id": "exec-1",
+            "dispatch_operation_id": op1_id,
+        })
+        finish_launch_intent(self.store, intent1)
+
+        # Challenger ran and gave [BLOCKED] on mismatched plan at ts=100
+        chal_task = {
+            "task_id": f"{self.wf_id}-plan-challenger", "workflow_id": self.wf_id, "node": "plan",
+            "dispatch_role": "challenger", "status": "cleaned", "run_id": "run-chal-1",
+            "execution_id": "exec-1",
+        }
+        self.store.save_task(chal_task)
+        note_chal_blocked = workflow_docs.append_note(
+            self.wf_id, kind="review", title="旧错配计划审查",
+            body="## 方案对抗性审查与可行性评估\n[BLOCKED] 方案对抗审查：被审计划错配。\nPlan-Ref: legacy-mismatched-plan.md\nHERDR_GATE_VERDICT: blocked",
+            node="plan", task_id=f"{self.wf_id}-plan-challenger"
+        )
+
+        # Executor subsequently delivers valid fresh plan at ts=200
+        note_plan = workflow_docs.append_note(
+            self.wf_id, kind="plan", title="合规实施计划",
+            body="## 技术方案与架构设计\n合规架构设计\n## 任务拆分与依赖关系\n- Task 1: 核心实现\n## 修改文件范围清单\n- Modify: core.py\n## 每个 Task 目标与验收标准\n- 验证命令: pytest\n## 风险与应对策略\n无风险",
+            node="plan", task_id=f"{self.wf_id}-plan-executor"
+        )
+
+        self.ctrl.mark_stage_advance_notified(self.wf_id, "plan")
+
+        # Controller sweep must recognize that the review is mismatched/outdated,
+        # revoke the notified lock and queue challenger redispatch!
+        self.assertFalse(self.ctrl.is_node_complete(self.wf_id, "plan"))
+        self.ctrl.check_workflow_stage_advance(self.wf_id)
+        self.ctrl.check_workflow_stage_advance(self.wf_id)
+        self.assertFalse(self.ctrl.coordinator_queue.empty(), "Controller must queue challenger redispatch when new plan exists")
+        q_redispatch = self.ctrl.coordinator_queue.get(block=False)
+        self.assertEqual(q_redispatch["node_id"], "plan")
 
         # 5. Capacity admission on real boundary: max_tasks_per_node=2 allows replacement
         from types import SimpleNamespace

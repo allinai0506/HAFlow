@@ -726,7 +726,7 @@ Evidence:
 
 ## 自动验收与启动失败现场
 
-`FACT` 非门禁任务的自动验收拒绝已有 blocked 裁决及 review/reviewer/adversarial 角色。受控变更只证明变更验收，不产生评审 pass；状态转换使用 agent_done 与版本 CAS，既有状态事件和任务 metadata 记录 `acceptance_mode=auto`、`auto_accept_reason=controlled_changes`。
+`FACT` 非门禁任务的自动验收拒绝已有 blocked 裁决及 review/reviewer/adversarial 角色。受控变更只证明变更验收，不产生评审 pass；状态转换使用 agent_done 与版本 CAS，既有状态事件和任务 metadata 记录 `acceptance_mode=auto`、`auto_accept_reason=controlled_changes`。计划阶段审查任务（role 为 challenger/review/adversarial）的自动验收强制核验审查裁决（`extract_challenger_verdict`）：裁决为 `blocked` 时以 `challenger_blocked` 拒绝，无明确通过裁决时以 `challenger_verdict_missing` 拒绝，严禁以段落结构完备为由误收工为 `completed`。
 
 `FACT` staged 流程（`coordinator_required=false`）的自动验收失败不再只写 attention 后空转：可修复白名单（需求/计划缺段落、challenger 交付物缺内容、实现无受控变更）经既有 `herdr-task rework` 在同一 Task/Pane 返工并重新验收；次数从 `status_history` 的 `auto_acceptance_rework:` 规范条目持久化计数，上限 2。门禁证据缺失/冲突、`stage_verdict=blocked`、关闭开关、reviewer 角色、身份不完整与 CAS 竞争不返工，写含 `attempts/limit` 的升级 attention，并以绑定 `version`/`run_id`/`execution_id` 的升级闩停止 `done` 重投；快照不匹配的陈旧事件按 stale 丢弃，不强制写入。
 

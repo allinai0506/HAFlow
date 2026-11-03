@@ -9,7 +9,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     import yaml
@@ -40,46 +40,25 @@ def _load_file(path: Path) -> Dict[str, Any]:
     return data
 
 
-def list_templates() -> Dict[str, Dict[str, Any]]:
-    """List all available workflow templates from user and bundled directories."""
-    templates = {}
-    search_dirs = [USER_TEMPLATES_DIR, BUNDLED_TEMPLATES_DIR]
-
-    for directory in search_dirs:
-        if not directory.exists():
-            continue
-        for file in directory.glob("*.*"):
-            if file.suffix.lower() in (".yaml", ".yml", ".json"):
-                base_name = file.stem
-                if base_name in templates:
-                    continue
-                try:
-                    data = _load_file(file)
-                    templates[base_name] = {
-                        "name": data.get("name", base_name),
-                        "label": data.get("label", base_name),
-                        "version": str(data.get("version", "1.0")),
-                        "description": data.get("description", ""),
-                        "node_count": len(data.get("nodes", [])),
-                        "path": str(file),
-                    }
-                except Exception:
-                    continue
-
-    return templates
-
-
 DEFAULT_TEMPLATE_NAME = "software-development-v1"
 
 
-def load_template(name_or_path: Optional[str] = None) -> Dict[str, Any]:
-    """Load a workflow template by name or file path."""
+def _parse_template_version(ver_val: Any) -> Tuple[int, ...]:
+    try:
+        parts = re.findall(r"\d+", str(ver_val or "0"))
+        return tuple(int(p) for p in parts) if parts else (0,)
+    except Exception:
+        return (0,)
+
+
+def resolve_template_file(name_or_path: Optional[str] = None) -> Optional[Path]:
+    """Resolve authoritative template file path with version comparison between user and bundled directories."""
     if not name_or_path:
         name_or_path = DEFAULT_TEMPLATE_NAME
 
     explicit_path = Path(name_or_path).expanduser()
     if explicit_path.exists():
-        return normalize_workflow(_load_file(explicit_path))
+        return explicit_path
 
     candidates = [
         USER_TEMPLATES_DIR / f"{name_or_path}.yaml",
@@ -90,10 +69,65 @@ def load_template(name_or_path: Optional[str] = None) -> Dict[str, Any]:
         BUNDLED_TEMPLATES_DIR / f"{name_or_path}.json",
     ]
 
+    user_cand = next((c for c in candidates[:3] if c.exists()), None)
+    bundled_cand = next((c for c in candidates[3:] if c.exists()), None)
+    if user_cand and bundled_cand:
+        try:
+            u_data = _load_file(user_cand)
+            b_data = _load_file(bundled_cand)
+            if _parse_template_version(b_data.get("version")) > _parse_template_version(u_data.get("version")):
+                return bundled_cand
+            return user_cand
+        except Exception:
+            pass
+
     for candidate in candidates:
         if candidate.exists():
-            data = _load_file(candidate)
-            return normalize_workflow(data)
+            return candidate
+    return None
+
+
+def list_templates() -> Dict[str, Dict[str, Any]]:
+    """List all available workflow templates from user and bundled directories, sharing authoritative resolution."""
+    templates = {}
+    base_names = set()
+    search_dirs = [USER_TEMPLATES_DIR, BUNDLED_TEMPLATES_DIR]
+
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for file in directory.glob("*.*"):
+            if file.suffix.lower() in (".yaml", ".yml", ".json"):
+                base_names.add(file.stem)
+
+    for base_name in sorted(base_names):
+        resolved_file = resolve_template_file(base_name)
+        if not resolved_file:
+            continue
+        try:
+            data = _load_file(resolved_file)
+            templates[base_name] = {
+                "name": data.get("name", base_name),
+                "label": data.get("label", base_name),
+                "version": str(data.get("version", "1.0")),
+                "description": data.get("description", ""),
+                "node_count": len(data.get("nodes", [])),
+                "path": str(resolved_file),
+            }
+        except Exception:
+            continue
+
+    return templates
+
+
+def load_template(name_or_path: Optional[str] = None) -> Dict[str, Any]:
+    """Load a workflow template by name or file path."""
+    if not name_or_path:
+        name_or_path = DEFAULT_TEMPLATE_NAME
+
+    resolved_file = resolve_template_file(name_or_path)
+    if resolved_file:
+        return normalize_workflow(_load_file(resolved_file))
 
     available = list(list_templates().keys())
     raise FileNotFoundError(
