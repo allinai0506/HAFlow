@@ -68,6 +68,31 @@ class TestPlanCausalDispatch(unittest.TestCase):
         self.assertEqual(len(specs), 1, "Must ONLY dispatch executor initially even if depends_on_role is missing")
         self.assertEqual(specs[0]["dispatch_role"], "executor")
 
+    def test_plan_node_without_executor_does_not_inject_impossible_executor_dependency(self):
+        """When a custom plan node only configures a reviewer/challenger without executor, do not inject impossible dependency."""
+        reviewer_only_plan_node = {
+            "id": "plan",
+            "label": "3计划",
+            "purpose": "审查计划",
+            "required_outputs": ["方案对抗审查与可行性风险评估"],
+            "agent_policy": {
+                "max_concurrency": 1,
+                "roles": [
+                    {
+                        "name": "reviewer",
+                        "label": "方案审查",
+                        "goal": "审查",
+                        "outputs": ["方案对抗审查与可行性风险评估"],
+                    },
+                ],
+            },
+        }
+        res = plan_stage_dispatch(self.wf_id, reviewer_only_plan_node, [], "用户需求文本")
+        self.assertEqual(res.get("mode"), "dispatch", "Must dispatch configured role without stalling on non-existent executor")
+        specs = res.get("specs", [])
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["dispatch_role"], "reviewer")
+
     def test_auto_acceptance_rejects_challenger_with_blocked_verdict(self):
         """Auto acceptance must strictly reject challenger reviews that contain [BLOCKED] verdict."""
         from services.controller.auto_acceptance import try_auto_accept

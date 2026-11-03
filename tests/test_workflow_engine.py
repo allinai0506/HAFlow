@@ -111,6 +111,26 @@ class TestWorkflowTemplates(unittest.TestCase):
                 # Bundled software-development-v1.yaml has version '1.2'
                 self.assertEqual(tmpl.get("version"), "1.2", "Must load newer bundled template (1.2) rather than stale user copy (1.0)")
 
+    def test_list_templates_and_load_template_share_authoritative_resolution(self):
+        """When user directory has stale 1.0 and bundled has 1.2, both list_templates and load_template select the bundled file."""
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from herdr import workflow
+
+        with tempfile.TemporaryDirectory() as tmp_user_dir:
+            user_p = Path(tmp_user_dir)
+            stale_file = user_p / "software-development-v1.yaml"
+            stale_file.write_text("name: software-development-v1\nversion: '1.0'\nnodes: [{'id': 'n1', 'depends_on': []}]\n", encoding="utf-8")
+
+            with mock.patch("herdr.workflow.USER_TEMPLATES_DIR", user_p):
+                tmpl = workflow.load_template("software-development-v1")
+                self.assertEqual(tmpl.get("version"), "1.2")
+                listed = workflow.list_templates()
+                self.assertIn("software-development-v1", listed)
+                self.assertEqual(listed["software-development-v1"]["version"], "1.2")
+                self.assertEqual(listed["software-development-v1"]["path"], str(workflow.resolve_template_file("software-development-v1")))
+
 
 
 class TestDAGValidation(unittest.TestCase):

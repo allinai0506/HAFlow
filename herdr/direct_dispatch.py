@@ -835,7 +835,8 @@ def plan_stage_dispatch(
                 if r_name in completed_role_tasks:
                     continue
                 dep_role = str(r.get("depends_on_role") or "").strip().lower()
-                if not dep_role and node_id == "plan" and r_name in ("challenger", "review", "reviewer", "adversarial"):
+                has_executor = any(str(x.get("name") or "").strip().lower() == "executor" for x in roles)
+                if not dep_role and node_id == "plan" and r_name in ("challenger", "review", "reviewer", "adversarial") and has_executor:
                     dep_role = "executor"
                 if dep_role:
                     if dep_role in completed_role_tasks:
@@ -1051,7 +1052,8 @@ def plan_stage_dispatch(
                 r_acceptance = _acceptance_lines(normalized, r_outputs)
 
                 dep_role = str(r.get("depends_on_role") or "").strip().lower()
-                if not dep_role and node_id == "plan" and r_name.lower() in ("challenger", "review", "reviewer", "adversarial"):
+                has_executor = any(str(x.get("name") or "").strip().lower() == "executor" for x in roles)
+                if not dep_role and node_id == "plan" and r_name.lower() in ("challenger", "review", "reviewer", "adversarial") and has_executor:
                     dep_role = "executor"
                 plan_chunk = None
                 plan_ref = None
