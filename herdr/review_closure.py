@@ -570,7 +570,7 @@ def parse_remote_identity(url: Any) -> Optional[Tuple[str, str]]:
     """(owner, repo) when the remote URL points at github.com, else None."""
     text = str(url or "").strip()
     match = re.match(
-        r"^(?:[a-z+]+://)?(?:[^@/]+@)?(?:github\.com|github-[\w.-]+)(?::\d+)?[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?$",
+        r"^(?:[a-z+]+://)?(?:[^@/]+@)?(?i:github\.com|github-[\w.-]+)(?::\d+)?[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?$",
         text,
     )
     if not match:

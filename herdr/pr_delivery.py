@@ -14,7 +14,7 @@ from .task_resources import workflow_launch_lock
 
 def repository_identity(remote):
     match = re.fullmatch(
-        r'(?:https://|(?:ssh://)?(?:[^@/]+@)?)(github\.com|gitee\.com|github-[\w.-]+|gitee-[\w.-]+)(?::\d+)?[/:]([^/\s:]+)/([^/\s]+?)(?:\.git)?',
+        r'(?:https://|(?:ssh://)?(?:[^@/]+@)?)((?i:github\.com|gitee\.com|github-[\w.-]+|gitee-[\w.-]+))(?::\d+)?[/:]([^/\s:]+)/([^/\s]+?)(?:\.git)?',
         str(remote or '').strip(),
     )
     if not match:
@@ -22,7 +22,7 @@ def repository_identity(remote):
     raw_host, owner, repo = match.groups()
     if not re.fullmatch(r'[\w.-]+', owner) or not re.fullmatch(r'[\w.-]+', repo):
         raise ValueError('invalid repository identity')
-    host = 'github.com' if raw_host.startswith('github') else 'gitee.com'
+    host = 'github.com' if raw_host.lower().startswith('github') else 'gitee.com'
     return host, owner, repo
 
 

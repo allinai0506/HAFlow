@@ -246,23 +246,31 @@ def test_explicit_workflow_ceiling_overrides_node_default(monkeypatch):
 
 
 def test_remote_identity_and_deferred_closure_with_explicit_port(monkeypatch):
-    """Codex Round 2 P2 finding: explicit-port GitHub URLs are recognized and reject deferred closure."""
+    """Codex Round 2 P2 finding: explicit-port and mixed-case GitHub URLs are recognized and reject deferred closure."""
     import herdr.review_closure as rc
 
-    # 1. parse_remote_identity recognizes explicit port
+    # 1. parse_remote_identity recognizes explicit port and mixed-case host
     assert parse_remote_identity("ssh://git@github.com:22/org/repo.git") == ("org", "repo")
     assert parse_remote_identity("ssh://git@github-work:2222/org/repo.git") == ("org", "repo")
     assert parse_remote_identity("https://github.com:443/org/repo.git") == ("org", "repo")
+    assert parse_remote_identity("https://GitHub.com/MyOrg/MyRepo.git") == ("MyOrg", "MyRepo")
+    assert parse_remote_identity("git@GITHUB.COM:MyOrg/MyRepo.git") == ("MyOrg", "MyRepo")
 
-    # 2. repository_identity recognizes explicit port
+    # 2. repository_identity recognizes explicit port and mixed-case host
     assert repository_identity("ssh://git@github.com:22/org/repo.git") == ("github.com", "org", "repo")
     assert repository_identity("ssh://git@github-custom:2222/org/repo.git") == ("github.com", "org", "repo")
     assert repository_identity("ssh://git@gitee.com:22/org/repo.git") == ("gitee.com", "org", "repo")
     assert repository_identity("https://github.com:443/org/repo.git") == ("github.com", "org", "repo")
+    assert repository_identity("https://GitHub.com/MyOrg/MyRepo.git") == ("github.com", "MyOrg", "MyRepo")
 
-    # 3. collect_deferred_evidence rejects deferred closure when explicit-port GitHub remote is present
+    # 3. collect_deferred_evidence rejects deferred closure when explicit-port or mixed-case GitHub remote is present
     monkeypatch.setattr(rc, "delivery_identity", lambda s, t: ([], "", "", ""))
     monkeypatch.setattr(rc, "git_remote_urls", lambda p: ["ssh://git@github.com:22/org/repo.git"])
+    is_deferred, msg, meta = collect_deferred_evidence(None, {"source_repo": "/dummy"})
+    assert not is_deferred
+    assert "a GitHub remote exists" in msg
+
+    monkeypatch.setattr(rc, "git_remote_urls", lambda p: ["https://GitHub.com/MyOrg/MyRepo.git"])
     is_deferred, msg, meta = collect_deferred_evidence(None, {"source_repo": "/dummy"})
     assert not is_deferred
     assert "a GitHub remote exists" in msg
