@@ -155,10 +155,10 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
     def test_workspace_ceiling_skips_the_receipt_and_e2e_is_conditional(self):
         from herdr.review_closure import _closure_demanded
 
-        self.assertEqual(self.tmpl.get("delivery_ceiling_default"), "workspace")
-        self.assertFalse(_closure_demanded(self.tmpl))
-        self.assertTrue(_closure_demanded({
-            **self.tmpl, "delivery_ceiling": "pr",
+        self.assertEqual(self.tmpl.get("delivery_ceiling_default"), "pr")
+        self.assertTrue(_closure_demanded(self.tmpl))
+        self.assertFalse(_closure_demanded({
+            **self.tmpl, "delivery_ceiling": "workspace",
         }))
         self.assertTrue(_closure_demanded({
             "nodes": [{"id": "wrapup", "review_closure_required": True}],

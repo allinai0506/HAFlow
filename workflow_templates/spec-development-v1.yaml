@@ -2,6 +2,7 @@ name: spec-development-v1
 label: SPEC规格开发
 version: '1.1'
 description: 七节点 SPEC 研发：规格与澄清→方案与任务→实现自查→独立测试/双技能审核并行→验收汇聚→六步收尾。
+delivery_ceiling_default: pr
 execution:
   mode: git
 selective_replan:

@@ -287,7 +287,7 @@ def assemble_stage_context(
     dispatch_role: str = "worker",
     candidate_sha: str = "",
     upstream_notes: Optional[List[Dict[str, Any]]] = None,
-    delivery_ceiling: str = "workspace",
+    delivery_ceiling: str = "pr",
     configured_skills: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Assemble structured stage execution context for a software-development-v1 node."""
