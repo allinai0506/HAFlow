@@ -222,6 +222,47 @@ class TestPlanCausalDispatch(unittest.TestCase):
             self.assertTrue(res.accepted, f"Auto-acceptance should accept updated note review over older clone file: {res.reason_code} {res.detail}")
             DummyPorts.set_task_status.assert_called_once()
 
+    def test_auto_acceptance_role_detection_prioritizes_explicit_metadata_over_workflow_id(self):
+        """When workflow ID contains 'review' (e.g. wf-review-fix), explicit executor role is not misclassified as challenger."""
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr import workflow_docs
+
+        wf_id = f"{self.wf_id}-review-fix"
+        exec_task_id = f"{wf_id}-plan-executor"
+        exec_task = {
+            "task_id": exec_task_id,
+            "workflow_id": wf_id,
+            "node": "plan",
+            "stage": "plan",
+            "dispatch_role": "executor",
+            "status": "agent_done",
+            "version": 1,
+            "run_id": "run-1",
+            "execution_id": "exec-1",
+        }
+
+        # Another task published a passing review note
+        workflow_docs.append_note(
+            wf_id, kind="review", title="审查结论通过",
+            body="## 方案对抗性审查与可行性评估\n[PASS] 通过",
+            node="plan", task_id=f"{wf_id}-plan-challenger"
+        )
+
+        import re as re_mod
+        class DummyPorts:
+            auto_accept_enabled = lambda self: True
+            get_task = lambda self, tid: exec_task
+            node_is_gate = lambda self, *a: False
+            workflow_config_for = lambda self, wid: {"workflow_template": "software-development-v1"}
+            _task_version = lambda self, t: 1
+            set_task_status = mock.MagicMock(return_value=True)
+        DummyPorts.re = re_mod
+
+        # Executor has not produced a plan; it must NOT be accepted using challenger's passing review!
+        res = try_auto_accept(DummyPorts(), exec_task_id)
+        self.assertFalse(res.accepted, "Executor must not be accepted using another task's passing review")
+        DummyPorts.set_task_status.assert_not_called()
+
     def test_plan_stage_dispatch_preserves_genuine_blocked_verdict_without_blind_redispatch(self):
         """When challenger legitimately blocks the CURRENT plan, direct dispatch preserves refusal and does NOT blind redispatch."""
         from herdr import workflow_docs

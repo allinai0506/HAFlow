@@ -91,9 +91,12 @@ def try_auto_accept(ports, task_id):
     if task.get("stage_verdict") == "blocked":
         return AutoAcceptResult(False, "stage_verdict_blocked")
 
-    role_text = " ".join(str(task.get(key) or "").lower() for key in
-                         ("dispatch_role", "agent_role", "role", "task_id"))
-    is_challenger = bool(ports.re.search(r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])", role_text))
+    role_pattern = r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])"
+    explicit_role = " ".join(str(task.get(key) or "").lower() for key in ("dispatch_role", "agent_role", "role")).strip()
+    if explicit_role:
+        is_challenger = bool(ports.re.search(role_pattern, explicit_role))
+    else:
+        is_challenger = bool(ports.re.search(role_pattern, str(task.get("task_id") or "").lower()))
 
     wf_cfg = None
     if hasattr(ports, "workflow_config_for"):
@@ -157,6 +160,13 @@ def try_auto_accept(ports, task_id):
                 task_copy.setdefault("clone_path", clone_path)
 
             deliv = find_plan_deliverables(workflow_id, tasks=[task_copy], project_root=clone_path)
+            selected_note = getattr(deliv, "meta", {}).get("challenger_note" if is_challenger else "plan_note")
+            if selected_note and selected_note.get("source") != "file":
+                note_task = selected_note.get("task_id") or selected_note.get("author")
+                if note_task and note_task != task_id:
+                    print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} note {selected_note.get('note_id')} belongs to task {note_task}, not {task_id}")
+                    return AutoAcceptResult(False, "plan_challenger_missing_sections" if is_challenger else "plan_missing_sections")
+
             deliverable_text = deliv.challenger_text if is_challenger else deliv.plan_text
 
             ok, missing = validate_plan_deliverable_content(deliverable_text, role=role)
