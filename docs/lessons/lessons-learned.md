@@ -9461,16 +9461,15 @@ pytest -q tests/test_software_development_v1_adapter.py
 | 用户目录旧模板静默覆盖新版本 | 路径优先若缺乏版本比较，宿主缓存的陈旧模板会持续穿透已修复的仓库内置模板 | `load_template` 双路径存在时解析语义版本号（`major.minor.patch`）；若内置模板版本高于用户目录版本，必须自动优先加载内置模板 |
 | 因果时序强依赖模板显式声明 | 领域语义上审查天然依赖被审查物料；仅依赖 YAML 声明无法抵御配置遗漏或旧模板 | 审查角色（`challenger`、`review`、`adversarial`）在 `plan` 阶段必须在引擎层（`direct_dispatch`、`stage_state`、`node_dispatch_store`）硬编码内置因果兜底（`dep_role = "executor"`） |
 | 自动验收盲目放行阻断性审查 | 交付物满足结构规范不等于业务裁决合法；审查任务的核心产出是裁决而非段落格式 | 审查工位交付物的自动验收（`try_auto_accept`）必须强制调用 `extract_challenger_verdict`；裁决为 `blocked` 或缺少有效 `pass` 时严禁自动验收为 completed，必须以 `challenger_blocked` 拦截 |
-| 裁决抽取优先于方案身份核验 | 裁决必须且仅能附着于目标方案；若先判裁决再对齐引用，陈旧或误指文件的裁决会污染全新交付物 | `plan_parser.py` 必须严格遵循「身份与时序核验在前，内容与裁决校验在后」：先校验 `Plan-Ref` 目标一致性与时间戳新鲜度，匹配当前方案后才采纳其阻断或通过裁决 |
-| 自愈与重派触发白名单漏项 | 阻断性审查（`challenger_blocked`）与过期审查同属需重审的非终态就绪信号 | 无论是 `direct_dispatch.py` 的重派推导，还是 `stage_state.py` 的作废重选，拒绝码白名单必须全量覆盖 `challenger_blocked`、`challenger_outdated` 与 `challenger_plan_version_mismatch` |
+| 裁决抽取优先于方案身份核验 | 裁决必须且仅能附着于目标方案；若先判裁决再对齐引用，陈旧或误指文件的裁决会污染全新交付物 | `plan_parser.py` 必须严格遵循「身份与时序核验在前，内容与裁决校验在后」：先校验 `Plan-Ref` 目标一致性与时间戳新鲜度，旧审查诊断为 mismatch/outdated 触发重审；对当前方案真实生效的阻断则予以保留，不盲目重派 |
 
 ### 操作规范
 
 1. **模板加载版本抢占**：`herdr/workflow.py:load_template` 在用户模板与内置模板均存在时，通过 `_parse_template_version` 比较版本元数据，高版本优先；相同或解析失败时保留用户自定义配置。
 2. **审查工位内置因果约束**：在 `herdr/direct_dispatch.py`、`services/controller/stage_state.py`、`herdr/node_dispatch_store.py` 中，针对 `plan` 节点的审查类角色（`challenger`、`review`、`adversarial`），若模板未配置 `depends_on_role`，缺省兜底为 `depends_on_role: "executor"`，彻底消除初始派发抢跑。
-3. **审查自动验收门禁拦截**：`services/controller/auto_acceptance.py:try_auto_accept` 针对 `plan` 节点的 challenger 角色，提取 `extract_challenger_verdict(deliverable_text, task)`；若裁决为 `blocked` 返回 `challenger_blocked` 拒绝，若未给出明确 `pass` 返回 `challenger_verdict_missing` 拒绝，阻断任务伪完成。
+3. **审查自动验收门禁拦截与权威事实源解析**：`services/controller/auto_acceptance.py:try_auto_accept` 复用 `find_plan_deliverables`，以共享 Notes 为权威源、Clone 文件为回退；针对审查角色强制调用 `extract_challenger_verdict`，若为 `blocked` 返回 `challenger_blocked` 拦截，若缺失 `pass` 返回 `challenger_verdict_missing` 拦截。
 4. **方案解析器核验顺序修正**：`herdr/plan_parser.py:verify_plan_and_challenger` 调整执行顺序：优先执行 `challenger_plan_version_mismatch` 与 `challenger_outdated`（时间戳与引用核验），引用不匹配或已过期时直接返回对应重审原因码，绝不让历史/异构文件的 `[BLOCKED]` 误污染当前合格方案。
-5. **拒绝码全闭环重派驱动**：在 `direct_dispatch.py`、`stage_state.py`、`node_dispatch_store.py` 中统一将 `challenger_blocked` 纳入 `roles_needing_redispatch` 与作废重派名单，在前置 Executor 方案完备且审查未通过时，自动派发新一代 Challenger 重审任务（如 `wf-xxx-plan-challenger-r2`）。
+5. **版本失效重审与当前方案真实阻断保持**：针对旧方案或错配方案的历史审查，由 `challenger_plan_version_mismatch` / `challenger_outdated` 驱动自动补派 `-r2` 质询任务；对当前合格新方案的实质性 `challenger_blocked` 予以保留阻断（mode: refusal），杜绝在方案未修订前盲目重派审查工位。
 
 ### 验证命令 / 守护测试
 

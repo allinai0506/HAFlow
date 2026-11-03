@@ -172,7 +172,7 @@ Evidence:
 
 `FACT` `load_template` 在用户宿主目录与仓库内置目录同时存在同名模板时，解析语义版本号（`major.minor.patch`）；若内置模板版本高于用户目录模板，优先加载内置模板，防止宿主缓存旧版本模板静默覆盖仓库新修复。
 
-`FACT` `plan_parser.py:verify_plan_and_challenger` 必须先校验 `target_ref` 与时间戳新鲜度（`challenger_plan_version_mismatch` / `challenger_outdated`），再提取裁决结论，防止对历史旧文件的阻断裁决跨方案生效。拒绝码 `challenger_blocked` 纳入重派推导白名单，方案就绪后自动触发重审自愈。
+`FACT` `plan_parser.py:verify_plan_and_challenger` 必须先校验 `target_ref` 与时间戳新鲜度（`challenger_plan_version_mismatch` / `challenger_outdated`），再提取裁决结论，防止对历史旧文件的阻断裁决跨方案生效。对当前方案生效的实质性 `challenger_blocked` 予以保留阻断，避免在方案未修复前盲目空转重派审查。
 
 Evidence:
 - `herdr/workflow.py#load_template`

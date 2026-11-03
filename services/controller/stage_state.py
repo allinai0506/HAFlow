@@ -325,7 +325,6 @@ def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
                         if not verif_ok:
                             refusal_code = verif_reason.split(":")[0].strip()
                             if refusal_code in (
-                                "challenger_blocked",
                                 "challenger_outdated",
                                 "challenger_plan_ref_missing",
                                 "challenger_plan_version_mismatch",

@@ -8,28 +8,6 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
-## [2026-11-03] Fix | 计划阶段审查工位因果内置、自动验收门禁、解析器隔离与重派闭环（解决 wf-haflow-1103-01 静默死锁）
-
-- 背景：真实工作流 `wf-haflow-1103-01` 在 `plan` 阶段发生无任务推进的持久性停滞（静默死锁，Silent Deadlock）：Executor 与 Challenger（Codex）无序并发，Challenger 抢先运行误读仓库历史遗留方案给出 `[BLOCKED]`；Controller 自动验收漏检裁决将其误收工；随后 Executor 交付合格新方案，但解析器先判裁决先入为主阻断新方案，且拒绝码白名单漏掉 `challenger_blocked` 导致无法触发重审。
-- 根因分析：
-  1. 用户宿主目录 `~/.herdr-controller/templates/software-development-v1.yaml` 系历史残留（v1.0），`workflow.py:load_template` 原实现只要用户目录存在模板即无条件优先加载，穿透了仓库内置 v1.2 修复；
-  2. 调度引擎仅依赖模板 YAML 的 `depends_on_role` 显式声明，缺少领域因果内置兜底；
-  3. `services/controller/auto_acceptance.py:try_auto_accept` 未对审查交付物执行 `extract_challenger_verdict`，将 `[BLOCKED]` 裁决盲目收工为 `completed`；
-  4. `herdr/plan_parser.py:verify_plan_and_challenger` 裁决抽取优先于方案 `target_ref` / 时间戳核验，使针对历史旧文件的阻断裁决跨方案生效；
-  5. `direct_dispatch.py` 与 `stage_state.py` 的重派推导与作废白名单缺少 `challenger_blocked`，截断自愈。
-- 治理与修复：
-  1. **模板版本优先加载**：`herdr/workflow.py:load_template` 通过 `_parse_template_version` 比较语义版本，仓库内置新版本优先于宿主旧版本缓存；
-  2. **内置因果依赖兜底**：在 `direct_dispatch.py`、`stage_state.py`、`node_dispatch_store.py` 中对 `plan` 节点的审查角色强制兜底 `depends_on_role: executor`，杜绝抢跑；
-  3. **审查自动验收门禁**：`services/controller/auto_acceptance.py` 强制校验 `extract_challenger_verdict`，严格拦截 `challenger_blocked` 与 `challenger_verdict_missing` 自动验收；
-  4. **解析器核验顺序修正**：`herdr/plan_parser.py` 优先执行方案版本对齐（`challenger_plan_version_mismatch` / `challenger_outdated`），杜绝异构旧方案裁决污染；
-  5. **重派自愈闭环**：在 `direct_dispatch.py`、`stage_state.py`、`node_dispatch_store.py` 中全量纳入 `challenger_blocked` 拒绝码，新方案就绪后自动派发 `-r2` 质询重审。
-- 验收结果：
-  - `tests/test_plan_causal_dispatch.py` 11 项专项测试全绿；
-  - `tests/test_workflow_engine.py` 64 项测试全绿；
-  - 全套回归测试（173 + 228 = 401+ 测试）全部 PASS；
-  - `compileall`、`git diff --check` clean；
-  - 沉淀四段式工程教训 `docs/lessons/lessons-learned.md` §224。
-
 ## [2026-11-02] fix | 计划阶段角色因果分步派发、持久化调度代次串联与质询审查自愈闭环（PR #390 / §222）
 
 - 背景：真实工作流 `wf-haflow-1102-02` 的 `plan` 阶段在推进至 `implementation` 时因审查时序倒挂（Executor 尚未写完方案前 Challenger 已提前退出）陷入 `challenger_outdated` 拒绝死锁；后续计划更新后无法自动触发重审，直接进入 `waiting_human` 挂起。
@@ -4081,3 +4059,25 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - rework 快照：`herdr/task_cli_rework.py` 接受 `--expected-status/version/run-id/execution-id`，快照不匹配 fail-closed，防止陈旧 done 事件把新执行拉回 rework；request-id 保持幂等。
 - 验证：新增 `tests/test_auto_acceptance_rework_recovery.py`（真实 SQLite、真实 CLI 解析、kernel 与 attention store，25 项）；受影响四文件 `112 passed`；`compileall`、`git diff --check` clean；候选 `4110731` 经独立 test/review 同 SHA pass。
 - 教训见 lessons §223。
+
+## [2026-11-03] Fix | 计划阶段审查工位因果内置、自动验收门禁、解析器隔离与重派闭环（解决 wf-haflow-1103-01 静默死锁）
+
+- 背景：真实工作流 `wf-haflow-1103-01` 在 `plan` 阶段发生无任务推进的持久性停滞（静默死锁，Silent Deadlock）：Executor 与 Challenger（Codex）无序并发，Challenger 抢先运行误读仓库历史遗留方案给出 `[BLOCKED]`；Controller 自动验收漏检裁决将其误收工；随后 Executor 交付合格新方案，但解析器先判裁决先入为主阻断新方案，且拒绝码白名单漏掉 `challenger_blocked` 导致无法触发重审。
+- 根因分析：
+  1. 用户宿主目录 `~/.herdr-controller/templates/software-development-v1.yaml` 系历史残留（v1.0），`workflow.py:load_template` 原实现只要用户目录存在模板即无条件优先加载，穿透了仓库内置 v1.2 修复；
+  2. 调度引擎仅依赖模板 YAML 的 `depends_on_role` 显式声明，缺少领域因果内置兜底；
+  3. `services/controller/auto_acceptance.py:try_auto_accept` 未对审查交付物执行 `extract_challenger_verdict`，将 `[BLOCKED]` 裁决盲目收工为 `completed`；
+  4. `herdr/plan_parser.py:verify_plan_and_challenger` 裁决抽取优先于方案 `target_ref` / 时间戳核验，使针对历史旧文件的阻断裁决跨方案生效；
+  5. `direct_dispatch.py` 与 `stage_state.py` 的重派推导与作废白名单缺少 `challenger_blocked`，截断自愈。
+- 治理与修复：
+  1. **模板版本优先加载**：`herdr/workflow.py:load_template` 通过 `_parse_template_version` 比较语义版本，仓库内置新版本优先于宿主旧版本缓存；
+  2. **内置因果依赖兜底**：在 `direct_dispatch.py`、`stage_state.py`、`node_dispatch_store.py` 中对 `plan` 节点的审查角色强制兜底 `depends_on_role: executor`，杜绝抢跑；
+  3. **审查自动验收门禁**：`services/controller/auto_acceptance.py` 强制校验 `extract_challenger_verdict`，严格拦截 `challenger_blocked` 与 `challenger_verdict_missing` 自动验收；
+  4. **解析器核验顺序修正**：`herdr/plan_parser.py` 优先执行方案版本对齐（`challenger_plan_version_mismatch` / `challenger_outdated`），杜绝异构旧方案裁决污染；
+  5. **重派自愈闭环**：在 `direct_dispatch.py`、`stage_state.py`、`node_dispatch_store.py` 中全量纳入 `challenger_blocked` 拒绝码，新方案就绪后自动派发 `-r2` 质询重审。
+- 验收结果：
+  - `tests/test_plan_causal_dispatch.py` 11 项专项测试全绿；
+  - `tests/test_workflow_engine.py` 64 项测试全绿；
+  - 全套回归测试（173 + 228 = 401+ 测试）全部 PASS；
+  - `compileall`、`git diff --check` clean；
+  - 沉淀四段式工程教训 `docs/lessons/lessons-learned.md` §224。

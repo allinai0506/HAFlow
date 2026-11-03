@@ -143,6 +143,102 @@ class TestPlanCausalDispatch(unittest.TestCase):
         # Must report version mismatch (or outdated), NOT challenger_blocked
         self.assertIn("challenger_plan_version_mismatch", reason, "Review targeting old-legacy-plan.md must be diagnosed as version mismatch, not blocked")
 
+    def test_auto_acceptance_uses_notes_as_authoritative_over_older_clone_review_file(self):
+        """When challenger publishes passing review in shared notes, auto-acceptance accepts it even if clone file has old blocked review."""
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr import workflow_docs
+        import tempfile, os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Old blocked review in clone file
+            with open(os.path.join(tmpdir, "challenger-review.md"), "w", encoding="utf-8") as f:
+                f.write("## 方案对抗性审查与可行性评估\n[BLOCKED] 存在严重问题\nHERDR_GATE_VERDICT: blocked")
+
+            chal_task_id = f"{self.wf_id}-plan-chal-updated"
+            chal_task = {
+                "task_id": chal_task_id,
+                "workflow_id": self.wf_id,
+                "node": "plan",
+                "stage": "plan",
+                "dispatch_role": "challenger",
+                "clone_path": tmpdir,
+                "status": "agent_done",
+                "version": 1,
+                "run_id": "run-1",
+                "execution_id": "exec-1",
+            }
+
+            # Updated passing review published in shared notes
+            passing_body = (
+                "## 方案对抗性审查与可行性评估\n"
+                "### 1. 计划完备性评估\n合格\n"
+                "### 2. 潜在单点故障\n无\n"
+                "### 3. 回退方案评估\n可行\n"
+                "### 4. 边界条件覆盖\n完整\n"
+                "### 5. 验收方案可行性\n可行\n\n"
+                "最终裁决：通过\n[PASS]"
+            )
+            workflow_docs.append_note(
+                self.wf_id, kind="review", title="最新通过审查", body=passing_body,
+                node="plan", task_id=chal_task_id
+            )
+
+            import re as re_mod
+            class DummyPorts:
+                auto_accept_enabled = lambda self: True
+                get_task = lambda self, tid: chal_task
+                node_is_gate = lambda self, *a: False
+                workflow_config_for = lambda self, wid: {"workflow_template": "software-development-v1"}
+                _task_version = lambda self, t: 1
+                set_task_status = mock.MagicMock(return_value=True)
+            DummyPorts.re = re_mod
+
+            res = try_auto_accept(DummyPorts(), chal_task_id)
+            self.assertTrue(res.accepted, f"Auto-acceptance should accept updated note review over older clone file: {res.reason_code} {res.detail}")
+            DummyPorts.set_task_status.assert_called_once()
+
+    def test_plan_stage_dispatch_preserves_genuine_blocked_verdict_without_blind_redispatch(self):
+        """When challenger legitimately blocks the CURRENT plan, direct dispatch preserves refusal and does NOT blind redispatch."""
+        from herdr import workflow_docs
+
+        plan_task = {
+            "task_id": f"{self.wf_id}-plan-executor",
+            "workflow_id": self.wf_id,
+            "node": "plan",
+            "dispatch_role": "executor",
+            "status": "completed",
+        }
+        chal_task = {
+            "task_id": f"{self.wf_id}-plan-challenger",
+            "workflow_id": self.wf_id,
+            "node": "plan",
+            "dispatch_role": "challenger",
+            "status": "completed",
+        }
+
+        # Plan note published at ts=100
+        plan_note = workflow_docs.append_note(
+            self.wf_id, kind="plan", title="当前实施方案",
+            body="## 技术方案与架构设计\n当前方案\n## 任务拆分与依赖关系\n- Task 1\n## 修改文件范围清单\n- Modify: x.py\n## 每个 Task 目标与验收标准\n- pytest\n## 风险与应对策略\n无",
+            node="plan", task_id=plan_task["task_id"]
+        )
+
+        # Challenger review genuinely blocks the current plan at ts=200
+        workflow_docs.append_note(
+            self.wf_id, kind="review", title="针对当前方案的阻断审查",
+            body=f"## 方案对抗性审查与可行性评估\n发现不可接受的死锁缺陷，拒绝放行。\nPlan-Ref: {plan_note['note_id']}\nHERDR_GATE_VERDICT: blocked",
+            node="plan", task_id=chal_task["task_id"]
+        )
+
+        res = plan_stage_dispatch(self.wf_id, self.plan_node, [plan_task, chal_task], "需求文本")
+        self.assertNotEqual(res.get("mode"), "dispatch", "Must NOT dispatch when current plan is legitimately blocked")
+        self.assertEqual(len(res.get("specs", [])), 0, "Must NOT emit specs to redispatch challenger against unchanged blocked plan")
+
+        from herdr.plan_parser import verify_plan_and_challenger
+        ok, reason, details = verify_plan_and_challenger(self.wf_id, [plan_task, chal_task])
+        self.assertFalse(ok)
+        self.assertIn("challenger_blocked", reason, "Verification must report challenger_blocked for the current plan")
+
     def test_initial_dispatch_only_dispatches_executor_when_dependent_role_exists(self):
         """Initial dispatch of a node with dependent roles dispatches only the prerequisite role."""
         res = plan_stage_dispatch(self.wf_id, self.plan_node, [], "用户需求文本")

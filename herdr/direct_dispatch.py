@@ -821,7 +821,6 @@ def plan_stage_dispatch(
                 if not verif_ok:
                     refusal_code = verif_reason.split(":")[0].strip()
                     if refusal_code in (
-                        "challenger_blocked",
                         "challenger_outdated",
                         "challenger_plan_ref_missing",
                         "challenger_plan_version_mismatch",
