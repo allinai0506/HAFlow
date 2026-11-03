@@ -821,6 +821,7 @@ def plan_stage_dispatch(
                 if not verif_ok:
                     refusal_code = verif_reason.split(":")[0].strip()
                     if refusal_code in (
+                        "challenger_blocked",
                         "challenger_outdated",
                         "challenger_plan_ref_missing",
                         "challenger_plan_version_mismatch",
@@ -835,6 +836,8 @@ def plan_stage_dispatch(
                 if r_name in completed_role_tasks:
                     continue
                 dep_role = str(r.get("depends_on_role") or "").strip().lower()
+                if not dep_role and node_id == "plan" and r_name in ("challenger", "review", "reviewer", "adversarial"):
+                    dep_role = "executor"
                 if dep_role:
                     if dep_role in completed_role_tasks:
                         if dep_role == "executor" or (node_id == "plan" and r_name == "challenger"):
@@ -1049,6 +1052,8 @@ def plan_stage_dispatch(
                 r_acceptance = _acceptance_lines(normalized, r_outputs)
 
                 dep_role = str(r.get("depends_on_role") or "").strip().lower()
+                if not dep_role and node_id == "plan" and r_name.lower() in ("challenger", "review", "reviewer", "adversarial"):
+                    dep_role = "executor"
                 plan_chunk = None
                 plan_ref = None
                 if dep_role == "executor" or (node_id == "plan" and r_name.lower() in ("challenger", "review", "adversarial")):

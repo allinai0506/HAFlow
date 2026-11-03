@@ -325,6 +325,7 @@ def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
                         if not verif_ok:
                             refusal_code = verif_reason.split(":")[0].strip()
                             if refusal_code in (
+                                "challenger_blocked",
                                 "challenger_outdated",
                                 "challenger_plan_ref_missing",
                                 "challenger_plan_version_mismatch",
@@ -341,6 +342,8 @@ def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
                         if r_name in completed_roles:
                             continue
                         dep_role = str(r.get("depends_on_role") or "").strip().lower()
+                        if not dep_role and node_id == "plan" and r_name in ("challenger", "review", "reviewer", "adversarial"):
+                            dep_role = "executor"
                         if not dep_role or dep_role in completed_roles:
                             if dep_role == "executor" or (node_id == "plan" and r_name == "challenger"):
                                 from herdr.plan_parser import find_plan_deliverables, validate_plan_deliverable_content

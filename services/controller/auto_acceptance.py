@@ -194,6 +194,16 @@ def try_auto_accept(ports, task_id):
                 print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} plan ({role}) invalid: {missing}")
                 return AutoAcceptResult(False, "plan_challenger_missing_sections" if is_challenger else "plan_missing_sections", missing=tuple(missing))
 
+            if is_challenger:
+                from herdr.plan_parser import extract_challenger_verdict
+                verdict, verdict_reason = extract_challenger_verdict(deliverable_text, task)
+                if verdict == "blocked":
+                    print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} challenger verdict blocked: {verdict_reason}")
+                    return AutoAcceptResult(False, "challenger_blocked", detail=verdict_reason)
+                if verdict != "pass":
+                    print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} challenger verdict missing or non-pass: {verdict_reason}")
+                    return AutoAcceptResult(False, "challenger_verdict_missing", detail=verdict_reason)
+
         else:
             evidence, detail = ports.task_changes_evidence(task)
             if evidence != "changed":

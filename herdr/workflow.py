@@ -9,7 +9,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     import yaml
@@ -72,6 +72,14 @@ def list_templates() -> Dict[str, Dict[str, Any]]:
 DEFAULT_TEMPLATE_NAME = "software-development-v1"
 
 
+def _parse_template_version(ver_val: Any) -> Tuple[int, ...]:
+    try:
+        parts = re.findall(r"\d+", str(ver_val or "0"))
+        return tuple(int(p) for p in parts) if parts else (0,)
+    except Exception:
+        return (0,)
+
+
 def load_template(name_or_path: Optional[str] = None) -> Dict[str, Any]:
     """Load a workflow template by name or file path."""
     if not name_or_path:
@@ -89,6 +97,18 @@ def load_template(name_or_path: Optional[str] = None) -> Dict[str, Any]:
         BUNDLED_TEMPLATES_DIR / f"{name_or_path}.yml",
         BUNDLED_TEMPLATES_DIR / f"{name_or_path}.json",
     ]
+
+    user_cand = next((c for c in candidates[:3] if c.exists()), None)
+    bundled_cand = next((c for c in candidates[3:] if c.exists()), None)
+    if user_cand and bundled_cand:
+        try:
+            u_data = _load_file(user_cand)
+            b_data = _load_file(bundled_cand)
+            if _parse_template_version(b_data.get("version")) > _parse_template_version(u_data.get("version")):
+                return normalize_workflow(b_data)
+            return normalize_workflow(u_data)
+        except Exception:
+            pass
 
     for candidate in candidates:
         if candidate.exists():

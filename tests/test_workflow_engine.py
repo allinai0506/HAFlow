@@ -94,6 +94,24 @@ class TestWorkflowTemplates(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             load_template("non_existent_template_xyz")
 
+    def test_load_template_prefers_newer_bundled_template_over_stale_user_template(self):
+        """When user templates directory has stale version 1.0 and bundled has 1.2, load_template prefers bundled."""
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from herdr import workflow
+
+        with tempfile.TemporaryDirectory() as tmp_user_dir:
+            user_p = Path(tmp_user_dir)
+            stale_file = user_p / "software-development-v1.yaml"
+            stale_file.write_text("name: software-development-v1\nversion: '1.0'\nnodes: [{'id': 'n1', 'depends_on': []}]\n", encoding="utf-8")
+
+            with mock.patch("herdr.workflow.USER_TEMPLATES_DIR", user_p):
+                tmpl = workflow.load_template("software-development-v1")
+                # Bundled software-development-v1.yaml has version '1.2'
+                self.assertEqual(tmpl.get("version"), "1.2", "Must load newer bundled template (1.2) rather than stale user copy (1.0)")
+
+
 
 class TestDAGValidation(unittest.TestCase):
     """Test DAG validation including Kahn's algorithm and cycle detection."""

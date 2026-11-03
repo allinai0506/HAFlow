@@ -166,6 +166,22 @@ Evidence:
 - `tests/test_node_acceptance.py`
 - `tests/test_gate_verdict_symmetry.py`
 
+### 4.5 计划节点审查工位内置因果约束与模板版本优先
+
+`FACT` 计划阶段审查工位（`challenger`、`review`、`adversarial`）在领域语义上天然依赖方案产物；若模板未显式声明 `depends_on_role`，调度引擎（`direct_dispatch`、`stage_state`、`node_dispatch_store`）强制兜底 `depends_on_role = "executor"`，彻底消除初始派发抢跑。
+
+`FACT` `load_template` 在用户宿主目录与仓库内置目录同时存在同名模板时，解析语义版本号（`major.minor.patch`）；若内置模板版本高于用户目录模板，优先加载内置模板，防止宿主缓存旧版本模板静默覆盖仓库新修复。
+
+`FACT` `plan_parser.py:verify_plan_and_challenger` 必须先校验 `target_ref` 与时间戳新鲜度（`challenger_plan_version_mismatch` / `challenger_outdated`），再提取裁决结论，防止对历史旧文件的阻断裁决跨方案生效。拒绝码 `challenger_blocked` 纳入重派推导白名单，方案就绪后自动触发重审自愈。
+
+Evidence:
+- `herdr/workflow.py#load_template`
+- `herdr/direct_dispatch.py#plan_stage_dispatch`
+- `services/controller/stage_state.py#reconcile_stage_advance_states`
+- `herdr/node_dispatch_store.py#reconcile_workflow`
+- `herdr/plan_parser.py#verify_plan_and_challenger`
+- `tests/test_plan_causal_dispatch.py`
+
 ## 5. 选择性重新验证：候选轮换后哪些 verifier 必须重跑
 
 `FACT` 候选从 A 轮换到 B 时，`test` / `review` 不再一律重跑。复用（reuse）只在
