@@ -55,6 +55,10 @@ def test_review_closure_remote_identity_github_aliases(monkeypatch):
     assert parse_remote_identity("git@github.com:allinai0506/HAFlow.git") == ("allinai0506", "HAFlow")
     assert parse_remote_identity("https://github.com/allinai0506/HAFlow.git") == ("allinai0506", "HAFlow")
 
+    # Unsupported forge with github- in repo path should NOT be treated as GitHub
+    assert parse_remote_identity("https://gitlab.com/team/github-migration.git") is None
+    assert parse_remote_identity("git@gitlab.com:team/github-migration.git") is None
+
     # collect_deferred_evidence recognizes github-* remotes and rejects deferred
     import herdr.review_closure as rc
     monkeypatch.setattr(rc, "delivery_identity", lambda s, t: ([], "", "", ""))
@@ -62,6 +66,13 @@ def test_review_closure_remote_identity_github_aliases(monkeypatch):
     is_deferred, msg, meta = collect_deferred_evidence(None, {"source_repo": "/dummy"})
     assert not is_deferred
     assert "a GitHub remote exists" in msg
+
+    # But an unsupported forge with github- in repo path allows deferred (not treated as GitHub)
+    monkeypatch.setattr(rc, "git_remote_urls", lambda p: ["https://gitlab.com/team/github-migration.git"])
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: type("P", (), {"returncode": 0, "stderr": ""})())
+    is_deferred, msg, meta = collect_deferred_evidence(None, {"source_repo": "/dummy"})
+    assert is_deferred
+    assert meta["provider"] == "unsupported-forge"
 
 
 def test_software_development_v1_template_delivery_ceiling():
@@ -116,3 +127,75 @@ def test_direct_dispatch_passes_delivery_ceiling(monkeypatch):
     }
     prompt_ws = _prompt(node_ws, "requirements text", "goal text", ["acceptance item"])
     assert "交付授权: workspace（不得超越此上限）" in prompt_ws
+
+
+def test_plan_stage_dispatch_preserves_node_ceiling_and_workflow_id(monkeypatch):
+    """Codex P1 finding 1: plan_stage_dispatch passes normalized node into prompt without dropping ceiling."""
+    from herdr.direct_dispatch import plan_stage_dispatch
+    import herdr.projects as projects
+
+    node_workspace = {
+        "id": "wrapup",
+        "label": "收尾",
+        "purpose": "完成收尾",
+        "skills": ["six-step-finish"],
+        "delivery_ceiling": "workspace",
+    }
+
+    # Template config has delivery_ceiling_default: pr
+    monkeypatch.setattr(
+        projects,
+        "workflow_config_for",
+        lambda wid: {"name": "software-development-v1", "delivery_ceiling_default": "pr"},
+    )
+
+    res = plan_stage_dispatch("wf-p1-test", node_workspace, [], "requirements text")
+    assert res["mode"] == "dispatch"
+    spec = res["specs"][0]
+    prompt = spec["prompt"]
+    # Node explicit override to workspace MUST be honored, not overwritten by default 'pr'
+    assert "交付授权: workspace（不得超越此上限）" in prompt
+    assert "workflow=wf-p1-test" in prompt
+
+
+def test_run_level_delivery_ceiling_overrides_template_default(monkeypatch):
+    """Codex P1 finding 2: run-level delivery_ceiling in workflow record overrides template default in prompt."""
+    from herdr.direct_dispatch import plan_stage_dispatch
+    from herdr.review_closure import closure_required
+    import herdr.projects as projects
+    from herdr.state_store import get_state_store
+
+    node_wrapup = {
+        "id": "wrapup",
+        "label": "收尾",
+        "purpose": "完成收尾",
+        "skills": ["six-step-finish"],
+        "review_closure_required": True,
+    }
+
+    # Workflow config snapshot defaults to pr
+    wf_config = {
+        "name": "software-development-v1",
+        "delivery_ceiling_default": "pr",
+        "nodes": [node_wrapup],
+    }
+    monkeypatch.setattr(projects, "workflow_config_for", lambda wid: wf_config)
+
+    # But authoritative workflow record in DB has run-level explicit delivery_ceiling: workspace
+    mock_store = type("MockStore", (), {
+        "get_workflow": lambda self, wid: {
+            "workflow_id": wid,
+            "delivery_ceiling": "workspace",
+            "config": wf_config,
+        }
+    })()
+    monkeypatch.setattr("herdr.state_store.get_state_store", lambda: mock_store)
+
+    # 1. Prompt must honor run-level workspace ceiling
+    res = plan_stage_dispatch("wf-run-level-test", node_wrapup, [], "req")
+    prompt = res["specs"][0]["prompt"]
+    assert "交付授权: workspace（不得超越此上限）" in prompt
+
+    # 2. closure_required must also honor run-level workspace ceiling (skips review closure)
+    task = {"workflow_id": "wf-run-level-test", "node": "wrapup"}
+    assert closure_required(mock_store, task) is False

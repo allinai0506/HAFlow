@@ -341,6 +341,9 @@ def normalize_node(node):
         "id": node_id,
         "label": label,
         "purpose": purpose,
+        "workflow_id": str(node.get("workflow_id") or "").strip(),
+        "delivery_ceiling": str(node.get("delivery_ceiling") or "").strip(),
+        "delivery_ceiling_default": str(node.get("delivery_ceiling_default") or "").strip(),
         "required_outputs": _as_list(node.get("required_outputs")),
         "rules": _as_list(node.get("rules")),
         "task_type": resolve_task_type(node.get("default_task_type"), node_id),
@@ -490,8 +493,19 @@ def _prompt(
             wf_cfg = {}
         adapted = stage_skills.is_staged_dev_flow_workflow(wf_cfg)
         if (configured_skills or node_id in stage_skills.STAGE_SKILL_BINDINGS) and (adapted or configured_skills):
+            run_level_ceiling = ""
+            if wf_id:
+                try:
+                    from herdr.state_store import get_state_store
+                    from herdr.review_closure import _run_level_ceiling
+                    wf_record = get_state_store().get_workflow(wf_id) or {}
+                    run_level_ceiling = _run_level_ceiling(wf_record)
+                except Exception:
+                    run_level_ceiling = ""
+
             ceiling = (
                 node.get("delivery_ceiling")
+                or run_level_ceiling
                 or node.get("delivery_ceiling_default")
                 or wf_cfg.get("delivery_ceiling")
                 or wf_cfg.get("delivery_ceiling_default")
@@ -689,6 +703,8 @@ def plan_stage_dispatch(
     normalized = normalize_node(node)
     if not normalized:
         return {"mode": "fallback", "reason": "node config missing", "specs": []}
+    if workflow_id:
+        normalized["workflow_id"] = str(workflow_id).strip()
 
     from .workflow import validate_artifact_contract
     validate_artifact_contract(normalized.get("artifact_mode"), normalized["integration_mode"], node_id=normalized.get("id"), task_type=normalized.get("task_type"))

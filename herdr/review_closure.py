@@ -538,7 +538,7 @@ def collect_deferred_evidence(store, task: Any) -> Tuple[bool, str, Optional[Dic
             "remotes": [],
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
-    if any("github.com" in url.lower() or "github-" in url.lower() for url in remotes):
+    if any(parse_remote_identity(url) is not None for url in remotes):
         return False, (
             "a GitHub remote exists; the PR path is verifiable — create the PR, "
             "close the review and record a normal receipt (deferred is not "
