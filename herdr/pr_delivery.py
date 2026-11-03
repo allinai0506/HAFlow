@@ -14,7 +14,7 @@ from .task_resources import workflow_launch_lock
 
 def repository_identity(remote):
     match = re.fullmatch(
-        r'(?:https://|(?:ssh://)?git@)(github\.com|gitee\.com|github-[\w.-]+|gitee-[\w.-]+)[/:]([^/\s:]+)/([^/\s]+?)(?:\.git)?',
+        r'(?:https://|(?:ssh://)?(?:[^@/]+@)?)(github\.com|gitee\.com|github-[\w.-]+|gitee-[\w.-]+)(?::\d+)?[/:]([^/\s:]+)/([^/\s]+?)(?:\.git)?',
         str(remote or '').strip(),
     )
     if not match:

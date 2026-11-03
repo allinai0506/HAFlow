@@ -503,14 +503,18 @@ def _prompt(
                 except Exception:
                     run_level_ceiling = ""
 
-            ceiling = (
-                node.get("delivery_ceiling")
-                or run_level_ceiling
-                or node.get("delivery_ceiling_default")
-                or wf_cfg.get("delivery_ceiling")
-                or wf_cfg.get("delivery_ceiling_default")
-                or "pr"
-            )
+            # Authoritative delivery ceiling precedence (symmetrical with review_closure._recorded_ceiling):
+            # 1. Run-level explicit ceiling (_run_level_ceiling from workflow record)
+            # 2. Workflow-level explicit ceiling (wf_cfg.delivery_ceiling)
+            # 3. Node-level explicit ceiling (node.delivery_ceiling)
+            # 4. Workflow-level default ceiling (wf_cfg.delivery_ceiling_default)
+            # 5. Node-level default ceiling (node.delivery_ceiling_default)
+            # 6. Fallback default: "pr"
+            explicit_wf = run_level_ceiling or str(wf_cfg.get("delivery_ceiling") or "").strip()
+            explicit_node = str(node.get("delivery_ceiling") or "").strip()
+            default_wf = str(wf_cfg.get("delivery_ceiling_default") or "").strip()
+            default_node = str(node.get("delivery_ceiling_default") or "").strip()
+            ceiling = explicit_wf or explicit_node or default_wf or default_node or "pr"
             ctx = stage_skills.assemble_stage_context(
                 workflow_id=wf_id,
                 task_id=task_id or "",

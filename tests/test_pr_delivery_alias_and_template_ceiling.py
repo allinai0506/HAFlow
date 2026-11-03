@@ -66,7 +66,6 @@ def test_review_closure_remote_identity_github_aliases(monkeypatch):
     is_deferred, msg, meta = collect_deferred_evidence(None, {"source_repo": "/dummy"})
     assert not is_deferred
     assert "a GitHub remote exists" in msg
-
     # But an unsupported forge with github- in repo path allows deferred (not treated as GitHub)
     monkeypatch.setattr(rc, "git_remote_urls", lambda p: ["https://gitlab.com/team/github-migration.git"])
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: type("P", (), {"returncode": 0, "stderr": ""})())
@@ -199,3 +198,71 @@ def test_run_level_delivery_ceiling_overrides_template_default(monkeypatch):
     # 2. closure_required must also honor run-level workspace ceiling (skips review closure)
     task = {"workflow_id": "wf-run-level-test", "node": "wrapup"}
     assert closure_required(mock_store, task) is False
+
+
+def test_explicit_workflow_ceiling_overrides_node_default(monkeypatch):
+    """Codex Round 2 P1 finding: explicit workflow ceiling overrides node delivery_ceiling_default."""
+    from herdr.direct_dispatch import plan_stage_dispatch
+    from herdr.review_closure import closure_required, _recorded_ceiling
+    import herdr.projects as projects
+
+    node_wrapup = {
+        "id": "wrapup",
+        "label": "收尾",
+        "purpose": "完成收尾",
+        "skills": ["six-step-finish"],
+        "delivery_ceiling_default": "pr",
+        "review_closure_required": True,
+    }
+
+    # Workflow config explicitly restricts delivery to workspace
+    wf_config = {
+        "name": "software-development-v1",
+        "delivery_ceiling": "workspace",
+        "nodes": [node_wrapup],
+    }
+    monkeypatch.setattr(projects, "workflow_config_for", lambda wid: wf_config)
+
+    mock_store = type("MockStore", (), {
+        "get_workflow": lambda self, wid: {
+            "workflow_id": wid,
+            "config": wf_config,
+        }
+    })()
+    monkeypatch.setattr("herdr.state_store.get_state_store", lambda: mock_store)
+
+    # 1. Authoritative _recorded_ceiling yields workspace
+    assert _recorded_ceiling(wf_config) == "workspace"
+
+    # 2. plan_stage_dispatch prompt must yield workspace, NOT node's delivery_ceiling_default pr
+    res = plan_stage_dispatch("wf-explicit-wf-test", node_wrapup, [], "requirements text")
+    prompt = res["specs"][0]["prompt"]
+    assert "交付授权: workspace（不得超越此上限）" in prompt
+    assert "交付授权: pr" not in prompt
+
+    # 3. closure_required aligns with recorded workspace restriction (skips review closure)
+    task = {"workflow_id": "wf-explicit-wf-test", "node": "wrapup"}
+    assert closure_required(mock_store, task) is False
+
+
+def test_remote_identity_and_deferred_closure_with_explicit_port(monkeypatch):
+    """Codex Round 2 P2 finding: explicit-port GitHub URLs are recognized and reject deferred closure."""
+    import herdr.review_closure as rc
+
+    # 1. parse_remote_identity recognizes explicit port
+    assert parse_remote_identity("ssh://git@github.com:22/org/repo.git") == ("org", "repo")
+    assert parse_remote_identity("ssh://git@github-work:2222/org/repo.git") == ("org", "repo")
+    assert parse_remote_identity("https://github.com:443/org/repo.git") == ("org", "repo")
+
+    # 2. repository_identity recognizes explicit port
+    assert repository_identity("ssh://git@github.com:22/org/repo.git") == ("github.com", "org", "repo")
+    assert repository_identity("ssh://git@github-custom:2222/org/repo.git") == ("github.com", "org", "repo")
+    assert repository_identity("ssh://git@gitee.com:22/org/repo.git") == ("gitee.com", "org", "repo")
+    assert repository_identity("https://github.com:443/org/repo.git") == ("github.com", "org", "repo")
+
+    # 3. collect_deferred_evidence rejects deferred closure when explicit-port GitHub remote is present
+    monkeypatch.setattr(rc, "delivery_identity", lambda s, t: ([], "", "", ""))
+    monkeypatch.setattr(rc, "git_remote_urls", lambda p: ["ssh://git@github.com:22/org/repo.git"])
+    is_deferred, msg, meta = collect_deferred_evidence(None, {"source_repo": "/dummy"})
+    assert not is_deferred
+    assert "a GitHub remote exists" in msg
