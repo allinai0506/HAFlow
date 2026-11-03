@@ -20,6 +20,7 @@ import os
 import re
 from pathlib import Path
 
+from .scheduler import resolve_task_role
 from .node_roles import is_verifier_node
 from .task_lineage import REPLACEMENT_SUFFIX_RE, lineage_key, lineage_redispatch_candidates
 
@@ -778,13 +779,9 @@ def plan_stage_dispatch(
             completed_role_tasks = {}
             for t in node_tasks:
                 if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by"):
-                    r_name = str(t.get("dispatch_role") or t.get("role") or "").strip().lower()
-                    if not r_name:
-                        for ro in roles:
-                            ron = str(ro.get("name") or "").strip().lower()
-                            if ron in str(t.get("task_id") or "").lower():
-                                r_name = ron
-                                break
+                    r_name = resolve_task_role(
+                        t, role_names=[r.get("name") for r in roles],
+                        workflow_id=workflow_id, node_id=node_id)
                     if r_name:
                         completed_role_tasks[r_name] = t
 
@@ -868,7 +865,11 @@ def plan_stage_dispatch(
                 has_challenger_role = any(
                     isinstance(t, dict) and (t.get("node") == "plan" or t.get("stage") == "plan")
                     and (not t.get("workflow_id") or t.get("workflow_id") == workflow_id)
-                    and any(k in str(t.get(rk) or "").lower() for rk in ("dispatch_role", "role", "task_id") for k in ("challenger", "review", "adversarial"))
+                    and re.search(
+                        r"(?:^|[^a-z])(review(?:er)?|adversarial|challenger)(?:$|[^a-z])",
+                        resolve_task_role(
+                            t, role_names=("executor", "challenger", "review", "reviewer", "adversarial"),
+                            workflow_id=workflow_id, node_id="plan"))
                     for t in (tasks or [])
                 )
                 require_challenger = bool(has_challenger_role)
@@ -1035,10 +1036,9 @@ def plan_stage_dispatch(
                 redispatch_of = None
                 if r_name.lower() in roles_needing_redispatch:
                     def _matches_role(task, target_role):
-                        role_str = str(task.get("dispatch_role") or task.get("role") or "").strip().lower()
-                        if role_str:
-                            return role_str == target_role.lower()
-                        return target_role.lower() in str(task.get("task_id") or "").lower()
+                        return resolve_task_role(
+                            task, role_names=[r.get("name") for r in roles],
+                            workflow_id=workflow_id, node_id=node_id) == target_role.lower()
 
                     old_t = next((t for t in node_tasks if _matches_role(t, r_name) and not t.get("superseded_by")), None)
                     if old_t:

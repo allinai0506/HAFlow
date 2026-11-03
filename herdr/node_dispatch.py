@@ -1,6 +1,7 @@
 """Pure node dispatch identity, registration evidence and wait projection."""
 import hashlib
 import json
+from .scheduler import resolve_task_role
 from .transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
 
 WAIT_SECONDS = 900
@@ -76,7 +77,7 @@ def dependencies_ready(workflow, config, node, tasks):
                 workflow.get('_dispatch_reuse_facts'))
             if evidence.get('source') == scheduler.EFFECTIVE_REUSE:
                 continue
-        if not scheduler.node_is_complete(inventory, required):
+        if not scheduler.node_is_complete(inventory, required, node=nodes[dep]):
             return False
     return True
 
@@ -251,16 +252,12 @@ def result(operation, workflow, config, tasks, now):
         roles = {str(r['name']).strip().lower() for r in (policy.get('roles') or (node.get('roles') if node else None) or []) if isinstance(r, dict) and r.get('name')}
         if roles:
             existing_roles = {
-                str(t.get('dispatch_role') or t.get('role') or '').strip().lower()
+                resolve_task_role(t, role_names=roles,
+                                  workflow_id=operation['workflow_id'],
+                                  node_id=operation['payload']['node_id'])
                 for t in existing
                 if str(t.get('status') or '') in COMPLETED_TASK_STATUSES
             }
-            for t in existing:
-                if str(t.get('status') or '') in COMPLETED_TASK_STATUSES:
-                    tid = str(t.get('task_id') or '').lower()
-                    for r_name in roles:
-                        if r_name in tid:
-                            existing_roles.add(r_name)
             inventory_owned = inventory_owned and roles.issubset(existing_roles)
             if 'challenger' in roles and operation['payload']['node_id'] == 'plan':
                 from herdr.plan_parser import verify_plan_and_challenger
@@ -270,7 +267,9 @@ def result(operation, workflow, config, tasks, now):
             node = next(n for n in config['nodes'] if n['id'] == operation['payload']['node_id'])
             roles = {r['name'] for r in (node.get('agent_policy') or {}).get('roles', [])}
             expected = operation['payload'].get('candidate_sha')
-            inventory_owned = inventory_owned and roles.issubset({t.get('dispatch_role') for t in existing})
+            inventory_owned = inventory_owned and roles.issubset({
+                resolve_task_role(t, role_names=roles, workflow_id=operation['workflow_id'],
+                                  node_id=operation['payload']['node_id']) for t in existing})
             inventory_owned = inventory_owned and all(
                 t.get('status') in COMPLETED_TASK_STATUSES
                 and t.get('stage_verdict') == 'pass'
