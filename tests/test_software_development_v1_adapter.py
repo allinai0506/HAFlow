@@ -372,10 +372,11 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
         with open(self.template_path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
 
-        self.assertEqual(cfg.get("delivery_ceiling_default"), "workspace")
+        self.assertEqual(cfg.get("delivery_ceiling_default"), "pr")
 
         from herdr.review_closure import _closure_demanded
-        self.assertFalse(_closure_demanded(cfg), "workspace delivery ceiling must skip PR review closure")
+        self.assertTrue(_closure_demanded(cfg), "default pr delivery ceiling demands PR review closure")
+        self.assertFalse(_closure_demanded({**cfg, "delivery_ceiling": "workspace"}), "explicit workspace delivery ceiling must skip PR review closure")
 
     def test_12_legacy_templates_and_unadapted_workflows_not_regressed(self):
         """Scenario 12: Workflows using other templates retain original behavior."""

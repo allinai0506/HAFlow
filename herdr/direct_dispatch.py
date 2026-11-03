@@ -490,6 +490,13 @@ def _prompt(
             wf_cfg = {}
         adapted = stage_skills.is_staged_dev_flow_workflow(wf_cfg)
         if (configured_skills or node_id in stage_skills.STAGE_SKILL_BINDINGS) and (adapted or configured_skills):
+            ceiling = (
+                node.get("delivery_ceiling")
+                or node.get("delivery_ceiling_default")
+                or wf_cfg.get("delivery_ceiling")
+                or wf_cfg.get("delivery_ceiling_default")
+                or "pr"
+            )
             ctx = stage_skills.assemble_stage_context(
                 workflow_id=wf_id,
                 task_id=task_id or "",
@@ -497,6 +504,7 @@ def _prompt(
                 node_id=node_id,
                 dispatch_role=node.get("dispatch_role", "worker"),
                 candidate_sha=candidate_sha or "",
+                delivery_ceiling=ceiling,
                 configured_skills=configured_skills,
             )
             stage_context_section = f"\n{ctx['prompt_block']}\n"
