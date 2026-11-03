@@ -9440,3 +9440,48 @@ pytest -q tests/test_software_development_v1_adapter.py
 - `services/controller/attention.py#attention_escalated`
 - `herdr/task_cli_rework.py#handle_rework`（expected snapshot 参数）
 - `tests/test_auto_acceptance_rework_recovery.py` — 25 项专项守护测试（含真实链路与并发）
+
+---
+
+## 224. 交付上限解析优先级契约与 SSH Host Alias 远程身份规范化（2026-11-03）
+
+### 问题背景
+
+1. 在 `software-development-v1` 及 `spec-development-v1` 模板中，`delivery_ceiling_default` 历史缺省值为 `workspace`，导致收尾 Agent 在无显式运行级覆盖时无法自动发布 PR，阻塞交付自动化流水线。
+2. 开发者机器常使用 SSH Host Alias（如 `git@github-work:...` 或 `git@gitee-org:...`）或显式端口（如 `ssh://git@github.com:22/...`），`herdr/pr_delivery.py:repository_identity` 与 `herdr/review_closure.py:parse_remote_identity` 早期正则无法识别此类别名、显式端口与大小写混写主机名，导致 PR 工具被拦截或将合法 GitHub 仓库误判为 `unsupported-forge`。
+3. 在派发阶段，`herdr/direct_dispatch.py:normalize_node` 曾遗漏保留 `workflow_id`、`delivery_ceiling` 字段，且 `_prompt` 中一度出现「节点默认值抢占工作流显式上限」的优先级倒挂缺陷，破坏了权限约束体系。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 模板默认 `workspace` 阻断收尾自动发 PR | 交付型工作流模板应赋予收尾 Agent 明确的 PR 提交授权上限 | `software-development-v1` 与 `spec-development-v1` 模板将 `delivery_ceiling_default` 设定为 `pr`，运行级显式授权可收紧/覆盖 |
+| 节点派发时 `normalize_node` 丢弃权限与工作流元数据 | 数据流水线中任意一步清洗/重构都必须显式保留并透传关键语义字段 | `normalize_node` 保留 `workflow_id`、`delivery_ceiling`、`delivery_ceiling_default`，派发函数显式透传 `workflow_id` |
+| 节点默认上限（default）先于工作流显式限制（explicit）生效导致优先级倒挂 | 权限控制中所有显式约束（Explicit）严格先于所有默认回退（Default）生效 | 确立与 `_recorded_ceiling` 严格对称的优先级链：运行级显式 > 工作流显式 > 节点显式 > 工作流默认 > 节点默认 > `'pr'` |
+| 正则未适配 SSH Host Alias、显式端口与大小写混写域名 | 远程仓库识别必须支持规范化的主机别名、端口与大小写不敏感域名匹配 | 正则采用 `(?i:github\.com|...)`，支持 `github-*` 别名映射至 `github.com`，匹配可选端口 `(?::\d+)?`，保留原始 owner/repo 大小写 |
+
+### 操作规范（已固化到 `herdr/direct_dispatch.py` / `herdr/review_closure.py` / `herdr/pr_delivery.py`）
+
+1. **显式约束优先于默认值**：解析授权上限时，任何显式声明（explicit ceiling）严格优先于默认回退值（default ceiling）。
+2. **多源配置严格对齐权威来源**：`direct_dispatch.py` 的提示词注入解析链必须与 `review_closure._recorded_ceiling` 的审核判定顺序 100% 对齐。
+3. **域名解析支持 Host Alias 与显式端口**：`repository_identity` 与 `parse_remote_identity` 规范化提取标准主机与 owner/repo，保留原始 owner/repo 大小写。
+4. **验证用真实链路守护**：单测必须通过真实 `plan_stage_dispatch`、`closure_required` 和远程探测，覆盖别名、端口、大小写及优先级组合。
+
+### 验证命令 / 守护测试
+
+```bash
+# PR 交付别名、显式端口、优先级解析及模板默认验证（10 项专项全绿）
+pytest -q tests/test_pr_delivery_alias_and_template_ceiling.py
+
+# 模板与适配层回归（54 项全绿）
+pytest -q tests/test_software_development_v1_template.py tests/test_software_development_v1_adapter.py
+```
+
+### 相关文档 / 关联证据
+
+- PR #394（Commit `3c0228c`, `f69e003`, `799c539`, `c65b7a7`）
+- `herdr/pr_delivery.py#repository_identity`
+- `herdr/review_closure.py#parse_remote_identity` / `#collect_deferred_evidence`
+- `herdr/direct_dispatch.py#_prompt` / `#normalize_node`
+- `workflow_templates/software-development-v1.yaml` / `spec-development-v1.yaml`
+- `tests/test_pr_delivery_alias_and_template_ceiling.py`

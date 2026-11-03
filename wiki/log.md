@@ -8,6 +8,23 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-03] Fix | 交付上限解析优先级契约与 SSH Host Alias 远程身份规范化（PR #394 / §224）
+
+- 背景：真实工作流在收尾节点时因模板默认交付上限为 `workspace`，导致收尾 Agent 无权自动发布 PR，阻塞交付自动化流水线；且在开发者机器配置有形如 `git@github-work:...` 的 SSH Host Alias 或显式端口（`:22`）时，PR 提交与审核闭环工具被错误拦截。
+- 根因分析：
+  1. `workflow_templates/software-development-v1.yaml` 与 `spec-development-v1.yaml` 声明了 `delivery_ceiling_default: workspace`，未赋予收尾 Agent 默认 PR 交付授权；
+  2. `herdr/pr_delivery.py:repository_identity` 与 `herdr/review_closure.py:parse_remote_identity` 正则缺少对 SSH Host Alias（`github-*` / `gitee-*`）、显式端口（`(?::\d+)?`）及大小写混写主机名（`(?i:...)`）的支持，导致解析失败或误判为非 GitHub 仓库；
+  3. `herdr/direct_dispatch.py:normalize_node` 派发规范化时丢弃了 `workflow_id`、`delivery_ceiling` 字段，且 `_prompt` 中出现节点默认值先于工作流显式限制被解析的优先级倒挂缺陷。
+- 治理与修复：
+  1. **模板交付授权默认提升**：模板 `delivery_ceiling_default` 升级为 `pr`，`stage_skills.py:assemble_stage_context` 缺省上限对齐为 `pr`；
+  2. **远程身份正则增强**：`repository_identity` 与 `parse_remote_identity` 规范化识别 Host Alias、显式端口与大小写不敏感主机名，并映射至权威 provider host；
+  3. **派发元数据透传与显式约束绝对优先**：`normalize_node` 完整保留并透传工作流 ID 与交付上限；`_prompt` 确立权威优先级链（运行级显式 > 工作流显式 > 节点显式 > 工作流默认 > 节点默认 > 'pr'），与 `_recorded_ceiling` 严格对称。
+- 验收结果：
+  - 新增 `tests/test_pr_delivery_alias_and_template_ceiling.py`（10 项专项全绿）
+  - 模板与适配层回归 `tests/test_software_development_v1_template.py` + `tests/test_software_development_v1_adapter.py`（54 项全绿）
+  - 全量 6,940+ 测试与 CI 门禁（Codex P1 Gate / Pytest / Auto PR Review）4/4 项全部 PASS
+  - 沉淀四段式系统性教训文档 `docs/lessons/lessons-learned.md` §224。
+
 ## [2026-11-02] fix | 计划阶段角色因果分步派发、持久化调度代次串联与质询审查自愈闭环（PR #390 / §222）
 
 - 背景：真实工作流 `wf-haflow-1102-02` 的 `plan` 阶段在推进至 `implementation` 时因审查时序倒挂（Executor 尚未写完方案前 Challenger 已提前退出）陷入 `challenger_outdated` 拒绝死锁；后续计划更新后无法自动触发重审，直接进入 `waiting_human` 挂起。
