@@ -17,6 +17,7 @@ def is_unfinished_infrastructure_predecessor(task):
     return bool(
         isinstance(task, dict)
         and task.get('status') == 'superseded'
+        and task.get('replacement_pending') is not False
         and not task.get('superseded_by')
         and task.get('failure_reason') in _INFRASTRUCTURE_FAILURES
         and str(task.get('supersede_reason') or '').startswith('auto-recover:')
@@ -113,15 +114,22 @@ def repair_coverage(operation, tasks):
                     target.get('candidate_sha'),
                 )
             )
-            if not old.get('commit') and old.get('candidate_sha') == payload.get('candidate_sha'):
-                # 前驱死于提交前(看门狗/熔断/崩溃):继任者扎根同一冻结候选。
-                # committed 谱系字典由 link_committed_successor 写入,而该原语
-                # 要求前驱已提交;这里以行内链接 + 候选等价证明同一身份
-                # (wf-haflow-1022-01 的 frozen-root 继任路径)。
-                valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
-                         and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id
-                         and bool(payload.get('candidate_sha'))
-                         and target.get('candidate_sha') == payload.get('candidate_sha'))
+            if not old.get('commit') and not old.get('integrated_commit'):
+                # 前驱可能是在更早冻结的候选上启动，之后候选 SHA 前进。
+                # 同一冻结候选保留既有的双向链接兼容路径；候选前进时，
+                # 必须另有 launch registration 持久化的完整 lineage。
+                linked = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
+                          and old.get('superseded_by') == entry['task_id']
+                          and target.get('supersedes') == original_id
+                          and bool(payload.get('candidate_sha'))
+                          and target.get('candidate_sha') == payload.get('candidate_sha'))
+                same_frozen_root = old.get('candidate_sha') == payload.get('candidate_sha')
+                advanced_frozen_root = (
+                    bool(re.fullmatch(r'[0-9a-f]{40}', str(old.get('candidate_sha') or ''), re.IGNORECASE))
+                    and all(lineage.get(key) == value for key, value in required.items())
+                    and lineage_cand == payload.get('candidate_sha')
+                )
+                valid = linked and (same_frozen_root or advanced_frozen_root)
             else:
                 valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
                          and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id
