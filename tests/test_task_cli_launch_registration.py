@@ -4,6 +4,7 @@ from herdr.task_cli_launch_registration import (
     LaunchRegistration,
     register_launched_task,
 )
+from herdr.workflow_recovery import repair_coverage
 
 
 class Store:
@@ -63,3 +64,59 @@ def test_register_launched_task_persists_context_and_identity_fields(monkeypatch
     assert task['status_history'] == []
     assert [call[0][1] for call in calls] == ['run_started', 'task_started', 'agent_started']
     assert finished == [context.launch_intent]
+
+
+def test_uncommitted_successor_registration_persists_frozen_recovery_lineage(monkeypatch):
+    old_sha, frozen_sha = 'a' * 40, 'b' * 40
+    args = SimpleNamespace(
+        task_id='task-new', workflow_id='wf-1', integration_mode='git',
+        artifact_mode=None, task_type='fix', goal='repair', acceptance=[],
+        dispatch_role='worker', dispatch_round=1, candidate_sha=frozen_sha,
+    )
+    predecessor = {
+        'task_id': 'task-old', 'workflow_id': 'wf-1', 'run_id': 'run-old',
+        'execution_id': 'exec-1', 'candidate_sha': old_sha,
+        'status': 'superseded', 'commit': None, 'integrated_commit': None,
+    }
+    context = LaunchRegistration(
+        args=args, now=100.0, node={'node_type': 'agent'}, node_id='build',
+        run_id='run-new', project={'project_id': 'p', 'execution_mode': 'git'},
+        exec_fields={'execution_mode': 'git'}, source_repo='', base_branch='main',
+        stage_config={'tab_id': 'tab'}, workspace_id='workspace', pane_id='pane',
+        pane_source='dynamic', resolved_agent='codex', requested_agent='auto',
+        clone_path='/clone', branch='agent/task', baseline_commit=old_sha,
+        onto_branch=None, baseline_untracked=[], baseline_fingerprint={},
+        recorded_onto=None, launch_intent={'intent_id': 'intent-2'},
+        worker_result={}, predecessor=predecessor, committed_recovery=False,
+    )
+    store = Store()
+    monkeypatch.setattr('herdr.task_resources.finish_launch_intent', lambda *a: None)
+
+    task = register_launched_task(
+        context, store,
+        apply_execution_identity=lambda task, _args: task.update(execution_id='exec-1'),
+        init_status_history=lambda task, _status, _now: None,
+        is_gate_task=lambda _task: False,
+        trajectory_ledger_factory=lambda _path: object(),
+        record_trajectory_event=lambda *a, **k: None,
+    )
+
+    assert task['supersedes'] == 'task-old'
+    assert task['recovery_lineage'] == {
+        'predecessor_id': 'task-old', 'successor_id': 'task-new',
+        'predecessor_run_id': 'run-old', 'successor_run_id': 'run-new',
+        'candidate_sha': frozen_sha,
+    }
+    predecessor['superseded_by'] = task['task_id']
+    operation = {
+        'workflow_id': 'wf-1',
+        'payload': {'kind': 'fix_loop', 'candidate_sha': frozen_sha,
+                    'affected_task_ids': ['task-old']},
+        'detail': {'execution_id': 'exec-1', 'source_runs': {'task-old': 'run-old'},
+                   'successor_ids': ['task-new'],
+                   'repair_map': {'task-old': {
+                       'kind': 'successor', 'task_id': 'task-new',
+                       'run_id': 'run-new', 'source_run_id': 'run-old',
+                   }}},
+    }
+    assert repair_coverage(operation, [predecessor, task]) == []

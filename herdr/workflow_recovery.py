@@ -116,15 +116,20 @@ def repair_coverage(operation, tasks):
             )
             if not old.get('commit') and not old.get('integrated_commit'):
                 # 前驱可能是在更早冻结的候选上启动，之后候选 SHA 前进。
-                # 只有双向任务链接、同一 workflow/execution/run 身份，以及
-                # 继任者当前冻结 SHA 的 recovery lineage 同时成立才接受。
-                valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
-                         and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id
-                         and bool(payload.get('candidate_sha'))
-                         and target.get('candidate_sha') == payload.get('candidate_sha')
-                         and bool(re.fullmatch(r'[0-9a-f]{40}', str(old.get('candidate_sha') or ''), re.IGNORECASE))
-                         and all(lineage.get(key) == value for key, value in required.items())
-                         and lineage_cand == payload.get('candidate_sha'))
+                # 同一冻结候选保留既有的双向链接兼容路径；候选前进时，
+                # 必须另有 launch registration 持久化的完整 lineage。
+                linked = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
+                          and old.get('superseded_by') == entry['task_id']
+                          and target.get('supersedes') == original_id
+                          and bool(payload.get('candidate_sha'))
+                          and target.get('candidate_sha') == payload.get('candidate_sha'))
+                same_frozen_root = old.get('candidate_sha') == payload.get('candidate_sha')
+                advanced_frozen_root = (
+                    bool(re.fullmatch(r'[0-9a-f]{40}', str(old.get('candidate_sha') or ''), re.IGNORECASE))
+                    and all(lineage.get(key) == value for key, value in required.items())
+                    and lineage_cand == payload.get('candidate_sha')
+                )
+                valid = linked and (same_frozen_root or advanced_frozen_root)
             else:
                 valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
                          and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import json
+import re
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,30 @@ def register_launched_task(context, store, *, apply_execution_identity,
             expected_predecessor_version=predecessor["version"],
             expected_predecessor_sha=predecessor["commit"],
         )
+    elif context.predecessor:
+        predecessor = context.predecessor
+        candidate_sha = task.get("candidate_sha") or ""
+        if (
+            predecessor.get("task_id")
+            and predecessor.get("workflow_id") == task.get("workflow_id")
+            and predecessor.get("run_id")
+            and task.get("run_id")
+            and predecessor.get("execution_id")
+            and predecessor.get("execution_id") == task.get("execution_id")
+            and not predecessor.get("commit")
+            and not predecessor.get("integrated_commit")
+            and re.fullmatch(r"[0-9a-f]{40}", candidate_sha, re.IGNORECASE)
+        ):
+            # Persist frozen-root provenance before delivery. The predecessor
+            # back-link is added after dispatch; coverage also requires it.
+            task["supersedes"] = predecessor["task_id"]
+            task["recovery_lineage"] = {
+                "predecessor_id": predecessor["task_id"],
+                "successor_id": task["task_id"],
+                "predecessor_run_id": predecessor["run_id"],
+                "successor_run_id": task["run_id"],
+                "candidate_sha": candidate_sha,
+            }
 
     store.save_task(task)
     from herdr.task_resources import finish_launch_intent
