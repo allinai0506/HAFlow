@@ -304,7 +304,7 @@ def test_refresh_remote_base_tolerates_missing_origin(scene):
     assert refresh_remote_base(str(repo), "") is False
 
 
-def test_freeze_refreshes_remote_base_before_recording(scene, tmp_path):
+def test_freeze_refreshes_remote_base_before_recording(scene, tmp_path, monkeypatch):
     """远程 base 已前进时，freeze 不得基于过期 origin/main 通过新鲜度判定（#313）。"""
     import json
     import sqlite3
@@ -319,6 +319,10 @@ def test_freeze_refreshes_remote_base_before_recording(scene, tmp_path):
     frozen = git("rev-parse", "HEAD")
     git("checkout", "-q", "main")
     store = SQLiteStateStore(db)
+    # The controller's default store is a process singleton whose path can be
+    # changed by other tests in this xdist worker. Keep this scenario bound to
+    # the exact temporary database populated below.
+    monkeypatch.setattr(controller, "_get_store", lambda: store)
     store.save_workflow({'workflow_id': 'wf-candidate', 'status': 'running',
         'execution_id': 'gen', 'project_root': str(repo), 'base_branch': 'main'})
     store.save_task({"task_id": "t1", "workflow_id": "wf-candidate", "node": "implementation",
