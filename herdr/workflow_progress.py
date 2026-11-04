@@ -210,7 +210,7 @@ def _unfinished_dispatch_targets(workflow, expected_ids, tasks, candidate):
     for original_id in expected_ids:
         task_id, seen = original_id, set()
         task = by_id.get(task_id)
-        while task and task.get('status') == 'superseded' and task.get('superseded_by'):
+        while task and task.get('superseded_by'):
             if task_id in seen:
                 break
             seen.add(task_id)

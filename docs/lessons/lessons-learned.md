@@ -9520,7 +9520,7 @@ python3 -m compileall -q herdr services bin tests
 git diff --check
 ```
 
-当前候选：216 passed，18 subtests passed；compileall 与 diff 检查通过。运行数据库只读副本上的 operation 384872 从 stale T1 `waiting_human` 预览为 `pending`，目标改为 T2；代码尚未部署，live Controller 尚未加载修复。
+当前候选：247 passed，18 subtests passed；compileall 与 diff 检查通过。运行数据库只读副本上的 operation 384872 从 stale T1 `waiting_human` 预览为 `pending`，目标改为 T2；代码尚未部署，live Controller 尚未加载修复。
 
 ### 相关文档 / 关联证据
 

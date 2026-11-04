@@ -4085,5 +4085,5 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 ## [2026-11-04] Fix | 动态派发恢复目标沿未完成谱系归因（wf-haflow-1103-01）
 - 现场：动态派发的 T1 已集成，T2 因 `hard_timeout_watchdog` superseded 且无 successor；恢复评估仍把 T1 当目标，retry 停在 `waiting_human`。
 - 修复：将最新、身份匹配的 node-dispatch 清单并入恢复评估；沿 superseded 链选择未完成谱系头，排除已集成兄弟；仅对明确 retry 意图的可信目标变化重新入队。阶段完成检查同样考虑动态 inventory；临时并发占满与累计任务预算分离。
-- 验证：只读数据库副本上的 operation 384872 预览由 stale T1 `waiting_human` 改为 T2 `pending`；专项 `216 passed, 18 subtests passed`，compileall 与 diff 检查通过。候选仍在隔离分支；未部署，live Controller 未加载。
+- 验证：只读数据库副本上的 operation 384872 预览由 stale T1 `waiting_human` 改为 T2 `pending`；专项 `247 passed, 18 subtests passed`，compileall 与 diff 检查通过。候选仍在隔离分支；未部署，live Controller 未加载。
 - 教训：`docs/lessons/lessons-learned.md` §225。

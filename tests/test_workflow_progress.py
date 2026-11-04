@@ -99,6 +99,35 @@ def test_recovery_targets_unfinished_dynamic_task_not_integrated_sibling():
     assert obligation['status'] == 'pending'
 
 
+def test_dynamic_recovery_follows_committed_predecessor_to_failed_successor():
+    failed_gate = task('review', execution_id='generation-1')
+    predecessor = task(
+        'implementation', task_id='impl-t1', status='committed', stage_verdict='pass',
+        execution_id='generation-1', commit=SHA, integrated_commit=SHA,
+        integration_mode='git', superseded_by='impl-t1-r2',
+    )
+    failed_successor = task(
+        'implementation', task_id='impl-t1-r2', status='failed', stage_verdict='',
+        execution_id='generation-1', supersedes='impl-t1',
+    )
+    integrated_sibling = task(
+        'implementation', task_id='impl-t2', status='integrated', stage_verdict='pass',
+        execution_id='generation-1', commit=SHA, integrated_commit=SHA,
+        integration_mode='git',
+    )
+
+    result = assess_workflow(
+        WF, CFG, [failed_gate, predecessor, failed_successor, integrated_sibling],
+        expected_task_ids_by_node={'implementation': ['impl-t1', 'impl-t2']},
+    )
+
+    implementation_recovery = next(
+        obligation for obligation in result['obligations']
+        if obligation['retry_node'] == 'implementation'
+    )
+    assert implementation_recovery['affected_task_ids'] == ['impl-t1-r2']
+
+
 @pytest.mark.parametrize('status', ['closed', 'paused'])
 def test_inactive_workflow_has_no_executable_obligations(status):
     result = assess_workflow(dict(WF, status=status), CFG, [task()])
