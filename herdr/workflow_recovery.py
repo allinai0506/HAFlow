@@ -17,6 +17,7 @@ def is_unfinished_infrastructure_predecessor(task):
     return bool(
         isinstance(task, dict)
         and task.get('status') == 'superseded'
+        and task.get('replacement_pending') is not False
         and not task.get('superseded_by')
         and task.get('failure_reason') in _INFRASTRUCTURE_FAILURES
         and str(task.get('supersede_reason') or '').startswith('auto-recover:')
@@ -113,15 +114,17 @@ def repair_coverage(operation, tasks):
                     target.get('candidate_sha'),
                 )
             )
-            if not old.get('commit') and old.get('candidate_sha') == payload.get('candidate_sha'):
-                # 前驱死于提交前(看门狗/熔断/崩溃):继任者扎根同一冻结候选。
-                # committed 谱系字典由 link_committed_successor 写入,而该原语
-                # 要求前驱已提交;这里以行内链接 + 候选等价证明同一身份
-                # (wf-haflow-1022-01 的 frozen-root 继任路径)。
+            if not old.get('commit') and not old.get('integrated_commit'):
+                # 前驱可能是在更早冻结的候选上启动，之后候选 SHA 前进。
+                # 只有双向任务链接、同一 workflow/execution/run 身份，以及
+                # 继任者当前冻结 SHA 的 recovery lineage 同时成立才接受。
                 valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
                          and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id
                          and bool(payload.get('candidate_sha'))
-                         and target.get('candidate_sha') == payload.get('candidate_sha'))
+                         and target.get('candidate_sha') == payload.get('candidate_sha')
+                         and bool(re.fullmatch(r'[0-9a-f]{40}', str(old.get('candidate_sha') or ''), re.IGNORECASE))
+                         and all(lineage.get(key) == value for key, value in required.items())
+                         and lineage_cand == payload.get('candidate_sha'))
             else:
                 valid = (entry['task_id'] != original_id and entry['run_id'] != entry['source_run_id']
                          and old.get('superseded_by') == entry['task_id'] and target.get('supersedes') == original_id

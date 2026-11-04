@@ -102,6 +102,25 @@ def test_recovery_targets_unfinished_dynamic_task_not_integrated_sibling():
     assert obligation['status'] == 'pending'
 
 
+def test_dynamic_inventory_does_not_resurrect_explicitly_abandoned_task():
+    output_sha = 'b' * 40
+    workflow = dict(WF, candidate_sha=output_sha)
+    failed_gate = task('review', execution_id='generation-1', candidate_sha=output_sha,
+                       affected_task_ids=[])
+    abandoned = task(
+        'implementation', task_id='impl-t2', status='superseded', stage_verdict='',
+        execution_id='generation-1', failure_reason='hard_timeout_watchdog',
+        supersede_reason='auto-recover: infrastructure failure', candidate_sha=SHA,
+        replacement_pending=False, abandon_reason='operator explicitly abandoned',
+    )
+    result = assess_workflow(
+        workflow, CFG, [failed_gate, abandoned],
+        expected_task_ids_by_node={'implementation': ['impl-t2']},
+    )
+    assert result['obligations'][0]['affected_task_ids'] == []
+    assert result['obligations'][0]['status'] == 'waiting_human'
+
+
 def test_dynamic_recovery_follows_committed_predecessor_to_failed_successor():
     failed_gate = task('review', execution_id='generation-1')
     predecessor = task(

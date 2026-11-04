@@ -53,6 +53,12 @@ def test_only_unreplaced_infrastructure_supersede_can_auto_create_successor():
     assert not is_unfinished_infrastructure_predecessor({
         **timed_out, 'failure_reason': 'quality_gate_failed',
     })
+    abandoned = {**timed_out, 'replacement_pending': False,
+                 'abandon_reason': 'operator explicitly abandoned'}
+    assert not is_unfinished_infrastructure_predecessor(abandoned)
+    assert not should_launch_frozen_candidate_successor(abandoned, workflow, A)
+    # Older persisted tasks without the field retain the historical default.
+    assert is_unfinished_infrastructure_predecessor(timed_out)
     assert not is_unfinished_infrastructure_predecessor({
         'status': 'superseded', 'supersede_reason': 'operator requested replacement',
     })
@@ -168,6 +174,51 @@ def test_forged_mapping_without_gateway_lineage_is_missing():
     tasks = facts()
     tasks[0].pop('recovery_lineage')
     assert repair_coverage(OP, tasks) == ['impl']
+
+
+def test_frozen_root_successor_covers_uncommitted_predecessor_after_candidate_advances():
+    operation = deepcopy(OP)
+    operation['payload']['candidate_sha'] = B
+    operation['detail']['repair_map']['impl'] = {
+        'kind': 'successor', 'task_id': 'impl-r2', 'run_id': 'new',
+        'source_run_id': 'old',
+    }
+    operation['detail']['successor_ids'] = ['impl-r2']
+    tasks = [
+        {'task_id': 'impl', 'workflow_id': 'wf', 'execution_id': 'gen',
+         'run_id': 'old', 'status': 'superseded', 'candidate_sha': A,
+         'commit': None, 'integrated_commit': None, 'superseded_by': 'impl-r2'},
+        {'task_id': 'impl-r2', 'workflow_id': 'wf', 'execution_id': 'gen',
+         'run_id': 'new', 'status': 'working', 'candidate_sha': B,
+         'supersedes': 'impl', 'recovery_lineage': {
+             'predecessor_id': 'impl', 'successor_id': 'impl-r2',
+             'predecessor_run_id': 'old', 'successor_run_id': 'new',
+             'candidate_sha': B,
+         }},
+    ]
+    assert repair_coverage(operation, tasks) == []
+
+
+def test_frozen_root_successor_with_wrong_lineage_candidate_fails_closed():
+    operation = deepcopy(OP)
+    operation['payload']['candidate_sha'] = B
+    operation['detail']['repair_map']['impl'] = {
+        'kind': 'successor', 'task_id': 'impl-r2', 'run_id': 'new',
+        'source_run_id': 'old',
+    }
+    tasks = [
+        {'task_id': 'impl', 'workflow_id': 'wf', 'execution_id': 'gen',
+         'run_id': 'old', 'status': 'superseded', 'candidate_sha': A,
+         'superseded_by': 'impl-r2'},
+        {'task_id': 'impl-r2', 'workflow_id': 'wf', 'execution_id': 'gen',
+         'run_id': 'new', 'status': 'working', 'candidate_sha': B,
+         'supersedes': 'impl', 'recovery_lineage': {
+             'predecessor_id': 'impl', 'successor_id': 'impl-r2',
+             'predecessor_run_id': 'old', 'successor_run_id': 'new',
+             'candidate_sha': A,
+         }},
+    ]
+    assert repair_coverage(operation, tasks) == ['impl']
 
 
 def test_source_or_target_run_rotation_invalidates_coverage():
