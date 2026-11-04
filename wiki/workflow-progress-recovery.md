@@ -191,3 +191,17 @@ UNKNOWN：GitHub HEAD、配置 release 与实际运行 SHA 是三个事实。本
 首轮独立反证补强：全局按发表顺序限量读取当前目标记录，扫描游标与消费游标分别持久化；积压未读完不会被当成“无进展”，总预算仍到点停止。继任映射固定已确认送达的 epoch/path，重复 phase/content 不因 epoch 轮换变新。内容校验前后与写事务 CAS 使用 inode/device/size/mtime_ns/ctime_ns 稳定性比较；这些字段只保护已校验内容不变，不能独立续期。总期限同时守卫 owner renewal / effect barrier。旧空 detail 人工状态不因事实刷新变 pending，旧 manual verify 不补造一小时。
 
 Evidence：`tests/test_recovery_autonomy.py#test_progress_backlog_after_restart_does_not_false_timeout`、`#test_byte_budget_backlog_resumes_without_false_timeout`、`#test_total_deadline_blocks_subsequent_effects`、`#test_successor_epoch_rotation_cannot_reconsume_phase`、`#test_legacy_manual_verify_does_not_invent_result_window`、`#test_legacy_empty_human_detail_stays_human_on_fact_refresh`、`#test_artifact_mutation_between_preparation_and_writer_rejects_cas`。
+
+## FACT：动态派发恢复归因使用已持久化清单（2026-11-04，隔离源码）
+
+恢复评估对动态多任务节点只读取当前 workflow generation 的 node-dispatch 回执，并校验其中的 `expected_task_ids` 与 Task execution。并行任务可能从候选 A 出发，T1 的集成输出推进为候选 B，而 T2 仍记录输入 A；同 generation 的任务无需逐个引用最新输出 SHA。对每个派发目标沿 `superseded_by` 链解析谱系头：已集成的兄弟任务不再被错误选作恢复目标；未完成且无 successor 的基础设施失败任务仍保留为阻塞目标。旧 execution 清单不参与当前评估。
+
+既有 `retry` 操作只有在当前动态清单把目标从旧任务改为明确的未完成基础设施失败任务时才重新进入 pending；其他 `waiting_human` 决定不自动重开。节点并发容量与生命周期派发预算分开判断，临时容量占用不会永久冻结恢复义务。
+
+Evidence:
+- `herdr/workflow_progress.py#_unfinished_dispatch_targets`
+- `herdr/recovery_store.py#_dispatch_expected_task_ids` / `#ensure_obligations`
+- `services/controller/stage_state.py#is_node_complete`
+- `tests/test_dynamic_stage_completion.py`
+- `tests/test_workflow_progress.py`
+- `tests/test_recovery_store.py`

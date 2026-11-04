@@ -111,10 +111,45 @@ def _human_wait_detail(payload, status, detail):
                 'operation id/version. A started repair requires verify before replacement.'}
 
 
+def _dispatch_expected_task_ids(conn, workflow):
+    """Read recent durable dynamic inventories, newest first for each node."""
+    rows = conn.execute("""SELECT payload_json,detail_json FROM workflow_recovery_operations
+        WHERE workflow_id=? AND identity_key LIKE 'node_dispatch:%'
+        ORDER BY id DESC LIMIT 1000""", (workflow['workflow_id'],)).fetchall()
+    generation = [workflow.get('execution_id'), workflow.get('created_at'),
+                  workflow.get('reopened_at')]
+    inventories = {}
+    for row in rows:
+        try:
+            payload = json.loads(row['payload_json'] or '{}')
+            detail = json.loads(row['detail_json'] or '{}')
+        except (TypeError, ValueError):
+            continue
+        if payload.get('generation') != generation:
+            continue
+        node_id = payload.get('node_id')
+        expected = detail.get('expected_task_ids')
+        if (node_id in inventories or not isinstance(expected, list) or not expected
+                or any(not isinstance(task_id, str) or not task_id for task_id in expected)
+                or len(expected) != len(set(expected))):
+            continue
+        inventories[node_id] = expected
+    return inventories
+
+
+def _assess_current_workflow(conn, assess_workflow, workflow, config, tasks):
+    inventories = _dispatch_expected_task_ids(conn, workflow)
+    if inventories:
+        return assess_workflow(
+            workflow, config, tasks, expected_task_ids_by_node=inventories
+        )
+    return assess_workflow(workflow, config, tasks)
+
+
 def ensure_obligations(conn, workflow, config, tasks, now=None):
     from herdr.workflow_progress import _generation, assess_workflow, recovery_identity
     now = time.time() if now is None else now
-    assessment = assess_workflow(workflow, config, tasks)
+    assessment = _assess_current_workflow(conn, assess_workflow, workflow, config, tasks)
     identities = set()
     result = []
     for facts in assessment['obligations']:
@@ -130,7 +165,44 @@ def ensure_obligations(conn, workflow, config, tasks, now=None):
             if row['status'] == 'running' and row['started']:
                 continue
             changed_status = status if row['status'] == 'running' else row['status']
-            conn.execute('UPDATE workflow_recovery_operations SET payload_json=?,status=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?', (payload, changed_status, now, row['id']))
+            changed_detail_json = row['detail_json']
+            # Older assessments treated temporary verifier concurrency as a
+            # hard budget failure and parked the operation for a human. Once
+            # capacity clears, that specific automatic wait must become
+            # runnable again; preserve all other explicit human decisions.
+            previous_facts = json.loads(row['payload_json'] or '{}')
+            if (row['status'] == 'waiting_human'
+                    and previous_facts.get('reason') == 'verifier_budget_exhausted'
+                    and facts.get('reason') != 'verifier_budget_exhausted'):
+                changed_status = status
+            previous_targets = sorted(previous_facts.get('affected_task_ids') or [])
+            current_targets = sorted(facts.get('affected_task_ids') or [])
+            previous_detail = json.loads(row['detail_json'] or '{}')
+            if (row['status'] == 'waiting_human'
+                    and previous_detail.get('reason') == 'target_requires_explicit_replacement'
+                    and previous_detail.get('action') == 'retry'
+                    and previous_targets != current_targets
+                    and status == 'pending'
+                    and facts.get('reason') == 'blocked_gate'
+                    and current_targets):
+                from .workflow_recovery import is_unfinished_infrastructure_predecessor
+
+                by_id = {task.get('task_id'): task for task in tasks if task.get('task_id')}
+                if all(is_unfinished_infrastructure_predecessor(by_id.get(task_id))
+                       for task_id in current_targets):
+                    # The operator already authorized retry. The only changed
+                    # fact is that a dynamic dispatch receipt now identifies
+                    # the actual timed-out sibling; resume that same retry
+                    # intent instead of preserving a stale T1 refusal forever.
+                    changed_status = 'pending'
+                    previous_detail.update(
+                        reason='recovery_target_retargeted',
+                        retargeted_from_task_ids=previous_targets,
+                        retargeted_to_task_ids=current_targets,
+                    )
+                    previous_detail.pop('missing_task_ids', None)
+                    changed_detail_json = json.dumps(previous_detail, ensure_ascii=False)
+            conn.execute('UPDATE workflow_recovery_operations SET payload_json=?,detail_json=?,status=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?', (payload, changed_detail_json, changed_status, now, row['id']))
             _event(conn, _get(conn, row['id']), 'facts_changed', now)
         op = _get(conn, row['id'])
         if op['status'] == 'waiting_human' and facts.get('kind') == 'fix_loop':
@@ -365,7 +437,9 @@ def _validate_step(conn, operation, now, step=None, detail=None):
     delivered_reworks = {task_id for task_id in receipt.get('rework_ids') or []
                          if task_id in by_id and confirmed_rework(conn, by_id[task_id],
                              (receipt.get('rework_requests') or {}).get(task_id))}
-    assessed = assess_workflow(workflow, config, tasks)['obligations']
+    assessed = _assess_current_workflow(
+        conn, assess_workflow, workflow, config, tasks
+    )['obligations']
     current = next((facts for facts in assessed if facts.get('identity_key') == operation['identity_key']), None)
     expected_gates = set(payload.get('task_ids') or [])
     invalidating = (operation['detail'].get('gate_invalidation_started')

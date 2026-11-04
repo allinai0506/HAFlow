@@ -104,3 +104,14 @@ def launch_capacity_error(usage):
     if limit is not None and active > limit:
         return f'concurrent task count {active} exceeds max_concurrency={limit}'
     return None
+
+
+def task_budget_exhausted(usage):
+    """Whether cumulative node history prevents any further task launch.
+
+    Concurrency is transient admission pressure and should wait for an active
+    task to settle; only the cumulative task limit requires human intervention.
+    """
+    limit = usage.get('max_tasks_per_node')
+    count = usage.get('budget_task_count', usage.get('task_count', 0)) + 1
+    return limit is not None and count > limit

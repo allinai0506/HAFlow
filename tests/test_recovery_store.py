@@ -1,4 +1,5 @@
 import multiprocessing
+import json
 import sqlite3
 
 import pytest
@@ -78,6 +79,89 @@ def test_transaction_rollback(db):
             raise RuntimeError('injected before commit')
     assert rs.list_operations(db, 'w') == before
     assert conn.execute("SELECT status FROM workflows WHERE workflow_id='w'").fetchone()[0] == 'running'
+    conn.close()
+
+
+def test_transient_capacity_wait_recovers_automatically_when_facts_change(db, monkeypatch):
+    from herdr import workflow_progress
+
+    conn = state_db.get_db_connection(db)
+    facts = {
+        **_facts(),
+        'kind': 'fix_loop',
+        'retry_node': 'implementation',
+        'reason': 'verifier_budget_exhausted',
+    }
+    monkeypatch.setattr(workflow_progress, 'assess_workflow',
+                        lambda *args: {'obligations': [facts]})
+    op = rs.ensure_obligations(conn, {'workflow_id': 'w'}, {}, [], now=11)[0]
+    conn.execute("UPDATE workflow_recovery_operations SET status='waiting_human' WHERE id=?", (op['id'],))
+    facts['reason'] = 'blocked_gate'
+    facts['status'] = 'pending'
+    refreshed = rs.ensure_obligations(conn, {'workflow_id': 'w'}, {}, [], now=12)[0]
+    assert refreshed['status'] == 'pending'
+    conn.close()
+
+
+def test_recovery_obligation_uses_dynamic_dispatch_inventory(tmp_path):
+    path = tmp_path / 'dynamic-recovery.db'
+    _seed(path)
+    conn = state_db.get_db_connection(path)
+    expected = ['impl-t1', 'impl-t2']
+    candidate = 'b' * 40
+    input_candidate = 'a' * 40
+    workflow = {
+        'workflow_id': 'w', 'status': 'running', 'execution_id': 'gen',
+        'candidate_sha': candidate,
+    }
+    config = {'nodes': [{'id': 'implementation'}, {'id': 'review'}]}
+    tasks = [
+        {'task_id': 'review-fail', 'workflow_id': 'w', 'run_id': 'review-run',
+         'execution_id': 'gen', 'node': 'review', 'status': 'cleaned',
+         'stage_verdict': 'blocked', 'stage_verdict_note': 'review failed',
+         'candidate_sha': candidate},
+        {'task_id': 'impl-t1', 'workflow_id': 'w', 'run_id': 'impl-t1-run',
+         'execution_id': 'gen', 'node': 'implementation', 'status': 'integrated',
+         'integration_mode': 'git', 'stage_verdict': 'pass', 'candidate_sha': input_candidate,
+         'commit': candidate, 'integrated_commit': candidate},
+        {'task_id': 'impl-t2', 'workflow_id': 'w', 'run_id': 'impl-t2-run',
+         'execution_id': 'gen', 'node': 'implementation', 'status': 'superseded',
+         'stage_verdict': '', 'failure_reason': 'hard_timeout_watchdog',
+         'supersede_reason': 'auto-recover: infrastructure failure',
+         'candidate_sha': input_candidate},
+    ]
+
+    # The old assessment targets T1, so the previous retry decision parks.
+    old = rs.ensure_obligations(conn, workflow, config, tasks, now=1)[0]
+    assert old['payload']['affected_task_ids'] == ['impl-t1']
+    conn.execute('''UPDATE workflow_recovery_operations
+        SET status='waiting_human',detail_json=? WHERE id=?''', (
+        json.dumps({'reason': 'target_requires_explicit_replacement', 'action': 'retry',
+                    'operator': 'admin', 'missing_task_ids': ['impl-t1']}),
+        old['id'],
+    ))
+    payload = {'kind': 'node_dispatch', 'node_id': 'implementation',
+               'generation': ['gen', None, None]}
+    detail = {'expected_task_ids': expected}
+    conn.execute('''INSERT INTO workflow_recovery_operations
+        (identity_key,workflow_id,payload_json,detail_json,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?)''', (
+            'node_dispatch:test', 'w', json.dumps(payload), json.dumps(detail),
+            'superseded', 1, 1,
+        ))
+    stale_payload = {**payload, 'generation': ['old-generation', None, None]}
+    conn.execute('''INSERT INTO workflow_recovery_operations
+        (identity_key,workflow_id,payload_json,detail_json,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?)''', (
+            'node_dispatch:stale', 'w', json.dumps(stale_payload),
+            json.dumps({'expected_task_ids': ['impl-t1']}), 'superseded', 2, 2,
+        ))
+    obligations = rs.ensure_obligations(conn, workflow, config, tasks, now=2)
+    assert obligations[0]['payload']['affected_task_ids'] == ['impl-t2']
+    assert obligations[0]['status'] == 'pending'
+    assert obligations[0]['detail']['reason'] == 'recovery_target_retargeted'
+    assert obligations[0]['detail']['retargeted_from_task_ids'] == ['impl-t1']
+    assert obligations[0]['detail']['retargeted_to_task_ids'] == ['impl-t2']
     conn.close()
 
 

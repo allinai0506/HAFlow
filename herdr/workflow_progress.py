@@ -187,6 +187,42 @@ def candidate_responsible_source(workflow, tasks, candidate_sha, retry_node=None
     return None, []
 
 
+def _unfinished_dispatch_targets(workflow, expected_ids, tasks):
+    """Resolve a dynamic dispatch inventory to its unfinished lineage heads."""
+    if not isinstance(expected_ids, list) or not expected_ids:
+        return None
+    by_id = {task.get('task_id'): task for task in tasks or [] if task.get('task_id')}
+    wid, execution_id = workflow.get('workflow_id'), workflow.get('execution_id')
+    for task_id in expected_ids:
+        task = by_id.get(task_id)
+        if task is None:
+            continue  # An expected but absent registration is still outstanding.
+        if task.get('workflow_id') != wid or task.get('execution_id') != execution_id:
+            return None  # Another workflow or execution cannot own this inventory.
+
+    done = {'completed', 'committed', 'integrated', 'cleanup_ready', 'cleaned'}
+    targets = set()
+    for original_id in expected_ids:
+        task_id, seen = original_id, set()
+        task = by_id.get(task_id)
+        while task and task.get('superseded_by'):
+            if task_id in seen:
+                break
+            seen.add(task_id)
+            task_id = task['superseded_by']
+            task = by_id.get(task_id)
+        if task is None:
+            targets.add(task_id)
+            continue
+        settled = task.get('status') in done and (
+            task.get('integration_mode') != 'git'
+            or task.get('status') in {'integrated', 'cleanup_ready', 'cleaned'}
+        )
+        if not settled:
+            targets.add(task_id)
+    return sorted(targets)
+
+
 def gate_retry_node(config, node_id):
     """Public gate accessor: the node a gate retries ('' when not a gate).
 
@@ -228,7 +264,7 @@ def _identity_reason(workflow, facts, candidate):
     return None
 
 
-def assess_workflow(workflow, config, tasks):
+def assess_workflow(workflow, config, tasks, *, expected_task_ids_by_node=None):
     """Return original blocking tasks plus fail-closed grouped recovery decisions."""
     current = active_tasks(workflow, tasks)
     def relevant(task):
@@ -269,26 +305,41 @@ def assess_workflow(workflow, config, tasks):
             affected.update(task.get('stage_verdict_affected_task_ids') or [])
         used_fallback = False
         if not affected:
-            source_node, source_targets = candidate_responsible_source(workflow, current, candidate, retry_node=retry)
-            if source_node == retry and source_targets:
-                affected.update(source_targets)
-            else:
-                affected.update(task['task_id'] for task in current
-                                if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
-                                and candidate in {
-                                    task.get('commit'),
-                                    task.get('candidate_sha'),
-                                    task.get('integrated_commit'),
-                                    (task.get('wrapup_delivery') or {}).get('integrated_sha'),
-                                })
-            if not affected and retry:
-                # Fallback for parallel tasks / multi-task DAGs: attribute to all active tasks under retry node
-                affected.update(task['task_id'] for task in current
-                                if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
-                                and task.get('status') not in ('superseded', 'failed'))
+            dispatch_targets = _unfinished_dispatch_targets(
+                workflow,
+                (expected_task_ids_by_node or {}).get(retry),
+                tasks,
+            )
+            if dispatch_targets:
+                # Dynamic planning makes all dispatched subtasks part of the
+                # implementation contract. Replacing the integrated producer
+                # would repeat completed work while the missing sibling stays
+                # permanently absent from the recovery operation.
+                affected.update(dispatch_targets)
                 used_fallback = True
+            if not affected:
+                source_node, source_targets = candidate_responsible_source(
+                    workflow, current, candidate, retry_node=retry
+                )
+                if source_node == retry and source_targets:
+                    affected.update(source_targets)
+                else:
+                    affected.update(task['task_id'] for task in current
+                                    if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
+                                    and candidate in {
+                                        task.get('commit'),
+                                        task.get('candidate_sha'),
+                                        task.get('integrated_commit'),
+                                        (task.get('wrapup_delivery') or {}).get('integrated_sha'),
+                                    })
+                if not affected and retry:
+                    # Fallback for parallel tasks / multi-task DAGs: attribute to all active tasks under retry node
+                    affected.update(task['task_id'] for task in current
+                                    if task.get('task_id') and (task.get('node') or task.get('stage')) == retry
+                                    and task.get('status') not in ('superseded', 'failed'))
+                    used_fallback = True
         facts = sorted(failed, key=lambda task: str(task.get('task_id') or ''))
-        affected_facts = [task for task in current if task.get('task_id') in affected and task not in facts]
+        affected_facts = [task for task in tasks if task.get('task_id') in affected and task not in facts]
         if kind == 'delivery':
             from .delivery_rework import repair_reason
             reason = next((r for r in map(repair_reason, facts) if r), None)
@@ -314,7 +365,7 @@ def assess_workflow(workflow, config, tasks):
         if reason is None and (workflow.get('status') != 'running' or workflow.get('startup_ready') is False):
             reason = 'workflow_inactive'
         if reason is None and kind == 'fix_loop':
-            from .node_capacity import launch_capacity_error, node_usage
+            from .node_capacity import node_usage, task_budget_exhausted
             if retry == 'wrapup':
                 verifiers = [n for n in nodes.values() if n.get('id') != 'wrapup'
                              and (n.get('id') in {t.get('node') or t.get('stage') for t in failed}
@@ -322,7 +373,7 @@ def assess_workflow(workflow, config, tasks):
             else:
                 verifiers = [n for n in nodes.values() if n.get('id') != 'wrapup'
                              and _gate(nodes, n.get('id')) == retry]
-            if any(launch_capacity_error(node_usage(n, tasks, workflow.get('workflow_id')))
+            if any(task_budget_exhausted(node_usage(n, tasks, workflow.get('workflow_id')))
                    for n in verifiers):
                 reason = 'verifier_budget_exhausted'
         if reason is None and kind == 'fix_loop' and not affected:

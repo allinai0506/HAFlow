@@ -6,6 +6,33 @@ import uuid
 from . import recovery_store
 from .workflow_progress import active_tasks
 
+_INFRASTRUCTURE_FAILURES = frozenset({
+    'dispatch_delivery_fuse', 'agent_process_crash', 'hard_timeout_watchdog',
+    'token_exhausted',
+})
+
+
+def is_unfinished_infrastructure_predecessor(task):
+    """Allow automatic successor creation only for an unreplaced infra death."""
+    return bool(
+        isinstance(task, dict)
+        and task.get('status') == 'superseded'
+        and not task.get('superseded_by')
+        and task.get('failure_reason') in _INFRASTRUCTURE_FAILURES
+        and str(task.get('supersede_reason') or '').startswith('auto-recover:')
+    )
+
+
+def should_launch_frozen_candidate_successor(task, workflow, frozen):
+    return bool(
+        (task or {}).get('status') == 'failed'
+        or is_unfinished_infrastructure_predecessor(task)
+    ) and bool(
+        re.fullmatch(r'[0-9a-f]{40}', frozen or '', re.IGNORECASE)
+        and (workflow or {}).get('execution_id')
+        and (workflow or {}).get('candidate_sha') == frozen
+    )
+
 
 def successor_launch_command(cli, workflow, predecessor, successor_id, source, prompt, root_sha=None):
     """A new repair round owns a distinct branch rooted at the failed immutable commit.

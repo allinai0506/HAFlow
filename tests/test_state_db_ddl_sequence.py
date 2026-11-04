@@ -104,6 +104,17 @@ def _assert_trace(name: str, actual: list[str]) -> None:
         "SELECT id,event_type,payload_json FROM events WHERE workflow_id=",
         "SELECT id,payload_json FROM events WHERE workflow_id=",
     )
+    dispatch_inventory_read = (
+        "SELECT payload_json,detail_json FROM workflow_recovery_operations "
+        "WHERE workflow_id='w-legacy' AND identity_key LIKE 'node_dispatch:%' "
+        "ORDER BY id DESC LIMIT 1000"
+    )
+    # The recovery assessor now reads a bounded dispatch inventory after the
+    # legacy import. It is application data access, not a DDL/bootstrap change;
+    # pin its exact occurrence and omit only that read from the DDL baseline.
+    if name == "legacy":
+        assert actual.count(dispatch_inventory_read) == 1
+        actual = [statement for statement in actual if statement != dispatch_inventory_read]
     # Feature-specific registration authorization adds these three reads only
     # immediately before a legacy task INSERT.  The non-legacy traces contain
     # no matching statements at this position; all original DDL remains exact.

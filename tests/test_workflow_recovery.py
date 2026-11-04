@@ -1,7 +1,13 @@
 """Recovery completion needs new-candidate evidence, never a sent notification."""
 from copy import deepcopy
 
-from herdr.workflow_recovery import result_status, successor_launch_command, repair_coverage
+from herdr.workflow_recovery import (
+    is_unfinished_infrastructure_predecessor,
+    should_launch_frozen_candidate_successor,
+    result_status,
+    successor_launch_command,
+    repair_coverage,
+)
 
 A, B = 'a' * 40, 'b' * 40
 WF = {'workflow_id': 'wf', 'status': 'running', 'execution_id': 'gen', 'candidate_sha': B}
@@ -23,6 +29,43 @@ def facts():
 
 def test_new_candidate_and_all_fresh_gates_resolve():
     assert result_status(OP, WF, facts())[0] == 'resolved'
+
+
+def test_only_unreplaced_infrastructure_supersede_can_auto_create_successor():
+    timed_out = {
+        'status': 'superseded',
+        'failure_reason': 'hard_timeout_watchdog',
+        'supersede_reason': 'auto-recover: infrastructure failure',
+    }
+    assert is_unfinished_infrastructure_predecessor(timed_out)
+    workflow = {'workflow_id': 'wf', 'execution_id': 'gen', 'candidate_sha': A}
+    assert should_launch_frozen_candidate_successor(timed_out, workflow, A)
+    uppercase_sha = A.upper()
+    assert should_launch_frozen_candidate_successor(
+        {'status': 'failed'},
+        {**workflow, 'candidate_sha': uppercase_sha},
+        uppercase_sha,
+    )
+    assert not should_launch_frozen_candidate_successor(timed_out, workflow, B)
+    assert not is_unfinished_infrastructure_predecessor({
+        **timed_out, 'superseded_by': 'impl-t2-r2',
+    })
+    assert not is_unfinished_infrastructure_predecessor({
+        **timed_out, 'failure_reason': 'quality_gate_failed',
+    })
+    assert not is_unfinished_infrastructure_predecessor({
+        'status': 'superseded', 'supersede_reason': 'operator requested replacement',
+    })
+    command = successor_launch_command(
+        'herdr-task', workflow,
+        {'task_id': 'impl-t2', 'node': 'implementation', 'dispatch_role': 'impl_2',
+         'dispatch_round': 1, 'failure_reason': 'hard_timeout_watchdog'},
+        'impl-t2-r2', '/repo', 'repair the missing implementation task', root_sha=A,
+    )
+    assert command[command.index('--supersedes') + 1] == 'impl-t2'
+    assert command[command.index('--dispatch-round') + 1] == '2'
+    assert command[command.index('--dispatch-role') + 1] == 'impl_2'
+    assert command[command.index('--candidate-sha') + 1] == A
 
 
 def test_old_or_missing_verifier_does_not_resolve():

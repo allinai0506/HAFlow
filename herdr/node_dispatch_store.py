@@ -302,6 +302,37 @@ def operation_for_node(db_path, wid, node_id):
         conn.close()
 
 
+def latest_expected_task_ids(db_path, wid, node_id, execution_id=None):
+    """Return the newest durable dynamic task inventory for a node.
+
+    The current operation can be superseded when its predecessor snapshot
+    changes, even though its already-dispatched tasks still belong to the
+    current candidate. Keep the dispatch receipt available for completion
+    joins instead of silently falling back to whichever task finished first.
+    """
+    from . import state_db
+
+    if not execution_id:
+        return None
+    conn = state_db.get_readonly_db_connection(db_path)
+    try:
+        rows = conn.execute("""SELECT detail_json FROM workflow_recovery_operations
+            WHERE workflow_id=? AND identity_key LIKE 'node_dispatch:%'
+              AND json_extract(payload_json,'$.node_id')=?
+              AND json_extract(payload_json,'$.generation[0]')=?
+            ORDER BY id DESC LIMIT 1000""", (wid, node_id, execution_id)).fetchall()
+        for row in rows:
+            detail = json.loads(row['detail_json'] or '{}')
+            expected = detail.get('expected_task_ids')
+            if (isinstance(expected, list) and expected
+                    and all(isinstance(item, str) and item for item in expected)
+                    and len(expected) == len(set(expected))):
+                return expected
+        return None
+    finally:
+        conn.close()
+
+
 def claim(db_path, operation_id, owner, now=None):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
