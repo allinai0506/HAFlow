@@ -162,6 +162,13 @@ def is_node_complete(ports, workflow_id, node_id):
     cfg = ports.workflow_config_for(workflow_id) or {}
     node = next((n for n in cfg.get("nodes", []) if n.get("id") == node_id), {})
     required_ids = node.get("required_task_ids")
+    reuse_satisfied = None
+    if not active and required_ids is None:
+        # A verifier's current-candidate reuse receipt supersedes old dispatch
+        # history. Check it before historical inventory makes required_ids nonempty.
+        reuse_satisfied = ports._reverification_satisfies_node(workflow_id, node_id)
+        if reuse_satisfied:
+            return True
     if required_ids is None and callable(getattr(ports, "_get_store", None)):
         # Dynamic plan parsing creates the task inventory at dispatch time.
         # The durable dispatch operation is the authority for that generation;
@@ -195,7 +202,7 @@ def is_node_complete(ports, workflow_id, node_id):
     if not active and required_ids is None:
         # Current-candidate verifier reuse is a real replacement for execution;
         # missing/stale evidence remains false, including pending obligations.
-        return ports._reverification_satisfies_node(workflow_id, node_id)
+        return bool(reuse_satisfied)
 
     if ports.scheduler_core is not None:
         try:

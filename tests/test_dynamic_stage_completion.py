@@ -139,3 +139,28 @@ def test_bound_controller_declares_store_for_dynamic_inventory():
         assert namespace["is_node_complete"](workflow_id, "implementation") is False
 
     reader.assert_called_once_with("unused", workflow_id, "implementation")
+
+
+def test_current_candidate_reuse_can_satisfy_node_with_old_dispatch_history():
+    workflow_id = "wf-reused-verifier"
+    tasks = [{
+        "task_id": "test-old",
+        "workflow_id": workflow_id,
+        "node": "test",
+        "status": "superseded",
+        "execution_id": "exec-1",
+    }]
+    reused = []
+    ports = SimpleNamespace(
+        load_tasks=lambda: tasks,
+        workflow_config_for=lambda _wid: {"nodes": [{"id": "test"}]},
+        scheduler_core=scheduler,
+        _reverification_satisfies_node=lambda _wid, _node: reused.append(True) or True,
+        _get_store=lambda: SimpleNamespace(db_path="unused"),
+    )
+    dispatch = {"status": "superseded", "detail": {"expected_task_ids": ["test-old"]}}
+
+    with patch("herdr.node_dispatch_store.operation_for_node", return_value=dispatch):
+        assert is_node_complete(ports, workflow_id, "test")
+
+    assert reused == [True]
