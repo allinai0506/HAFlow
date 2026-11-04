@@ -95,7 +95,15 @@ def ensure_agy_workspace_trust(repo_path: Path | str) -> bool:
     try:
         canonical = _exact_case_path(os.path.realpath(str(Path(repo_path).expanduser().absolute())))
         config = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
-        config.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            config.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            alt = Path("/Users/user/Library/Application Support/Antigravity CLI Isolated/home/.gemini/antigravity-cli/settings.json")
+            if alt.exists():
+                config = alt
+                config.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                raise
         import fcntl
         # Different workflows launch concurrently and the controller only
         # serializes within one workflow: serialize the whole read-modify-

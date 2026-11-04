@@ -950,7 +950,7 @@ def allocate_task_pane(parent_pane, clone, launch_identity=None, task_id=None):
 
 
 
-def unique_agent_name(task_id, pane_id):
+def unique_agent_name(task_id, pane_id, attempt=0):
     base = re.sub(
         r"[^a-z0-9_-]+",
         "-",
@@ -960,8 +960,9 @@ def unique_agent_name(task_id, pane_id):
     if not base or not base[0].isalpha():
         base = "task-" + base
 
+    key = f"{task_id}:{pane_id}" if not attempt else f"{task_id}:{pane_id}:{attempt}"
     suffix = hashlib.sha1(
-        pane_id.encode("utf-8")
+        key.encode("utf-8")
     ).hexdigest()[:6]
 
     max_base = 32 - 1 - len(suffix)
@@ -977,7 +978,8 @@ def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
         try:
             agent_name = unique_agent_name(
                 task_id,
-                pane_id
+                pane_id,
+                attempt=attempt,
             )
 
             cmd = [
