@@ -486,35 +486,45 @@ def _prompt(
         # 默认 stage 契约只属于 software-development-v1 适配流（PR #355 评
         # 审遗留）：其他工作流命中同名节点 ID 时不得注入默认技能与限制。
         wf_cfg = {}
+        config_unreadable = False
         try:
             from herdr.projects import workflow_config_for
             wf_cfg = workflow_config_for(wf_id) or {}
         except Exception:
-            wf_cfg = {}
+            config_unreadable = True
+        if wf_id and not wf_cfg and not config_unreadable:
+            try:
+                from herdr.projects import workflow_snapshot_unreadable
+                config_unreadable = workflow_snapshot_unreadable(wf_id)
+            except Exception:  # noqa: BLE001 - failure must never increase authorization.
+                config_unreadable = True
         adapted = stage_skills.is_staged_dev_flow_workflow(wf_cfg)
-        if (configured_skills or node_id in stage_skills.STAGE_SKILL_BINDINGS) and (adapted or configured_skills):
+        should_inject_stage = (
+            bool(configured_skills)
+            or (adapted and node_id in stage_skills.STAGE_SKILL_BINDINGS)
+            or (config_unreadable and node_id in stage_skills.STAGE_SKILL_BINDINGS)
+        )
+        if should_inject_stage:
             run_level_ceiling = ""
-            if wf_id:
+            run_level_unreadable = False
+            if wf_id and not config_unreadable:
                 try:
-                    from herdr.state_store import get_state_store
+                    from herdr.projects import workflow_state_store
                     from herdr.review_closure import _run_level_ceiling
-                    wf_record = get_state_store().get_workflow(wf_id) or {}
+                    wf_record = workflow_state_store().get_workflow(wf_id) or {}
                     run_level_ceiling = _run_level_ceiling(wf_record)
                 except Exception:
-                    run_level_ceiling = ""
+                    run_level_unreadable = True
 
-            # Authoritative delivery ceiling precedence (symmetrical with review_closure._recorded_ceiling):
-            # 1. Run-level explicit ceiling (_run_level_ceiling from workflow record)
-            # 2. Workflow-level explicit ceiling (wf_cfg.delivery_ceiling)
-            # 3. Node-level explicit ceiling (node.delivery_ceiling)
-            # 4. Workflow-level default ceiling (wf_cfg.delivery_ceiling_default)
-            # 5. Node-level default ceiling (node.delivery_ceiling_default)
-            # 6. Fallback default: "pr"
-            explicit_wf = run_level_ceiling or str(wf_cfg.get("delivery_ceiling") or "").strip()
-            explicit_node = str(node.get("delivery_ceiling") or "").strip()
-            default_wf = str(wf_cfg.get("delivery_ceiling_default") or "").strip()
-            default_node = str(node.get("delivery_ceiling_default") or "").strip()
-            ceiling = explicit_wf or explicit_node or default_wf or default_node or "pr"
+            if config_unreadable or run_level_unreadable:
+                ceiling = "workspace"
+            else:
+                # Explicit Run / workflow / node limits precede template defaults.
+                explicit_wf = run_level_ceiling or str(wf_cfg.get("delivery_ceiling") or "").strip()
+                explicit_node = str(node.get("delivery_ceiling") or "").strip()
+                default_wf = str(wf_cfg.get("delivery_ceiling_default") or "").strip()
+                default_node = str(node.get("delivery_ceiling_default") or "").strip()
+                ceiling = explicit_wf or explicit_node or default_wf or default_node or "pr"
             ctx = stage_skills.assemble_stage_context(
                 workflow_id=wf_id,
                 task_id=task_id or "",
