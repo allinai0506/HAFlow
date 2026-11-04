@@ -17,7 +17,7 @@ def is_unfinished_infrastructure_predecessor(task):
     return bool(
         isinstance(task, dict)
         and task.get('status') == 'superseded'
-        and task.get('replacement_pending') is not False
+        and not task.get('abandon_reason')
         and not task.get('superseded_by')
         and task.get('failure_reason') in _INFRASTRUCTURE_FAILURES
         and str(task.get('supersede_reason') or '').startswith('auto-recover:')

@@ -179,7 +179,7 @@ def ensure_obligations(conn, workflow, config, tasks, now=None):
             current_targets = sorted(facts.get('affected_task_ids') or [])
             previous_detail = json.loads(row['detail_json'] or '{}')
             if (row['status'] == 'waiting_human'
-                    and previous_detail.get('reason') == 'target_requires_explicit_replacement'
+                    and previous_detail.get('reason') in ('target_requires_explicit_replacement', 'recovery_total_budget_exhausted')
                     and previous_detail.get('action') == 'retry'
                     and previous_targets != current_targets
                     and status == 'pending'

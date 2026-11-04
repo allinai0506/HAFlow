@@ -170,6 +170,22 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
         execution = str(task.get("execution_id") or "")
         return bool(current_execution) and execution == current_execution
 
+    from herdr.node_dispatch_store import latest_expected_task_ids
+    store = ports._get_store() if callable(getattr(ports, "_get_store", None)) else None
+
+    # Load dynamic dispatch inventories for non-gate nodes
+    expected_ids_by_node = {}
+    if store and hasattr(store, "db_path") and current_execution:
+        for task in node_tasks:
+            node_id = task.get("node") or task.get("stage")
+            if node_id and node_id not in expected_ids_by_node:
+                try:
+                    exp = latest_expected_task_ids(store.db_path, workflow_id, node_id, current_execution)
+                    if isinstance(exp, list) and exp:
+                        expected_ids_by_node[node_id] = exp
+                except Exception:
+                    pass
+
     settled_nodes = {}
     for task in node_tasks:
         st = str(task.get("status") or "")
@@ -193,6 +209,17 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
                 # 交付必须落在当前冻结 candidate 上；历史终态任务（candidate
                 # 不同）不是本义务的交付证据，不得替替代任务清账
                 # (PR #360 评审遗留)。
+                # 若节点存在动态派发清单，单一任务交付不能代表整个节点已收敛
+                if node_id in expected_ids_by_node:
+                    exp = expected_ids_by_node[node_id]
+                    by_id = {t.get("task_id"): t for t in node_tasks if _current_execution(t)}
+                    done_statuses = ("cleaned", "completed", "committed", "integrated", "cleanup_ready")
+                    all_done = all(
+                        by_id.get(tid) and str(by_id[tid].get("status") or "") in done_statuses
+                        for tid in exp
+                    )
+                    if not all_done:
+                        continue
                 candidate = str(task.get("candidate_sha") or task.get("integrated_commit") or task.get("commit") or "")
                 if candidate and candidate.lower() == frozen.lower():
                     settled_nodes.setdefault(node_id, (task.get("task_id"), "settled_node_delivery"))
@@ -210,6 +237,10 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
         if node_id not in settled_nodes:
             continue
         task_id = task.get("task_id")
+        if node_id in expected_ids_by_node and task_id in expected_ids_by_node[node_id]:
+            resolved_by_id, _ = settled_nodes[node_id]
+            if resolved_by_id != task_id and resolved_by_id in expected_ids_by_node[node_id]:
+                continue
         resolved_by, settle_reason = settled_nodes[node_id]
         try:
             ports._get_store().update_task_metadata(
