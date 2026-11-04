@@ -67,3 +67,35 @@ def test_superseded_current_dispatch_keeps_its_launched_task_inventory():
               return_value=["impl-1", "impl-2"]),
     ):
         assert not is_node_complete(ports, workflow_id, "implementation")
+
+
+def test_bound_controller_declares_store_for_dynamic_inventory():
+    from services.controller.bindings import install_modules
+    from services.controller.stage_state import DEPENDENCIES
+
+    workflow_id = "wf-bound-dynamic-stage"
+    tasks = [{
+        "task_id": "impl-1",
+        "workflow_id": workflow_id,
+        "node": "implementation",
+        "status": "integrated",
+        "integration_mode": "git",
+    }]
+    store = SimpleNamespace(db_path="unused")
+    namespace = {
+        "__name__": "test_bound_controller",
+        "_get_store": lambda: store,
+        "_reverification_satisfies_node": lambda _wid, _node: False,
+        "load_tasks": lambda: tasks,
+        "scheduler_core": scheduler,
+        "workflow_config_for": lambda _wid: {"nodes": [{"id": "implementation"}]},
+    }
+    for name in {dep for dependencies in DEPENDENCIES.values() for dep in dependencies}:
+        namespace.setdefault(name, lambda *args, **kwargs: None)
+    install_modules(namespace, ("stage_state",))
+    dispatch = {"status": "running", "detail": {"expected_task_ids": ["impl-1", "impl-2"]}}
+
+    with patch("herdr.node_dispatch_store.operation_for_node", return_value=dispatch) as reader:
+        assert namespace["is_node_complete"](workflow_id, "implementation") is False
+
+    reader.assert_called_once_with("unused", workflow_id, "implementation")
