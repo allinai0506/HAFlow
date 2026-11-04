@@ -4087,3 +4087,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 修复：将最新、身份匹配的 node-dispatch 清单并入恢复评估；沿 superseded 链选择未完成谱系头，排除已集成兄弟；仅对明确 retry 意图的可信目标变化重新入队。阶段完成检查同样考虑动态 inventory；临时并发占满与累计任务预算分离。
 - 验证：只读数据库副本上的 operation 384872 预览由 stale T1 `waiting_human` 改为 T2 `pending`；专项 `329 passed, 18 subtests passed`，compileall 与 diff 检查通过。候选仍在隔离分支；未部署，live Controller 未加载。
 - 教训：`docs/lessons/lessons-learned.md` §225。
+
+## [2026-11-04] Fix | 动态派发多任务收敛隔离与显式放弃凭据守卫（wf-haflow-1103-01）
+- 现场：`implementation` 阶段内 T1 集成至候选后，后台守护进程的 `converge_dangling_replacement_obligations` 误把单个兄弟任务完成视作整阶段交付完成，错误清除了看门狗超时任务 T2 的 `replacement_pending`（使其变为 `False`）；评估引擎随后将没有理由的 `replacement_pending=False` 误判为操作人显式放弃，导致 T2 无法重新派发继任者。
+- 修复：`infra_recovery.py` 对齐动态派发清单（`expected_task_ids`），清单内有未完成任务时禁止判定阶段交付达成，严禁兄弟任务交叉清账；`workflow_progress.py` 与 `workflow_recovery.py` 必须以 `abandon_reason` 作为显式放弃的唯一证据；`ensure_obligations` 允许在目标重定向至新谱系时唤醒重试。
+- 验证：单元测试 `test_converge_does_not_clear_replacement_obligation_of_dynamic_sibling` 通过；111 项恢复与推进回归测试全部 PASS；`compileall`、`git diff --check` clean。
+- 教训：`docs/lessons/lessons-learned.md` §226。
