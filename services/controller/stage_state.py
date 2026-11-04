@@ -162,6 +162,47 @@ def is_node_complete(ports, workflow_id, node_id):
     cfg = ports.workflow_config_for(workflow_id) or {}
     node = next((n for n in cfg.get("nodes", []) if n.get("id") == node_id), {})
     required_ids = node.get("required_task_ids")
+    if required_ids is None and callable(getattr(ports, "_get_store", None)):
+        # Dynamic plan parsing creates the task inventory at dispatch time.
+        # The durable dispatch operation is the authority for that generation;
+        # without consulting it, one integrated task can make a parallel node
+        # appear complete while sibling tasks were never launched or finished.
+        from herdr.node_dispatch_store import operation_for_node
+
+        operation = operation_for_node(
+            ports._get_store().db_path, workflow_id, node_id
+        )
+        detail = operation.get("detail") if isinstance(operation, dict) else None
+        expected_ids = detail.get("expected_task_ids") if isinstance(detail, dict) else None
+        if not (isinstance(expected_ids, list) and expected_ids):
+            from herdr.node_dispatch_store import latest_expected_task_ids
+
+            expected_ids = latest_expected_task_ids(
+                ports._get_store().db_path, workflow_id, node_id
+            )
+        store = ports._get_store()
+        if isinstance(expected_ids, list) and expected_ids and callable(
+            getattr(store, "get_workflow", None)
+        ):
+            workflow = store.get_workflow(workflow_id) or {}
+            by_id = {task.get("task_id"): task for task in tasks}
+            recorded = [by_id[task_id] for task_id in expected_ids if task_id in by_id]
+            current_execution = workflow.get("execution_id")
+            current_candidate = workflow.get("candidate_sha")
+            if current_execution and any(
+                task.get("execution_id") != current_execution for task in recorded
+            ):
+                expected_ids = None
+            elif current_candidate and any(
+                any(value and value != current_candidate for value in (
+                    task.get("candidate_sha"), task.get("commit"),
+                    task.get("integrated_commit"),
+                ))
+                for task in recorded
+            ):
+                expected_ids = None
+        if isinstance(expected_ids, list) and expected_ids:
+            required_ids = expected_ids
     if not active and required_ids is None:
         # Current-candidate verifier reuse is a real replacement for execution;
         # missing/stale evidence remains false, including pending obligations.

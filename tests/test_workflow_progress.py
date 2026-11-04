@@ -61,6 +61,44 @@ def test_finalize_escalation_is_visible_for_committed():
     assert result['obligations'][0]['status'] == 'waiting_human'
 
 
+def test_temporary_verifier_concurrency_is_not_a_human_budget_block():
+    config = {'nodes': [
+        {'id': 'implementation'},
+        {'id': 'test', 'max_concurrency': 1},
+        {'id': 'review'},
+    ]}
+    failed = task('test', execution_id='generation-1')
+    sibling = task('test', task_id='test-02', status='working', stage_verdict=None,
+                   execution_id='generation-1')
+    implementation = task('implementation', task_id='impl-01', status='integrated',
+                          stage_verdict='pass', execution_id='generation-1')
+    result = assess_workflow(WF, config, [failed, sibling, implementation])
+    assert result['obligations'][0]['status'] == 'pending'
+    assert result['obligations'][0]['reason'] == 'blocked_gate'
+
+
+def test_recovery_targets_unfinished_dynamic_task_not_integrated_sibling():
+    failed_gate = task('review', execution_id='generation-1')
+    integrated = task(
+        'implementation', task_id='impl-t1', status='integrated', stage_verdict='pass',
+        execution_id='generation-1', commit=SHA, integrated_commit=SHA,
+        integration_mode='git',
+    )
+    timed_out = task(
+        'implementation', task_id='impl-t2', status='superseded', stage_verdict='',
+        execution_id='generation-1', failure_reason='hard_timeout_watchdog',
+        supersede_reason='auto-recover: infrastructure failure',
+    )
+    result = assess_workflow(
+        WF, CFG, [failed_gate, integrated, timed_out],
+        expected_task_ids_by_node={'implementation': ['impl-t1', 'impl-t2']},
+    )
+    obligation = result['obligations'][0]
+    assert obligation['retry_node'] == 'implementation'
+    assert obligation['affected_task_ids'] == ['impl-t2']
+    assert obligation['status'] == 'pending'
+
+
 @pytest.mark.parametrize('status', ['closed', 'paused'])
 def test_inactive_workflow_has_no_executable_obligations(status):
     result = assess_workflow(dict(WF, status=status), CFG, [task()])

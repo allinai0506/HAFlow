@@ -9489,3 +9489,43 @@ pytest -q tests/test_software_development_v1_adapter.py tests/test_auto_acceptan
 - `services/controller/auto_acceptance.py#try_auto_accept` — 审查工位 `[BLOCKED]` 自动验收拦截
 - `herdr/plan_parser.py#verify_plan_and_challenger` — 版本时序前置核验
 - `tests/test_plan_causal_dispatch.py` — 11 项因果时序、自动验收门禁、解析器隔离与重派闭环专项守护测试
+
+---
+
+## 225. 动态派发恢复必须沿未完成任务归因并重开既有恢复意图（2026-11-04）
+
+### 问题背景
+
+同一工作流 `wf-haflow-1103-01` 的 plan 阶段修复后，implementation 动态派发出 T1 与 T2。T1 已集成，而 T2 因 `hard_timeout_watchdog` 被自动 supersede、没有 successor；恢复评估仅看活跃任务和冻结候选，错误地把旧 T1 记录为受影响对象，既有 retry 因此停在 `waiting_human`，自动化无法接续。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 仅从当前活跃任务推导动态派发阶段的责任任务 | 活跃集合会丢失已集成兄弟任务与未完成谱系头之间的区别 | 若阶段有持久派发清单，恢复评估应校验 workflow、execution 和候选身份，沿 superseded 谱系找出未完成叶节点，并把已集成兄弟排除 |
+| 恢复意图永久绑定旧的 T1 目标 | retry 决策可保留，但目标事实会随可信派发回执变化 | 只在明确授权的 retry 意图、目标集合确实改变、且新目标是未替换的自动基础设施失败任务时，重开该意图；其他人工决定保持等待 |
+| 临时并发占用被当成累计预算耗尽 | 节点的并发容量与生命周期派发上限是不同约束 | 并发容量暂满时等待并重试；只有生命周期硬上限耗尽才拒绝继续自动派发 |
+
+### 操作规范（已固化到 `herdr/workflow_progress.py`、`herdr/recovery_store.py` 与回归测试）
+
+1. **动态清单优先归因**：读取最近的持久 node-dispatch 清单；身份或候选不匹配时 fail-closed 回退，不把历史清单拼到当前 execution。
+2. **只接续明确基础设施失败**：自动继任仅接受无 successor 的自动 supersede 基础设施失败，并绑定当前冻结候选与 execution。
+3. **锁定目标与负向边界**：覆盖已集成 T1 + 未完成 T2、谱系已替换、跨候选历史清单、非基础设施失败及大写 SHA。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_dynamic_stage_completion.py tests/test_workflow_progress.py tests/test_recovery_store.py tests/test_node_capacity.py tests/test_role_identity_consistency.py tests/test_plan_causal_dispatch.py tests/test_workflow_recovery_autonomy.py tests/test_workflow_recovery.py tests/test_recovery_successor.py tests/test_task_cli_workflow.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+当前候选：213 passed，18 subtests passed；compileall 与 diff 检查通过。运行数据库只读副本上的 operation 384872 从 stale T1 `waiting_human` 预览为 `pending`，目标改为 T2；代码尚未部署，live Controller 尚未加载修复。
+
+### 相关文档 / 关联证据
+
+- 实际工作流及只读恢复预览：`wf-haflow-1103-01`，operation `384872`
+- `herdr/workflow_progress.py#_unfinished_dispatch_targets` / `#assess_workflow`
+- `herdr/recovery_store.py#_dispatch_expected_task_ids` / `#ensure_obligations`
+- `services/controller/stage_state.py#is_node_complete`
+- `tests/test_dynamic_stage_completion.py`、`tests/test_workflow_progress.py`、`tests/test_recovery_store.py`

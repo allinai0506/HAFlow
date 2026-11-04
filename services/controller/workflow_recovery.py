@@ -2,12 +2,14 @@
 
 Dependencies are explicit inputs; importing this module creates no runtime state.
 """
-import re
-
 def execute_workflow_recovery(ports, operation, owner):
     """Run existing Task primitives only after the durable recovery claim."""
     from herdr import recovery_store
-    from herdr.workflow_recovery import successor_launch_command, repair_coverage
+    from herdr.workflow_recovery import (
+        should_launch_frozen_candidate_successor,
+        successor_launch_command,
+        repair_coverage,
+    )
     from herdr.recovery_successor import has_confirmed_delivery, has_confirmed_rework, choose_recovery_source
     from herdr.repo_hygiene import check_source_cleanliness
     store = ports._get_store()
@@ -196,10 +198,7 @@ def execute_workflow_recovery(ports, operation, owner):
             # 人工:以当前冻结候选为根构造继任者,与人工 relaunch
             # --candidate-sha 同构(wf-haflow-1022-01 r7 的 identity_unknown 死路)。
             frozen = payload.get('candidate_sha')
-            if (task.get('status') == 'failed'
-                    and isinstance(frozen, str)
-                    and re.fullmatch(r'[0-9a-fA-F]{40}', frozen)
-                    and workflow.get('execution_id')):
+            if should_launch_frozen_candidate_successor(task, workflow, frozen):
                 next_id = ports.next_recovery_task_id(tid, store.list_tasks(workflow_id=wid))
                 details['successor_ids'].append(next_id)
                 from herdr.supervisor.state import redact_text
