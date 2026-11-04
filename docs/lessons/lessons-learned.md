@@ -9529,3 +9529,36 @@ git diff --check
 - `herdr/recovery_store.py#_dispatch_expected_task_ids` / `#ensure_obligations`
 - `services/controller/stage_state.py#is_node_complete`
 - `tests/test_dynamic_stage_completion.py`、`tests/test_workflow_progress.py`、`tests/test_recovery_store.py`
+
+---
+
+## 226. 动态派发阶段禁止兄弟任务交叉收敛且显式放弃必须以理由为凭据（2026-11-04）
+
+### 问题背景
+
+工作流 `wf-haflow-1103-01` 在 plan 阶段派发 implementation 包含 T1 与 T2 两个并行子任务。T1 集成至候选 SHA 后，T2 因工位超时被看门狗标记为 superseded。后台守护进程的 `converge_dangling_replacement_obligations` 仅以阶段节点名称判定交付收敛，误将 T1 在当前候选上的交付视作整个 implementation 阶段已达成，擅自将未完成 T2 的 `replacement_pending` 清除为 `False`。后续恢复评估因误把 `replacement_pending=False` 当作操作人显式放弃而将 T2 丢弃，恢复归因回退至已集成的 T1 并永久锁死在 `waiting_human`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 僵尸义务收敛忽略动态派发清单 | 阶段内单个任务交付不等于多任务清单整体交付完成 | 非门禁节点收敛必须核对 `expected_task_ids`，存在未结算兄弟任务时禁止提前清账，且兄弟任务之间严禁交叉收敛 |
+| 仅靠 `replacement_pending=False` 判定显式放弃 | 机器收敛副作用与人工显式放弃混淆 | 显式放弃必须以存在 `abandon_reason` 作为唯一事实凭据；未带理由的看门狗超时任务始终保留继承重派资格 |
+| 重试恢复意图被预算耗尽标志卡死 | 人工授权的重试在目标变化时未能重新激活 | 当操作人已做出 retry 裁决且恢复目标重定向至真实未完成任务时，允许从 `recovery_total_budget_exhausted` 重新入队为 `pending` |
+
+### 验证命令 / 守护测试
+
+```bash
+HOME=/Users/user pytest -q tests/test_finalize_baseline_and_replacement_closure.py tests/test_dynamic_stage_completion.py tests/test_workflow_progress.py tests/test_workflow_recovery.py tests/test_recovery_store.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- 实际工作流现场：`wf-haflow-1103-01`，operation `384872`，task `wf-haflow-1103-01-implementation-t2`
+- `services/controller/infra_recovery.py#converge_dangling_replacement_obligations`
+- `herdr/workflow_progress.py#_unfinished_dispatch_targets`
+- `herdr/workflow_recovery.py#is_unfinished_infrastructure_predecessor`
+- `herdr/recovery_store.py#ensure_obligations`
+- `tests/test_finalize_baseline_and_replacement_closure.py#test_converge_does_not_clear_replacement_obligation_of_dynamic_sibling`

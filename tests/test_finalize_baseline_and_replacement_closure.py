@@ -335,6 +335,69 @@ class TestReplacementObligationConvergence(unittest.TestCase):
         events = self.store.list_events(workflow_id=wf_id, event_type="replacement_obligation_auto_resolved")
         self.assertEqual(len(events), 0)
 
+    def test_converge_does_not_clear_replacement_obligation_of_dynamic_sibling(self):
+        """动态派发阶段中，一个兄弟任务交付不能收敛同级其他未完成任务的替换义务。"""
+        import json
+        from services.controller import infra_recovery
+        from herdr import state_db
+
+        wf_id = "wf-dyn-1"
+        exec_id = "exec-dyn-1"
+        self.store.save_workflow({
+            "workflow_id": wf_id, "status": "running", "execution_id": exec_id,
+        })
+
+        # 保存 dynamic dispatch 期望清单: ['impl-t1', 'impl-t2']
+        with state_db.get_db_connection(self.store.db_path) as conn:
+            conn.execute("""INSERT INTO workflow_recovery_operations
+                (identity_key, workflow_id, payload_json, detail_json, status, next_due_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'resolved', 0, 0, 0)""",
+                (
+                    "node_dispatch:test_dyn",
+                    wf_id,
+                    json.dumps({"node_id": "implementation", "generation": [exec_id, 0, None]}),
+                    json.dumps({"expected_task_ids": ["impl-t1", "impl-t2"]}),
+                ),
+            )
+
+        # impl-t1 已经 integrated 到当前 candidate_sha
+        self.store.save_task({
+            "task_id": "impl-t1",
+            "execution_id": exec_id,
+            "workflow_id": wf_id,
+            "node": "implementation",
+            "stage": "implementation",
+            "status": "integrated",
+            "candidate_sha": "a" * 40,
+            "integrated_commit": "a" * 40,
+        })
+        # impl-t2 看门狗超时，待替代
+        self.store.save_task({
+            "task_id": "impl-t2",
+            "workflow_id": wf_id,
+            "node": "implementation",
+            "stage": "implementation",
+            "status": "superseded",
+            "replacement_pending": True,
+            "superseded_by": None,
+            "execution_id": exec_id,
+            "failure_reason": "hard_timeout_watchdog",
+            "supersede_reason": "auto-recover: infrastructure failure",
+        })
+
+        ports = MagicMock()
+        ports._get_store.return_value = self.store
+        ports.load_tasks.return_value = self.store.list_tasks(workflow_id=wf_id)
+        ports.workflow_closed.return_value = False
+        ports._scheduler_current_frozen_candidate_sha.return_value = "a" * 40
+
+        converged = infra_recovery.converge_dangling_replacement_obligations(ports, wf_id)
+        self.assertFalse(converged, "Dynamic sibling task must not be cleared by sibling delivery")
+        reloaded = self.store.get_task("impl-t2")
+        self.assertTrue(reloaded.get("replacement_pending"), "impl-t2 replacement_pending must remain True")
+        events = self.store.list_events(workflow_id=wf_id, event_type="replacement_obligation_auto_resolved")
+        self.assertEqual(len(events), 0)
+
 
 class TestIntegrateBaseRefResolution(unittest.TestCase):
     def test_integrate_task_falls_back_to_main_repo_when_remote_base_missing(self):

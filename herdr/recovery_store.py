@@ -179,7 +179,7 @@ def ensure_obligations(conn, workflow, config, tasks, now=None):
             current_targets = sorted(facts.get('affected_task_ids') or [])
             previous_detail = json.loads(row['detail_json'] or '{}')
             if (row['status'] == 'waiting_human'
-                    and previous_detail.get('reason') == 'target_requires_explicit_replacement'
+                    and previous_detail.get('reason') in ('target_requires_explicit_replacement', 'recovery_total_budget_exhausted')
                     and previous_detail.get('action') == 'retry'
                     and previous_targets != current_targets
                     and status == 'pending'
@@ -201,6 +201,12 @@ def ensure_obligations(conn, workflow, config, tasks, now=None):
                         retargeted_to_task_ids=current_targets,
                     )
                     previous_detail.pop('missing_task_ids', None)
+                    from .recovery_policy import initial_budget
+                    floor = conn.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
+                    try:
+                        previous_detail.update(initial_budget(config, now, floor))
+                    except ValueError:
+                        pass
                     changed_detail_json = json.dumps(previous_detail, ensure_ascii=False)
             conn.execute('UPDATE workflow_recovery_operations SET payload_json=?,detail_json=?,status=?,owner=NULL,lease_until=NULL,version=version+1,updated_at=? WHERE id=?', (payload, changed_detail_json, changed_status, now, row['id']))
             _event(conn, _get(conn, row['id']), 'facts_changed', now)
@@ -548,7 +554,7 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
             raise ValueError('business gate waits resolve only after fresh acceptance evidence; relaunch the gate')
         if op['version'] != expected_version:
             raise ValueError('stale recovery version')
-        workflow, _, _ = _snapshot(conn, op['workflow_id'])
+        workflow, config, _ = _snapshot(conn, op['workflow_id'])
         if op['status'] in ('superseded', 'resolved', 'running') or workflow['status'] in ('closed', 'paused'):
             raise ValueError('stale recovery facts or inactive workflow')
         if action == 'retry' and ((op['payload'].get('status') == 'waiting_human' and op['payload'].get('reason') != 'finalize_escalated') or op['started']):
@@ -580,8 +586,16 @@ def decide_operation(db_path, operation_id, expected_version, operator, action, 
                 raise ValueError('current unstarted dispatch and explicit confirmation required')
             detail['dispatch_confirmation'] = {'identity_key': op['identity_key'],
                 'operator': operator, 'reason': reason, 'confirmed_at': now}
+        reset_budget = action == 'retry' and (op['detail'].get('reason') in ('recovery_total_budget_exhausted', 'recovery_retry_budget_exhausted') or detail.get('total_deadline_at', float('inf')) <= now)
+        if reset_budget:
+            floor = conn.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
+            from .recovery_policy import initial_budget
+            try:
+                detail.update(initial_budget(config, now, floor))
+            except ValueError:
+                pass
         pending = action in ('retry', 'verify', 'confirm_dispatch')
-        conn.execute('UPDATE workflow_recovery_operations SET status=?,next_due_at=?,detail_json=?,attempts=?,version=version+1,updated_at=? WHERE id=? AND version=?', ('pending' if pending else 'waiting', now if pending else until, json.dumps(detail), op['attempts'] if 'first_started_at' in detail else 0, now, operation_id, expected_version))
+        conn.execute('UPDATE workflow_recovery_operations SET status=?,next_due_at=?,detail_json=?,attempts=?,version=version+1,updated_at=? WHERE id=? AND version=?', ('pending' if pending else 'waiting', now if pending else until, json.dumps(detail), 0 if reset_budget else (op['attempts'] if 'first_started_at' in detail else 0), now, operation_id, expected_version))
         result = _get(conn, operation_id)
         _event(conn, result, 'decided', now, detail)
         return result

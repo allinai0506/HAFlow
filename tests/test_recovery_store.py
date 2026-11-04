@@ -509,3 +509,25 @@ def test_gate_invalidation_requires_complete_repair_receipt_in_transaction(tmp_p
     fresh = next(x for x in rs.list_operations(path, 'w') if x['id'] == op['id'])
     assert fresh['started'] == 0
     assert not fresh['detail'].get('gate_invalidation_started')
+
+
+def test_retry_after_budget_exhausted_resets_budget_and_allows_claim(tmp_path):
+    path, op, sha = _lineage_db(tmp_path)
+    now = op['updated_at'] + 1
+    # Expire the total budget
+    conn = state_db.get_db_connection(path)
+    with conn:
+        conn.execute("UPDATE workflow_recovery_operations SET detail_json=?, status='waiting_human', owner=NULL, lease_until=NULL WHERE id=?",
+                     (json.dumps({'reason': 'recovery_total_budget_exhausted', 'first_started_at': now - 20000, 'total_deadline_at': now - 1000}), op['id']))
+    conn.close()
+    rs.reconcile(path, 'w', now)
+    expired = next(x for x in rs.list_operations(path, 'w') if x['id'] == op['id'])
+    assert expired['status'] == 'waiting_human'
+    # Human decides retry
+    decided = rs.decide_operation(path, op['id'], expired['version'], 'operator', 'retry', 'retry after exhausted', now + 1)
+    assert decided['status'] == 'pending'
+    # Claim must now succeed with fresh initial budget instead of re-failing total budget
+    claimed = rs.claim_operation(path, op['id'], 'worker', now + 2)
+    assert claimed is not None
+    assert claimed['status'] == 'running'
+    assert claimed['detail']['total_deadline_at'] > now

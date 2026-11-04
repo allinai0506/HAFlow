@@ -214,7 +214,7 @@ def _unfinished_dispatch_targets(workflow, expected_ids, tasks):
         if task is None:
             targets.add(task_id)
             continue
-        if task.get('status') == 'superseded' and task.get('replacement_pending') is False:
+        if task.get('status') == 'superseded' and task.get('replacement_pending') is False and task.get('abandon_reason'):
             # Explicit operator abandonment closes this inventory obligation.
             continue
         settled = task.get('status') in done and (

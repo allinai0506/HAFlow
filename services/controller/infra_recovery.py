@@ -161,22 +161,29 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
     # 证据与义务都必须绑定当前 execution（PR #339 评审遗留）：跨 execution
     # 的 PASS 或缺失身份的任务不得授权自动收敛。
     try:
-        current_execution = str((ports._get_store().get_workflow(workflow_id) or {})
-                                .get("execution_id") or "")
+        current_execution = str((ports._get_store().get_workflow(workflow_id) or {}).get("execution_id") or "")
     except (OSError, RuntimeError, ValueError, AttributeError):
         current_execution = ""
 
     def _current_execution(task):
-        execution = str(task.get("execution_id") or "")
-        return bool(current_execution) and execution == current_execution
+        return bool(current_execution) and str(task.get("execution_id") or "") == current_execution
+
+    from herdr.node_dispatch_store import latest_expected_task_ids
+    store = ports._get_store() if callable(getattr(ports, "_get_store", None)) else None
+    expected_ids_by_node = {}
+    if store and hasattr(store, "db_path") and current_execution:
+        for task in node_tasks:
+            nid = task.get("node") or task.get("stage")
+            if nid and nid not in expected_ids_by_node:
+                exp = latest_expected_task_ids(store.db_path, workflow_id, nid, current_execution)
+                if isinstance(exp, list) and exp:
+                    expected_ids_by_node[nid] = exp
 
     settled_nodes = {}
     for task in node_tasks:
         st = str(task.get("status") or "")
         node_id = task.get("node") or task.get("stage")
-        if not node_id:
-            continue
-        if not _current_execution(task):
+        if not node_id or not _current_execution(task):
             continue
         if st in ("cleaned", "completed", "committed", "integrated", "cleanup_ready"):
             verdict = str(task.get("stage_verdict") or "")
@@ -190,9 +197,12 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
                     settled_nodes.setdefault(node_id, (task.get("task_id"), "settled_gate_pass"))
             elif not verdict:
                 # Non-gate node (e.g. implementation): deliverable settled
-                # 交付必须落在当前冻结 candidate 上；历史终态任务（candidate
-                # 不同）不是本义务的交付证据，不得替替代任务清账
-                # (PR #360 评审遗留)。
+                if node_id in expected_ids_by_node:
+                    exp = expected_ids_by_node[node_id]
+                    by_id = {t.get("task_id"): t for t in node_tasks if _current_execution(t)}
+                    done_st = ("cleaned", "completed", "committed", "integrated", "cleanup_ready")
+                    if not all(by_id.get(tid) and str(by_id[tid].get("status") or "") in done_st for tid in exp):
+                        continue
                 candidate = str(task.get("candidate_sha") or task.get("integrated_commit") or task.get("commit") or "")
                 if candidate and candidate.lower() == frozen.lower():
                     settled_nodes.setdefault(node_id, (task.get("task_id"), "settled_node_delivery"))
@@ -202,14 +212,17 @@ def converge_dangling_replacement_obligations(ports, workflow_id, tasks=None):
     for task in node_tasks:
         if (task.get("status") != "superseded"
                 or task.get("replacement_pending") is not True
-                or task.get("superseded_by")):
-            continue
-        if not _current_execution(task):
+                or task.get("superseded_by")
+                or not _current_execution(task)):
             continue
         node_id = task.get("node") or task.get("stage")
         if node_id not in settled_nodes:
             continue
         task_id = task.get("task_id")
+        if node_id in expected_ids_by_node and task_id in expected_ids_by_node[node_id]:
+            resolved_by_id, _ = settled_nodes[node_id]
+            if resolved_by_id != task_id and resolved_by_id in expected_ids_by_node[node_id]:
+                continue
         resolved_by, settle_reason = settled_nodes[node_id]
         try:
             ports._get_store().update_task_metadata(
@@ -468,20 +481,18 @@ def recover_router_isolation_tasks(ports, workflow_id, tasks=None):
     return recovered
 
 
-DEPENDENCIES = {'should_retry_finalize': ('FINALIZE_RETRY_MAX',),
- 'verify_auto_recover_redispatch': ('_attention_store', '_get_store', 'get_task',
-                                    'liveness', 'notify_attention', 'time',
-                                    'workflow_closed'),
- 'converge_dangling_replacement_obligations': ('_get_store', 'load_tasks',
-                                               '_scheduler_current_frozen_candidate_sha',
-                                               'workflow_closed'),
- 'recover_infra_failed_tasks': ('AUTO_RECOVER_MAX_ATTEMPTS', 'AUTO_RECOVER_REASONS', 'TASK_MANAGER',
-                                '_attention_store', '_get_store', '_workflow_entry',
-                                'attention_note', 'clear_stage_advance', 'get_task',
-                                'liveness', 'load_tasks', 'notify_attention',
-                                'subprocess', 'time', 'workflow_closed'),
- 'process_crash_observations': ('_get_store',),
- 'recover_router_isolation_tasks': ('TASK_MANAGER', 'get_task', 'load_tasks', 'subprocess',
-                                    'workflow_closed')}
+DEPENDENCIES = {
+    'should_retry_finalize': ('FINALIZE_RETRY_MAX',),
+    'verify_auto_recover_redispatch': (
+        '_attention_store', '_get_store', 'get_task', 'liveness', 'notify_attention', 'time', 'workflow_closed'),
+    'converge_dangling_replacement_obligations': (
+        '_get_store', 'load_tasks', '_scheduler_current_frozen_candidate_sha', 'workflow_closed'),
+    'recover_infra_failed_tasks': (
+        'AUTO_RECOVER_MAX_ATTEMPTS', 'AUTO_RECOVER_REASONS', 'TASK_MANAGER', '_attention_store',
+        '_get_store', '_workflow_entry', 'attention_note', 'clear_stage_advance', 'get_task',
+        'liveness', 'load_tasks', 'notify_attention', 'subprocess', 'time', 'workflow_closed'),
+    'process_crash_observations': ('_get_store',),
+    'recover_router_isolation_tasks': ('TASK_MANAGER', 'get_task', 'load_tasks', 'subprocess', 'workflow_closed'),
+}
 
 __all__ = tuple(DEPENDENCIES)
