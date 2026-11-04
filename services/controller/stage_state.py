@@ -194,12 +194,15 @@ def is_node_complete(ports, workflow_id, node_id):
             ):
                 expected_ids = None
             elif current_candidate and any(
-                any(value and value != current_candidate for value in (
+                not any(value == current_candidate for value in (
                     task.get("candidate_sha"), task.get("commit"),
                     task.get("integrated_commit"),
-                ))
+                ) if value)
                 for task in recorded
             ):
+                # candidate_sha is the task's input/base; commit/integrated_commit
+                # identify its output. An implementation may advance A -> B, so
+                # either side can bind this dispatch inventory to current B.
                 expected_ids = None
         if isinstance(expected_ids, list) and expected_ids:
             required_ids = expected_ids
