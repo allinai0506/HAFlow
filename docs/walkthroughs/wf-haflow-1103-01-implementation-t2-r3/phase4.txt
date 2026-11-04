@@ -1,0 +1,90 @@
+=== delivery.txt ===
+S4 delivery: HTTPS public-host and SSH alias boundary
+Task: wf-haflow-1103-01-implementation-t2-r3
+Plan: n-1793757947062-b485, T2 only
+Frozen base and unchanged HEAD: 654bff4f12f1f5d50b51d4079db6a68c3f93fd35; implementation is an uncommitted workspace patch on this candidate. No branch switch or new commit.
+
+Changed files:
+- herdr/pr_delivery.py: repository_identity now chooses HTTPS, ssh://, or scp-like grammar before host recognition. HTTPS recognizes only exact github.com/gitee.com (case insensitive, numeric port allowed). Only SSH forms accept github-*/gitee-* aliases. scp has colon separator without URL-style port.
+- herdr/review_closure.py: matching transport boundaries for parse_remote_identity, retaining GitHub-only closure support and None for Gitee.
+- tests/test_pr_delivery_alias_and_template_ceiling.py: appended 39 parameterized cases; original cases retained. Covers enterprise/suffix HTTPS, HTTPS :443, SSH :2222, host case and owner/repo case preservation, scp port refusal, unsupported schemes, and deferred provider classification.
+- docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/: local phase reports and validation evidence requested by dispatch; shared publication uses managed checkpoint/note interfaces.
+
+Causal proof:
+Before production edits: target suite 20 failed, 29 passed in 0.58s; red.txt retains assertion failures. Existing single grammar permitted aliases for HTTPS, and ambiguous colon/digit syntax accepted scp URL-style ports.
+After fix: target suite 49 passed in 0.36s (targeted.txt); initial combined suite 119 passed in 64.49s (green.txt). Final post-cleanup standard local run is captured in final-tests.txt; managed wrapper discrepancy is detailed below.
+Actual paths: publication Git origin/push URL -> repository_identity -> canonical provider tuple; Review Closure git_named_remotes -> parse_remote_identity -> delivery identity; collect_deferred_evidence -> parse_remote_identity -> unsupported-forge probe metadata or verifiable GitHub refusal. Existing wrapup tests exercise real CLI, temporary Git repositories/SQLite, persisted receipt and transition checks; fake gh replaces only external provider. Joint candidate tests exercise delivery publication against controlled resources. New deferred cases replace Git URL inventory and external probe only, retaining actual classification.
+
+Cleanup and gates:
+Bounded ai-slop-cleaner plan in cleanup-plan.txt. No dead additions, dependencies or needless wrappers found; no shared parser module introduced. Corrected only new test import ordering; no unrelated cleanup.
+compileall herdr/services/bin/tests and git diff --check: exit 0 (managed receipts). No bin source edited.
+Inner-loop first score 96.5 due one added I001; corrected. Second score 100.0, converged. Collection smoke and differential lint are not functional acceptance. Existing full-repo lint baseline is 7464, no new lint after cleanup; standalone touched-file ruff still reports existing violations and is not claimed clean.
+verify-baseline: initial BASELINE_MATCH; final TASK_CHANGED (expected implementation patch), zero commits ahead and frozen HEAD retained. Business changes confined to planned three-file T2 set; task report files are separately identified. No ordinary git status used for scope proof.
+
+Risks and limits:
+No SSH config or network target resolution added: alias trust remains the planned SSH transport+host naming contract. Enterprise HTTPS now intentionally unsupported instead of mapped to a public provider. No new state, persistence fields, locks, async behavior or model input; concurrency/recovery/model budgets unchanged.
+T1 authorization/StateStore repair is not modified or accepted by this worker. No template, topology or Controller edit. No production service, actual provider mutation, merge, deployment, push or PR creation. No CI execution or independent Codex review performed; these are downstream requirements, not PASS. No configured machine delivery contract; structured completion records work submission only.
+This is a bounded parser bug fix with executable regression coverage; no architecture/Wiki contract expansion or duplicate general lesson added. Historical memory was used only to locate the prior blocked T2 symptom; every code claim above was rechecked in this clone.
+Next authorized action: controller collects the local patch and schedules independent validation/review. S4 self-test result does not assert MERGE_READY or end-to-end workflow acceptance.
+
+Managed wrapper environment caveat (latest evidence, supersedes any implication of a wrapper PASS above):
+The post-cleanup tool-run suite returned 117 passed / 2 failed, because the wrapper's worker environment rejects operator bypass before the pre-existing tests reach review closure assertions (Issue #307/B2). Failed cases: test_bypass_gate_completion_requires_receipt; test_bypass_gate_wrapup_completion_guards_direct_save_and_fails_closed_on_advanced_head. Receipt obs_5d82b76760724a689329fcfc5b707d7c sha256 02e99d037ccd25fa63c28a150aefc468a9def332a7d339234316132b06ace1e1. No test assertion or permission implementation changed. Standard local suite is rerun after cleanup to distinguish supported local test environment from wrapper restrictions.
+Managed verify-baseline returned Task not found, receipt obs_2d27d5a72ad6477fa2de8b0f801802b9 sha256 f7cb52f9abe980b57eda16f710a8514b462f7c812cf72659f68282eee698cbcf; standard dispatched CLI invocation resolves this Task and provides baseline.txt. This wrapper failure is not classified as a baseline PASS.
+
+Final acceptance boundary: acceptance-evidence-gate was consulted; its automated VERIFIED receipt requires a clean committed HEAD. This worker is explicitly authorized to submit an uncommitted patch on a frozen HEAD, not to commit/change candidate or perform downstream acceptance. Accordingly its final committed-candidate gate is UNVERIFIED, not bypassed; S4 local tests and managed evidence are supplied for the controller's later gate. This does not prevent the requested implementation/self-test handoff.
+
+Final post-cleanup results:
+Standard local combined command: 119 passed in 69.10s, exit 0 (final-tests.txt). Managed worker-wrapper target-only command: 49 passed in 0.19s, exit 0, obs_5bfd5e0019d64833b7e651a9ae48107d sha256 639766bbd61d1ead265fa3b040ecd78e2333f98afaf445b68636ec8806de75cd. Thus the requested parser behavior is tested in both execution contexts; the two operator-bypass wrapper failures remain an explicit environment limitation, not silently counted as successful.
+
+
+=== final-tests.txt ===
+........................................................................ [ 60%]
+...............................................                          [100%]
+119 passed in 69.10s (0:01:09)
+
+
+=== targeted.txt ===
+.................................................                        [100%]
+49 passed in 0.36s
+
+
+=== receipts.txt ===
+checkpoint phase1 obs_ac74a3b9140b43d886b9ccff8a8bcf20 67e0654b1b83373c5ed4d3e18d020bed03d365ed1a7149c90065bbcff3a6eeb8
+checkpoint phase2 obs_a2f17f9e0cae4ec385b749f5c3868719 7ea988cb3672b1ae02fac639201255140e55c9b9724694744f9c297b40a9cfbd
+checkpoint phase3 obs_7243f6f977cf4cf2a640a38247336fcb 61c5e10fe0cd64554e46a3e576504bc524d61a91bbe4f45558bd07287540db2b
+compileall exit0 obs_0a4c92564cca4c9eae7fac1b72a96669 e1e716e4fb64922a06f63aa1690332301d13d9064a01177e611217434b5ea695
+diff-check exit0 obs_f663fab5ff4d460cb10d10466ee03d9d 747a44770d89cd5827422f1c3d7619eb0a0df1ad7e0af3803d8a8d13a230c6ca
+worker-wrapper-tests exit1 obs_5d82b76760724a689329fcfc5b707d7c 02e99d037ccd25fa63c28a150aefc468a9def332a7d339234316132b06ace1e1
+worker-wrapper-baseline task-not-found exit1 obs_2d27d5a72ad6477fa2de8b0f801802b9 f7cb52f9abe980b57eda16f710a8514b462f7c812cf72659f68282eee698cbcf
+shared-note n-1793801899715-1884 (wrapper caveat in subsequent phase3 and final note)
+worker-wrapper-target exit0 obs_5bfd5e0019d64833b7e651a9ae48107d 639766bbd61d1ead265fa3b040ecd78e2333f98afaf445b68636ec8806de75cd
+
+
+=== baseline.txt ===
+TASK_CHANGED:
+- [tracked] herdr/pr_delivery.py
+- [tracked] herdr/review_closure.py
+- [tracked] tests/test_pr_delivery_alias_and_template_ceiling.py
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/baseline.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/cleanup-plan.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/delivery.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/final-tests.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/green.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/phase1.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/phase2.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/phase3.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/receipts.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/red.txt
+- [untracked] docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/targeted.txt
+HERDR_BASELINE_RESULT={"task_id": "wf-haflow-1103-01-implementation-t2-r3", "baseline_match": false, "changes": [{"type": "tracked", "path": "herdr/pr_delivery.py", "baseline": "__NOT_PRESENT__", "current": "e6c7f38253907fa315621186e5b273bc2bd0789765c05e1214ba740324a93630"}, {"type": "tracked", "path": "herdr/review_closure.py", "baseline": "__NOT_PRESENT__", "current": "d542021c9271ffccf335f2d6dafd35b00e80f78a01ce477ee9b9c5fe62ee4b29"}, {"type": "tracked", "path": "tests/test_pr_delivery_alias_and_template_ceiling.py", "baseline": "__NOT_PRESENT__", "current": "63938e7362a958c62d971e77e9076556724a60f9065928b49f302de962346475"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/baseline.txt", "baseline": "__NOT_PRESENT__", "current": "d72357780589a6bb230c639cdc71e04f0862c0114005aa75475a5b3529a06d67"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/cleanup-plan.txt", "baseline": "__NOT_PRESENT__", "current": "0359e36103def04f09900b98bd7eba0bf7e8889f8bebb29d137bbb9f0c60954f"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/delivery.txt", "baseline": "__NOT_PRESENT__", "current": "049dfe09c9818d6420a2a9b190a6892cec11fae4fc8d0ed01e51fac632cae49a"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/final-tests.txt", "baseline": "__NOT_PRESENT__", "current": "ff33590c796f45fd6f3e26e866d756cd8301dd1058729beda19d5c0b17bdea5a"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/green.txt", "baseline": "__NOT_PRESENT__", "current": "7aa33d8b4ba4168619a847a07c554a9aa1d18258b8d68a0099e06e84510feb57"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/phase1.txt", "baseline": "__NOT_PRESENT__", "current": "67e0654b1b83373c5ed4d3e18d020bed03d365ed1a7149c90065bbcff3a6eeb8"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/phase2.txt", "baseline": "__NOT_PRESENT__", "current": "7ea988cb3672b1ae02fac639201255140e55c9b9724694744f9c297b40a9cfbd"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/phase3.txt", "baseline": "__NOT_PRESENT__", "current": "61c5e10fe0cd64554e46a3e576504bc524d61a91bbe4f45558bd07287540db2b"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/receipts.txt", "baseline": "__NOT_PRESENT__", "current": "1aadd0cfd068d4ba566c0640652ffc55f4746244717fc93ef9e2dddaced561bd"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/red.txt", "baseline": "__NOT_PRESENT__", "current": "08ff49c1f60af1c1cb337fb9637362b6d7e840a974d779bf0e0945a91894c776"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1103-01-implementation-t2-r3/targeted.txt", "baseline": "__NOT_PRESENT__", "current": "a1d2457c906847cc4714edf296d3e9bf80997485230957897e530993c2561ce5"}], "worktree_changed": true, "commits_ahead": 0, "baseline_commit": "654bff4f12f1f5d50b51d4079db6a68c3f93fd35", "head": "654bff4f12f1f5d50b51d4079db6a68c3f93fd35", "basis": "baseline_commit"}
+
+
+=== Inner-loop ===
+# 第 2 轮评估诊断报告 (Evaluation Succeeded)
+
+✅ **所选命令满足通用评分条件。**
+- 所选测试通过数：0/0
+- 质量/静态扫描：满足配置的评分条件
+
+业务验收：unknown。业务标准以当前候选、Run 和 epoch 绑定的 checkpoint 回执为准。
+本轮通用评分已收敛；提交与工单完成仍需各自的验收及授权依据。
