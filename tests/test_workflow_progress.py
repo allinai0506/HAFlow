@@ -78,19 +78,22 @@ def test_temporary_verifier_concurrency_is_not_a_human_budget_block():
 
 
 def test_recovery_targets_unfinished_dynamic_task_not_integrated_sibling():
-    failed_gate = task('review', execution_id='generation-1')
+    output_sha = 'b' * 40
+    workflow = dict(WF, candidate_sha=output_sha)
+    failed_gate = task('review', execution_id='generation-1', candidate_sha=output_sha)
     integrated = task(
         'implementation', task_id='impl-t1', status='integrated', stage_verdict='pass',
-        execution_id='generation-1', commit=SHA, integrated_commit=SHA,
+        execution_id='generation-1', candidate_sha=SHA, commit=output_sha,
+        integrated_commit=output_sha,
         integration_mode='git',
     )
     timed_out = task(
         'implementation', task_id='impl-t2', status='superseded', stage_verdict='',
         execution_id='generation-1', failure_reason='hard_timeout_watchdog',
-        supersede_reason='auto-recover: infrastructure failure',
+        supersede_reason='auto-recover: infrastructure failure', candidate_sha=SHA,
     )
     result = assess_workflow(
-        WF, CFG, [failed_gate, integrated, timed_out],
+        workflow, CFG, [failed_gate, integrated, timed_out],
         expected_task_ids_by_node={'implementation': ['impl-t1', 'impl-t2']},
     )
     obligation = result['obligations'][0]

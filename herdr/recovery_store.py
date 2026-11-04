@@ -111,17 +111,21 @@ def _human_wait_detail(payload, status, detail):
                 'operation id/version. A started repair requires verify before replacement.'}
 
 
-def _dispatch_expected_task_ids(conn, workflow_id):
+def _dispatch_expected_task_ids(conn, workflow):
     """Read recent durable dynamic inventories, newest first for each node."""
     rows = conn.execute("""SELECT payload_json,detail_json FROM workflow_recovery_operations
         WHERE workflow_id=? AND identity_key LIKE 'node_dispatch:%'
-        ORDER BY id DESC LIMIT 1000""", (workflow_id,)).fetchall()
+        ORDER BY id DESC LIMIT 1000""", (workflow['workflow_id'],)).fetchall()
+    generation = [workflow.get('execution_id'), workflow.get('created_at'),
+                  workflow.get('reopened_at')]
     inventories = {}
     for row in rows:
         try:
             payload = json.loads(row['payload_json'] or '{}')
             detail = json.loads(row['detail_json'] or '{}')
         except (TypeError, ValueError):
+            continue
+        if payload.get('generation') != generation:
             continue
         node_id = payload.get('node_id')
         expected = detail.get('expected_task_ids')
@@ -134,7 +138,7 @@ def _dispatch_expected_task_ids(conn, workflow_id):
 
 
 def _assess_current_workflow(conn, assess_workflow, workflow, config, tasks):
-    inventories = _dispatch_expected_task_ids(conn, workflow['workflow_id'])
+    inventories = _dispatch_expected_task_ids(conn, workflow)
     if inventories:
         return assess_workflow(
             workflow, config, tasks, expected_task_ids_by_node=inventories

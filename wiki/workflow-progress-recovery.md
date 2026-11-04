@@ -194,7 +194,7 @@ Evidence：`tests/test_recovery_autonomy.py#test_progress_backlog_after_restart_
 
 ## FACT：动态派发恢复归因使用已持久化清单（2026-11-04，隔离源码）
 
-恢复评估对动态多任务节点优先读取最新 node-dispatch 回执中的 `expected_task_ids`，并校验 workflow、execution 与冻结候选。对每个派发目标沿 `superseded_by` 链解析谱系头：已集成的兄弟任务不再被错误选作恢复目标；未完成且无 successor 的基础设施失败任务仍保留为阻塞目标。当前清单缺失或身份不匹配时不借用历史事实。
+恢复评估对动态多任务节点只读取当前 workflow generation 的 node-dispatch 回执，并校验其中的 `expected_task_ids` 与 Task execution。并行任务可能从候选 A 出发，T1 的集成输出推进为候选 B，而 T2 仍记录输入 A；同 generation 的任务无需逐个引用最新输出 SHA。对每个派发目标沿 `superseded_by` 链解析谱系头：已集成的兄弟任务不再被错误选作恢复目标；未完成且无 successor 的基础设施失败任务仍保留为阻塞目标。旧 execution 清单不参与当前评估。
 
 既有 `retry` 操作只有在当前动态清单把目标从旧任务改为明确的未完成基础设施失败任务时才重新进入 pending；其他 `waiting_human` 决定不自动重开。节点并发容量与生命周期派发预算分开判断，临时容量占用不会永久冻结恢复义务。
 

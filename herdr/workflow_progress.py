@@ -187,7 +187,7 @@ def candidate_responsible_source(workflow, tasks, candidate_sha, retry_node=None
     return None, []
 
 
-def _unfinished_dispatch_targets(workflow, expected_ids, tasks, candidate):
+def _unfinished_dispatch_targets(workflow, expected_ids, tasks):
     """Resolve a dynamic dispatch inventory to its unfinished lineage heads."""
     if not isinstance(expected_ids, list) or not expected_ids:
         return None
@@ -197,13 +197,8 @@ def _unfinished_dispatch_targets(workflow, expected_ids, tasks, candidate):
         task = by_id.get(task_id)
         if task is None:
             continue  # An expected but absent registration is still outstanding.
-        candidate_values = {
-            task.get('candidate_sha'), task.get('commit'), task.get('integrated_commit'),
-            (task.get('wrapup_delivery') or {}).get('integrated_sha'),
-        } - {None, ''}
-        if (task.get('workflow_id') != wid or task.get('execution_id') != execution_id
-                or candidate not in candidate_values):
-            return None  # Historical inventory: fail closed to ordinary attribution.
+        if task.get('workflow_id') != wid or task.get('execution_id') != execution_id:
+            return None  # Another workflow or execution cannot own this inventory.
 
     done = {'completed', 'committed', 'integrated', 'cleanup_ready', 'cleaned'}
     targets = set()
@@ -314,7 +309,6 @@ def assess_workflow(workflow, config, tasks, *, expected_task_ids_by_node=None):
                 workflow,
                 (expected_task_ids_by_node or {}).get(retry),
                 tasks,
-                candidate,
             )
             if dispatch_targets:
                 # Dynamic planning makes all dispatched subtasks part of the

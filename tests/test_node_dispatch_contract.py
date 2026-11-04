@@ -541,6 +541,34 @@ def test_old_resolved_history_cannot_hide_current_dispatch_from_scan(scene):
     assert current['status'] == 'resolved'
 
 
+def test_latest_dynamic_inventory_is_scoped_to_current_execution(scene):
+    import json
+    from herdr import node_dispatch_store as nd, state_db
+
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    operation = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    nd.claim(scene.store.db_path, operation['id'], 'owner', now=1000)
+    nd.start(scene.store.db_path, operation['id'], 'owner', now=1000,
+             expected_task_ids=['current-task'])
+
+    conn = state_db.get_db_connection(scene.store.db_path)
+    stale_payload = {
+        'kind': 'node_dispatch', 'node_id': 'implementation',
+        'generation': ['old-execution', 1, None],
+    }
+    conn.execute('''INSERT INTO workflow_recovery_operations
+        (identity_key,workflow_id,payload_json,detail_json,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?)''', (
+        'node_dispatch:old-execution', 'wf', json.dumps(stale_payload),
+        json.dumps({'expected_task_ids': ['old-task']}), 'superseded', 2000, 2000,
+    ))
+    conn.close()
+
+    assert nd.latest_expected_task_ids(
+        scene.store.db_path, 'wf', 'implementation', 'execution-1'
+    ) == ['current-task']
+
+
 def test_queued_dispatch_survives_lost_in_memory_queue_with_bounded_lease(scene):
     from herdr import node_dispatch_store as nd
     scene.ctrl.check_workflow_stage_advance('wf')

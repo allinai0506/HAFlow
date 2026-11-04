@@ -109,6 +109,7 @@ def test_recovery_obligation_uses_dynamic_dispatch_inventory(tmp_path):
     conn = state_db.get_db_connection(path)
     expected = ['impl-t1', 'impl-t2']
     candidate = 'b' * 40
+    input_candidate = 'a' * 40
     workflow = {
         'workflow_id': 'w', 'status': 'running', 'execution_id': 'gen',
         'candidate_sha': candidate,
@@ -121,13 +122,13 @@ def test_recovery_obligation_uses_dynamic_dispatch_inventory(tmp_path):
          'candidate_sha': candidate},
         {'task_id': 'impl-t1', 'workflow_id': 'w', 'run_id': 'impl-t1-run',
          'execution_id': 'gen', 'node': 'implementation', 'status': 'integrated',
-         'integration_mode': 'git', 'stage_verdict': 'pass', 'candidate_sha': candidate,
+         'integration_mode': 'git', 'stage_verdict': 'pass', 'candidate_sha': input_candidate,
          'commit': candidate, 'integrated_commit': candidate},
         {'task_id': 'impl-t2', 'workflow_id': 'w', 'run_id': 'impl-t2-run',
          'execution_id': 'gen', 'node': 'implementation', 'status': 'superseded',
          'stage_verdict': '', 'failure_reason': 'hard_timeout_watchdog',
          'supersede_reason': 'auto-recover: infrastructure failure',
-         'candidate_sha': candidate},
+         'candidate_sha': input_candidate},
     ]
 
     # The old assessment targets T1, so the previous retry decision parks.
@@ -139,13 +140,21 @@ def test_recovery_obligation_uses_dynamic_dispatch_inventory(tmp_path):
                     'operator': 'admin', 'missing_task_ids': ['impl-t1']}),
         old['id'],
     ))
-    payload = {'kind': 'node_dispatch', 'node_id': 'implementation'}
+    payload = {'kind': 'node_dispatch', 'node_id': 'implementation',
+               'generation': ['gen', None, None]}
     detail = {'expected_task_ids': expected}
     conn.execute('''INSERT INTO workflow_recovery_operations
         (identity_key,workflow_id,payload_json,detail_json,status,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?)''', (
             'node_dispatch:test', 'w', json.dumps(payload), json.dumps(detail),
             'superseded', 1, 1,
+        ))
+    stale_payload = {**payload, 'generation': ['old-generation', None, None]}
+    conn.execute('''INSERT INTO workflow_recovery_operations
+        (identity_key,workflow_id,payload_json,detail_json,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?)''', (
+            'node_dispatch:stale', 'w', json.dumps(stale_payload),
+            json.dumps({'expected_task_ids': ['impl-t1']}), 'superseded', 2, 2,
         ))
     obligations = rs.ensure_obligations(conn, workflow, config, tasks, now=2)
     assert obligations[0]['payload']['affected_task_ids'] == ['impl-t2']

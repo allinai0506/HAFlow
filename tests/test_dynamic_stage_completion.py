@@ -53,6 +53,13 @@ def test_implementation_inventory_survives_candidate_advance_from_input_to_outpu
         "candidate_sha": "a" * 40,
         "commit": "b" * 40,
         "integrated_commit": "b" * 40,
+    }, {
+        "task_id": "impl-2",
+        "workflow_id": workflow_id,
+        "node": "implementation",
+        "status": "superseded",
+        "execution_id": "exec-1",
+        "candidate_sha": "a" * 40,
     }]
     ports = SimpleNamespace(
         load_tasks=lambda: tasks,

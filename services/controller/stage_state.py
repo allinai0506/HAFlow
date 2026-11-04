@@ -169,8 +169,13 @@ def is_node_complete(ports, workflow_id, node_id):
         # appear complete while sibling tasks were never launched or finished.
         from herdr.node_dispatch_store import operation_for_node
 
+        store = ports._get_store()
+        workflow = (store.get_workflow(workflow_id) or {}) if callable(
+            getattr(store, "get_workflow", None)
+        ) else {}
+        current_execution = workflow.get("execution_id")
         operation = operation_for_node(
-            ports._get_store().db_path, workflow_id, node_id
+            store.db_path, workflow_id, node_id
         )
         detail = operation.get("detail") if isinstance(operation, dict) else None
         expected_ids = detail.get("expected_task_ids") if isinstance(detail, dict) else None
@@ -178,31 +183,12 @@ def is_node_complete(ports, workflow_id, node_id):
             from herdr.node_dispatch_store import latest_expected_task_ids
 
             expected_ids = latest_expected_task_ids(
-                ports._get_store().db_path, workflow_id, node_id
+                store.db_path, workflow_id, node_id, current_execution
             )
-        store = ports._get_store()
-        if isinstance(expected_ids, list) and expected_ids and callable(
-            getattr(store, "get_workflow", None)
-        ):
-            workflow = store.get_workflow(workflow_id) or {}
+        if isinstance(expected_ids, list) and expected_ids and current_execution:
             by_id = {task.get("task_id"): task for task in tasks}
             recorded = [by_id[task_id] for task_id in expected_ids if task_id in by_id]
-            current_execution = workflow.get("execution_id")
-            current_candidate = workflow.get("candidate_sha")
-            if current_execution and any(
-                task.get("execution_id") != current_execution for task in recorded
-            ):
-                expected_ids = None
-            elif current_candidate and any(
-                not any(value == current_candidate for value in (
-                    task.get("candidate_sha"), task.get("commit"),
-                    task.get("integrated_commit"),
-                ) if value)
-                for task in recorded
-            ):
-                # candidate_sha is the task's input/base; commit/integrated_commit
-                # identify its output. An implementation may advance A -> B, so
-                # either side can bind this dispatch inventory to current B.
+            if any(task.get("execution_id") != current_execution for task in recorded):
                 expected_ids = None
         if isinstance(expected_ids, list) and expected_ids:
             required_ids = expected_ids
