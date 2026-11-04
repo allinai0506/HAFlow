@@ -71,7 +71,10 @@ else:
  print(json.dumps({'result':{'agent':{'name':'owned','agent':'codex','agent_session':session,'agent_status':'idle' if mode!='unknown' else 'starting'}}}))
 """)
     native.chmod(0o755)
-    env=dict(os.environ,HOME=str(home),PATH=str(bindir)+os.pathsep+os.environ['PATH'],HERDR_CLONES_DIR=str(tmp_path/'clones'),HERDR_STATE_DB=str(tmp_path/'state.db'),TEST_NATIVE_CALLS=str(tmp_path/'calls.jsonl'),TEST_NATIVE_MODE=mode,HERDR_RUN_ID='test-run')
+    # Keep the native ``starting`` fixture bounded well inside the subprocess
+    # deadline. The default 8s readiness window plus worker startup/preflight
+    # can exceed 12s on the loaded self-hosted macOS runner.
+    env=dict(os.environ,HOME=str(home),PATH=str(bindir)+os.pathsep+os.environ['PATH'],HERDR_CLONES_DIR=str(tmp_path/'clones'),HERDR_STATE_DB=str(tmp_path/'state.db'),TEST_NATIVE_CALLS=str(tmp_path/'calls.jsonl'),TEST_NATIVE_MODE=mode,HERDR_RUN_ID='test-run',HERDR_WORKER_STARTUP_TIMEOUT='1')
     result=subprocess.run([sys.executable,str(ROOT/'services/herdr-worker.py'),'--task-id','test-native','--source',str(tmp_path),'--agent','codex','--execution-mode','context','--pane-id','test-pane'],env=env,text=True,capture_output=True,timeout=12)
     assert (result.returncode==0) is success, result.stderr
     assert ('HERDR_WORKER_RESULT=' in result.stdout) is success
