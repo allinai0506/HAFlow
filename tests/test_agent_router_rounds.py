@@ -159,11 +159,12 @@ class TestAgentRouterRounds(unittest.TestCase):
              patch.object(agent_router, "RESERVATIONS_FILE", self.reservations_file), \
              patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file):
 
-            # Round 1 and 2 are within budget
+            # Round 1, 2, and 3 are within budget (default MAX_REMEDIATION_ROUNDS = 3)
             choose_agent(self.workflow_id, "craft", "task", dispatch_round=1)
             choose_agent(self.workflow_id, "craft", "task", dispatch_round=2)
+            choose_agent(self.workflow_id, "craft", "task", dispatch_round=3)
 
-            # Round 3 exceeds MAX_REMEDIATION_ROUNDS = 2
+            # Round 4 exceeds MAX_REMEDIATION_ROUNDS = 3
             with self.assertRaises(RouterRemediationExhausted) as ctx:
                 choose_agent(
                     self.workflow_id,
@@ -172,6 +173,61 @@ class TestAgentRouterRounds(unittest.TestCase):
                     dispatch_round=MAX_REMEDIATION_ROUNDS + 1,
                 )
             self.assertIn("Remediation round limit exceeded", str(ctx.exception))
+
+    def test_remediation_rounds_configurable_via_node_policy(self):
+        """Verify node_policy.max_remediation_rounds overrides the default cap."""
+        cfg_custom = {
+            "nodes": [
+                {
+                    "id": "craft",
+                    "role": "implementation",
+                    "agent_policy": {
+                        "max_remediation_rounds": 5,
+                    },
+                },
+            ]
+        }
+        with patch.object(agent_router, "_get_store", return_value=self.store), \
+             patch.object(agent_router, "workflow_config_for", return_value=cfg_custom), \
+             patch.object(agent_router, "POOLS_FILE", self.pools_file), \
+             patch.object(agent_router, "RESERVATIONS_FILE", self.reservations_file), \
+             patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file):
+
+            # Round 4 and 5 are within custom node budget (5)
+            choose_agent(self.workflow_id, "craft", "task", dispatch_round=4)
+            choose_agent(self.workflow_id, "craft", "task", dispatch_round=5)
+
+            # Round 6 exceeds custom node budget (5)
+            with self.assertRaises(RouterRemediationExhausted) as ctx:
+                choose_agent(self.workflow_id, "craft", "task", dispatch_round=6)
+            self.assertIn("round 6 > MAX_REMEDIATION_ROUNDS (5)", str(ctx.exception))
+
+    def test_remediation_rounds_configurable_via_workflow_policy(self):
+        """Verify workflow-level agent_policy.max_remediation_rounds applies when node doesn't override."""
+        cfg_custom = {
+            "agent_policy": {
+                "max_remediation_rounds": 4,
+            },
+            "nodes": [
+                {
+                    "id": "craft",
+                    "role": "implementation",
+                },
+            ]
+        }
+        with patch.object(agent_router, "_get_store", return_value=self.store), \
+             patch.object(agent_router, "workflow_config_for", return_value=cfg_custom), \
+             patch.object(agent_router, "POOLS_FILE", self.pools_file), \
+             patch.object(agent_router, "RESERVATIONS_FILE", self.reservations_file), \
+             patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file):
+
+            # Round 4 is within workflow-level budget (4)
+            choose_agent(self.workflow_id, "craft", "task", dispatch_round=4)
+
+            # Round 5 exceeds workflow-level budget (4)
+            with self.assertRaises(RouterRemediationExhausted) as ctx:
+                choose_agent(self.workflow_id, "craft", "task", dispatch_round=5)
+            self.assertIn("round 5 > MAX_REMEDIATION_ROUNDS (4)", str(ctx.exception))
 
     def test_feature_flag_disabled_falls_back_to_global_accumulation(self):
         """When HERDR_ROUTER_ROUND_SCOPED_ISOLATION=0, old flat exclusion applies and exhausts pool."""

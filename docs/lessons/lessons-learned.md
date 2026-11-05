@@ -9607,3 +9607,46 @@ git diff --check
 - `herdr/plan_parser.py#extract_challenger_verdict`
 - `herdr/stage_skills.py#is_staged_dev_flow_workflow`
 - `tests/test_plan_causal_dispatch.py#test_challenger_blocked_triggers_same_node_redo_and_sequential_causal_redispatch`
+
+
+---
+
+## 228. 多角色与重试节点因果轮次膨胀导致 Agent Router 熔断拒派：轮次常数解耦、分层策略重写与重试预算弹性（2026-11-05）
+
+### 问题背景
+
+真实工作流 `wf-haflow-1103-01` 与 `wf-haflow-1105-01` 在 Same-Node Redo（节点内返工）修复完成后，再度卡死在 `plan` 阶段：
+1. `wf-haflow-1105-01-plan-executor-r2` 顺利修复技术方案（B1 缺陷），成功落盘并由控制器自动验收为 `cleaned`；
+2. 控制器检测到需要重审新方案，尝试派发 `wf-haflow-1105-01-plan-challenger-r3`（因为前置质询者此前因看门狗超时曾重试一次为 `-r2`，根据 `herdr/task_resources.py` 的资源不变式，替换任务继承前序 round 并递增为 3）；
+3. 然而 `herdr/agent_router.py` 硬编码 `MAX_REMEDIATION_ROUNDS = 2`，在 `_choose_agent_locked` 中当 `r_int > 2` 时直接抛出 `RouterRemediationExhausted`；
+4. 该异常导致派发被判定为 `dispatch_refused`（`reason: router_isolation_rejected`），写入 `attention.json` 并生成恢复操作 396415 挂起在 `waiting_human`；
+5. 且 `MAX_REMEDIATION_ROUNDS` 未读取环境变量 `HERDR_MAX_REMEDIATION_ROUNDS`，亦未解析节点策略 `node_policy.max_remediation_rounds` 或工作流策略 `wf_policy.max_remediation_rounds`，导致多角色节点或经历过非致命看门狗重试的审查任务永久无法派发。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 任务级重试轮次与阶段级返工轮次混淆 | 任务的 `dispatch_round`（包含单工位看门狗超时重试）会自然累加，在多角色交替节点（如架构师与质询者）中易超过 2 | 默认熔断预算放宽至 3 轮（允许 1 次单工位非致命故障重试 + 1 次节点级修案重审闭环），Round 4 严格熔断防死循环 |
+| 路由器硬编码全局常数无法按需覆盖 | `MAX_REMEDIATION_ROUNDS = 2` 写死在代码顶层，工作流配置与操作员无法按节点复杂度配置上限 | 遵循分层配置覆盖规范：优先读取 `node_policy.max_remediation_rounds`，其次 `wf_policy.max_remediation_rounds`，再次环境变量 `HERDR_MAX_REMEDIATION_ROUNDS`，默认保底为 3 |
+
+### 操作规范（已固化到 `herdr/agent_router.py` 与回归测试）
+
+1. **环境变量可配与合理默认**：`herdr/agent_router.py` 将 `MAX_REMEDIATION_ROUNDS` 设为 `int(os.environ.get("HERDR_MAX_REMEDIATION_ROUNDS", "3"))`。
+2. **分层策略动态解析**：在 `_choose_agent_locked` 中优先解析 `node_policy.get("max_remediation_rounds")` 与 `wf_policy.get("max_remediation_rounds")`，获取 `effective_max_rounds` 并执行熔断判定。
+3. **熔断错误信息对齐**：熔断错误提示中回显当前生效的 `effective_max_rounds`，便于线上排障。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_agent_router_rounds.py
+pytest -q tests/test_agent_router_*.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- 实际工作流故障现场：`wf-haflow-1103-01`、`wf-haflow-1105-01`
+- `herdr/agent_router.py#_choose_agent_locked`
+- `herdr/task_resources.py#begin_launch_intent`
+- `tests/test_agent_router_rounds.py#TestAgentRouterRounds`
