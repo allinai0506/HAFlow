@@ -1623,6 +1623,43 @@ HERDR_GATE_VERDICT: BLOCKED
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_44_canonical_verdict_rejects_conditional_approval(self):
+        """Scenario 44 (Codex P2): Canonical HERDR_GATE_VERDICT rejects conditional approval as blocked."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # Conditional approval in canonical header must be blocked, not pass
+        text1 = "HERDR_GATE_VERDICT: 修复上述问题后方可通过。"
+        v1, r1 = extract_challenger_verdict(text1)
+        self.assertEqual(v1, "blocked", f"Should be blocked, got {v1}: {r1}")
+        self.assertIn("conditional approval rejected as blocked", r1)
+
+        text2 = "HERDR_GATE_VERDICT: 待补充错误处理后方可批准实施"
+        v2, r2 = extract_challenger_verdict(text2)
+        self.assertEqual(v2, "blocked", f"Should be blocked, got {v2}: {r2}")
+
+        # Statistics only in canonical header does not produce pass
+        text3 = "HERDR_GATE_VERDICT: 2 failed, 5 passed"
+        v3, r3 = extract_challenger_verdict(text3)
+        self.assertEqual(v3, "missing", f"Should be missing (no terminal approval), got {v3}: {r3}")
+
+    def test_45_verdict_lines_exclude_test_counts_from_pass_detection(self):
+        """Scenario 45 (Codex P2): Test statistics alone (e.g. 2 failed, 5 passed) do not trigger false-positive pass."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # '5 passed' inside test stats must NOT be parsed as review approval
+        text1 = "结论：2 failed, 5 passed"
+        v1, r1 = extract_challenger_verdict(text1)
+        self.assertEqual(v1, "missing", f"Test statistics alone must be missing, got {v1}: {r1}")
+
+        text2 = "最终裁决：0 failed, 10 passed"
+        v2, r2 = extract_challenger_verdict(text2)
+        self.assertEqual(v2, "missing", f"Test statistics alone must be missing, got {v2}: {r2}")
+
+        # Explicit approval accompanied by test stats passes correctly
+        text3 = "最终结论：2 failed, 5 passed 符合预期，建议通过"
+        v3, r3 = extract_challenger_verdict(text3)
+        self.assertEqual(v3, "pass", f"Explicit approval with stats should pass, got {v3}: {r3}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -222,12 +222,15 @@ def extract_challenger_verdict(
         cval_lower = cval.lower()
         if any(kw in cval_lower for kw in ("<", "[pass", "[blocked", "二选一", "或", " or ", "示例", "example")):
             continue
-        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|驳回|拒绝", cval, re.IGNORECASE):
+        cleaned_cval = re.sub(r"\b\d+[ \t]+(?:failed|fail|passed|pass)\b|\b\d+[ \t]*个[ \t]*(?:fail|pass)\b", "", cval, flags=re.IGNORECASE)
+        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|驳回|拒绝", cleaned_cval, re.IGNORECASE):
             canonical_blocked.append(cval)
+        elif re.search(r"(?:方可通过|方可批准|方可实施|修[复改].*后.*通过|须.*通过|待.*通过)", cval):
+            canonical_blocked.append(f"conditional approval rejected as blocked: {cval}")
         elif re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", cval, re.IGNORECASE):
             canonical_unfinished.append(cval)
-        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|通过|同意实施", cval, re.IGNORECASE):
-            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", cval):
+        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|通过|同意实施", cleaned_cval, re.IGNORECASE):
+            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", cleaned_cval) and not re.search(r"(?:方可通过|方可批准|方可实施|修[复改].*后.*通过|须.*通过|待.*通过)", cval):
                 canonical_pass.append(cval)
 
     if canonical_blocked:
@@ -281,7 +284,7 @@ def extract_challenger_verdict(
     )
     for vm in verdict_lines:
         line_val = vm.group(1).strip()
-        # 排除包含测试统计（如 2 failed, 5 passed / 6 failed / 2 个 FAIL）时的 failed 误匹配
+        # 排除包含测试统计（如 2 failed, 5 passed / 6 failed / 2 个 FAIL）时的 failed 与 passed 误匹配
         cleaned_line = re.sub(r"\b\d+[ \t]+(?:failed|fail|passed|pass)\b|\b\d+[ \t]*个[ \t]*(?:fail|pass)\b", "", line_val, flags=re.IGNORECASE)
         # 阻断检查
         if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|存在阻塞|驳回|暂不予通过|不予通过|不能通过|暂不通过|拒绝", cleaned_line, re.IGNORECASE):
@@ -295,9 +298,9 @@ def extract_challenger_verdict(
         elif re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", line_val, re.IGNORECASE):
             has_explicit_blocked = True
             blocked_reasons.append(f"verdict line indicates non-terminal state: {line_val}")
-        # 肯定通过检查 (必须无否定前缀且非条件短语)
-        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|建议通过|确认通过|准予通过|同意实施|通过", line_val, re.IGNORECASE):
-            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", line_val):
+        # 肯定通过检查 (必须无否定前缀且非条件短语，且使用 cleaned_line 避免把测试统计中的 passed 误判为通过)
+        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|建议通过|确认通过|准予通过|同意实施|通过", cleaned_line, re.IGNORECASE):
+            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", cleaned_line):
                 has_explicit_pass = True
                 pass_reasons.append(f"verdict line indicates pass: {line_val}")
 
