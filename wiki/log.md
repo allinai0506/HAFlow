@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-05] fix | 审查角色的验收语义与 Same-Node Redo 因果重派自治闭环（PR #397 / §227）
+
+- 背景：真实工作流 `wf-haflow-1105-01` 在 `plan` 阶段因 Challenger 质询阻断（`HERDR_GATE_VERDICT: blocked`）导致任务停滞在 `agent_done`。PR #396 在 `auto_acceptance.py` 误将审查阻断作为任务验收失败丢弃，导致任务无法结算（settled）且阻断元数据丢失，既饿死了 `node_acceptance.py` 的 Same-Node Redo，又在重派时并发派发未就绪的审查工位。
+- 根因分析：
+  1. 混淆了审查工位本身的交付验收（报告完整、裁决明确即完成）与被审方案的门禁判定（通过或阻断）；
+  2. 任务未结算导致 `node_acceptance.py` 的 `_SETTLED` 门禁条件不满足，Same-Node Redo 无法生效；
+  3. `herdr/direct_dispatch.py` 在 `awaiting` 存在多个待重派任务时未遵循 `depends_on_role`，导致 `challenger-r2` 与 `executor-r2` 并发重派且依然引用旧版计划。
+- 治理与修复：
+  1. **确立审查角色的验收语义**：`auto_acceptance.py` 允许结构完备且裁决明确（`pass` / `blocked`）的审查任务成功验收（`completed`），并原子性持久化 `stage_verdict`、`stage_verdict_note` 与 `blocker`；
+  2. **激活 Same-Node Redo 闭环**：审查工位结算为 `blocked` 后，自然触发 `node_acceptance.py` 在预算内生成 `rework` 动作，将前置与后置任务共同标记为 `superseded`（带 `same_node_redo_note`）；
+  3. **因果顺序重派与动态引用绑定**：`direct_dispatch.py` 在 `awaiting` 存在角色依赖时，先派发 `executor-r2`（注入阻断修改原因）；待其交付修订方案后，再派发 `challenger-r2` 并动态绑定新版 `Plan-Ref`。
+- 验收结果：
+  - `tests/test_plan_causal_dispatch.py` 全部 17 项测试通过（含全链路重派自治闭环）；
+  - `tests/test_plan*.py`、`tests/test_auto*.py`、`tests/test_node*.py`、`tests/test_direct*.py`、`tests/test_software*.py` 共 425 项回归全部 PASS；
+  - 沉淀系统教训至 `docs/lessons/lessons-learned.md` §227。
+
 ## [2026-11-02] fix | 计划阶段角色因果分步派发、持久化调度代次串联与质询审查自愈闭环（PR #390 / §222）
 
 - 背景：真实工作流 `wf-haflow-1102-02` 的 `plan` 阶段在推进至 `implementation` 时因审查时序倒挂（Executor 尚未写完方案前 Challenger 已提前退出）陷入 `challenger_outdated` 拒绝死锁；后续计划更新后无法自动触发重审，直接进入 `waiting_human` 挂起。

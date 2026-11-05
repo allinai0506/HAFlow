@@ -9562,3 +9562,48 @@ git diff --check
 - `herdr/workflow_recovery.py#is_unfinished_infrastructure_predecessor`
 - `herdr/recovery_store.py#ensure_obligations`
 - `tests/test_finalize_baseline_and_replacement_closure.py#test_converge_does_not_clear_replacement_obligation_of_dynamic_sibling`
+
+---
+
+## 227. 审查角色的验收语义与 Same-Node Redo 因果重派自治闭环（2026-11-05）
+
+### 问题背景
+
+真实工作流 `wf-haflow-1105-01` 在 `plan` 阶段发生死锁：
+1. Challenger（质询者）审查技术方案后，依据审查发现给出了 `HERDR_GATE_VERDICT: blocked` 阻断结论（红测退出条件与测试用例数矛盾）；
+2. PR #396 在 `services/controller/auto_acceptance.py` 中将 `verdict == "blocked"` 直接判定为任务验收失败（`AutoAcceptResult(False, "challenger_blocked")`）；
+3. 由于 `plan` 阶段并非代码门禁节点（不走 `auto_verdict.py`），且 `challenger_blocked` 不在任务级可返工原因列表中，导致该事件被控制器直接升级到 `attention.json` 并丢弃，Challenger 任务永远停滞在 `agent_done`；
+4. 节点验收 `node_acceptance.py` 必须等待节点内所有任务进入 `_SETTLED`（`completed` 或 `cleaned`）且无活跃未结任务，由于审查任务卡死在 `agent_done` 且未持久化 `stage_verdict: "blocked"`，Same-Node Redo 无法触发，整个流水线被永久冻结在 `plan` 阶段；
+5. 此外，即便人工将任务改写为 `completed` 并触发 `rework`，`herdr/direct_dispatch.py` 中的 `lineage_redispatch_candidates` 会并发重派所有待返工任务，导致 `challenger-r2` 在 `executor-r2` 尚未完成修案前就被盲目重派，且依然引用旧版计划，因果时序倒挂。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 审查角色本身的交付验收与被审方案的门禁结论混淆 | 质询/审查工位的交付目标是“产出结构完备、事实清楚且裁决明确的审查报告”，给出 `blocked` 并非审查工位执行失败 | 对审查角色（`challenger` / `reviewer`），只要报告完备且结论明确（无论 `pass` 还是 `blocked`），均应以 `completed` 成功收工，并将裁决与原因持久化到 `stage_verdict` 与 `stage_verdict_note` |
+| 节点级返工（Same-Node Redo）依赖任务规范收工 | 节点级因果判定以全任务结算为前提；在任务级拦截阻断会饿死节点级返工策略 | 审查结论属于节点级门禁信号；任务级验收应确保状态合规沉淀，由 `node_acceptance.py` 根据 `stage_verdict == "blocked"` 在 `REDO_LIMIT` 预算内生成 `rework` 动作 |
+| 重派待定集合盲目并发破坏角色因果依赖 | 多角色节点中角色间存在因果依赖（如 Challenger 依赖 Executor 方案） | 当具有 `roles` 的节点存在 `awaiting` 重派任务时，必须依据 `depends_on_role` 过滤就绪角色；前置执行者未完成前阻断后置审查重派，且重派审查者时必须动态绑定最新交付的 `Plan-Ref` 与内容 |
+
+### 操作规范（已固化到 `services/controller/auto_acceptance.py`、`herdr/direct_dispatch.py`、`herdr/plan_parser.py` 与回归测试）
+
+1. **确立审查角色的验收语义**：`auto_acceptance.py` 判定 `is_challenger` 时，仅在 verdict 缺失（`not in ("pass", "blocked")`）或结构残缺时拒收；若判定为 `pass` 或 `blocked`，均 CAS 跃迁为 `completed`，并持久化 `stage_verdict`、`stage_verdict_note` 与 `blocker`。
+2. **打通 Same-Node Redo 闭环**：审查工位结算为 `blocked` 后，`node_acceptance.py` 自然检测到 `_blocked(task)` 并触发 `rework`，原子性将前置架构师与质询者共同置为 `superseded`，附带 `same_node_redo_note`。
+3. **因果串联重派与动态引用绑定**：`direct_dispatch.py` 的 `plan_stage_dispatch` 在处理 `awaiting` 重派集合时感知 `roles`，仅先重派 `executor-r2` 并注入阻断原因；待 `executor-r2` 交付最新方案后，再行派发 `challenger-r2`，并自动解析并注入最新 `Plan-Ref`。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_plan_causal_dispatch.py
+pytest -q tests/test_plan*.py tests/test_auto*.py tests/test_node*.py tests/test_direct*.py tests/test_software*.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- 实际工作流故障现场：`wf-haflow-1105-01`，task `wf-haflow-1105-01-plan-challenger`
+- `services/controller/auto_acceptance.py#try_auto_accept`
+- `herdr/direct_dispatch.py#plan_stage_dispatch`
+- `herdr/plan_parser.py#extract_challenger_verdict`
+- `herdr/stage_skills.py#is_staged_dev_flow_workflow`
+- `tests/test_plan_causal_dispatch.py#test_challenger_blocked_triggers_same_node_redo_and_sequential_causal_redispatch`

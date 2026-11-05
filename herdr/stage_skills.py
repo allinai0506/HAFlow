@@ -70,6 +70,14 @@ def is_staged_dev_flow_workflow(workflow_config: Any) -> bool:
         return True
     if workflow_config.get("coordinator_required") is False:
         return True
+    nodes = workflow_config.get("nodes") or workflow_config.get("stages")
+    if isinstance(nodes, list):
+        node_ids = {n.get("id") if isinstance(n, dict) else str(n) for n in nodes}
+        if {"requirements", "plan", "implementation"}.issubset(node_ids):
+            return True
+    elif isinstance(nodes, dict):
+        if {"requirements", "plan", "implementation"}.issubset(set(nodes.keys())):
+            return True
     return False
 
 

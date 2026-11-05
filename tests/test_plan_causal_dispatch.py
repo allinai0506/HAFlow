@@ -93,8 +93,8 @@ class TestPlanCausalDispatch(unittest.TestCase):
         self.assertEqual(len(specs), 1)
         self.assertEqual(specs[0]["dispatch_role"], "reviewer")
 
-    def test_auto_acceptance_rejects_challenger_with_blocked_verdict(self):
-        """Auto acceptance must strictly reject challenger reviews that contain [BLOCKED] verdict."""
+    def test_auto_acceptance_accepts_challenger_and_persists_verdict(self):
+        """When challenger review has valid sections and explicit BLOCKED verdict, auto-acceptance accepts task and records blocked verdict."""
         from services.controller.auto_acceptance import try_auto_accept
         from herdr import workflow_docs
         import tempfile, os
@@ -133,10 +133,60 @@ class TestPlanCausalDispatch(unittest.TestCase):
             set_task_status = mock.MagicMock(return_value=True)
         DummyPorts.re = re_mod
 
-        res = try_auto_accept(DummyPorts(), chal_task_id)
-        self.assertFalse(res.accepted, "Auto-acceptance must NOT accept a blocked challenger review")
-        self.assertEqual(res.reason_code, "challenger_blocked")
-        DummyPorts.set_task_status.assert_not_called()
+        ports = DummyPorts()
+        res = try_auto_accept(ports, chal_task_id)
+        self.assertTrue(res.accepted, "Auto-acceptance must accept a structurally valid challenger review even if blocked")
+        ports.set_task_status.assert_called_once()
+        args, kwargs = ports.set_task_status.call_args
+        self.assertEqual(args[0], chal_task_id)
+        self.assertEqual(args[1], "completed")
+        meta = kwargs.get("metadata", {})
+        self.assertEqual(meta.get("stage_verdict"), "blocked")
+        self.assertIn("blocked", meta.get("stage_verdict_note", ""))
+
+    def test_auto_acceptance_rejects_challenger_when_verdict_is_missing(self):
+        """When challenger review has valid sections but lacks a clear verdict, auto-acceptance rejects."""
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr import workflow_docs
+
+        chal_task_id = f"{self.wf_id}-plan-chal-noverdict"
+        chal_task = {
+            "task_id": chal_task_id,
+            "workflow_id": self.wf_id,
+            "node": "plan",
+            "stage": "plan",
+            "dispatch_role": "challenger",
+            "status": "agent_done",
+            "version": 1,
+            "run_id": "run-1",
+            "execution_id": "exec-1",
+        }
+        no_verdict_body = (
+            "## 方案对抗性审查与可行性评估\n"
+            "对主方案进行破防性质询与审查，重点核查架构耦合度、死锁与复杂度风险。"
+            "进行了方案分析与逻辑排查，针对各个关键模块的调用链路进行了核实，但审查者未在此处给出明确的通过或阻断裁决结论。\n"
+            "Plan-Ref: n-plan-1\n"
+        )
+        workflow_docs.append_note(
+            self.wf_id, kind="review", title="未定结论审查", body=no_verdict_body,
+            node="plan", task_id=chal_task_id
+        )
+
+        import re as re_mod
+        class DummyPorts:
+            auto_accept_enabled = lambda self: True
+            get_task = lambda self, tid: chal_task
+            node_is_gate = lambda self, *a: False
+            workflow_config_for = lambda self, wid: {"workflow_template": "software-development-v1"}
+            _task_version = lambda self, t: 1
+            set_task_status = mock.MagicMock(return_value=True)
+        DummyPorts.re = re_mod
+
+        ports = DummyPorts()
+        res = try_auto_accept(ports, chal_task_id)
+        self.assertFalse(res.accepted)
+        self.assertEqual(res.reason_code, "challenger_verdict_missing")
+        ports.set_task_status.assert_not_called()
 
     def test_plan_parser_prioritizes_mismatch_and_outdated_over_blocked_verdict(self):
         """When challenger review has [BLOCKED] but targets a mismatched or outdated plan, parser reports mismatch/outdated."""
@@ -436,6 +486,8 @@ class TestControllerPlanCausalIntegration(unittest.TestCase):
 
         self.wf_id = "wf-ctl-causal-01"
         self.wf_cfg = {
+            "workflow_template": "software-development-v1",
+            "staged_dev_flow": True,
             "nodes": [
                 {"id": "requirements", "label": "1需求", "purpose": "确认需求规格", "depends_on": []},
                 {
@@ -872,6 +924,133 @@ class TestControllerPlanCausalIntegration(unittest.TestCase):
         self.assertEqual(spec["dispatch_role"], "challenger")
         self.assertEqual(spec["supersedes"], f"{wf_chal_id}-plan-challenger", "Must bind previous round of same role")
         self.assertNotEqual(spec["supersedes"], f"{wf_chal_id}-plan-executor")
+
+    def test_challenger_blocked_triggers_same_node_redo_and_sequential_causal_redispatch(self):
+        """When challenger gives [BLOCKED], auto_acceptance accepts it with verdict 'blocked',
+        node_acceptance supersedes tasks with same_node_redo, and plan_stage_dispatch
+        sequentially redispatches executor-r2 first (with blocker note), then challenger-r2."""
+        from herdr import node_dispatch_store, workflow_docs
+        from herdr.node_acceptance import acceptance_actions
+        from services.controller.auto_acceptance import try_auto_accept
+        from herdr.task_resources import begin_launch_intent, finish_launch_intent
+
+        # 1. Setup completed executor with valid plan deliverable
+        self.ctrl.check_workflow_stage_advance(self.wf_id)
+        q1 = self.ctrl.coordinator_queue.get(block=False)
+        op1_id = q1["dispatch_operation_id"]
+        owner1 = q1["dispatch_owner"]
+        node_dispatch_store.start(self.store.db_path, op1_id, owner1)
+        intent1 = begin_launch_intent(
+            self.store, workflow_id=self.wf_id, node_id="plan", role="executor",
+            candidate_sha=None, task_id=f"{self.wf_id}-plan-executor",
+            dispatch_operation_id=op1_id, execution_id="exec-1", run_id="run-exec-1"
+        )["intent"]
+        exec_task = {
+            "task_id": f"{self.wf_id}-plan-executor", "workflow_id": self.wf_id, "node": "plan",
+            "stage": "plan", "dispatch_role": "executor", "status": "completed", "run_id": "run-exec-1",
+            "launch_intent_id": intent1["intent_id"], "execution_id": "exec-1",
+            "dispatch_operation_id": op1_id,
+        }
+        self.store.save_task(exec_task)
+        finish_launch_intent(self.store, intent1)
+
+        plan_note = workflow_docs.append_note(
+            self.wf_id, kind="plan", title="初始技术架构方案",
+            body="## 技术方案与架构设计\n模块拆分说明\n## 任务拆分与依赖关系\n- Task 1\n## 修改文件范围清单\n- Modify: core.py\n## 每个 Task 目标与验收标准\n- 验证命令: pytest\n## 风险与应对策略\n无",
+            node="plan", task_id=f"{self.wf_id}-plan-executor"
+        )
+
+        # 2. Challenger is dispatched and finishes in agent_done
+        chal_task_id = f"{self.wf_id}-plan-challenger"
+        chal_task = {
+            "task_id": chal_task_id, "workflow_id": self.wf_id, "node": "plan",
+            "stage": "plan", "dispatch_role": "challenger", "status": "agent_done",
+            "run_id": "run-chal-1", "execution_id": "exec-1", "version": 1,
+        }
+        self.store.save_task(chal_task)
+
+        # Challenger delivers review note with explicit BLOCKED verdict
+        blocked_body = (
+            "## 方案对抗性审查与可行性评估\n"
+            "对主方案进行破防性质询与审查，发现严重设计矛盾：红测退出条件与用例不符。\n"
+            f"Plan-Ref: {plan_note['note_id']}\n"
+            "HERDR_GATE_VERDICT: blocked: 红测退出条件与用例不符"
+        )
+        workflow_docs.append_note(
+            self.wf_id, kind="review", title="方案审查报告", body=blocked_body,
+            node="plan", task_id=chal_task_id
+        )
+
+        # 3. try_auto_accept is called for challenger:
+        # MUST succeed (accepted=True), transition status to 'completed', and persist stage_verdict='blocked'
+        accept_res = try_auto_accept(self.ctrl, chal_task_id)
+        self.assertTrue(accept_res.accepted, "Challenger review with valid structure and explicit BLOCKED verdict must be accepted")
+        updated_chal = self.store.get_task(chal_task_id)
+        self.assertEqual(updated_chal["status"], "completed")
+        self.assertEqual(updated_chal["stage_verdict"], "blocked")
+
+        # Simulate cleanup of tasks (completed -> cleaned)
+        exec_task["status"] = "cleaned"
+        self.store.save_task(exec_task)
+        updated_chal["status"] = "cleaned"
+        self.store.save_task(updated_chal)
+
+        # 4. node_acceptance evaluates the plan node:
+        # Both tasks are settled (cleaned), and one has stage_verdict='blocked'.
+        # Must produce a 'rework' action for live tasks!
+        tasks_in_store = self.store.list_tasks(workflow_id=self.wf_id)
+        actions = acceptance_actions(self.wf_cfg, tasks_in_store, self.wf_id)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["op"], "rework")
+        self.assertEqual(actions[0]["node_id"], "plan")
+        self.assertIn("红测退出条件", actions[0]["note"])
+
+        # Apply the rework action: tasks become superseded with same_node_redo
+        from services.controller.node_acceptance import apply_node_acceptance
+        written = apply_node_acceptance(self.ctrl, self.wf_id, self.wf_cfg, tasks_in_store)
+        self.assertEqual(written, 2)
+
+        # 5. Direct dispatch after rework:
+        # Because challenger depends on executor, direct dispatch must ONLY dispatch executor-r2!
+        tasks_after_rework = self.store.list_tasks(workflow_id=self.wf_id)
+        dispatch_res1 = plan_stage_dispatch(self.wf_id, self.wf_cfg["nodes"][1], tasks_after_rework, self.wf["requirement"])
+        self.assertEqual(dispatch_res1["mode"], "dispatch")
+        self.assertEqual(len(dispatch_res1["specs"]), 1)
+        spec1 = dispatch_res1["specs"][0]
+        self.assertEqual(spec1["task_id"], f"{self.wf_id}-plan-executor-r2")
+        self.assertEqual(spec1["dispatch_role"], "executor")
+        self.assertEqual(spec1["supersedes"], f"{self.wf_id}-plan-executor")
+        self.assertIn("红测退出条件", spec1.get("last_failure_note") or "")
+
+        # 6. Simulate executor-r2 completing and delivering updated plan
+        exec_r2_task = {
+            "task_id": f"{self.wf_id}-plan-executor-r2", "workflow_id": self.wf_id, "node": "plan",
+            "stage": "plan", "dispatch_role": "executor", "status": "cleaned",
+            "run_id": "run-exec-2", "execution_id": "exec-1",
+            "supersedes": f"{self.wf_id}-plan-executor",
+        }
+        self.store.save_task(exec_r2_task)
+        old_exec = self.store.get_task(f"{self.wf_id}-plan-executor")
+        old_exec["superseded_by"] = f"{self.wf_id}-plan-executor-r2"
+        self.store.save_task(old_exec)
+
+        new_plan_note = workflow_docs.append_note(
+            self.wf_id, kind="plan", title="修订后的技术架构方案",
+            body="## 技术方案与架构设计\n修订后的方案设计\n## 任务拆分与依赖关系\n- Task 1\n## 修改文件范围清单\n- Modify: core.py\n## 每个 Task 目标与验收标准\n- 验证命令: pytest\n## 风险与应对策略\n无风险",
+            node="plan", task_id=f"{self.wf_id}-plan-executor-r2"
+        )
+
+        # 7. Direct dispatch after executor-r2 is complete:
+        # Now challenger-r2 must be dispatched, targeting the NEW plan note!
+        tasks_after_exec_r2 = self.store.list_tasks(workflow_id=self.wf_id)
+        dispatch_res2 = plan_stage_dispatch(self.wf_id, self.wf_cfg["nodes"][1], tasks_after_exec_r2, self.wf["requirement"])
+        self.assertEqual(dispatch_res2["mode"], "dispatch")
+        self.assertEqual(len(dispatch_res2["specs"]), 1)
+        spec2 = dispatch_res2["specs"][0]
+        self.assertEqual(spec2["task_id"], f"{self.wf_id}-plan-challenger-r2")
+        self.assertEqual(spec2["dispatch_role"], "challenger")
+        self.assertEqual(spec2["supersedes"], f"{self.wf_id}-plan-challenger")
+        self.assertEqual(spec2["plan_ref"], new_plan_note["note_id"])
 
 
 if __name__ == "__main__":

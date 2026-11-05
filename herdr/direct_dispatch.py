@@ -664,6 +664,8 @@ def _dispatch_spec(
         spec["supersedes"] = redispatch_of
         if not spec.get("supersede_reason"):
             spec["supersede_reason"] = f"redispatch of {redispatch_of}"
+    if last_failure_note:
+        spec["last_failure_note"] = last_failure_note
     if onto_branch:
         spec["onto_branch"] = onto_branch
     elif is_verifier_node(node) and candidate_sha and context_branch:
@@ -751,7 +753,146 @@ def plan_stage_dispatch(
     ]
 
     try:
+        roles = normalized.get("roles") or []
         if awaiting:
+            if roles:
+                from herdr.transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
+                running_tasks = [t for t in node_tasks if str(t.get("status") or "") in ACTIVE_TASK_STATUSES]
+                if running_tasks:
+                    return {
+                        "mode": "wait",
+                        "reason": f"node has active tasks ({len(running_tasks)} running)",
+                        "specs": [],
+                    }
+
+                completed_role_tasks = {}
+                for t in node_tasks:
+                    if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by"):
+                        r_name = resolve_task_role(
+                            t, role_names=[r.get("name") for r in roles],
+                            workflow_id=workflow_id, node_id=node_id)
+                        if r_name:
+                            completed_role_tasks[r_name] = t
+
+                dispatchable_awaiting = []
+                for task in sorted(
+                    awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or "")
+                ):
+                    t_role = resolve_task_role(
+                        task, role_names=[r.get("name") for r in roles],
+                        workflow_id=workflow_id, node_id=node_id
+                    )
+                    r_def = next((r for r in roles if str(r.get("name") or "").strip().lower() == t_role), None)
+                    dep_role = str(r_def.get("depends_on_role") or "").strip().lower() if r_def else ""
+                    has_executor = any(str(x.get("name") or "").strip().lower() == "executor" for x in roles)
+                    if not dep_role and node_id == "plan" and t_role in ("challenger", "review", "reviewer", "adversarial") and has_executor:
+                        dep_role = "executor"
+
+                    if dep_role:
+                        if dep_role not in completed_role_tasks:
+                            continue
+                        if dep_role == "executor" or (node_id == "plan" and t_role in ("challenger", "review", "reviewer", "adversarial")):
+                            from herdr.plan_parser import find_plan_deliverables, validate_plan_deliverable_content
+                            deliv = find_plan_deliverables(workflow_id, tasks, project_root)
+                            p_text = deliv[0] if deliv else None
+                            p_meta = getattr(deliv, "meta", {})
+                            p_ref = str(p_meta.get("plan_id") or "").strip()
+                            if not p_text or not p_ref:
+                                continue
+                            p_ok, _ = validate_plan_deliverable_content(p_text, role="executor")
+                            if not p_ok:
+                                continue
+                    dispatchable_awaiting.append((task, r_def, t_role))
+
+                if not dispatchable_awaiting:
+                    return {
+                        "mode": "wait",
+                        "reason": "waiting for prerequisite deliverables before redispatching next role",
+                        "specs": [],
+                    }
+
+                existing_ids = {
+                    str(task.get("task_id"))
+                    for task in (tasks or [])
+                    if task.get("task_id")
+                }
+                existing_ids.update(str(task_id) for task_id in (reserved_task_ids or ()) if task_id)
+                specs = []
+                for task, r_def, t_role in dispatchable_awaiting:
+                    old_id = str(task.get("task_id"))
+                    new_id = next_replacement_id(old_id, existing_ids)
+                    existing_ids.add(new_id)
+
+                    goal = str(task.get("goal") or "").strip()
+                    acceptance = _acceptance_lines(normalized, task.get("acceptance_criteria"))
+                    plan_chunk = None
+                    plan_ref = None
+
+                    dep_role = str(r_def.get("depends_on_role") or "").strip().lower() if r_def else ""
+                    has_executor = any(str(x.get("name") or "").strip().lower() == "executor" for x in roles)
+                    if not dep_role and node_id == "plan" and t_role in ("challenger", "review", "reviewer", "adversarial") and has_executor:
+                        dep_role = "executor"
+
+                    if dep_role == "executor" or (node_id == "plan" and t_role in ("challenger", "review", "reviewer", "adversarial")):
+                        from herdr.plan_parser import find_plan_deliverables
+                        deliverables = find_plan_deliverables(workflow_id, tasks, project_root)
+                        meta = getattr(deliverables, "meta", {})
+                        plan_ref = str(meta.get("plan_id") or "").strip()
+                        plan_chunk = deliverables[0] if deliverables else None
+                        r_label = str(r_def.get("label") or t_role).strip() if r_def else t_role
+                        r_goal = str(r_def.get("goal") or "").strip() if r_def else ""
+                        if not r_goal:
+                            suffix = str(r_def.get("purpose_suffix") or "").strip() if r_def else ""
+                            r_goal = f"{normalized['label']} ({r_label}): {suffix or normalized['purpose']}"
+                        r_outputs = _as_list(r_def.get("outputs")) if r_def else []
+                        if not r_outputs:
+                            r_outputs = list(normalized["required_outputs"])
+                        r_acceptance = _acceptance_lines(normalized, r_outputs)
+                        if plan_ref:
+                            r_goal += f" (被审计划: {plan_ref})"
+                            r_acceptance = [f"显式引用被审计划 Plan-Ref: {plan_ref}", "输出明确裁决结论 [PASS] 或 [BLOCKED]"] + list(r_acceptance)
+                        goal = r_goal
+                        acceptance = r_acceptance
+
+                    if not goal:
+                        goal = f"{normalized['label']}: {normalized['purpose']}"
+
+                    spec = _dispatch_spec(
+                        normalized,
+                        requirement,
+                        goal,
+                        acceptance,
+                        new_id,
+                        redispatch_of=old_id,
+                        last_failure_note=str(
+                            task.get("same_node_redo_note")
+                            or task.get("stage_verdict_note")
+                            or ""
+                        ).strip()
+                        or None,
+                        context_branch=context_branch,
+                        integration_mode=task.get("integration_mode"),
+                        gate_contract=gate_contract,
+                        docs_block=docs_block,
+                        candidate_sha=candidate_sha,
+                        gate_inventory_block=gate_inventory_block,
+                        redispatch_blocker_note=(
+                            redispatch_blocker_notes or {}
+                        ).get(old_id),
+                        plan_chunk=plan_chunk,
+                        plan_ref=plan_ref,
+                    )
+                    spec["dispatch_role"] = t_role or task.get("dispatch_role") or "worker"
+                    spec["dispatch_round"] = _calculate_redispatch_round(node_tasks, task, candidate_sha)
+                    spec["supersedes"] = task["task_id"]
+                    if plan_ref:
+                        spec["plan_ref"] = plan_ref
+                    if plan_chunk:
+                        spec["plan_chunk"] = plan_chunk
+                    specs.append(spec)
+
+                return {"mode": "dispatch", "reason": "redispatch superseded subset", "specs": specs}
+
             existing_ids = {
                 str(task.get("task_id"))
                 for task in (tasks or [])
