@@ -298,8 +298,29 @@ def _with_node_runtime(config, record):
     return config
 
 
+def workflow_state_store():
+    """Resolve the shared store for workflow configuration and Run authorization."""
+    return _get_store()
+
+
+def workflow_snapshot_unreadable(workflow_id):
+    store = workflow_state_store()
+    if not hasattr(store, "read_workflow_snapshot"):
+        return False
+    try:
+        store.read_workflow_snapshot(workflow_id)
+        return False
+    except ValueError:
+        try:
+            return store.get_workflow(workflow_id) is not None
+        except Exception:  # noqa: BLE001 - any unreadable authorization must fail closed.
+            return True
+    except Exception:  # noqa: BLE001 - any unreadable authorization must fail closed.
+        return True
+
+
 def workflow_config_for(workflow_id):
-    store = _get_store()
+    store = workflow_state_store()
     if hasattr(store, "read_workflow_snapshot"):
         try:
             record, cfg, _ = store.read_workflow_snapshot(workflow_id)

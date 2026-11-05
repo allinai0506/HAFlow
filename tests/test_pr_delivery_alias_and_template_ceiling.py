@@ -274,3 +274,74 @@ def test_remote_identity_and_deferred_closure_with_explicit_port(monkeypatch):
     is_deferred, msg, meta = collect_deferred_evidence(None, {"source_repo": "/dummy"})
     assert not is_deferred
     assert "a GitHub remote exists" in msg
+
+
+@pytest.mark.parametrize("host", [
+    "github-work", "github-enterprise.com", "github-corp.example",
+    "gitee-work", "gitee-enterprise.com", "github.com.evil", "gitee.com.evil",
+])
+@pytest.mark.parametrize("port", ["", ":443"])
+def test_repository_identity_rejects_https_alias_hosts(host, port):
+    with pytest.raises(ValueError):
+        repository_identity(f"https://{host}{port}/Org/Repo.git")
+    assert parse_remote_identity(f"https://{host}{port}/Org/Repo.git") is None
+
+
+@pytest.mark.parametrize("host,forge", [
+    ("GitHub.com", "github.com"), ("GITEE.COM", "gitee.com"),
+    ("GitHub-Work", "github.com"), ("Gitee-Work", "gitee.com"),
+])
+@pytest.mark.parametrize("form", ["git@{host}:Org/Repo.git", "ssh://git@{host}:2222/Org/Repo.git"])
+def test_ssh_alias_boundaries_keep_working(host, forge, form):
+    url = form.format(host=host)
+    assert repository_identity(url) == (forge, "Org", "Repo")
+    assert parse_remote_identity(url) == (("Org", "Repo") if forge == "github.com" else None)
+
+
+@pytest.mark.parametrize("host,forge", [("GitHub.com", "github.com"), ("GITEE.COM", "gitee.com")])
+@pytest.mark.parametrize("port", ["", ":443"])
+def test_public_https_host_boundaries(host, forge, port):
+    url = f"https://{host}{port}/Org/Repo.git"
+    assert repository_identity(url) == (forge, "Org", "Repo")
+    assert parse_remote_identity(url) == (("Org", "Repo") if forge == "github.com" else None)
+
+
+@pytest.mark.parametrize("host", ["github.com", "github-work", "gitee.com", "gitee-work"])
+def test_scp_style_with_port_is_rejected(host):
+    url = f"git@{host}:2222/Org/Repo.git"
+    with pytest.raises(ValueError):
+        repository_identity(url)
+    assert parse_remote_identity(url) is None
+
+
+@pytest.mark.parametrize("url", [
+    "http://github-work/Org/Repo.git", "git+ssh://git@github-work/Org/Repo.git",
+    "https://github.com:Org/Repo.git", "ssh://git@github-work:Org/Repo.git",
+])
+def test_unconfirmed_ssh_forms_are_rejected(url):
+    with pytest.raises(ValueError):
+        repository_identity(url)
+    assert parse_remote_identity(url) is None
+
+
+@pytest.mark.parametrize("url,unsupported", [
+    ("https://github-enterprise.com/Org/Repo.git", True),
+    ("https://GitHub-Work:443/Org/Repo.git", True),
+    ("https://gitee-work/Org/Repo.git", True),
+    ("ssh://git@GitHub-Work:2222/Org/Repo.git", False),
+    ("git@github-work:Org/Repo.git", False),
+])
+def test_collect_deferred_evidence_https_enterprise_is_unsupported(monkeypatch, url, unsupported):
+    import subprocess
+
+    import herdr.review_closure as rc
+
+    monkeypatch.setattr(rc, "delivery_identity", lambda s, t: ([], "", "", ""))
+    monkeypatch.setattr(rc, "git_remote_urls", lambda p: [url])
+    monkeypatch.setattr(rc.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    deferred, _reason, evidence = collect_deferred_evidence(None, {"source_repo": "/controlled"})
+    assert deferred is unsupported
+    if unsupported:
+        assert evidence["provider"] == "unsupported-forge"
+    else:
+        assert evidence is None

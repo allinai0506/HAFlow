@@ -569,10 +569,16 @@ def collect_deferred_evidence(store, task: Any) -> Tuple[bool, str, Optional[Dic
 def parse_remote_identity(url: Any) -> Optional[Tuple[str, str]]:
     """(owner, repo) when the remote URL points at github.com, else None."""
     text = str(url or "").strip()
-    match = re.match(
-        r"^(?:[a-z+]+://)?(?:[^@/]+@)?(?i:github\.com|github-[\w.-]+)(?::\d+)?[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?$",
-        text,
-    )
+    public_host = r'(?i:github\.com)'
+    ssh_host = r'(?i:github\.com|github-[\w.-]+)'
+    path = r'([^/\s:]+)/([^/\s]+?)(?:\.git)?'
+    if text.startswith("https://"):
+        pattern = rf'https://{public_host}(?::\d+)?/{path}'
+    elif text.startswith("ssh://"):
+        pattern = rf'ssh://(?:[^@/]+@)?{ssh_host}(?::\d+)?/{path}'
+    else:
+        pattern = rf'(?:[^@/:]+@)?{ssh_host}:{path}'
+    match = re.fullmatch(pattern, text)
     if not match:
         return None
     return match.group(1), match.group(2)

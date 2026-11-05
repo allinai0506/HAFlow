@@ -13,10 +13,17 @@ from .task_resources import workflow_launch_lock
 
 
 def repository_identity(remote):
-    match = re.fullmatch(
-        r'(?:https://|(?:ssh://)?(?:[^@/]+@)?)((?i:github\.com|gitee\.com|github-[\w.-]+|gitee-[\w.-]+))(?::\d+)?[/:]([^/\s:]+)/([^/\s]+?)(?:\.git)?',
-        str(remote or '').strip(),
-    )
+    text = str(remote or '').strip()
+    public_host = r'(?i:github\.com|gitee\.com)'
+    ssh_host = r'(?i:github\.com|gitee\.com|github-[\w.-]+|gitee-[\w.-]+)'
+    path = r'([^/\s:]+)/([^/\s]+?)(?:\.git)?'
+    if text.startswith('https://'):
+        pattern = rf'https://({public_host})(?::\d+)?/{path}'
+    elif text.startswith('ssh://'):
+        pattern = rf'ssh://(?:[^@/]+@)?({ssh_host})(?::\d+)?/{path}'
+    else:
+        pattern = rf'(?:[^@/:]+@)?({ssh_host}):{path}'
+    match = re.fullmatch(pattern, text)
     if not match:
         raise ValueError('PR publication requires an identified GitHub or Gitee origin')
     raw_host, owner, repo = match.groups()
