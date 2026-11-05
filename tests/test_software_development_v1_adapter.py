@@ -1624,7 +1624,8 @@ HERDR_GATE_VERDICT: BLOCKED
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_44_canonical_verdict_rejects_conditional_approval(self):
-        """Scenario 44 (Codex P2): Canonical HERDR_GATE_VERDICT rejects conditional approval as blocked."""
+        """Scenario 44 (Codex P2): Canonical HERDR_GATE_VERDICT rejects conditional approval as blocked,
+        while correctly distinguishing completed fixes and negated requirements as pass."""
         from herdr.plan_parser import extract_challenger_verdict
 
         # Conditional approval in canonical header must be blocked, not pass
@@ -1637,10 +1638,33 @@ HERDR_GATE_VERDICT: BLOCKED
         v2, r2 = extract_challenger_verdict(text2)
         self.assertEqual(v2, "blocked", f"Should be blocked, got {v2}: {r2}")
 
+        text2b = "HERDR_GATE_VERDICT: 待架构师确认后通过"
+        v2b, r2b = extract_challenger_verdict(text2b)
+        self.assertEqual(v2b, "blocked", f"Should be blocked, got {v2b}: {r2b}")
+
+        text2c = "HERDR_GATE_VERDICT: 须在完成重构后通过"
+        v2c, r2c = extract_challenger_verdict(text2c)
+        self.assertEqual(v2c, "blocked", f"Should be blocked, got {v2c}: {r2c}")
+
         # Statistics only in canonical header does not produce pass
         text3 = "HERDR_GATE_VERDICT: 2 failed, 5 passed"
         v3, r3 = extract_challenger_verdict(text3)
         self.assertEqual(v3, "missing", f"Should be missing (no terminal approval), got {v3}: {r3}")
+
+        # Completed fixes must NOT be mistaken for conditional approvals (Codex P2 regression)
+        text4 = "HERDR_GATE_VERDICT: PASS，修复后所有测试均已通过。"
+        v4, r4 = extract_challenger_verdict(text4)
+        self.assertEqual(v4, "pass", f"Completed fix must pass, got {v4}: {r4}")
+        self.assertIn("canonical HERDR_GATE_VERDICT", r4)
+
+        # Negated requirements must NOT be mistaken for conditional approvals (Codex P2 regression)
+        text5 = "HERDR_GATE_VERDICT: PASS，无须修改，审查通过。"
+        v5, r5 = extract_challenger_verdict(text5)
+        self.assertEqual(v5, "pass", f"Negated requirements must pass, got {v5}: {r5}")
+
+        text6 = "HERDR_GATE_VERDICT: PASS，无需修改，测试全部通过"
+        v6, r6 = extract_challenger_verdict(text6)
+        self.assertEqual(v6, "pass", f"Negated requirements must pass, got {v6}: {r6}")
 
     def test_45_verdict_lines_exclude_test_counts_from_pass_detection(self):
         """Scenario 45 (Codex P2): Test statistics alone (e.g. 2 failed, 5 passed) do not trigger false-positive pass."""
