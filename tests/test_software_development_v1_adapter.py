@@ -1565,6 +1565,64 @@ class TestSoftwareDevelopmentV1Adapter(unittest.TestCase):
             res = plan_stage_dispatch(wf_id, impl_node, tasks, "需求", context_branch="main")
             self.assertEqual(res.get("mode"), "dispatch", f"Should dispatch without requiring challenger: {res}")
 
+    def test_42_challenger_verdict_canonical_and_test_count_false_positive_immunity(self):
+        """Scenario 42: Canonical HERDR_GATE_VERDICT takes precedence and test count statistics don't trigger false-positive blocks."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # Note matching wf-haflow-1105-01-plan-challenger-r3 note n-1793920366567-79c3 exactly
+        r3_review_text = """
+# [PASS] 计划对抗审查（第三轮）：已通过
+
+## 核心审查裁决
+HERDR_GATE_VERDICT: PASS
+
+### 2. 红测复验
+- 结论：B1 指出的 '6 failed, 1 passed' 已不存在；红测摘要、断言与预期统一为 '2 failed, 5 passed'。
+- 结论：恰好 2 个 FAIL，与修订计划 §2.2/§11 一致。
+
+## 综合结论
+建议准予通过实施。
+"""
+        verdict, reason = extract_challenger_verdict(r3_review_text)
+        self.assertEqual(verdict, "pass", f"Should be pass, got {verdict}: {reason}")
+        self.assertIn("canonical HERDR_GATE_VERDICT", reason)
+
+        # Standalone [PASS] with list bullet conclusions containing test failures
+        text_pass_with_bullet = """
+[PASS] 对抗审查通过
+- 结论：当前 3 failed, 4 passed 符合 TDD 预期。
+"""
+        v2, r2 = extract_challenger_verdict(text_pass_with_bullet)
+        self.assertEqual(v2, "pass", f"Should be pass, got {v2}: {r2}")
+
+        # Explicit blocked canonical verdict must be blocked
+        text_blocked_canonical = """
+HERDR_GATE_VERDICT: BLOCKED
+测试结果：0 failed, 7 passed
+原因：架构方案存在根本性设计缺陷。
+"""
+        v3, r3 = extract_challenger_verdict(text_blocked_canonical)
+        self.assertEqual(v3, "blocked", f"Should be blocked, got {v3}: {r3}")
+
+    def test_43_find_plan_file_path_in_dir_docs_plans(self):
+        """Scenario 43: find_plan_file_path_in_dir discovers plans under docs/plans/."""
+        import tempfile
+        import shutil
+        from herdr.plan_parser import find_plan_file_path_in_dir
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            plans_dir = os.path.join(temp_dir, "docs", "plans")
+            os.makedirs(plans_dir, exist_ok=True)
+            plan_file = os.path.join(plans_dir, "2026-11-06-feat.md")
+            with open(plan_file, "w", encoding="utf-8") as f:
+                f.write("# Plan\n## Task 1")
+
+            found = find_plan_file_path_in_dir(temp_dir)
+            self.assertEqual(found, plan_file)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
