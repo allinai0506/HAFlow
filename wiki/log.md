@@ -4109,3 +4109,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 修复：`infra_recovery.py` 对齐动态派发清单（`expected_task_ids`），清单内有未完成任务时禁止判定阶段交付达成，严禁兄弟任务交叉清账；`workflow_progress.py` 与 `workflow_recovery.py` 必须以 `abandon_reason` 作为显式放弃的唯一证据；`ensure_obligations` 允许在目标重定向至新谱系时唤醒重试。
 - 验证：单元测试 `test_converge_does_not_clear_replacement_obligation_of_dynamic_sibling` 通过；111 项恢复与推进回归测试全部 PASS；`compileall`、`git diff --check` clean。
 - 教训：`docs/lessons/lessons-learned.md` §226。
+
+
+## [2026-11-05] Fix | 解耦 Agent Router 熔断轮次常数并支持分层策略覆盖（wf-haflow-1103-01 / wf-haflow-1105-01）
+- 现场：`plan` 节点多角色重派中，因前序 Challenger 曾触发看门狗超时重试，后继修案重审任务按不变式递增为 `dispatch_round = 3`；`agent_router.py` 硬编码 `MAX_REMEDIATION_ROUNDS = 2`，直接抛出 `RouterRemediationExhausted` 并记录 `dispatch_refused`，停滞工作流。
+- 修复：`herdr/agent_router.py` 将全局熔断默认预算放宽至 3 并支持环境变量 `HERDR_MAX_REMEDIATION_ROUNDS`；`_choose_agent_locked` 分层解析 `node_policy.max_remediation_rounds` 与 `wf_policy.max_remediation_rounds`，实现熔断预算弹性覆盖。
+- 验证：`tests/test_agent_router_rounds.py` 新增节点与工作流级分层覆盖测试，全套路由测试全部 PASS；`compileall` 与 `git diff --check` clean。
+- 教训：`docs/lessons/lessons-learned.md` §228。

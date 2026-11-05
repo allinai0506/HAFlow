@@ -46,7 +46,7 @@ class RouterPolicyRejection(RouterRejectionError):
     pass
 
 
-MAX_REMEDIATION_ROUNDS = 2
+MAX_REMEDIATION_ROUNDS = int(os.environ.get("HERDR_MAX_REMEDIATION_ROUNDS", "3"))
 
 
 class RouterRemediationExhausted(RouterRejectionError):
@@ -663,6 +663,7 @@ def _choose_agent_locked(
     if node_val is None:
         node_val = node_policy.get("soft_degrade")
     wf_val = None
+    wf_policy = {}
     if wf_cfg:
         wf_policy = wf_cfg.get("agent_policy") or {}
         wf_val = wf_policy.get("allow_soft_degrade")
@@ -679,14 +680,28 @@ def _choose_agent_locked(
     is_degraded = False
     degrade_reason = ""
 
+    node_max_rounds = node_policy.get("max_remediation_rounds")
+    wf_max_rounds = wf_policy.get("max_remediation_rounds")
+    effective_max_rounds = MAX_REMEDIATION_ROUNDS
+    if node_max_rounds is not None:
+        try:
+            effective_max_rounds = int(node_max_rounds)
+        except (ValueError, TypeError):
+            pass
+    elif wf_max_rounds is not None:
+        try:
+            effective_max_rounds = int(wf_max_rounds)
+        except (ValueError, TypeError):
+            pass
+
     if dispatch_round is not None:
         try:
             r_int = int(dispatch_round)
-            if r_int > MAX_REMEDIATION_ROUNDS:
+            if r_int > effective_max_rounds:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
                 raise RouterRemediationExhausted(
                     f"Remediation round limit exceeded for stage '{stage}' in workflow '{workflow_id}': "
-                    f"round {r_int} > MAX_REMEDIATION_ROUNDS ({MAX_REMEDIATION_ROUNDS}). "
+                    f"round {r_int} > MAX_REMEDIATION_ROUNDS ({effective_max_rounds}). "
                     "Halting automated re-dispatch to prevent unbounded remediation loops."
                 )
         except (ValueError, TypeError):
