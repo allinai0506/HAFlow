@@ -135,21 +135,25 @@ def extract_verify_command(chunk: str) -> str:
 
 
 def find_plan_file_path_in_dir(base_dir: str) -> Optional[str]:
-    """从指定目录查找计划文件路径（支持 plan.md, docs/plan.md 及 docs/superpowers/plans 下单一最新计划）。"""
+    """从指定目录查找计划文件路径（支持 plan.md, docs/plan.md, docs/plans 及 docs/superpowers/plans 下单一最新计划）。"""
     if not base_dir or not os.path.exists(base_dir):
         return None
     for fname in ("plan.md", "docs/plan.md"):
         fpath = os.path.join(base_dir, fname)
         if os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
             return fpath
-    plans_dir = os.path.join(base_dir, "docs/superpowers/plans")
-    if os.path.isdir(plans_dir):
-        md_files = [
-            os.path.join(plans_dir, f) for f in os.listdir(plans_dir)
-            if f.endswith(".md") and os.path.isfile(os.path.join(plans_dir, f))
-        ]
-        if md_files:
-            return max(md_files, key=os.path.getmtime)
+    candidate_files = []
+    for sub in ("docs/plans", "docs/superpowers/plans"):
+        plans_dir = os.path.join(base_dir, sub)
+        if os.path.isdir(plans_dir):
+            md_files = [
+                os.path.join(plans_dir, f) for f in os.listdir(plans_dir)
+                if f.endswith(".md") and os.path.isfile(os.path.join(plans_dir, f))
+            ]
+            if md_files:
+                candidate_files.extend(md_files)
+    if candidate_files:
+        return max(candidate_files, key=os.path.getmtime)
     return None
 
 
@@ -203,13 +207,47 @@ def extract_challenger_verdict(
 
     text = challenger_text.strip()
 
+    # 0. 规范机器协议标记优先判决（HERDR_GATE_VERDICT / GATE_VERDICT）
+    # 必须排除 Prompt 回显、指令占位符与二选一歧义行（如 HERDR_GATE_VERDICT: <pass|blocked> 或 [pass|blocked]）
+    canonical_markers = re.finditer(
+        r"^[ \t]*(?:[-*][ \t]*)?(?:\*{0,2})(?:HERDR_GATE_VERDICT|GATE_VERDICT)[:：][ \t]*\*{0,2}([^\n*]+)",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    canonical_blocked = []
+    canonical_pass = []
+    canonical_unfinished = []
+    for cm in canonical_markers:
+        cval = cm.group(1).strip()
+        cval_lower = cval.lower()
+        if any(kw in cval_lower for kw in ("<", "[pass", "[blocked", "二选一", "或", " or ", "示例", "example")):
+            continue
+        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|驳回|拒绝", cval, re.IGNORECASE):
+            canonical_blocked.append(cval)
+        elif re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", cval, re.IGNORECASE):
+            canonical_unfinished.append(cval)
+        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|通过|同意实施", cval, re.IGNORECASE):
+            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", cval):
+                canonical_pass.append(cval)
+
+    if canonical_blocked:
+        return "blocked", f"canonical HERDR_GATE_VERDICT is blocked: {'; '.join(canonical_blocked)}"
+    if canonical_unfinished:
+        return "blocked", f"canonical HERDR_GATE_VERDICT is unfinished: {'; '.join(canonical_unfinished)}"
+    if canonical_pass:
+        return "pass", f"canonical HERDR_GATE_VERDICT is pass: {'; '.join(canonical_pass)}"
+
     has_explicit_blocked = False
     blocked_reasons: List[str] = []
     has_explicit_pass = False
     pass_reasons: List[str] = []
 
-    # 1. 显式方括号标记优先判决
+    # 1. 显式方括号标记判决（须排除指令占位符与二选一歧义，如 [PASS] 或 [BLOCKED]）
     for bm in re.finditer(r"\[(?:BLOCKED|REJECT(?:ED)?|FAILED)\][ \t]*(.*)", text, re.IGNORECASE):
+        prefix_start = max(0, bm.start() - 20)
+        surrounding = text[prefix_start:bm.end() + 20].lower()
+        if any(kw in surrounding for kw in ("或", " or ", "二选一", "示例", "example", "<")):
+            continue
         has_explicit_blocked = True
         detail = bm.group(1).strip()
         if detail:
@@ -217,7 +255,12 @@ def extract_challenger_verdict(
             blocked_reasons.append(f"[BLOCKED] {first_line}")
         else:
             blocked_reasons.append("explicit [BLOCKED] marker found")
-    if re.search(r"\[(?:PASS(?:ED)?|APPROVED?)\]", text, re.IGNORECASE):
+
+    for pm in re.finditer(r"\[(?:PASS(?:ED)?|APPROVED?)\][ \t]*(.*)", text, re.IGNORECASE):
+        prefix_start = max(0, pm.start() - 20)
+        surrounding = text[prefix_start:pm.end() + 20].lower()
+        if any(kw in surrounding for kw in ("或", " or ", "二选一", "示例", "example", "<")):
+            continue
         has_explicit_pass = True
         pass_reasons.append("explicit [PASS] marker found")
 
@@ -230,16 +273,18 @@ def extract_challenger_verdict(
 
     is_unfinished = bool(re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", text, re.IGNORECASE))
 
-    # 2. 严格行首字段边界匹配裁决行（避免误匹配正文中间出现的 '测试结论' 等非裁决字段）
+    # 2. 严格行首字段边界匹配裁决行（避免误匹配列表项 '- 结论:' 及正文中间出现的 '测试结论'）
     verdict_lines = re.finditer(
-        r"^[ \t]*(?:[-*][ \t]*)?(?:HERDR_GATE_VERDICT|GATE_VERDICT|VERDICT|最终裁决|审查裁决|评审裁决|最终结论|方案审查结论|对抗审查结论|可行性评估结论|结论)[:：][ \t]*(.+)$",
+        r"^[ \t]*(?:\*{0,2})(?:VERDICT|最终裁决|审查裁决|评审裁决|最终结论|方案审查结论|对抗审查结论|可行性评估结论|综合结论|结论)(?:\*{0,2})[:：][ \t]*(.+)$",
         text,
         re.IGNORECASE | re.MULTILINE,
     )
     for vm in verdict_lines:
         line_val = vm.group(1).strip()
+        # 排除包含测试统计（如 2 failed, 5 passed / 6 failed / 2 个 FAIL）时的 failed 误匹配
+        cleaned_line = re.sub(r"\b\d+[ \t]+(?:failed|fail|passed|pass)\b|\b\d+[ \t]*个[ \t]*(?:fail|pass)\b", "", line_val, flags=re.IGNORECASE)
         # 阻断检查
-        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|存在阻塞|驳回|暂不予通过|不予通过|不能通过|暂不通过|拒绝", line_val, re.IGNORECASE):
+        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|存在阻塞|驳回|暂不予通过|不予通过|不能通过|暂不通过|拒绝", cleaned_line, re.IGNORECASE):
             has_explicit_blocked = True
             blocked_reasons.append(f"verdict line indicates blocked: {line_val}")
         # 条件性通过判定为阻断/未完成
