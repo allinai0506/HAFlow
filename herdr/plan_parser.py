@@ -209,12 +209,24 @@ def extract_challenger_verdict(
     pass_reasons: List[str] = []
 
     # 1. 显式方括号标记优先判决
-    if re.search(r"\[(?:BLOCKED|REJECT(?:ED)?|FAILED)\]", text, re.IGNORECASE):
+    for bm in re.finditer(r"\[(?:BLOCKED|REJECT(?:ED)?|FAILED)\][ \t]*(.*)", text, re.IGNORECASE):
         has_explicit_blocked = True
-        blocked_reasons.append("explicit [BLOCKED] marker found")
+        detail = bm.group(1).strip()
+        if detail:
+            first_line = detail.split("\n")[0].strip()
+            blocked_reasons.append(f"[BLOCKED] {first_line}")
+        else:
+            blocked_reasons.append("explicit [BLOCKED] marker found")
     if re.search(r"\[(?:PASS(?:ED)?|APPROVED?)\]", text, re.IGNORECASE):
         has_explicit_pass = True
         pass_reasons.append("explicit [PASS] marker found")
+
+    for m in re.finditer(r"(?:^|\n)[ \t]*(?:[-*][ \t]*)?(?:【阻塞】|阻塞原因|阻断原因|主要阻断点|阻断点|Blocker|Reason)[:：][ \t]*(.+)", text, re.IGNORECASE):
+        has_explicit_blocked = True
+        detail = m.group(1).strip()
+        if detail:
+            first_line = detail.split("\n")[0].strip()
+            blocked_reasons.append(first_line)
 
     is_unfinished = bool(re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", text, re.IGNORECASE))
 

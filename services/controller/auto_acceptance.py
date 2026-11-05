@@ -105,6 +105,13 @@ def try_auto_accept(ports, task_id):
         except Exception:
             wf_cfg = None
 
+    wf_record = None
+    if hasattr(ports, "project_for_workflow"):
+        try:
+            wf_record = ports.project_for_workflow(workflow_id)
+        except Exception:
+            wf_record = None
+
     from herdr.stage_skills import (
         is_staged_dev_flow_workflow,
         validate_requirements_deliverable_content,
@@ -113,7 +120,7 @@ def try_auto_accept(ports, task_id):
     from herdr.workflow_docs import load_notes
     import os
 
-    is_staged = is_staged_dev_flow_workflow(wf_cfg)
+    is_staged = is_staged_dev_flow_workflow(wf_cfg) or is_staged_dev_flow_workflow(wf_record)
 
     if is_staged:
         if is_challenger and node_id != "plan":
@@ -177,10 +184,7 @@ def try_auto_accept(ports, task_id):
             if is_challenger:
                 from herdr.plan_parser import extract_challenger_verdict
                 verdict, verdict_reason = extract_challenger_verdict(deliverable_text, task)
-                if verdict == "blocked":
-                    print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} challenger verdict blocked: {verdict_reason}")
-                    return AutoAcceptResult(False, "challenger_blocked", detail=verdict_reason)
-                if verdict != "pass":
+                if verdict not in ("pass", "blocked"):
                     print(f"[AUTO ACCEPT REJECTED] task={task_id} node={node_id} challenger verdict missing or non-pass: {verdict_reason}")
                     return AutoAcceptResult(False, "challenger_verdict_missing", detail=verdict_reason)
 
@@ -199,16 +203,24 @@ def try_auto_accept(ports, task_id):
             return AutoAcceptResult(False, "verification_unavailable" if evidence == "unavailable"
                                     else "no_controlled_changes_other", detail)
 
+    metadata = {"auto_accept_reason": "controlled_changes", "acceptance_mode": "auto"}
+    if is_challenger and node_id == "plan" and 'verdict' in locals():
+        metadata["stage_verdict"] = verdict
+        if locals().get("verdict_reason"):
+            metadata["stage_verdict_note"] = verdict_reason
+            if verdict == "blocked":
+                metadata["blocker"] = verdict_reason
+
     if not ports.set_task_status(
         task_id, "completed", expected_status="agent_done",
         expected_version=ports._task_version(task), source="herdr-controller:auto-accept",
-        metadata={"auto_accept_reason": "controlled_changes", "acceptance_mode": "auto"},
+        metadata=metadata,
     ):
         return AutoAcceptResult(False, "cas_mismatch")
 
     print(
         f"[AUTO ACCEPT] task={task_id} "
-        f"node={node_id} -> completed"
+        f"node={node_id} -> completed (verdict={metadata.get('stage_verdict', 'none')})"
     )
     return AutoAcceptResult(True)
 
