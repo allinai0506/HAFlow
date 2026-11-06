@@ -9694,3 +9694,50 @@ git diff --check
 - `herdr/liveness.py#evaluate_pending_task_stalls`
 - `services/herdr-sentinel.py#check_pending_tasks`
 - `tests/test_dispatch_pending_timeout_contract.py`
+
+## 230. Same-Node Redo 持久化派发按角色因果分代：predecessors 阶段收敛、因果等待与真实缺失分离（2026-11-06）
+
+### 问题背景
+
+PR #401（§227）让 `plan` 节点的 same-node redo 在内存 planner 中按角色因果先派 `executor-r2`、再派 `challenger-r2`，但持久化发现仍把两条谱系头快照进同一个 `workflow_recovery_operations` 代际：真实工作流 `wf-haflow-1106-01` 的复现显示，redo 后 planner 只派 `executor-r2`，durable operation 的 `predecessors` 却是 `[challenger, executor]`。由于 `start()` 单发、`result()` 要求全部 predecessor 都有非 pending 替代才算 `resolved`，executor-r2 登记后代际仍不收敛；challenger-r2 又被角色门控无法派发，最终在旧 deadline 后误报 `dispatch_task_missing` / `waiting_human`——正常的因果等待被持久化派发链路当成了传输失败，节点被永久锁死。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| planner 与 store 各自解释角色因果 | 内存派发顺序与持久化派发代际必须消费同一个决策函数；否则 planner 只派 executor，store 却把尚未就绪的 challenger 绑进同一代际 | 抽取 `redispatch_stage` 作为单一事实源，`plan_stage_dispatch` 与 `reconcile_workflow` 共用；`dispatchable` 元素统一为 `{task, role, definition}`，store 只从 `item["task"]` 读取身份 |
+| 因果等待被当作传输失败 | 等待前置角色完成、等待新计划交付属于正常因果顺序，不应消耗 claim / lease / deadline | `dispatchable` 为空时 `continue`，不为尚未就绪的角色创建代际；义务留在谱系头由 `lineage_redispatch_candidates` 每轮重新发现；只有真实缺任务才在 deadline 后进入 `waiting_human` |
+| 一次性代际承载全部角色导致永久锁 | 一个 operation 的 `predecessors` 只能包含当前阶段可派发任务，后续角色必须用新代际承接 | 按角色依赖分代：op#1 `predecessors=[executor]`，executor-r2 登记即 `resolved`；executor-r2 完成且新 Plan-Ref 有效后，op#2 `predecessors=[challenger]` 并带 `prior_operation_id` |
+| deadline 诊断只有泛化原因 | 超时告警必须点名真正缺失的 expected task 与 predecessor，否则值守无法区分因果等待与派发失败 | `node_dispatch.result()` 的 deadline 分支写入 `missing_expected_task_ids` 与 `missing_predecessor_ids`；`reason` 与 Console 映射保持不变，旧代际无 expected 清单时保留原泛化文本 |
+| 重启、重扫、重复 done 的幂等边界 | 因果分代不能以“再发一次”补偿，否则会产生重复任务或第二代际 | 复用代际 identity（predecessors + `prior_operation_id`）、`claim` lease 与 `start` 单发封口；同一角色同一时刻最多一个可派发代际；节点完成仍由 role-aware `scheduler.node_is_complete` 与最新 `expected_task_ids` 判定，代际 `resolved` 不等于节点完成 |
+
+### 操作规范（已固化到 `herdr/direct_dispatch.py`、`herdr/node_dispatch_store.py`、`herdr/node_dispatch.py` 与回归测试）
+
+1. **共享因果判定**：`herdr/direct_dispatch.py#redispatch_stage` 从 `lineage_redispatch_candidates` 的未替代谱系头出发，按 `depends_on_role`（plan challenger 缺省依赖 executor）与有效 Plan-Ref 过滤；任一活跃任务存在时不放行。`plan_stage_dispatch` 的 awaiting 分支只消费 `dispatchable`，禁止在 store 内复制一套角色规则。
+2. **durable 代际按阶段**：`herdr/node_dispatch_store.py#reconcile_workflow` 只快照本阶段 `dispatchable` 为 `predecessors`；为空时不创建代际；下一代以 `prior_operation_id` 承接，不修改 `start` 单发契约与 `replacement_complete` 口径。
+3. **精确缺失诊断**：`herdr/node_dispatch.py#result` 保留 #407 的「非 pending 才算活跃」口径；deadline 分支只报告结构化缺失 ID，不延长 deadline、不新增无限重试。
+4. **不扩大改动面**：不新增第二套状态机、不改工作流拓扑、不改 `plan_parser` / Agent Router；节点完成语义保持 role-aware。
+5. **验证必须走真实链路**：测试使用真实 Controller 队列 / sweep、CLI launch intent、StateStore 与 SQLite，不以只调用 `plan_stage_dispatch()` 的伪集成替代。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_plan_causal_dispatch.py tests/test_node_dispatch_contract.py
+pytest -q tests/test_direct_stage_dispatch.py tests/test_role_identity_consistency.py \
+  tests/test_stage_advance_and_supersede.py tests/test_recovery_entrypoints.py \
+  tests/test_auto_acceptance_rework_recovery.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+期望：专项 `113 passed`；回归 `170 passed, 60 subtests`；compileall 与 diff 检查退出码 0。
+
+### 相关文档 / 关联证据
+
+- 实际工作流故障现场：`wf-haflow-1106-01`（test note `n-1793948202152-1ae3`、review note `n-1793948602807-c95c`）
+- 实施提交 `f0acb8e8`（父提交 `b5f4301`，#407）
+- `herdr/direct_dispatch.py#redispatch_stage`
+- `herdr/node_dispatch_store.py#reconcile_workflow`
+- `herdr/node_dispatch.py#result`
+- `tests/test_plan_causal_dispatch.py#TestPlanSameNodeRedoDurableClosure`
+- `tests/test_node_dispatch_contract.py#test_staged_rework_snapshots_only_the_dispatchable_role`

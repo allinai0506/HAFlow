@@ -4,7 +4,7 @@ _ TestPlanSameNodeRedoDurableClosure.test_causal_wait_for_executor_does_not_crea
 tests/test_plan_causal_dispatch.py:1241: in test_causal_wait_for_executor_does_not_create_challenger_generation_or_escalate
     assert self._operation()['status'] == 'resolved'
 E   AssertionError: assert 'waiting_human' == 'resolved'
-E     
+E
 E     - resolved
 E     + waiting_human
 ----------------------------- Captured stdout call -----------------------------
@@ -132,7 +132,7 @@ _ TestPlanSameNodeRedoDurableClosure.test_same_node_redo_registers_executor_then
 tests/test_plan_causal_dispatch.py:1208: in test_same_node_redo_registers_executor_then_challenger_and_completes_node
     assert op1['payload']['predecessors'] == [
 E   AssertionError: assert [{'task_id': ...42a97cefe8d'}] == [{'task_id': ...42a97cefe8d'}]
-E     
+E
 E     At index 0 diff: {'task_id': 'wf-ctl-causal-01-plan-challenger', 'run_id': 'run_eded1eb58d9540958fcaa1b7716e2522'} != {'task_id': 'wf-ctl-causal-01-plan-executor', 'run_id': 'run_1a5dd70022bc46e484d7542a97cefe8d'}
 E     Left contains one more item: {'task_id': 'wf-ctl-causal-01-plan-executor', 'run_id': 'run_1a5dd70022bc46e484d7542a97cefe8d'}
 E     Use -v to get more diff
@@ -171,7 +171,7 @@ _____________ test_redispatch_stage_shape_reaches_real_store[True] _____________
 tests/test_node_dispatch_contract.py:1208: in test_redispatch_stage_shape_reaches_real_store
     assert op['payload']['predecessors'] == expected
 E   AssertionError: assert [{'task_id': ...un-executor'}] == [{'task_id': ...un-executor'}]
-E     
+E
 E     At index 0 diff: {'task_id': 'wf-plan-challenger', 'run_id': 'run-challenger'} != {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
 E     Left contains one more item: {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
 E     Use -v to get more diff
@@ -181,7 +181,7 @@ tests/test_node_dispatch_contract.py:1212: in test_staged_rework_snapshots_only_
 tests/test_node_dispatch_contract.py:1208: in test_redispatch_stage_shape_reaches_real_store
     assert op['payload']['predecessors'] == expected
 E   AssertionError: assert [{'task_id': ...un-executor'}] == [{'task_id': ...un-executor'}]
-E     
+E
 E     At index 0 diff: {'task_id': 'wf-plan-challenger', 'run_id': 'run-challenger'} != {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
 E     Left contains one more item: {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
 E     Use -v to get more diff
@@ -194,7 +194,7 @@ _ test_executor_launch_absence_retries_without_creating_challenger_generation __
 tests/test_node_dispatch_contract.py:1257: in test_executor_launch_absence_retries_without_creating_challenger_generation
     assert op['payload']['predecessors'] == [{'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}]
 E   AssertionError: assert [{'task_id': ...un-executor'}] == [{'task_id': ...un-executor'}]
-E     
+E
 E     At index 0 diff: {'task_id': 'wf-plan-challenger', 'run_id': 'run-challenger'} != {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
 E     Left contains one more item: {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
 E     Use -v to get more diff

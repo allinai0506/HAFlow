@@ -86,6 +86,17 @@ UNKNOWN：本节是本地工作树实现。真实 Agent 接单、生产部署和
 
 发送和launch前再次核验前序Task/Run及待补派资格；部分前序撤销时未发送计划终止，下一轮为剩余合法谱系建立新责任，prior_operation_id关联旧计划，避免取消后恢复撞旧终态。已登记supersedes身份不可擦除或重绑定。
 
+## FACT：同节点返工按角色因果分代派发（节点内多角色）
+
+多角色节点（如 `plan` 的 executor + challenger）发生 same-node redo 时，持久化发现只把当前阶段满足角色依赖的谱系头快照为 `predecessors`：`herdr/direct_dispatch.py#redispatch_stage` 从 `lineage_redispatch_candidates` 的未替代谱系头出发，按 `depends_on_role` 过滤（plan challenger 缺省依赖 executor），并要求 executor/质询角色已有通过校验的有效 Plan-Ref；任一活跃任务存在时不放行。`herdr/node_dispatch_store.py#reconcile_workflow` 在 `dispatchable` 为空时 `continue`，不为仍在因果等待的角色建立代际，义务留在谱系头由每轮扫描重新发现。后续角色到来时以 `prior_operation_id` 建立新代际（op#1 predecessors=[executor] → resolved；op#2 predecessors=[challenger]），`start` 单发与 `replacement_complete` 口径不变。`herdr/node_dispatch.py#result` 的 deadline 分支只报告真实缺失的 `missing_expected_task_ids` / `missing_predecessor_ids`，正常因果等待不会进入传输 deadline；节点完成仍由 role-aware `scheduler.node_is_complete` 与最新 `expected_task_ids` 判定，代际 resolved 不等于节点完成。
+
+Evidence:
+- `herdr/direct_dispatch.py#redispatch_stage`
+- `herdr/node_dispatch_store.py#reconcile_workflow`
+- `herdr/node_dispatch.py#result`
+- `tests/test_plan_causal_dispatch.py#TestPlanSameNodeRedoDurableClosure`
+- `tests/test_node_dispatch_contract.py#test_staged_rework_snapshots_only_the_dispatchable_role`
+
 ## 存量、模式与显式替代关系
 
 首节点责任按节点任务发现；其他起点已有Task不阻止空节点建立待办。存量当前代次superseded且仍需替代的任务，即使没有首派历史，也建立第一条绑定前序Task/Run的派发责任。关闭总指挥接单时，只结束尚未发送的待办，释放旧阶段锁并移交直接调度；已发送未知交付继续核验，不借开关重发。重新启用时追加新epoch并保留退役记录。替代谱系合并持久supersedes关系与旧-rN命名兼容，登记后的替代Task不依赖反向superseded_by落盘即可阻止重复补派。
