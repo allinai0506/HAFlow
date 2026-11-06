@@ -1,0 +1,210 @@
+FFFFF.F..FF                                                              [100%]
+=================================== FAILURES ===================================
+_ TestPlanSameNodeRedoDurableClosure.test_causal_wait_for_executor_does_not_create_challenger_generation_or_escalate _
+tests/test_plan_causal_dispatch.py:1241: in test_causal_wait_for_executor_does_not_create_challenger_generation_or_escalate
+    assert self._operation()['status'] == 'resolved'
+E   AssertionError: assert 'waiting_human' == 'resolved'
+E
+E     - resolved
+E     + waiting_human
+----------------------------- Captured stdout call -----------------------------
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmp50p7jz40/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-executor
+[STAGE ADVANCED DIRECT] workflow=wf-ctl-causal-01 node=plan tasks=wf-ctl-causal-01-plan-executor
+[COLLABORATION HANDOFF] {'task_id': 'wf-ctl-causal-01-plan-executor', 'skipped': True, 'reason': 'no_deterministic_route'}
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-executor node=plan -> completed (verdict=none)
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: node not complete with pending roles to dispatch, revoking 'notified' lock
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmp50p7jz40/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-challenger
+[STAGE ADVANCED DIRECT] workflow=wf-ctl-causal-01 node=plan tasks=wf-ctl-causal-01-plan-challenger
+[COLLABORATION HANDOFF] {'task_id': 'wf-ctl-causal-01-plan-challenger', 'skipped': True, 'reason': 'no_deterministic_route'}
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-challenger node=plan -> completed (verdict=blocked)
+[NODE ACCEPTANCE] workflow=wf-ctl-causal-01 node=plan rework tasks=wf-ctl-causal-01-plan-executor,wf-ctl-causal-01-plan-challenger
+SQLITE_STATE {"phase": "redo", "operations": [{"id": 1, "status": "resolved", "payload": {"workflow_id": "wf-ctl-causal-01", "generation": ["exec-1", 100.0, null], "node_id": "plan", "config_hash": "e99806cbabeba4ee5e420406a078149e7e2b5ff8d8975a97c701a758eb267a72", "candidate_sha": null, "candidate_episode_id": 0, "dependency_runs": {"requirements": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null}]}, "generation_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973", "kind": "node_dispatch", "responsible": "coordinator", "recovery_responsible": "controller", "required_task_ids": null, "identity_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973"}, "detail": {"sent_at": 1793947005.32062, "deadline_at": 1793947905.32062, "expected_task_ids": ["wf-ctl-causal-01-plan-executor"], "reason": "dispatch_registered", "registered_task_ids": ["wf-ctl-causal-01-plan-executor"], "registered_runs": {"wf-ctl-causal-01-plan-executor": "run_37de2b10fa2f42ba992e885b58207c94"}}, "attempts": 1}, {"id": 6, "status": "resolved", "payload": {"workflow_id": "wf-ctl-causal-01", "generation": ["exec-1", 100.0, null], "node_id": "plan", "config_hash": "e99806cbabeba4ee5e420406a078149e7e2b5ff8d8975a97c701a758eb267a72", "candidate_sha": null, "candidate_episode_id": 0, "dependency_runs": {"requirements": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null}]}, "prior_operation_id": 1, "generation_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973", "kind": "node_dispatch", "responsible": "coordinator", "recovery_responsible": "controller", "required_task_ids": null, "identity_key": "node_dispatch:f957a0b286270c81cbd5219fc41f261b8a58a67ba197fa5003fbb97f2008fbe4"}, "detail": {"sent_at": 1793947005.9875782, "deadline_at": 1793947905.9875782, "expected_task_ids": ["wf-ctl-causal-01-plan-challenger"], "reason": "dispatch_registered", "registered_task_ids": ["wf-ctl-causal-01-plan-challenger"], "registered_runs": {"wf-ctl-causal-01-plan-challenger": "run_f5a3a0db3b2c4c27a61de48040c3bf02"}}, "attempts": 1}, {"id": 7, "status": "superseded", "payload": {"affected_task_ids": [], "candidate_sha": null, "facts": [{"affected_task_ids": [], "blocker": "canonical HERDR_GATE_VERDICT is blocked: blocked", "candidate_sha": null, "commit": null, "execution_id": "exec-1", "finalize_escalate_reason": null, "finalize_escalated": null, "node": "plan", "parent_task_id": null, "run_id": "run_f5a3a0db3b2c4c27a61de48040c3bf02", "stage": "plan", "stage_verdict": "blocked", "stage_verdict_affected_task_ids": null, "stage_verdict_note": "canonical HERDR_GATE_VERDICT is blocked: blocked", "supersedes": null, "task_id": "wf-ctl-causal-01-plan-challenger", "workflow_id": "wf-ctl-causal-01", "workflow_run_id": null}], "gate_nodes": ["plan"], "identity": "4636c55d7b6a4596fc4c3f3cea57d73b3d4ec7761271ac5112abbd5141e8c9bb", "identity_key": "91e25de838e8c8ed27e78117f83c9c22ea8c34f5be3d748ab093685852902ab1", "kind": "fix_loop", "reason": "candidate_unknown", "retry_node": null, "status": "waiting_human", "task_ids": ["wf-ctl-causal-01-plan-challenger"]}, "detail": {"target_requires_explicit_replacement": true, "replacement": {"operation_type": "fix_loop", "retry_node": null, "affected_task_ids": []}, "decision_needed": "Resolve candidate_unknown; inspect recovery-status, then use recovery-decide with the current operation id/version. A started repair requires verify before replacement."}, "attempts": 0}], "tasks": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null, "dispatch_role": null, "status": "cleaned", "supersedes": null, "superseded_by": null, "dispatch_operation_id": null}, {"task_id": "wf-ctl-causal-01-plan-executor", "run_id": "run_37de2b10fa2f42ba992e885b58207c94", "dispatch_role": "executor", "status": "superseded", "supersedes": null, "superseded_by": null, "dispatch_operation_id": 1}, {"task_id": "wf-ctl-causal-01-plan-challenger", "run_id": "run_f5a3a0db3b2c4c27a61de48040c3bf02", "dispatch_role": "challenger", "status": "superseded", "supersedes": null, "superseded_by": null, "dispatch_operation_id": 6}]}
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: own lineage fully superseded with no live task, revoking 'notified' lock
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmp50p7jz40/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-executor-r2
+wf-ctl-causal-01-plan-executor: linked superseded_by=wf-ctl-causal-01-plan-executor-r2 (status unchanged: superseded)
+[STAGE DISPATCH AWAITING_TASK] workflow=wf-ctl-causal-01 node=plan operation=11 status=awaiting_result
+_ TestPlanSameNodeRedoDurableClosure.test_challenge_launch_missing_reports_exact_missing_task_after_deadline _
+tests/test_plan_causal_dispatch.py:1270: in test_challenge_launch_missing_reports_exact_missing_task_after_deadline
+    item = self.ctrl.coordinator_queue.get_nowait()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/queue.py:231: in get_nowait
+    return self.get(block=False)
+           ^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/queue.py:196: in get
+    raise Empty
+E   _queue.Empty
+----------------------------- Captured stdout call -----------------------------
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmpl_ihjw_t/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-executor
+[STAGE ADVANCED DIRECT] workflow=wf-ctl-causal-01 node=plan tasks=wf-ctl-causal-01-plan-executor
+[COLLABORATION HANDOFF] {'task_id': 'wf-ctl-causal-01-plan-executor', 'skipped': True, 'reason': 'no_deterministic_route'}
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-executor node=plan -> completed (verdict=none)
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: node not complete with pending roles to dispatch, revoking 'notified' lock
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmpl_ihjw_t/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-challenger
+[STAGE ADVANCED DIRECT] workflow=wf-ctl-causal-01 node=plan tasks=wf-ctl-causal-01-plan-challenger
+[COLLABORATION HANDOFF] {'task_id': 'wf-ctl-causal-01-plan-challenger', 'skipped': True, 'reason': 'no_deterministic_route'}
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-challenger node=plan -> completed (verdict=blocked)
+[NODE ACCEPTANCE] workflow=wf-ctl-causal-01 node=plan rework tasks=wf-ctl-causal-01-plan-executor,wf-ctl-causal-01-plan-challenger
+SQLITE_STATE {"phase": "redo", "operations": [{"id": 1, "status": "resolved", "payload": {"workflow_id": "wf-ctl-causal-01", "generation": ["exec-1", 100.0, null], "node_id": "plan", "config_hash": "e99806cbabeba4ee5e420406a078149e7e2b5ff8d8975a97c701a758eb267a72", "candidate_sha": null, "candidate_episode_id": 0, "dependency_runs": {"requirements": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null}]}, "generation_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973", "kind": "node_dispatch", "responsible": "coordinator", "recovery_responsible": "controller", "required_task_ids": null, "identity_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973"}, "detail": {"sent_at": 1793947008.104395, "deadline_at": 1793947908.104395, "expected_task_ids": ["wf-ctl-causal-01-plan-executor"], "reason": "dispatch_registered", "registered_task_ids": ["wf-ctl-causal-01-plan-executor"], "registered_runs": {"wf-ctl-causal-01-plan-executor": "run_d970d3a452904af1be35782f6cd9e1c1"}}, "attempts": 1}, {"id": 6, "status": "resolved", "payload": {"workflow_id": "wf-ctl-causal-01", "generation": ["exec-1", 100.0, null], "node_id": "plan", "config_hash": "e99806cbabeba4ee5e420406a078149e7e2b5ff8d8975a97c701a758eb267a72", "candidate_sha": null, "candidate_episode_id": 0, "dependency_runs": {"requirements": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null}]}, "prior_operation_id": 1, "generation_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973", "kind": "node_dispatch", "responsible": "coordinator", "recovery_responsible": "controller", "required_task_ids": null, "identity_key": "node_dispatch:f957a0b286270c81cbd5219fc41f261b8a58a67ba197fa5003fbb97f2008fbe4"}, "detail": {"sent_at": 1793947008.852919, "deadline_at": 1793947908.852919, "expected_task_ids": ["wf-ctl-causal-01-plan-challenger"], "reason": "dispatch_registered", "registered_task_ids": ["wf-ctl-causal-01-plan-challenger"], "registered_runs": {"wf-ctl-causal-01-plan-challenger": "run_4caf79b1271b4d78ace3f7336aa2fef5"}}, "attempts": 1}, {"id": 7, "status": "superseded", "payload": {"affected_task_ids": [], "candidate_sha": null, "facts": [{"affected_task_ids": [], "blocker": "canonical HERDR_GATE_VERDICT is blocked: blocked", "candidate_sha": null, "commit": null, "execution_id": "exec-1", "finalize_escalate_reason": null, "finalize_escalated": null, "node": "plan", "parent_task_id": null, "run_id": "run_4caf79b1271b4d78ace3f7336aa2fef5", "stage": "plan", "stage_verdict": "blocked", "stage_verdict_affected_task_ids": null, "stage_verdict_note": "canonical HERDR_GATE_VERDICT is blocked: blocked", "supersedes": null, "task_id": "wf-ctl-causal-01-plan-challenger", "workflow_id": "wf-ctl-causal-01", "workflow_run_id": null}], "gate_nodes": ["plan"], "identity": "41c3632e7e6b29fce71f1967996bc29637f63cb5fed13d07257fc5b724e1c584", "identity_key": "91e25de838e8c8ed27e78117f83c9c22ea8c34f5be3d748ab093685852902ab1", "kind": "fix_loop", "reason": "candidate_unknown", "retry_node": null, "status": "waiting_human", "task_ids": ["wf-ctl-causal-01-plan-challenger"]}, "detail": {"target_requires_explicit_replacement": true, "replacement": {"operation_type": "fix_loop", "retry_node": null, "affected_task_ids": []}, "decision_needed": "Resolve candidate_unknown; inspect recovery-status, then use recovery-decide with the current operation id/version. A started repair requires verify before replacement."}, "attempts": 0}], "tasks": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null, "dispatch_role": null, "status": "cleaned", "supersedes": null, "superseded_by": null, "dispatch_operation_id": null}, {"task_id": "wf-ctl-causal-01-plan-executor", "run_id": "run_d970d3a452904af1be35782f6cd9e1c1", "dispatch_role": "executor", "status": "superseded", "supersedes": null, "superseded_by": null, "dispatch_operation_id": 1}, {"task_id": "wf-ctl-causal-01-plan-challenger", "run_id": "run_4caf79b1271b4d78ace3f7336aa2fef5", "dispatch_role": "challenger", "status": "superseded", "supersedes": null, "superseded_by": null, "dispatch_operation_id": 6}]}
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: own lineage fully superseded with no live task, revoking 'notified' lock
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmpl_ihjw_t/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-executor-r2
+wf-ctl-causal-01-plan-executor: linked superseded_by=wf-ctl-causal-01-plan-executor-r2 (status unchanged: superseded)
+[STAGE DISPATCH AWAITING_TASK] workflow=wf-ctl-causal-01 node=plan operation=11 status=awaiting_result
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-executor-r2 node=plan -> completed (verdict=none)
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: own lineage fully superseded with no live task, revoking 'notified' lock
+_ TestPlanSameNodeRedoDurableClosure.test_duplicate_sweeps_and_done_events_are_idempotent _
+tests/test_plan_causal_dispatch.py:1253: in test_duplicate_sweeps_and_done_events_are_idempotent
+    challenger = self._launch_next('challenger')
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_plan_causal_dispatch.py:1131: in _launch_next
+    item = self.ctrl.coordinator_queue.get_nowait()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/queue.py:231: in get_nowait
+    return self.get(block=False)
+           ^^^^^^^^^^^^^^^^^^^^^
+/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/queue.py:196: in get
+    raise Empty
+E   _queue.Empty
+----------------------------- Captured stdout call -----------------------------
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmp608bogxj/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-executor
+[STAGE ADVANCED DIRECT] workflow=wf-ctl-causal-01 node=plan tasks=wf-ctl-causal-01-plan-executor
+[COLLABORATION HANDOFF] {'task_id': 'wf-ctl-causal-01-plan-executor', 'skipped': True, 'reason': 'no_deterministic_route'}
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-executor node=plan -> completed (verdict=none)
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: node not complete with pending roles to dispatch, revoking 'notified' lock
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmp608bogxj/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-challenger
+[STAGE ADVANCED DIRECT] workflow=wf-ctl-causal-01 node=plan tasks=wf-ctl-causal-01-plan-challenger
+[COLLABORATION HANDOFF] {'task_id': 'wf-ctl-causal-01-plan-challenger', 'skipped': True, 'reason': 'no_deterministic_route'}
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-challenger node=plan -> completed (verdict=blocked)
+[NODE ACCEPTANCE] workflow=wf-ctl-causal-01 node=plan rework tasks=wf-ctl-causal-01-plan-executor,wf-ctl-causal-01-plan-challenger
+SQLITE_STATE {"phase": "redo", "operations": [{"id": 1, "status": "resolved", "payload": {"workflow_id": "wf-ctl-causal-01", "generation": ["exec-1", 100.0, null], "node_id": "plan", "config_hash": "e99806cbabeba4ee5e420406a078149e7e2b5ff8d8975a97c701a758eb267a72", "candidate_sha": null, "candidate_episode_id": 0, "dependency_runs": {"requirements": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null}]}, "generation_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973", "kind": "node_dispatch", "responsible": "coordinator", "recovery_responsible": "controller", "required_task_ids": null, "identity_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973"}, "detail": {"sent_at": 1793947010.8174489, "deadline_at": 1793947910.8174489, "expected_task_ids": ["wf-ctl-causal-01-plan-executor"], "reason": "dispatch_registered", "registered_task_ids": ["wf-ctl-causal-01-plan-executor"], "registered_runs": {"wf-ctl-causal-01-plan-executor": "run_ae836b99ccdb43f4b5884730f2f7669e"}}, "attempts": 1}, {"id": 6, "status": "resolved", "payload": {"workflow_id": "wf-ctl-causal-01", "generation": ["exec-1", 100.0, null], "node_id": "plan", "config_hash": "e99806cbabeba4ee5e420406a078149e7e2b5ff8d8975a97c701a758eb267a72", "candidate_sha": null, "candidate_episode_id": 0, "dependency_runs": {"requirements": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null}]}, "prior_operation_id": 1, "generation_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973", "kind": "node_dispatch", "responsible": "coordinator", "recovery_responsible": "controller", "required_task_ids": null, "identity_key": "node_dispatch:f957a0b286270c81cbd5219fc41f261b8a58a67ba197fa5003fbb97f2008fbe4"}, "detail": {"sent_at": 1793947011.556333, "deadline_at": 1793947911.556333, "expected_task_ids": ["wf-ctl-causal-01-plan-challenger"], "reason": "dispatch_registered", "registered_task_ids": ["wf-ctl-causal-01-plan-challenger"], "registered_runs": {"wf-ctl-causal-01-plan-challenger": "run_ab01d6c4d1164d038f352b287a56b599"}}, "attempts": 1}, {"id": 7, "status": "superseded", "payload": {"affected_task_ids": [], "candidate_sha": null, "facts": [{"affected_task_ids": [], "blocker": "canonical HERDR_GATE_VERDICT is blocked: blocked", "candidate_sha": null, "commit": null, "execution_id": "exec-1", "finalize_escalate_reason": null, "finalize_escalated": null, "node": "plan", "parent_task_id": null, "run_id": "run_ab01d6c4d1164d038f352b287a56b599", "stage": "plan", "stage_verdict": "blocked", "stage_verdict_affected_task_ids": null, "stage_verdict_note": "canonical HERDR_GATE_VERDICT is blocked: blocked", "supersedes": null, "task_id": "wf-ctl-causal-01-plan-challenger", "workflow_id": "wf-ctl-causal-01", "workflow_run_id": null}], "gate_nodes": ["plan"], "identity": "fb06d1edef8531e1786ee2ef02dcbb287b767730145305db808fe641a8de7838", "identity_key": "91e25de838e8c8ed27e78117f83c9c22ea8c34f5be3d748ab093685852902ab1", "kind": "fix_loop", "reason": "candidate_unknown", "retry_node": null, "status": "waiting_human", "task_ids": ["wf-ctl-causal-01-plan-challenger"]}, "detail": {"target_requires_explicit_replacement": true, "replacement": {"operation_type": "fix_loop", "retry_node": null, "affected_task_ids": []}, "decision_needed": "Resolve candidate_unknown; inspect recovery-status, then use recovery-decide with the current operation id/version. A started repair requires verify before replacement."}, "attempts": 0}], "tasks": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null, "dispatch_role": null, "status": "cleaned", "supersedes": null, "superseded_by": null, "dispatch_operation_id": null}, {"task_id": "wf-ctl-causal-01-plan-executor", "run_id": "run_ae836b99ccdb43f4b5884730f2f7669e", "dispatch_role": "executor", "status": "superseded", "supersedes": null, "superseded_by": null, "dispatch_operation_id": 1}, {"task_id": "wf-ctl-causal-01-plan-challenger", "run_id": "run_ab01d6c4d1164d038f352b287a56b599", "dispatch_role": "challenger", "status": "superseded", "supersedes": null, "superseded_by": null, "dispatch_operation_id": 6}]}
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: own lineage fully superseded with no live task, revoking 'notified' lock
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmp608bogxj/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-executor-r2
+wf-ctl-causal-01-plan-executor: linked superseded_by=wf-ctl-causal-01-plan-executor-r2 (status unchanged: superseded)
+[STAGE DISPATCH AWAITING_TASK] workflow=wf-ctl-causal-01 node=plan operation=11 status=awaiting_result
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-executor-r2 node=plan -> completed (verdict=none)
+[QUEUE STALE] task=wf-ctl-causal-01-plan-executor-r2 expected=agent_done actual=cleaned
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: own lineage fully superseded with no live task, revoking 'notified' lock
+_ TestPlanSameNodeRedoDurableClosure.test_same_node_redo_registers_executor_then_challenger_and_completes_node _
+tests/test_plan_causal_dispatch.py:1208: in test_same_node_redo_registers_executor_then_challenger_and_completes_node
+    assert op1['payload']['predecessors'] == [
+E   AssertionError: assert [{'task_id': ...42a97cefe8d'}] == [{'task_id': ...42a97cefe8d'}]
+E
+E     At index 0 diff: {'task_id': 'wf-ctl-causal-01-plan-challenger', 'run_id': 'run_eded1eb58d9540958fcaa1b7716e2522'} != {'task_id': 'wf-ctl-causal-01-plan-executor', 'run_id': 'run_1a5dd70022bc46e484d7542a97cefe8d'}
+E     Left contains one more item: {'task_id': 'wf-ctl-causal-01-plan-executor', 'run_id': 'run_1a5dd70022bc46e484d7542a97cefe8d'}
+E     Use -v to get more diff
+----------------------------- Captured stdout call -----------------------------
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmpbi9zc6wn/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-executor
+[STAGE ADVANCED DIRECT] workflow=wf-ctl-causal-01 node=plan tasks=wf-ctl-causal-01-plan-executor
+[COLLABORATION HANDOFF] {'task_id': 'wf-ctl-causal-01-plan-executor', 'skipped': True, 'reason': 'no_deterministic_route'}
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-executor node=plan -> completed (verdict=none)
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: node not complete with pending roles to dispatch, revoking 'notified' lock
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmpbi9zc6wn/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-challenger
+[STAGE ADVANCED DIRECT] workflow=wf-ctl-causal-01 node=plan tasks=wf-ctl-causal-01-plan-challenger
+[COLLABORATION HANDOFF] {'task_id': 'wf-ctl-causal-01-plan-challenger', 'skipped': True, 'reason': 'no_deterministic_route'}
+[AUTO ACCEPT] task=wf-ctl-causal-01-plan-challenger node=plan -> completed (verdict=blocked)
+[NODE ACCEPTANCE] workflow=wf-ctl-causal-01 node=plan rework tasks=wf-ctl-causal-01-plan-executor,wf-ctl-causal-01-plan-challenger
+SQLITE_STATE {"phase": "redo", "operations": [{"id": 1, "status": "resolved", "payload": {"workflow_id": "wf-ctl-causal-01", "generation": ["exec-1", 100.0, null], "node_id": "plan", "config_hash": "e99806cbabeba4ee5e420406a078149e7e2b5ff8d8975a97c701a758eb267a72", "candidate_sha": null, "candidate_episode_id": 0, "dependency_runs": {"requirements": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null}]}, "generation_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973", "kind": "node_dispatch", "responsible": "coordinator", "recovery_responsible": "controller", "required_task_ids": null, "identity_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973"}, "detail": {"sent_at": 1793947013.629683, "deadline_at": 1793947913.629683, "expected_task_ids": ["wf-ctl-causal-01-plan-executor"], "reason": "dispatch_registered", "registered_task_ids": ["wf-ctl-causal-01-plan-executor"], "registered_runs": {"wf-ctl-causal-01-plan-executor": "run_1a5dd70022bc46e484d7542a97cefe8d"}}, "attempts": 1}, {"id": 6, "status": "resolved", "payload": {"workflow_id": "wf-ctl-causal-01", "generation": ["exec-1", 100.0, null], "node_id": "plan", "config_hash": "e99806cbabeba4ee5e420406a078149e7e2b5ff8d8975a97c701a758eb267a72", "candidate_sha": null, "candidate_episode_id": 0, "dependency_runs": {"requirements": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null}]}, "prior_operation_id": 1, "generation_key": "node_dispatch:4a707600000522c8df62e0a9ee1508d3d12d5772af2a5876987aac565e48f973", "kind": "node_dispatch", "responsible": "coordinator", "recovery_responsible": "controller", "required_task_ids": null, "identity_key": "node_dispatch:f957a0b286270c81cbd5219fc41f261b8a58a67ba197fa5003fbb97f2008fbe4"}, "detail": {"sent_at": 1793947014.409781, "deadline_at": 1793947914.409781, "expected_task_ids": ["wf-ctl-causal-01-plan-challenger"], "reason": "dispatch_registered", "registered_task_ids": ["wf-ctl-causal-01-plan-challenger"], "registered_runs": {"wf-ctl-causal-01-plan-challenger": "run_eded1eb58d9540958fcaa1b7716e2522"}}, "attempts": 1}, {"id": 7, "status": "superseded", "payload": {"affected_task_ids": [], "candidate_sha": null, "facts": [{"affected_task_ids": [], "blocker": "canonical HERDR_GATE_VERDICT is blocked: blocked", "candidate_sha": null, "commit": null, "execution_id": "exec-1", "finalize_escalate_reason": null, "finalize_escalated": null, "node": "plan", "parent_task_id": null, "run_id": "run_eded1eb58d9540958fcaa1b7716e2522", "stage": "plan", "stage_verdict": "blocked", "stage_verdict_affected_task_ids": null, "stage_verdict_note": "canonical HERDR_GATE_VERDICT is blocked: blocked", "supersedes": null, "task_id": "wf-ctl-causal-01-plan-challenger", "workflow_id": "wf-ctl-causal-01", "workflow_run_id": null}], "gate_nodes": ["plan"], "identity": "2c80cf84dd350e0fec05c21d6084bd6ad11e15691edad46a5d1fcf7e5a34383a", "identity_key": "91e25de838e8c8ed27e78117f83c9c22ea8c34f5be3d748ab093685852902ab1", "kind": "fix_loop", "reason": "candidate_unknown", "retry_node": null, "status": "waiting_human", "task_ids": ["wf-ctl-causal-01-plan-challenger"]}, "detail": {"target_requires_explicit_replacement": true, "replacement": {"operation_type": "fix_loop", "retry_node": null, "affected_task_ids": []}, "decision_needed": "Resolve candidate_unknown; inspect recovery-status, then use recovery-decide with the current operation id/version. A started repair requires verify before replacement."}, "attempts": 0}], "tasks": [{"task_id": "wf-ctl-causal-01-req-1", "run_id": null, "dispatch_role": null, "status": "cleaned", "supersedes": null, "superseded_by": null, "dispatch_operation_id": null}, {"task_id": "wf-ctl-causal-01-plan-executor", "run_id": "run_1a5dd70022bc46e484d7542a97cefe8d", "dispatch_role": "executor", "status": "superseded", "supersedes": null, "superseded_by": null, "dispatch_operation_id": 1}, {"task_id": "wf-ctl-causal-01-plan-challenger", "run_id": "run_eded1eb58d9540958fcaa1b7716e2522", "dispatch_role": "challenger", "status": "superseded", "supersedes": null, "superseded_by": null, "dispatch_operation_id": 6}]}
+[STAGE REVOKE] workflow=wf-ctl-causal-01 node=plan: own lineage fully superseded with no live task, revoking 'notified' lock
+[STAGE ADVANCE QUEUED] workflow=wf-ctl-causal-01 requirements -> plan
+[WORKER] clone=/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/tmpbi9zc6wn/clones/new
+[WORKER] pane=pane
+[WORKER] pane_source=dynamic
+[WORKER] agent=opencode requested=auto
+[REGISTERED] wf-ctl-causal-01-plan-executor-r2
+wf-ctl-causal-01-plan-executor: linked superseded_by=wf-ctl-causal-01-plan-executor-r2 (status unchanged: superseded)
+[STAGE DISPATCH AWAITING_TASK] workflow=wf-ctl-causal-01 node=plan operation=11 status=awaiting_result
+_____________ test_redispatch_stage_shape_reaches_real_store[True] _____________
+tests/test_node_dispatch_contract.py:1208: in test_redispatch_stage_shape_reaches_real_store
+    assert op['payload']['predecessors'] == expected
+E   AssertionError: assert [{'task_id': ...un-executor'}] == [{'task_id': ...un-executor'}]
+E
+E     At index 0 diff: {'task_id': 'wf-plan-challenger', 'run_id': 'run-challenger'} != {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
+E     Left contains one more item: {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
+E     Use -v to get more diff
+___________ test_staged_rework_snapshots_only_the_dispatchable_role ____________
+tests/test_node_dispatch_contract.py:1212: in test_staged_rework_snapshots_only_the_dispatchable_role
+    test_redispatch_stage_shape_reaches_real_store(scene, True)
+tests/test_node_dispatch_contract.py:1208: in test_redispatch_stage_shape_reaches_real_store
+    assert op['payload']['predecessors'] == expected
+E   AssertionError: assert [{'task_id': ...un-executor'}] == [{'task_id': ...un-executor'}]
+E
+E     At index 0 diff: {'task_id': 'wf-plan-challenger', 'run_id': 'run-challenger'} != {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
+E     Left contains one more item: {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
+E     Use -v to get more diff
+________ test_challenger_replacement_rejected_under_executor_generation ________
+tests/test_node_dispatch_contract.py:1242: in test_challenger_replacement_rejected_under_executor_generation
+    with pytest.raises(ValueError, match='predecessor'):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE ValueError
+_ test_executor_launch_absence_retries_without_creating_challenger_generation __
+tests/test_node_dispatch_contract.py:1257: in test_executor_launch_absence_retries_without_creating_challenger_generation
+    assert op['payload']['predecessors'] == [{'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}]
+E   AssertionError: assert [{'task_id': ...un-executor'}] == [{'task_id': ...un-executor'}]
+E
+E     At index 0 diff: {'task_id': 'wf-plan-challenger', 'run_id': 'run-challenger'} != {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
+E     Left contains one more item: {'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/test_plan_causal_dispatch.py::TestPlanSameNodeRedoDurableClosure::test_causal_wait_for_executor_does_not_create_challenger_generation_or_escalate
+FAILED tests/test_plan_causal_dispatch.py::TestPlanSameNodeRedoDurableClosure::test_challenge_launch_missing_reports_exact_missing_task_after_deadline
+FAILED tests/test_plan_causal_dispatch.py::TestPlanSameNodeRedoDurableClosure::test_duplicate_sweeps_and_done_events_are_idempotent
+FAILED tests/test_plan_causal_dispatch.py::TestPlanSameNodeRedoDurableClosure::test_same_node_redo_registers_executor_then_challenger_and_completes_node
+FAILED tests/test_node_dispatch_contract.py::test_redispatch_stage_shape_reaches_real_store[True]
+FAILED tests/test_node_dispatch_contract.py::test_staged_rework_snapshots_only_the_dispatchable_role
+FAILED tests/test_node_dispatch_contract.py::test_challenger_replacement_rejected_under_executor_generation
+FAILED tests/test_node_dispatch_contract.py::test_executor_launch_absence_retries_without_creating_challenger_generation
+8 failed, 3 passed, 99 deselected in 11.68s

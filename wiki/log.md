@@ -4125,3 +4125,12 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   3. `herdr/liveness.py` 与 `services/herdr-sentinel.py` 新增 Pending Task SLA（180s）与 `check_pending_tasks()` 巡检，对滞留超期的 `pending` 任务实时桌面告警与事件落盘。
 - 验证：`tests/test_dispatch_pending_timeout_contract.py` 4 个反证与防复发专项全绿，`tests/test_node_dispatch_contract.py` 82 项全绿，全量 230 项相关回归全绿；`compileall` 与 `git diff --check` clean。
 - 教训：`docs/lessons/lessons-learned.md` §229。
+
+## [2026-11-06] Fix | Same-Node Redo 持久化派发按角色因果分代（wf-haflow-1106-01 / #401 后续）
+- 现场：`plan` 节点 redo 后，planner 只派 `executor-r2`，但 durable discovery 把 executor 与 challenger 两个谱系头同时快照为同一 operation 的 `predecessors`；executor-r2 登记后代际仍不 resolved，challenger-r2 因角色门控无法派发，跨过旧 deadline 后误报 `dispatch_task_missing` / `waiting_human`，正常因果等待被当成传输失败。
+- 修复：
+  1. `herdr/direct_dispatch.py` 新增 `redispatch_stage`，作为 planner 与持久化发现共享的角色因果判定；`plan_stage_dispatch` awaiting 分支改为消费统一 `{task, role, definition}` 包装；
+  2. `herdr/node_dispatch_store.py#reconcile_workflow` 只按当前阶段 `dispatchable` 快照 `predecessors`，为空时不创建代际，下一代以 `prior_operation_id` 承接；
+  3. `herdr/node_dispatch.py#result` deadline 分支新增 `missing_expected_task_ids` / `missing_predecessor_ids` 精确诊断，保留 #407 非 pending 消解口径。
+- 验证：真实 Controller/StateStore/SQLite 闭环与边界测试专项 `113 passed`、回归 `170 passed, 60 subtests`；RED 在 base `b5f4301` 复现 10 failed；`compileall` 与 `git diff --check` clean。
+- 教训：`docs/lessons/lessons-learned.md` §230。

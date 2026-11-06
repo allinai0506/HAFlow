@@ -38,3 +38,4 @@
 - [`20261018-wf-haflow-1018-01-wrapup.md`](20261018-wf-haflow-1018-01-wrapup.md)：issue #255 双门禁 r5 汇聚、six-step-finish 0→6 状态表、PR #259 降级留证链与遗留事项。
 - [`20261025-wf-haflow-1024-02-wrapup-manual.md`](20261025-wf-haflow-1024-02-wrapup-manual.md)：issue #326 底部抽屉遮挡 —— 双门禁同候选汇聚核验、six-step-finish 0→6 与交付状态表（PR URL / CI / 审核 findings）、create-pr 结构性不可用降级留证、追加式文档合并面与 Codex P2 实测处置边界。
 - [`20261102-wf-haflow-1102-02-wrapup.md`](20261102-wf-haflow-1102-02-wrapup.md)：Staged 自动验收失败恢复闭环 V1 —— 结构化验收结果、同工位有界 rework、episode 级升级闩、真实 SQLite/CLI/kernel 守护测试与 six-step-finish 状态表。
+- [`20261106-wf-haflow-1106-01-wrapup.md`](20261106-wf-haflow-1106-01-wrapup.md)：同节点返工持久化派发闭环 V1 —— 按角色因果分代的 predecessors、因果等待与真实缺失分离、双门禁同候选汇聚与 six-step-finish 状态表。

@@ -1053,7 +1053,372 @@ class TestControllerPlanCausalIntegration(unittest.TestCase):
         self.assertEqual(spec2["plan_ref"], new_plan_note["note_id"])
 
 
+class TestPlanSameNodeRedoDurableClosure(unittest.TestCase):
+    """Keep Controller, CLI admission, launch intents and SQLite registration real."""
+
+    def setUp(self):
+        import os
+        import subprocess
+
+        import pytest
+
+        from herdr import state_db
+        from tests.test_recovery_entrypoints import _real_committed_launch_scene
+
+        self.env = mock.patch.dict(os.environ)
+        self.env.start()
+        TestControllerPlanCausalIntegration.setUp(self)
+        self.mp = pytest.MonkeyPatch()
+        real_run = subprocess.run
+        self.cli, self.store, _, self.calls, _ = _real_committed_launch_scene(self.tmp_dir, self.mp)
+        with state_db.get_db_connection(self.store.db_path) as conn:
+            conn.execute("DELETE FROM tasks WHERE task_id='old'")
+            conn.execute("DELETE FROM workflows WHERE workflow_id='wf'")
+        self.wf['project_root'] = str(self.tmp_dir / 'repo')
+        self.wf['base_branch'] = 'main'
+        self.store.save_workflow(self.wf)
+        self.mp.setattr(self.cli, 'project_for_workflow', self.store.get_workflow)
+        self.mp.setattr(self.cli, 'workflow_config_for', lambda wid: self.store.get_workflow(wid)['config'])
+        self.native_transport = self.cli.subprocess.run
+        import shutil
+
+        from herdr.experience.client import ExperienceClient
+        self.mp.setattr(ExperienceClient, '_request', lambda *a, **kw: {'ok': True, 'rules': []})
+        shutil.copytree(self.tmp_dir / 'repo', self.tmp_dir / 'clones' / 'new', dirs_exist_ok=True)
+        self.launches = []
+
+        def transport(cmd, **kwargs):
+            from herdr.task_cli_parser import build_parser
+            if len(cmd) > 1 and cmd[1] == 'launch':
+                args = build_parser().parse_args(cmd[1:])
+                self.launches.append(args)
+                self.cli.launch_task(args)
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+            if cmd[0] == 'ps':
+                return real_run(cmd, **kwargs)
+            return self.native_transport(cmd, **kwargs)
+
+        self.mp.setattr(self.ctrl.subprocess, 'run', transport)
+        # Candidate availability is external to this dispatch test; CLI still validates
+        # its temporary Git source and real launch identities.
+        self.mp.setattr(self.ctrl, '_dispatch_candidate_ready', lambda *a, **kw: True)
+        self.mp.setattr(self.ctrl, 'finalize_completed_task', self._cleanup)
+        self.mp.setenv('HERDR_DIRECT_STAGE_DISPATCH', '1')
+        self.mp.setenv('HERDR_AUTO_ACCEPT', '1')
+
+    def tearDown(self):
+        self.mp.undo()
+        TestControllerPlanCausalIntegration.tearDown(self)
+        self.env.stop()
+
+    def _cleanup(self, task_id):
+        # Native pane cleanup is substituted; accepted state is persisted by Controller.
+        task = self.store.get_task(task_id)
+        if task['status'] == 'completed':
+            self.store.transition_task(task_id, 'cleanup_ready', 'test_native_cleanup')
+            self.store.transition_task(task_id, 'cleaned', 'test_native_cleanup')
+
+    def _sweep(self):
+        for _ in range(4):
+            self.ctrl.check_workflow_stage_advance(self.wf_id)
+
+    def _launch_next(self, role):
+        self._sweep()
+        item = self.ctrl.coordinator_queue.get_nowait()
+        assert item['node_id'] == 'plan'
+        before = len(self.launches)
+        self.ctrl._handle_coordinator_item(item)
+        assert len(self.launches) == before + 1
+        args = self.launches[-1]
+        assert args.dispatch_role == role
+        task = self.store.get_task(args.task_id)
+        assert task['workflow_id'] == self.wf_id
+        assert task['execution_id'] == 'exec-1'
+        assert task['dispatch_operation_id'] == item['dispatch_operation_id']
+        assert task['launch_intent_id']
+        return task
+
+    def _plan(self, task):
+        from herdr import workflow_docs
+        return workflow_docs.append_note(self.wf_id, kind='plan', title='技术方案', node='plan',
+            task_id=task['task_id'], body=(
+                '## 技术方案与架构设计\n模块职责边界与调用链已明确。\n'
+                '## 任务拆分与依赖关系\n- Task 1: 修复持久化派发。\n'
+                '## 修改文件范围清单\n- Modify: herdr/direct_dispatch.py\n'
+                '## 每个 Task 目标与验收标准\n- 验证命令: pytest -q tests\n'
+                '## 风险与应对策略\n回滚本次修改，保持状态格式兼容。'))['note_id']
+
+    def _done(self, task, *, review=None, plan_ref=None):
+        from herdr import workflow_docs
+        if review:
+            workflow_docs.append_note(self.wf_id, kind='review', title='方案对抗性质询', node='plan',
+                task_id=task['task_id'], body=(
+                    '## 方案对抗性审查与可行性评估\n'
+                    '已核查架构、因果调用链、持久化边界及恢复路径，完成可行性风险评估。\n'
+                    f'Plan-Ref: {plan_ref}\nHERDR_GATE_VERDICT: {review}'))
+        self.store.transition_task(task['task_id'], 'agent_done', 'test_completion_receipt')
+        self._done_event(task)
+        assert self.store.get_task(task['task_id'])['status'] == 'cleaned'
+
+    def _done_event(self, task):
+        self.ctrl._handle_coordinator_item({'kind': 'task_event', 'task_id': task['task_id'],
+            'event_type': 'done', 'key': task['task_id'] + ':done'})
+
+    def _redo(self):
+        from services.controller.node_acceptance import apply_node_acceptance
+        executor = self._launch_next('executor')
+        ref = self._plan(executor)
+        self._done(executor)
+        challenger = self._launch_next('challenger')
+        self._done(challenger, review='blocked', plan_ref=ref)
+        assert self.store.get_task(challenger['task_id'])['stage_verdict'] == 'blocked'
+        assert apply_node_acceptance(self.ctrl, self.wf_id, self.wf_cfg,
+                                     self.store.list_tasks(workflow_id=self.wf_id)) == 2
+        for task in (executor, challenger):
+            current = self.store.get_task(task['task_id'])
+            assert current['status'] == 'superseded'
+            assert current['replacement_pending'] is True
+        self._snapshot('redo')
+        return executor, challenger
+
+    def _operation(self):
+        from herdr import node_dispatch_store as nd
+        return nd.operation_for_node(self.store.db_path, self.wf_id, 'plan')
+
+    def _snapshot(self, phase):
+        import json
+
+        from herdr import recovery_store
+        workflow = self.store.get_workflow(self.wf_id)
+        snapshot = {'phase': phase, 'unhealthy_agents': workflow.get('unhealthy_agents'),
+            'operations': [
+                {'id': op['id'], 'status': op['status'], 'attempts': op['attempts'],
+                 'payload': {k: op['payload'].get(k) for k in ('predecessors', 'prior_operation_id')},
+                 'detail': {k: op['detail'].get(k) for k in ('expected_task_ids', 'reason')}}
+                for op in recovery_store.list_operations(self.store.db_path, self.wf_id)
+                if op['payload'].get('kind') == 'node_dispatch'],
+            'tasks': [{k: task.get(k) for k in ('task_id', 'run_id', 'execution_id', 'dispatch_role',
+                'agent', 'status', 'failure_reason', 'supersedes', 'superseded_by',
+                'dispatch_operation_id', 'launch_intent_id')}
+                for task in self.store.list_tasks(workflow_id=self.wf_id)]}
+        print('SQLITE_STATE ' + json.dumps(snapshot, ensure_ascii=False))
+
+    def test_same_node_redo_registers_executor_then_challenger_and_completes_node(self):
+        old_executor, old_challenger = self._redo()
+        executor = self._launch_next('executor')
+        op1 = self._operation()
+        assert op1['payload']['predecessors'] == [
+            {'task_id': old_executor['task_id'], 'run_id': old_executor['run_id']}]
+        assert op1['status'] == 'resolved'
+        assert executor['supersedes'] == old_executor['task_id']
+        assert executor['run_id'] != old_executor['run_id']
+        assert not self.ctrl.is_node_complete(self.wf_id, 'plan')
+        self._snapshot('executor-r2 registered')
+        ref = self._plan(executor)
+        self._done(executor)
+        challenger = self._launch_next('challenger')
+        op2 = self._operation()
+        assert op2['payload']['prior_operation_id'] == op1['id']
+        assert op2['payload']['predecessors'] == [
+            {'task_id': old_challenger['task_id'], 'run_id': old_challenger['run_id']}]
+        assert op2['status'] == 'resolved'
+        assert challenger['supersedes'] == old_challenger['task_id']
+        assert f'Plan-Ref: {ref}' in self.launches[-1].prompt
+        self._snapshot('challenger-r2 registered')
+        self._done(challenger, review='pass', plan_ref=ref)
+        assert self.ctrl.is_node_complete(self.wf_id, 'plan')
+        self._sweep()
+        assert self.ctrl.coordinator_queue.get_nowait()['node_id'] == 'implementation'
+        self._snapshot('plan complete')
+
+    def test_causal_wait_for_executor_does_not_create_challenger_generation_or_escalate(self):
+        from herdr import node_dispatch_store as nd
+        self._redo()
+        executor = self._launch_next('executor')
+        op = self._operation()
+        for now in (op['updated_at'] + 1000, op['updated_at'] + 10000):
+            nd.reconcile_workflow(self.store.db_path, self.wf_id, now=now)
+            self._sweep()
+            assert self._operation()['id'] == op['id']
+            assert self._operation()['status'] == 'resolved'
+            assert self.ctrl.coordinator_queue.empty()
+            assert not self.ctrl.is_node_complete(self.wf_id, 'plan')
+        assert self.store.get_task(executor['task_id'])['status'] == 'dispatched'
+
+    def test_duplicate_sweeps_and_done_events_are_idempotent(self):
+        from herdr import recovery_store
+        self._redo()
+        executor = self._launch_next('executor')
+        self._plan(executor)
+        self._done(executor)
+        self._done_event(executor)
+        challenger = self._launch_next('challenger')
+        before = (len(self.store.list_tasks()), len(recovery_store.list_operations(self.store.db_path, self.wf_id)), len(self.launches))
+        for _ in range(3):
+            self._done_event(executor)
+            self._sweep()
+        assert self.ctrl.coordinator_queue.empty()
+        assert before == (len(self.store.list_tasks()), len(recovery_store.list_operations(self.store.db_path, self.wf_id)), len(self.launches))
+        assert challenger['dispatch_role'] == 'challenger'
+
+    def test_challenge_launch_missing_reports_exact_missing_task_after_deadline(self):
+        import subprocess
+
+        from herdr import node_dispatch_store as nd
+        _, old_challenger = self._redo()
+        executor = self._launch_next('executor')
+        self._plan(executor)
+        self._done(executor)
+        self._sweep()
+        item = self.ctrl.coordinator_queue.get_nowait()
+        # Unknown CLI transport outcome, with no registered Task or absence receipt.
+        self.mp.setattr(self.ctrl.subprocess, 'run', lambda cmd, **kw:
+                        subprocess.CompletedProcess(cmd, 1, '', 'transport outcome unknown'))
+        self.ctrl._handle_coordinator_item(item)
+        op = self._operation()
+        nd.reconcile_workflow(self.store.db_path, self.wf_id, now=op['detail']['deadline_at'] + 1)
+        op = self._operation()
+        assert op['status'] == 'waiting_human'
+        assert op['detail']['reason'] == 'dispatch_task_missing'
+        assert op['detail']['missing_expected_task_ids'] == [old_challenger['task_id'] + '-r2']
+        assert op['detail']['missing_predecessor_ids'] == [old_challenger['task_id']]
+
+    def _restart_controller(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('redo_restarted_controller', self.root / 'services/herdr-controller.py')
+        ctrl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ctrl)
+        for name in ('_get_store', 'load_tasks', 'workflow_closed', 'project_for_workflow',
+                     'workflow_config_for', 'coordinator_pane_for_workflow', 'coordinator_status',
+                     'get_stage_policy', 'shared_docs_block', 'maybe_compact_coordinator',
+                     '_scheduler_frozen_candidate_identity', '_scheduler_resolve_candidate_and_plan',
+                     '_scheduler_join_gate_allows', 'notify_attention', '_dispatch_candidate_ready',
+                     'finalize_completed_task'):
+            self.mp.setattr(ctrl, name, getattr(self.ctrl, name))
+        ctrl.STAGE_STATE_FILE = str(self.tmp_dir / 'stage-state.json')
+        self.ctrl = ctrl
+
+    def test_controller_restart_resumes_challenger_generation_without_duplicate_dispatch(self):
+        from herdr import node_dispatch_store as nd
+        self._redo()
+        executor = self._launch_next('executor')
+        executor_op = self._operation()
+        # Restart after registration: resolved stage must not be resent.
+        self._restart_controller()
+        self._sweep()
+        assert self.ctrl.coordinator_queue.empty()
+        assert self._operation()['id'] == executor_op['id']
+        self._plan(executor)
+        self._done(executor)
+        self._sweep()
+        queued = self.ctrl.coordinator_queue.get_nowait()
+        op = self._operation()
+        assert queued['dispatch_operation_id'] == op['id']
+        # Lose an in-memory claimed item before start; a fresh Controller reclaims
+        # the same SQLite generation once its bounded lease expires.
+        self._restart_controller()
+        now = op['lease_until'] + 1
+        self.mp.setattr(self.ctrl.time, 'time', lambda: now)
+        nd.reconcile_workflow(self.store.db_path, self.wf_id, now=now)
+        challenger = self._launch_next('challenger')
+        assert challenger['dispatch_operation_id'] == op['id']
+        assert len([a for a in self.launches if a.task_id.endswith('challenger-r2')]) == 1
+        self._sweep()
+        assert self.ctrl.coordinator_queue.empty()
+
+    def test_executor_quota_exhaustion_redispatches_executor_before_challenger(self):
+        import json
+        import subprocess
+
+        from herdr import agent_router, deep_preflight
+        self._redo()
+        self.wf = self.store.get_workflow(self.wf_id)
+        self.wf.update(project_id='controlled', healthy_agents=['codex', 'opencode'], unhealthy_agents={})
+        self.wf['config']['nodes'][1]['agent_policy']['preferred'] = ['codex', 'opencode']
+        self.store.save_workflow(self.wf)
+        pool = self.tmp_dir / 'pools.json'
+        pool.write_text(json.dumps({'projects': {'controlled': {
+            'allowed_agents': ['codex', 'opencode'], 'disabled_agents': [], 'max_concurrency_per_agent': 3}}}))
+        self.mp.setattr(agent_router, 'POOLS_FILE', pool)
+        self.mp.setattr(agent_router, 'RESERVATIONS_FILE', self.tmp_dir / 'reservations.json')
+        self.mp.setattr(agent_router, 'ROUTER_LOCK_FILE', self.tmp_dir / 'router.lock')
+        self.mp.setattr(agent_router, '_get_store', lambda: self.store)
+        self.mp.setattr(agent_router, 'workflow_config_for', lambda wid: self.store.get_workflow(wid)['config'])
+        self.mp.setattr(deep_preflight, 'preflight_identity', lambda *a, **kw: {'verifiable': True, 'fingerprint': 'controlled'})
+        self.mp.setattr(deep_preflight, 'inspect', lambda *a, **kw: [
+            {'agent': agent, 'final_status': 'READY', 'request_verified': True,
+             'preflight_identity': {'verifiable': True, 'fingerprint': 'controlled'}}
+            for agent in kw['target_agents']])
+        self.mp.setattr(self.cli, 'choose_agent', agent_router.choose_agent)
+        self.mp.setattr(self.cli, 'release_agent_reservation', agent_router.release_agent_reservation)
+        executor = self._launch_next('executor')
+        assert executor['agent'] == 'codex'
+        self.mp.setattr(self.ctrl, '_completion_marker_snapshot', lambda task: (False, "You've reached your usage limit. Try again later."))
+        self.ctrl.handle_event(executor['task_id'], 'blocked')
+        failed = self.store.get_task(executor['task_id'])
+        assert failed['status'] == 'failed'
+        assert failed['failure_reason'] == 'token_exhausted'
+        assert self.store.get_workflow(self.wf_id)['unhealthy_agents']['codex'] == 'TOKEN_EXHAUSTED'
+        self._snapshot('executor quota exhausted')
+        prior_transport = self.ctrl.subprocess.run
+        def recovery_transport(cmd, **kw):
+            if len(cmd) > 1 and cmd[1] == 'supersede':
+                self.cli.supersede_task(cmd[2], allow_pending=True, reason='auto-recover: infrastructure failure')
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+            return prior_transport(cmd, **kw)
+        self.mp.setattr(self.ctrl.subprocess, 'run', recovery_transport)
+        assert self.ctrl.recover_infra_failed_tasks(self.wf_id)
+        assert self.store.get_task(executor['task_id'])['status'] == 'superseded'
+        replacement = self._launch_next('executor')
+        assert replacement['task_id'].endswith('executor-r3')
+        assert replacement['agent'] == 'opencode'
+        assert replacement['agent'] != executor['agent']
+        assert replacement['run_id'] != executor['run_id']
+        assert replacement['supersedes'] == executor['task_id']
+        self._snapshot('quota recovery registered')
+        self._sweep()
+        assert self.ctrl.coordinator_queue.empty()
+        active = [t for t in self.store.list_tasks(workflow_id=self.wf_id)
+                  if t.get('dispatch_role') == 'executor' and t['status'] == 'dispatched']
+        assert [t['task_id'] for t in active] == [replacement['task_id']]
+        ref = self._plan(replacement)
+        self._done(replacement)
+        # A is exhausted and B authored the plan: two agents cannot provide an
+        # independent reviewer. Preserve that Router boundary, then provide a
+        # controlled C reviewer to exercise the remaining dispatch/Plan-Ref chain.
+        with self.assertRaises(agent_router.RouterIsolationRejection):
+            agent_router.choose_agent(self.wf_id, 'plan', 'docs', requested='auto',
+                                      dispatch_role='challenger', dispatch_round=2)
+        pool.write_text(json.dumps({'projects': {'controlled': {
+            'allowed_agents': ['codex', 'opencode', 'claude'], 'disabled_agents': []}}}))
+        self.store.update_workflow_metadata(self.wf_id, {'healthy_agents': ['opencode', 'claude']})
+        challenger = self._launch_next('challenger')
+        assert f'Plan-Ref: {ref}' in self.launches[-1].prompt
+        assert challenger['dispatch_role'] == 'challenger'
+
+    def test_controller_restart_after_start_does_not_replay_unknown_launch(self):
+        import subprocess
+
+        from herdr import node_dispatch_store as nd
+        self._redo()
+        self._sweep()
+        item = self.ctrl.coordinator_queue.get_nowait()
+        self.mp.setattr(self.ctrl.subprocess, 'run', lambda cmd, **kw:
+                        subprocess.CompletedProcess(cmd, 1, '', 'transport unknown'))
+        self.ctrl._handle_coordinator_item(item)
+        op = self._operation()
+        assert op['started'] == 1
+        assert op['status'] == 'awaiting_result'
+        self._restart_controller()
+        now = op['updated_at'] + 120
+        self.mp.setattr(self.ctrl.time, 'time', lambda: now)
+        nd.reconcile_workflow(self.store.db_path, self.wf_id, now=now)
+        self._sweep()
+        assert self.ctrl.coordinator_queue.empty()
+        assert self._operation()['id'] == op['id']
+        assert self._operation()['attempts'] == 1
+        assert self.store.get_task(self.wf_id + '-plan-executor-r2') is None
+
+
 if __name__ == "__main__":
-
-
     unittest.main()
