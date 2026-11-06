@@ -1613,6 +1613,61 @@ def check_task_stalls(tasks, state, notify_fn=None, now=None):
     return changed
 
 
+def notify_pending_stall(breach, task):
+    """Notify when a task is stuck in pending beyond launch SLA."""
+    try:
+        import importlib
+
+        notifier = importlib.import_module("services.herdr-notifier")
+        url = notifier.build_console_url(
+            workflow_id=breach.get("workflow_id"),
+            task_id=breach.get("task_id"),
+        )
+        body = (
+            f"任务滞留在 pending 状态 {breach.get('waited_seconds')}s，"
+            f"超过启动 SLA ({breach.get('sla_seconds')}s)，可能存在启动超时或 Prompt 漏投递，请人工介入核查。"
+        )
+        notifier.notify(
+            "Herdr Factory · 任务启动超时",
+            f"{breach.get('workflow_id', 'unknown')} · {breach.get('task_id')}",
+            body,
+            url=url,
+        )
+    except Exception as exc:
+        print(f"[SENTINEL NOTIFY ERROR] {exc}", file=sys.stderr, flush=True)
+
+
+def check_pending_tasks(tasks, state, notify_fn=None, now=None):
+    """检测滞留在 pending 状态超期的任务并告警。"""
+    now = time.time() if now is None else float(now)
+    episodes = state.get("pending_stalls") or {}
+    breaches, updated = liveness.evaluate_pending_task_stalls(tasks, episodes, now)
+
+    by_id = {t.get("task_id"): t for t in tasks or [] if t.get("task_id")}
+
+    for breach in breaches:
+        task = by_id.get(breach["task_id"]) or {}
+        print(
+            f"[SENTINEL PENDING STALL] "
+            f"task={breach['task_id']} "
+            f"waited={breach['waited_seconds']}s "
+            f"sla={breach['sla_seconds']}s "
+            f"workflow={breach.get('workflow_id')}",
+            flush=True,
+        )
+        if notify_fn is not None:
+            notify_fn(
+                breach.get("task_id"),
+                breach.get("workflow_id"),
+                f"任务滞留在 pending 状态 {breach['waited_seconds']}s，超过启动 SLA ({breach['sla_seconds']}s)，请核查工位装配或派发状态。",
+            )
+        else:
+            notify_pending_stall(breach, task)
+
+    state["pending_stalls"] = updated
+    return updated != episodes
+
+
 def main():
     try:
         from herdr import service_release
@@ -1851,11 +1906,13 @@ def main():
             )
         if wrote or fuse_changed or orphan_changed:
             check_task_stalls(tasks, state)
+            check_pending_tasks(tasks, state)
             save_json_atomic(STATE_FILE, state)
             print("[SENTINEL] State updated, controller will auto-sync via registry watcher", flush=True)
             time.sleep(1)
         else:
             check_task_stalls(tasks, state)
+            check_pending_tasks(tasks, state)
             save_json_atomic(STATE_FILE, state)
             time.sleep(POLL_SECONDS)
 

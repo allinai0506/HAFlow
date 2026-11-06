@@ -282,13 +282,18 @@ def result(operation, workflow, config, tasks, now):
                 'task_runs': {t['task_id']: t['run_id'] for t in existing}}
     required = operation['detail'].get('expected_task_ids') or (
         None if predecessors else operation['payload'].get('required_task_ids'))
-    ids = sorted(t['task_id'] for t in registered)
     valid_required = _valid_required(required)
-    replacement_complete = not predecessors or {t.get('supersedes') for t in registered}.issuperset(
+    dispatched_tasks = [
+        t for t in registered
+        if t.get('status') != 'pending'
+        and (t.get('status') in ACTIVE_TASK_STATUSES or t.get('status') in COMPLETED_TASK_STATUSES)
+    ]
+    dispatched_ids = sorted(t['task_id'] for t in dispatched_tasks)
+    replacement_complete = not predecessors or {t.get('supersedes') for t in dispatched_tasks}.issuperset(
         p['task_id'] for p in predecessors)
-    if registered and replacement_complete and valid_required and (required is None or set(required).issubset(ids)):
-        return 'resolved', {'reason': 'dispatch_registered', 'registered_task_ids': ids,
-                            'registered_runs': {t['task_id']: t['run_id'] for t in registered}}
+    if dispatched_tasks and replacement_complete and valid_required and (required is None or set(required).issubset(dispatched_ids)):
+        return 'resolved', {'reason': 'dispatch_registered', 'registered_task_ids': dispatched_ids,
+                            'registered_runs': {t['task_id']: t['run_id'] for t in dispatched_tasks}}
     deadline = operation['detail'].get('deadline_at')
     if deadline is not None and deadline <= now:
         return 'waiting_human', {'reason': 'dispatch_task_missing',

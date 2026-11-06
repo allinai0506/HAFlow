@@ -123,7 +123,7 @@ def test_launch_intent_and_task_must_match_bound_candidate(scene):
     with pytest.raises(ValueError, match='candidate'):
         begin_launch_intent(scene.store, candidate_sha='b' * 40, **kwargs)
     intent = begin_launch_intent(scene.store, candidate_sha=SHA, **kwargs)['intent']
-    task = {'task_id': 'tester', 'workflow_id': 'wf', 'node': 'test', 'status': 'pending',
+    task = {'task_id': 'tester', 'workflow_id': 'wf', 'node': 'test', 'status': 'dispatched',
         'execution_id': 'execution-1', 'run_id': 'test-run', 'dispatch_operation_id': op['id'],
         'launch_intent_id': intent['intent_id'], 'candidate_sha': 'b' * 40}
     with pytest.raises(ValueError, match='candidate'):
@@ -187,7 +187,7 @@ def test_direct_transport_registration_resolves_real_intent_and_persisted_task(s
             candidate_sha=arg('--candidate-sha'), dispatch_operation_id=op_id,
             execution_id='execution-1', run_id='test-run', now=1000)['intent']
         scene.store.save_task({'task_id': arg('--task-id'), 'workflow_id': 'wf', 'node': 'test',
-            'status': 'pending', 'execution_id': 'execution-1', 'run_id': 'test-run',
+            'status': 'dispatched', 'execution_id': 'execution-1', 'run_id': 'test-run',
             'dispatch_operation_id': op_id, 'launch_intent_id': intent['intent_id'], 'candidate_sha': SHA})
         return SimpleNamespace(returncode=0, stdout='', stderr='')
     monkeypatch.setattr(scene.ctrl.subprocess, 'run', external)

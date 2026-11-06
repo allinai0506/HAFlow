@@ -344,6 +344,7 @@ def try_direct_stage_advance(ports, item):
         for line in spec["acceptance"]:
             cmd += ["--acceptance", line]
 
+        is_timeout = False
         try:
             result = ports.subprocess.run(
                 cmd,
@@ -352,6 +353,7 @@ def try_direct_stage_advance(ports, item):
                 timeout=ports.DIRECT_DISPATCH_LAUNCH_TIMEOUT,
             )
         except ports.subprocess.TimeoutExpired:
+            is_timeout = True
             print(
                 f"[DIRECT DISPATCH TIMEOUT] "
                 f"task={spec['task_id']} "
@@ -376,7 +378,28 @@ def try_direct_stage_advance(ports, item):
                 if refusal and not ports.attention_get(refusal["key"]):
                     ports.attention_note(**refusal["note"])
                     print(refusal["log"])
-                ports.mark_stage_advance_notified(workflow_id, ready_id)
+                if is_timeout:
+                    key = f"{spec['task_id']}:dispatch_timeout"
+                    if not ports.attention_get(key):
+                        task_obj = (ports.get_task(spec["task_id"])
+                                    if hasattr(ports, "get_task") else None)
+                        if not task_obj:
+                            task_obj = ports._get_store().get_task(spec["task_id"]) or {}
+                        ports.attention_note(
+                            key,
+                            {
+                                "task_id": spec["task_id"],
+                                "workflow_id": workflow_id,
+                                "execution_id": project_ctx.get("execution_id"),
+                                "run_id": task_obj.get("run_id"),
+                                "version": task_obj.get("version"),
+                            },
+                            "dispatch_timeout",
+                            reason="dispatch_launch_timeout",
+                            attempts=1,
+                            detail=f"launch timed out after {ports.DIRECT_DISPATCH_LAUNCH_TIMEOUT}s",
+                        )
+                ports.mark_stage_advance_notified(workflow_id, ready_id, clear_attention=not is_timeout)
                 print(f"[STAGE DISPATCH AWAITING_TASK] workflow={workflow_id} "
                       f"node={ready_id} operation={receipt['id']} status={receipt['status']}")
                 return True  # A started launch must never fall through to a second transport.

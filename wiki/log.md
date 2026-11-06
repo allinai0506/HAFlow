@@ -4116,3 +4116,12 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 修复：`herdr/agent_router.py` 将全局熔断默认预算放宽至 3 并支持环境变量 `HERDR_MAX_REMEDIATION_ROUNDS`；`_choose_agent_locked` 分层解析 `node_policy.max_remediation_rounds` 与 `wf_policy.max_remediation_rounds`，实现熔断预算弹性覆盖。
 - 验证：`tests/test_agent_router_rounds.py` 新增节点与工作流级分层覆盖测试，全套路由测试全部 PASS；`compileall` 与 `git diff --check` clean。
 - 教训：`docs/lessons/lessons-learned.md` §228。
+
+## [2026-11-06] Fix | 节点任务初始化超时导致 Prompt 漏投递及恢复状态机假性消解彻底修复（wf-haflow-1106-01）
+- 现场：首节点 `requirements` 初始化耗时逼近 300s，触发 Controller 外层超时强杀；Prompt 未投递，数据库留下 `status='pending'` 孤儿任务；`node_dispatch.py:result()` 仅查任务记录存在便误判为 `resolved`，Controller 标记推进锁，Sentinel 排除 `pending`，导致系统静默死锁。
+- 修复：
+  1. `herdr/node_dispatch.py:result()` 收紧消解判定：注册任务与替代前驱必须处于非 pending 的实质活跃态或完成态（`ACTIVE_TASK_STATUSES` 或 `COMPLETED_TASK_STATUSES`），未满足且超时走 `waiting_human`，绝不假性消解；
+  2. `services/herdr-controller.py` 与 `services/controller/direct_dispatch.py` 将默认超时由 300s 提升为 600s（支持 `HERDR_DIRECT_DISPATCH_LAUNCH_TIMEOUT`），超时捕获时写入 `dispatch_launch_timeout` Attention 告警并保留告警不被静默清除；
+  3. `herdr/liveness.py` 与 `services/herdr-sentinel.py` 新增 Pending Task SLA（180s）与 `check_pending_tasks()` 巡检，对滞留超期的 `pending` 任务实时桌面告警与事件落盘。
+- 验证：`tests/test_dispatch_pending_timeout_contract.py` 4 个反证与防复发专项全绿，`tests/test_node_dispatch_contract.py` 82 项全绿，全量 230 项相关回归全绿；`compileall` 与 `git diff --check` clean。
+- 教训：`docs/lessons/lessons-learned.md` §229。
