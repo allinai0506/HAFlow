@@ -149,7 +149,7 @@ class ControllerReverificationTest(unittest.TestCase):
                 assert 'intent' in claim, (argv, claim)
                 intent = claim['intent']
                 self.store.save_task({'task_id': task_id, 'workflow_id': WF, 'node': node_id,
-                    'stage': node_id, 'status': 'pending', 'run_id': run_id, 'execution_id': 'gen',
+                    'stage': node_id, 'status': 'dispatched', 'run_id': run_id, 'execution_id': 'gen',
                     'dispatch_operation_id': op_id, 'launch_intent_id': intent['intent_id'],
                     'candidate_sha': arg('--candidate-sha'), 'dispatch_role': arg('--dispatch-role', 'worker'),
                     'dispatch_round': int(arg('--dispatch-round', '1')), 'supersedes': arg('--supersedes')})

@@ -226,7 +226,7 @@ def started_operation(scene):
     return nd.start(scene.store.db_path, op['id'], 'owner', now=1000)
 
 
-def register_task(scene, op, task_id='work', role='worker', predecessor=None):
+def register_task(scene, op, task_id='work', role='worker', predecessor=None, status='dispatched'):
     from herdr.task_resources import begin_launch_intent
     predecessors = op['payload'].get('predecessors') or []
     supersedes = predecessor or (predecessors[0]['task_id'] if predecessors else None)
@@ -235,7 +235,7 @@ def register_task(scene, op, task_id='work', role='worker', predecessor=None):
         execution_id='execution-1', supersedes=supersedes,
         dispatch_round=int(scene.store.get_task(supersedes).get('dispatch_round') or 1) + 1 if supersedes else 1,
         now=scene.clock[0])['intent']
-    task = {'task_id': task_id, 'workflow_id': 'wf', 'node': 'implementation', 'status': 'pending',
+    task = {'task_id': task_id, 'workflow_id': 'wf', 'node': 'implementation', 'status': status,
             'execution_id': 'execution-1', 'run_id': 'run-' + task_id,
             'dispatch_operation_id': op['id'], 'launch_intent_id': intent['intent_id'],
             'dispatch_role': role, 'dispatch_round': intent['dispatch_round']}

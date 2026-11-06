@@ -9650,3 +9650,47 @@ git diff --check
 - `herdr/agent_router.py#_choose_agent_locked`
 - `herdr/task_resources.py#begin_launch_intent`
 - `tests/test_agent_router_rounds.py#TestAgentRouterRounds`
+
+## 229. 节点任务初始化超时导致 Prompt 漏投递及恢复状态机假性消解：状态消解收敛、超时告警落盘与哨兵 Pending SLA 巡检（2026-11-06）
+
+### 问题背景
+
+真实工作流 `wf-haflow-1106-01` 在首节点 `requirements` 派发阶段发生静默停滞，Agent 工位就绪但空闲等待：
+1. **外层超时粗暴强杀**：控制器通过 `herdr-task launch` 执行直接派发，大仓库 CoW 隔离与 Deep Preflight 环境准备耗时逼近 300 秒，触发控制器 `DIRECT_DISPATCH_LAUNCH_TIMEOUT = 300s` 外层超时强杀（SIGKILL）；
+2. **Prompt 漏投递与半写孤儿任务**：`herdr-task launch` 已先行向数据库持久化插入了初始任务记录（`status='pending'`），但在凭据签发与 Prompt 发送前被强杀，导致 Agent 留在就绪界面未收到 Prompt，数据库留下 `pending` 孤儿任务；
+3. **恢复状态机假性消解（False Resolved）**：控制器捕获超时异常后调用 `direct_finished`，内部 `herdr/node_dispatch.py:result()` 仅查任务 ID 已在表且满足前驱替代，就直接返回 `('resolved', {'reason': 'dispatch_registered'})`，误将半写态判定为派发完成；同时控制器标记 `mark_stage_advance_notified` 锁死推进；
+4. **哨兵巡检集合排除盲区**：`services/herdr-sentinel.py` 巡检集合 `ACTIVE = {"dispatched", "working", "blocked", "rework"}` 不包含 `pending`，对滞留 `pending` 任务彻底失明，导致整个系统陷入静默死锁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 派发登记证据与实际派发完成混淆 | 数据库存在任务行不等于派发成功；处于 `pending` 状态的任务仅代表草稿或启动中，绝不能作为操作已消解证据 | `node_dispatch.py:result()` 必须严格断言任务处于非 pending 的实质活跃态或完成态（`ACTIVE_TASK_STATUSES` 或 `COMPLETED_TASK_STATUSES`），未满足且超期必须走 `waiting_human` |
+| 子进程超时捕获吞没错误与预算倒挂 | 复杂工程 CoW 与自检耗时较长，300s 预算余量不足；超时捕获未产生告警，反而谎报消解 | 提升默认预算为 600s 并支持环境变量重载；超时发生且任务仍处于 `pending` 时，必须立即落盘 Attention 报警（`dispatch_launch_timeout`），阻断推进锁 |
+| 哨兵巡检集合存在生命周期盲区 | 哨兵仅关注派发后的活跃状态，对长时间卡在 `pending` 的孤儿任务无感知 | 设立 Pending Task SLA（默认 180s），哨兵周期性巡检滞留超期的 `pending` 任务并发出桌面与日志告警 |
+
+### 操作规范（已固化到平台源码与回归测试）
+
+1. **消解准则收紧 (`herdr/node_dispatch.py`)**：在 `result()` 中，把 `replacement_complete` 与 `dispatch_registered` 的判定收紧为只有真正完成派发的任务（`t.get('status') != 'pending' and (t.get('status') in ACTIVE_TASK_STATUSES or t.get('status') in COMPLETED_TASK_STATUSES)`）才能满足。若任务仅处于 `pending` 且超时/租约到期，决不返回 `resolved`，必须进入 `waiting_human` 或保持 `awaiting_result`。
+2. **超时预算扩展与报警落盘 (`services/herdr-controller.py` & `services/controller/direct_dispatch.py`)**：提升 `DIRECT_DISPATCH_LAUNCH_TIMEOUT` 默认预算至 600s（支持 `HERDR_DIRECT_DISPATCH_LAUNCH_TIMEOUT` 重载）；捕获 `TimeoutExpired` 时如果任务留在 `pending`，显式调用 `ports.attention_note(..., reason="dispatch_launch_timeout")` 并保持 `clear_attention=False`。
+3. **哨兵 Pending SLA 巡检 (`herdr/liveness.py` & `services/herdr-sentinel.py`)**：新增 `evaluate_pending_task_stalls()` 纯逻辑与 `check_pending_tasks()` 运行时巡检，对滞留超过 180s 的 `pending` 任务实时告警。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_dispatch_pending_timeout_contract.py
+pytest -q tests/test_node_dispatch_contract.py
+pytest -q tests/test_direct_stage_dispatch.py
+pytest -q tests/test_downstream_dispatch_contract.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- 实际工作流故障现场：`wf-haflow-1106-01`
+- `herdr/node_dispatch.py#result`
+- `services/controller/direct_dispatch.py#try_direct_stage_advance`
+- `herdr/liveness.py#evaluate_pending_task_stalls`
+- `services/herdr-sentinel.py#check_pending_tasks`
+- `tests/test_dispatch_pending_timeout_contract.py`

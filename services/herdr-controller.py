@@ -253,7 +253,7 @@ DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5.0
 
 # 单个 launch 必须有界:子进程僵死时不得永久占用调度线程
 # 与 per-workflow 锁,超时后走既有 PARTIAL→总指挥回退路径。
-DIRECT_DISPATCH_LAUNCH_TIMEOUT = 300
+DIRECT_DISPATCH_LAUNCH_TIMEOUT = int(os.environ.get("HERDR_DIRECT_DISPATCH_LAUNCH_TIMEOUT", "600"))
 SUPERVISOR_VERIFY_DISPATCH_TIMEOUT = 120
 
 # Selective Reverification v1:选择性重新验证 (HAFlow PR #108)

@@ -37,6 +37,7 @@ DEFAULT_STAGE_ADVANCE_SLA = 600.0
 DEFAULT_ATTENTION_RETRY_INTERVAL = 600.0
 DEFAULT_ATTENTION_GRACE = 120.0
 DEFAULT_COORDINATOR_DECISION_TIMEOUT = 180.0
+DEFAULT_PENDING_TASK_SLA = 180.0
 DEFAULT_TASK_STALL_AFTER = 1800.0
 # dispatched 投递熔断:任务派发后超过该秒数仍未进入 working,视为投递死亡。
 # 正常派发 working 只需数秒;600s 内无 ack 的 pane 几乎不可能自愈
@@ -140,6 +141,10 @@ def task_stall_after() -> float:
 
 def dispatch_delivery_sla() -> float:
     return _env_float("HERDR_DISPATCH_DELIVERY_SLA", DEFAULT_DISPATCH_DELIVERY_SLA)
+
+
+def pending_task_sla() -> float:
+    return _env_float("HERDR_PENDING_TASK_SLA", DEFAULT_PENDING_TASK_SLA)
 
 
 def subscribe_backoff_base() -> float:
@@ -366,6 +371,75 @@ def evaluate_dispatch_fuse(
             "idle_seconds": int(waited),
             "sla_seconds": int(threshold),
             "requeues": int(previous.get("requeues", 0)),
+            "alerted_at": now,
+        }
+        episodes_out[task_id] = breach
+        breaches.append(dict(breach))
+
+    for task_id in list(episodes_out.keys()):
+        if task_id not in seen:
+            episodes_out.pop(task_id, None)
+
+    return breaches, episodes_out
+
+
+def evaluate_pending_task_stalls(
+    tasks: Iterable[Dict[str, Any]],
+    episodes: Dict[str, Dict[str, Any]],
+    now: float,
+    sla: Optional[float] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Detect tasks stranded in 'pending' status past the launch SLA.
+
+    Tasks in 'pending' should transition to 'dispatched' within the SLA (default 180s).
+    If a task lingers in 'pending' without transitioning, it indicates an aborted launch,
+    timeout, or orphaned draft task.
+    Returns (new_breaches, episodes_out) without performing I/O.
+    """
+    threshold = pending_task_sla() if sla is None else sla
+    episodes_out: Dict[str, Dict[str, Any]] = dict(episodes or {})
+    breaches: List[Dict[str, Any]] = []
+    seen = set()
+
+    for task in tasks or []:
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+        seen.add(task_id)
+
+        if task.get("status") != "pending":
+            episodes_out.pop(task_id, None)
+            continue
+
+        updated = float(
+            task.get("updated_at")
+            or task.get("created_at")
+            or task.get("last_activity_at")
+            or 0
+        )
+        if not updated:
+            continue
+
+        waited = now - updated
+        if waited < threshold:
+            episodes_out.pop(task_id, None)
+            continue
+
+        previous = episodes_out.get(task_id) or {}
+        if previous and float(previous.get("updated_at") or 0) == updated:
+            continue
+
+        breach = {
+            "task_id": task_id,
+            "workflow_id": task.get("workflow_id"),
+            "node": task.get("node") or task.get("stage"),
+            "status": "pending",
+            "agent": task.get("agent"),
+            "pane_id": task.get("pane_id"),
+            "updated_at": updated,
+            "waited_seconds": int(waited),
+            "idle_seconds": int(waited),
+            "sla_seconds": int(threshold),
             "alerted_at": now,
         }
         episodes_out[task_id] = breach

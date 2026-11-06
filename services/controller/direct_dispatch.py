@@ -344,29 +344,20 @@ def try_direct_stage_advance(ports, item):
         for line in spec["acceptance"]:
             cmd += ["--acceptance", line]
 
+        is_timeout = False
         try:
             result = ports.subprocess.run(
-                cmd,
-                text=True,
-                capture_output=True,
-                timeout=ports.DIRECT_DISPATCH_LAUNCH_TIMEOUT,
+                cmd, text=True, capture_output=True, timeout=ports.DIRECT_DISPATCH_LAUNCH_TIMEOUT
             )
         except ports.subprocess.TimeoutExpired:
-            print(
-                f"[DIRECT DISPATCH TIMEOUT] "
-                f"task={spec['task_id']} "
-                f"after={ports.DIRECT_DISPATCH_LAUNCH_TIMEOUT}s"
-            )
+            is_timeout = True
+            print(f"[DIRECT DISPATCH TIMEOUT] task={spec['task_id']} after={ports.DIRECT_DISPATCH_LAUNCH_TIMEOUT}s")
             result = None
 
         if result is None or result.returncode != 0:
-            output = ""
-            if result is not None:
-                output = result.stderr.strip() or result.stdout.strip()
-                print(
-                    f"[DIRECT DISPATCH ERROR] "
-                    f"task={spec['task_id']}: {output}"
-                )
+            output = (result.stderr.strip() or result.stdout.strip()) if result is not None else ""
+            if output:
+                print(f"[DIRECT DISPATCH ERROR] task={spec['task_id']}: {output}")
             if dispatch_operation_id is not None:
                 from herdr.node_dispatch_store import direct_finished
                 receipt = direct_finished(ports._get_store().db_path, dispatch_operation_id,
@@ -376,7 +367,18 @@ def try_direct_stage_advance(ports, item):
                 if refusal and not ports.attention_get(refusal["key"]):
                     ports.attention_note(**refusal["note"])
                     print(refusal["log"])
-                ports.mark_stage_advance_notified(workflow_id, ready_id)
+                if is_timeout and not ports.attention_get(f"{spec['task_id']}:dispatch_timeout"):
+                    t_get = getattr(ports, "get_task", None)
+                    t_obj = (t_get(spec["task_id"]) if t_get else None) or ports._get_store().get_task(spec["task_id"]) or {}
+                    ports.attention_note(
+                        f"{spec['task_id']}:dispatch_timeout",
+                        {"task_id": spec["task_id"], "workflow_id": workflow_id,
+                         "execution_id": project_ctx.get("execution_id"),
+                         "run_id": t_obj.get("run_id"), "version": t_obj.get("version")},
+                        "dispatch_timeout", reason="dispatch_launch_timeout", attempts=1,
+                        detail=f"launch timed out after {ports.DIRECT_DISPATCH_LAUNCH_TIMEOUT}s",
+                    )
+                ports.mark_stage_advance_notified(workflow_id, ready_id, clear_attention=not is_timeout)
                 print(f"[STAGE DISPATCH AWAITING_TASK] workflow={workflow_id} "
                       f"node={ready_id} operation={receipt['id']} status={receipt['status']}")
                 return True  # A started launch must never fall through to a second transport.
@@ -437,11 +439,8 @@ def try_direct_stage_advance(ports, item):
                 )
                 return True
             if launched:
-                print(
-                    f"[DIRECT DISPATCH PARTIAL] "
-                    f"launched={','.join(launched)} "
-                    "-> fallback to coordinator for reconciliation"
-                )
+                print(f"[DIRECT DISPATCH PARTIAL] launched={','.join(launched)} "
+                      "-> fallback to coordinator for reconciliation")
             return fallback("partial_launch_requires_reconciliation" if launched else "worker_launch_failed")
 
         launched.append(spec["task_id"])
@@ -456,12 +455,7 @@ def try_direct_stage_advance(ports, item):
                   f"node={ready_id} operation={receipt['id']} status={receipt['status']}")
             return True
 
-    print(
-        f"[STAGE ADVANCED DIRECT] "
-        f"workflow={workflow_id} "
-        f"node={ready_id} "
-        f"tasks={','.join(launched)}"
-    )
+    print(f"[STAGE ADVANCED DIRECT] workflow={workflow_id} node={ready_id} tasks={','.join(launched)}")
 
     # Collaboration accelerator: deterministic edges emit one HANDOFF each.
     # Best-effort only: the launched tasks already carry their own prompts,
