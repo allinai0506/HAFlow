@@ -1,0 +1,181 @@
+Implementation evidence — S4 local self-tests PASS; downstream acceptance pending.
+Task wf-haflow-1105-01-implementation-auto; baseline ac31150.
+Scope clarified by coordinator n-1793923394380-3dbf; tool entry supplied by
+coordinator n-1793923717458-c55d. Regression RED: 2 failed, 5 passed.
+Evidence file initialized before source edit; executed outputs are recorded below.
+
+Implementation and cleanup record:
+- herdr/review_closure.py: +2 lines in closure_required pinned-file fallback.
+  Nonempty Run delivery_ceiling overrides pinned default only when wrapup opts in.
+- tests/test_scattered_review_debt.py: two functions, six matrix parameters plus
+  one DB-read exception case. Real SQLite and pinned JSON used for the matrix.
+- Red evidence retained in red-evidence.txt; previous blockers resolved by
+  coordinator notes n-1793923394380-3dbf and n-1793923717458-c55d.
+- ai-slop-cleaner scope: these source/test changes only. Plan: remove dead code,
+  redundant wrappers or speculative abstraction if introduced. Inspection found
+  none; no cleanup edits needed. Existing ceiling/opt-in helpers are reused.
+- Impact: kernel normal completion, bypass completion, task_cli_review all use
+  check_completion_allowed -> closure_required. No signatures, state, writes,
+  locks, authorization model, template defaults, or remote parsing changed.
+- Risk: only workflows lacking a nodes snapshot and using an opted-in pinned
+  file plus nonempty Run ceiling change behavior. Pinned config corruption still
+  fails closed; absent file and no opt-in retain legacy behavior.
+
+Commands executed (all GREEN commands exit 0 unless explicitly marked pending):
+RED target: python3 -m pytest -q tests/test_scattered_review_debt.py -k
+  'pinned_config_fallback_honors_run_level_ceiling or fails_closed_when_workflow_read'
+GREEN target: same command after +2-line source fix.
+Affected: python3 -m pytest -q tests/test_scattered_review_debt.py
+  tests/test_project_template_registration.py tests/test_pr_delivery_alias_and_template_ceiling.py
+  tests/test_direct_dispatch_delivery_authorization.py
+Closure: env -u HERDR_TASK_ID -u HERDR_RUN_ID -u WORKER_WRITE_ROOT
+  -u HERDR_WORKER_CLONE -u HERDR_AGENT_ID python3 -m pytest -q tests/test_wrapup_review_closure.py
+Delivery: python3 -m pytest -q tests/test_delivery_pipeline.py tests/test_task_cli_delivery.py
+  tests/test_workflow_engine.py tests/test_software_development_v1_template.py
+  tests/test_software_development_v1_adapter.py tests/test_fix_bug1002_delivery.py
+Static: python3 -m compileall -q herdr services bin tests; git diff --check
+  Both exit 0, no output.
+Zero diff: git diff --exit-code -- herdr/direct_dispatch.py herdr/projects.py
+  herdr/pr_delivery.py workflow_templates; exit 0, no output.
+No modified bin script: no extra bin syntax/CLI check applicable.
+
+RED target
+FF.....                                                                  [100%]
+=================================== FAILURES ===================================
+___ test_pinned_config_fallback_honors_run_level_ceiling[workspace-pr-False] ___
+
+tmp_path = PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-86/test_pinned_config_fallback_ho0')
+run_ceiling = 'workspace', pinned_default = 'pr', expected = False
+
+    @pytest.mark.parametrize(
+        "run_ceiling,pinned_default,expected",
+        [
+            ("workspace", "pr", False),
+            ("pr", "workspace", True),
+            ("workspace", "workspace", False),
+            ("pr", "pr", True),
+            ("", "pr", True),
+            ("", "workspace", False),
+        ],
+    )
+    def test_pinned_config_fallback_honors_run_level_ceiling(
+        tmp_path, run_ceiling, pinned_default, expected
+    ):
+        """G1：无 SQLite 快照时，Run 级授权必须覆盖 pinned 配置的模板默认。"""
+        from herdr.review_closure import closure_required
+        store = SQLiteStateStore(tmp_path / "state.db")
+        workflow = {"workflow_id": "wf-pinned", "status": "running"}
+        if run_ceiling:
+            workflow["delivery_ceiling"] = run_ceiling
+        store.save_workflow(workflow)
+        pinned = tmp_path / "workflow.json"
+        pinned.write_text(json.dumps({
+            "delivery_ceiling_default": pinned_default,
+            "nodes": [
+                {"id": "implementation"},
+                {"id": "wrapup", "review_closure_required": True},
+            ],
+        }))
+        task = {"workflow_id": "wf-pinned", "workflow_config": str(pinned)}
+>       assert closure_required(store, task) is expected
+E       AssertionError: assert True is False
+E        +  where True = <function closure_required at 0x107119850>(<herdr.state_store.SQLiteStateStore object at 0x1070f5940>, {'workflow_id': 'wf-pinned', 'workflow_config': '/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-86/test_pinned_config_fallback_ho0/workflow.json'})
+
+tests/test_scattered_review_debt.py:329: AssertionError
+___ test_pinned_config_fallback_honors_run_level_ceiling[pr-workspace-True] ____
+
+tmp_path = PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-86/test_pinned_config_fallback_ho1')
+run_ceiling = 'pr', pinned_default = 'workspace', expected = True
+
+    @pytest.mark.parametrize(
+        "run_ceiling,pinned_default,expected",
+        [
+            ("workspace", "pr", False),
+            ("pr", "workspace", True),
+            ("workspace", "workspace", False),
+            ("pr", "pr", True),
+            ("", "pr", True),
+            ("", "workspace", False),
+        ],
+    )
+    def test_pinned_config_fallback_honors_run_level_ceiling(
+        tmp_path, run_ceiling, pinned_default, expected
+    ):
+        """G1：无 SQLite 快照时，Run 级授权必须覆盖 pinned 配置的模板默认。"""
+        from herdr.review_closure import closure_required
+        store = SQLiteStateStore(tmp_path / "state.db")
+        workflow = {"workflow_id": "wf-pinned", "status": "running"}
+        if run_ceiling:
+            workflow["delivery_ceiling"] = run_ceiling
+        store.save_workflow(workflow)
+        pinned = tmp_path / "workflow.json"
+        pinned.write_text(json.dumps({
+            "delivery_ceiling_default": pinned_default,
+            "nodes": [
+                {"id": "implementation"},
+                {"id": "wrapup", "review_closure_required": True},
+            ],
+        }))
+        task = {"workflow_id": "wf-pinned", "workflow_config": str(pinned)}
+>       assert closure_required(store, task) is expected
+E       AssertionError: assert False is True
+E        +  where False = <function closure_required at 0x107119850>(<herdr.state_store.SQLiteStateStore object at 0x10645bb10>, {'workflow_id': 'wf-pinned', 'workflow_config': '/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-86/test_pinned_config_fallback_ho1/workflow.json'})
+
+tests/test_scattered_review_debt.py:329: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_scattered_review_debt.py::test_pinned_config_fallback_honors_run_level_ceiling[workspace-pr-False]
+FAILED tests/test_scattered_review_debt.py::test_pinned_config_fallback_honors_run_level_ceiling[pr-workspace-True]
+2 failed, 5 passed, 13 deselected in 24.31s
+
+GREEN target
+.......                                                                  [100%]
+7 passed, 13 deselected in 8.21s
+
+GREEN affected
+........................................................................ [ 61%]
+..............................................                           [100%]
+118 passed in 2.67s
+
+GREEN delivery
+........................................................................ [ 41%]
+........................................................................ [ 82%]
+..............................                                           [100%]
+174 passed in 7.93s
+
+GREEN matrix
+run=workspace pinned_default=pr        -> False expected=False PASS
+run=pr        pinned_default=workspace -> True  expected=True  PASS
+run=workspace pinned_default=workspace -> False expected=False PASS
+run=pr        pinned_default=pr        -> True  expected=True  PASS
+run=-         pinned_default=pr        -> True  expected=True  PASS
+run=-         pinned_default=workspace -> False expected=False PASS
+
+GREEN boundaries
+workspace alias 'WORKSPACE': PASS
+workspace alias ' 工作区 ': PASS
+workspace alias 'working_tree': PASS
+workspace alias 'worktree': PASS
+pinned config without opt-in: PASS
+corrupt pinned config fails closed: PASS
+missing pinned config legacy behavior: PASS
+
+INNER LOOP (collection/static smoke only; not business acceptance):
+[HERDR_LOOP_SCORE] 100.0
+[HERDR_LOOP_CONVERGED] True
+
+Unverified/downstream: CI merge-result full suite, independent review and Codex review closure. Workspace-only authorization: no push, PR, merge, deployment or production mutation. Existing unrelated R1-R5 plan observations remain unchanged. No machine repository-delivery contract configured.
+
+GREEN closure (exit 0):
+..........................................................               [100%]
+58 passed in 46.72s
+
+Final source diff stat before evidence staging:
+ herdr/review_closure.py             |  2 ++
+ tests/test_scattered_review_debt.py | 44 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+TASK_CHANGED:
+- [tracked] herdr/review_closure.py
+- [tracked] tests/test_scattered_review_debt.py
+- [untracked] docs/walkthroughs/wf-haflow-1105-01-delivery-authorization/green-evidence.txt
+- [untracked] docs/walkthroughs/wf-haflow-1105-01-delivery-authorization/red-evidence.txt
+HERDR_BASELINE_RESULT={"task_id": "wf-haflow-1105-01-implementation-auto", "baseline_match": false, "changes": [{"type": "tracked", "path": "herdr/review_closure.py", "baseline": "__NOT_PRESENT__", "current": "3b9d23697cca186a1a5f32530821972e9a59272ad25a7afeac888de736e60814"}, {"type": "tracked", "path": "tests/test_scattered_review_debt.py", "baseline": "__NOT_PRESENT__", "current": "bf630b0eacc8c572d6c41b394291ecce7aae18a59e363eb8446d2828ca4a729f"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1105-01-delivery-authorization/green-evidence.txt", "baseline": "__NOT_PRESENT__", "current": "f7febf1d6b5f6ed2e006f736298bf715b0e259b4245e586c4522cf2246abff7f"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1105-01-delivery-authorization/red-evidence.txt", "baseline": "__NOT_PRESENT__", "current": "1e11b999c66941e508f06ee315149ea87298509f04f3f0947a72c0ce0d68da7d"}], "worktree_changed": true, "commits_ahead": 0, "baseline_commit": "ac311501319b52e8dbc3780388e94100cfacfdde", "head": "ac311501319b52e8dbc3780388e94100cfacfdde", "basis": "baseline_commit"}
