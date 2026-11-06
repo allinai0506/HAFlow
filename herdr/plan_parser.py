@@ -26,7 +26,7 @@ _TASK_HEADER_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _FILE_LINE_RE = re.compile(
-    r"[-*]\s*(?:Create|Modify|Test|新增|修改|测试)[:：]?\s*[`'\"]?([^`'\"\n\r\t]+)[`'\"]?",
+    r"[-*]\s*(?:Create|Modify|Test|新增|修改|测试)(?:\s*[（(][^）)\n]+[）)])?\s*[:：]?\s*[`'\"]?([^`'\"\n\r\t]+)[`'\"]?",
     re.IGNORECASE,
 )
 _DEP_LINE_RE = re.compile(
@@ -185,6 +185,34 @@ class PlanDeliverablesResult(tuple):
         self.meta = meta or {}
 
 
+def _is_conditional_approval(text: str) -> bool:
+    """Detect whether text represents a conditional approval (which must fail-closed as blocked).
+
+    Distinguishes outstanding requirements (e.g. '修复上述问题后方可通过', '待补充单测后批准')
+    from completed fixes (e.g. '修复后所有测试均已通过') or negated requirements
+    (e.g. '无须修改，审查通过').
+    """
+    if not text:
+        return False
+    if re.search(
+        r"\b(?:conditional(?:ly)?\s+(?:approve[ds]?|approval)|(?:approve[ds]?|approval)\s+conditionally|subject\s+to)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(r"(?:方可|才(?:能|可))(?:通过|批准|实施|合入)", text):
+        return True
+    for m in re.finditer(
+        r"(?:待|(?<![无不免])(?:须|需|必须))[^\n，。；]+?(?:后|下方)?(?:才|方)?(?:能|可)?(?:通过|批准|实施|合入)",
+        text,
+    ):
+        matched = m.group(0)
+        if re.search(r"(?:已|均已|已经)(?:全部|均)?通过", matched):
+            continue
+        return True
+    return False
+
+
 def extract_challenger_verdict(
     challenger_text: str,
     chal_task: Optional[Dict[str, Any]] = None,
@@ -222,12 +250,15 @@ def extract_challenger_verdict(
         cval_lower = cval.lower()
         if any(kw in cval_lower for kw in ("<", "[pass", "[blocked", "二选一", "或", " or ", "示例", "example")):
             continue
-        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|驳回|拒绝", cval, re.IGNORECASE):
+        cleaned_cval = re.sub(r"\b\d+[ \t]+(?:failed|fail|passed|pass)\b|\b\d+[ \t]*个[ \t]*(?:fail|pass)\b", "", cval, flags=re.IGNORECASE)
+        if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|驳回|拒绝", cleaned_cval, re.IGNORECASE):
             canonical_blocked.append(cval)
+        elif _is_conditional_approval(cval):
+            canonical_blocked.append(f"conditional approval rejected as blocked: {cval}")
         elif re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", cval, re.IGNORECASE):
             canonical_unfinished.append(cval)
-        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|通过|同意实施", cval, re.IGNORECASE):
-            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", cval):
+        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|通过|同意实施", cleaned_cval, re.IGNORECASE):
+            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", cleaned_cval) and not _is_conditional_approval(cval):
                 canonical_pass.append(cval)
 
     if canonical_blocked:
@@ -281,23 +312,23 @@ def extract_challenger_verdict(
     )
     for vm in verdict_lines:
         line_val = vm.group(1).strip()
-        # 排除包含测试统计（如 2 failed, 5 passed / 6 failed / 2 个 FAIL）时的 failed 误匹配
+        # 排除包含测试统计（如 2 failed, 5 passed / 6 failed / 2 个 FAIL）时的 failed 与 passed 误匹配
         cleaned_line = re.sub(r"\b\d+[ \t]+(?:failed|fail|passed|pass)\b|\b\d+[ \t]*个[ \t]*(?:fail|pass)\b", "", line_val, flags=re.IGNORECASE)
         # 阻断检查
         if re.search(r"\b(?:blocked|reject(?:ed)?|fail(?:ed)?)\b|不通过|未通过|阻断|存在阻塞|驳回|暂不予通过|不予通过|不能通过|暂不通过|拒绝", cleaned_line, re.IGNORECASE):
             has_explicit_blocked = True
             blocked_reasons.append(f"verdict line indicates blocked: {line_val}")
         # 条件性通过判定为阻断/未完成
-        elif re.search(r"(?:方可通过|方可批准|方可实施|修[复改].*后.*通过|须.*通过|待.*通过)", line_val):
+        elif _is_conditional_approval(line_val):
             has_explicit_blocked = True
             blocked_reasons.append(f"conditional approval rejected as blocked: {line_val}")
         # 非终态/未完成判定为阻断
         elif re.search(r"\b(?:pending|in_progress|todo|draft|wip)\b|进行中|未完成|尚未完成|待定|审查中|评估中", line_val, re.IGNORECASE):
             has_explicit_blocked = True
             blocked_reasons.append(f"verdict line indicates non-terminal state: {line_val}")
-        # 肯定通过检查 (必须无否定前缀且非条件短语)
-        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|建议通过|确认通过|准予通过|同意实施|通过", line_val, re.IGNORECASE):
-            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", line_val):
+        # 肯定通过检查 (必须无否定前缀且非条件短语，且使用 cleaned_line 避免把测试统计中的 passed 误判为通过)
+        elif re.search(r"\b(?:pass(?:ed)?|approved?)\b|建议通过|确认通过|准予通过|同意实施|通过", cleaned_line, re.IGNORECASE):
+            if not re.search(r"(?:不|未|暂不|不能|无|非|不予)通过", cleaned_line) and not _is_conditional_approval(line_val):
                 has_explicit_pass = True
                 pass_reasons.append(f"verdict line indicates pass: {line_val}")
 
@@ -315,7 +346,7 @@ def extract_challenger_verdict(
         prefix = text[max(0, start_pos - 15):start_pos]
         if not re.search(r"(?:不|未|不能|暂不|不予|上轮|历史|前次|如|若|如果|待|需|修)\s*$", prefix):
             surrounding = text[start_pos:start_pos + 30]
-            if not re.search(r"(?:方可通过|方可批准|方可实施|修[复改].*后.*通过)", surrounding):
+            if not _is_conditional_approval(surrounding):
                 has_explicit_pass = True
                 pass_reasons.append(f"terminal approval verb: {pm.group(0)}")
 

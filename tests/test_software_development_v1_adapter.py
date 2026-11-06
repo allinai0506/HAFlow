@@ -1623,6 +1623,87 @@ HERDR_GATE_VERDICT: BLOCKED
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_44_canonical_verdict_rejects_conditional_approval(self):
+        """Scenario 44 (Codex P2): Canonical HERDR_GATE_VERDICT rejects conditional approval as blocked,
+        while correctly distinguishing completed fixes and negated requirements as pass."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # Conditional approval in canonical header must be blocked, not pass
+        text1 = "HERDR_GATE_VERDICT: 修复上述问题后方可通过。"
+        v1, r1 = extract_challenger_verdict(text1)
+        self.assertEqual(v1, "blocked", f"Should be blocked, got {v1}: {r1}")
+        self.assertIn("conditional approval rejected as blocked", r1)
+
+        text2 = "HERDR_GATE_VERDICT: 待补充错误处理后方可批准实施"
+        v2, r2 = extract_challenger_verdict(text2)
+        self.assertEqual(v2, "blocked", f"Should be blocked, got {v2}: {r2}")
+
+        text2b = "HERDR_GATE_VERDICT: 待架构师确认后通过"
+        v2b, r2b = extract_challenger_verdict(text2b)
+        self.assertEqual(v2b, "blocked", f"Should be blocked, got {v2b}: {r2b}")
+
+        text2c = "HERDR_GATE_VERDICT: 须在完成重构后通过"
+        v2c, r2c = extract_challenger_verdict(text2c)
+        self.assertEqual(v2c, "blocked", f"Should be blocked, got {v2c}: {r2c}")
+
+        # Statistics only in canonical header does not produce pass
+        text3 = "HERDR_GATE_VERDICT: 2 failed, 5 passed"
+        v3, r3 = extract_challenger_verdict(text3)
+        self.assertEqual(v3, "missing", f"Should be missing (no terminal approval), got {v3}: {r3}")
+
+        # Completed fixes must NOT be mistaken for conditional approvals (Codex P2 regression)
+        text4 = "HERDR_GATE_VERDICT: PASS，修复后所有测试均已通过。"
+        v4, r4 = extract_challenger_verdict(text4)
+        self.assertEqual(v4, "pass", f"Completed fix must pass, got {v4}: {r4}")
+        self.assertIn("canonical HERDR_GATE_VERDICT", r4)
+
+        # Negated requirements must NOT be mistaken for conditional approvals (Codex P2 regression)
+        text5 = "HERDR_GATE_VERDICT: PASS，无须修改，审查通过。"
+        v5, r5 = extract_challenger_verdict(text5)
+        self.assertEqual(v5, "pass", f"Negated requirements must pass, got {v5}: {r5}")
+
+        text6 = "HERDR_GATE_VERDICT: PASS，无需修改，测试全部通过"
+        v6, r6 = extract_challenger_verdict(text6)
+        self.assertEqual(v6, "pass", f"Negated requirements must pass, got {v6}: {r6}")
+
+    def test_45_verdict_lines_exclude_test_counts_from_pass_detection(self):
+        """Scenario 45 (Codex P2): Test statistics alone (e.g. 2 failed, 5 passed) do not trigger false-positive pass."""
+        from herdr.plan_parser import extract_challenger_verdict
+
+        # '5 passed' inside test stats must NOT be parsed as review approval
+        text1 = "结论：2 failed, 5 passed"
+        v1, r1 = extract_challenger_verdict(text1)
+        self.assertEqual(v1, "missing", f"Test statistics alone must be missing, got {v1}: {r1}")
+
+        text2 = "最终裁决：0 failed, 10 passed"
+        v2, r2 = extract_challenger_verdict(text2)
+        self.assertEqual(v2, "missing", f"Test statistics alone must be missing, got {v2}: {r2}")
+
+        # Explicit approval accompanied by test stats passes correctly
+        text3 = "最终结论：2 failed, 5 passed 符合预期，建议通过"
+        v3, r3 = extract_challenger_verdict(text3)
+        self.assertEqual(v3, "pass", f"Explicit approval with stats should pass, got {v3}: {r3}")
+
+    def test_46_parse_plan_tasks_extracts_files_with_parenthetical_qualifiers(self):
+        """Scenario 46: parse_plan_tasks correctly extracts files even with parenthetical qualifiers."""
+        from herdr.plan_parser import parse_plan_tasks
+
+        plan_text = """
+# Plan
+## Task 1: 修复缺陷
+- Modify: `herdr/review_closure.py`
+- Modify（追加）: `tests/test_scattered_review_debt.py`
+- Create: `docs/walkthroughs/green-evidence.txt`
+- 新增（可选）: `herdr/optional_feature.py`
+"""
+        tasks = parse_plan_tasks(plan_text)
+        self.assertEqual(len(tasks), 1)
+        files = tasks[0].get("files", [])
+        self.assertIn("herdr/review_closure.py", files)
+        self.assertIn("tests/test_scattered_review_debt.py", files)
+        self.assertIn("docs/walkthroughs/green-evidence.txt", files)
+        self.assertIn("herdr/optional_feature.py", files)
+
 
 if __name__ == "__main__":
     unittest.main()
