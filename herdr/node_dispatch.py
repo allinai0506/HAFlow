@@ -295,8 +295,22 @@ def result(operation, workflow, config, tasks, now):
                             'registered_runs': {t['task_id']: t['run_id'] for t in dispatched_tasks}}
     deadline = operation['detail'].get('deadline_at')
     if deadline is not None and deadline <= now:
-        return 'waiting_human', {'reason': 'dispatch_task_missing',
-                                'decision_needed': '核对已有派发与需求；结果未知时先核验现有任务，禁止直接重发'}
+        detail = {'reason': 'dispatch_task_missing',
+                  'decision_needed': '核对已有派发与需求；结果未知时先核验现有任务，禁止直接重发'}
+        if operation['detail'].get('expected_task_ids') is not None:
+            missing_expected = sorted(set(required or []) - set(dispatched_ids))
+            missing_predecessors = sorted(
+                p['task_id'] for p in predecessors
+                if not any(t.get('supersedes') == p['task_id'] for t in dispatched_tasks))
+            if missing_expected:
+                detail['missing_expected_task_ids'] = missing_expected
+            if missing_predecessors:
+                detail['missing_predecessor_ids'] = missing_predecessors
+            if missing_expected or missing_predecessors:
+                detail['decision_needed'] = (
+                    f"缺少任务: {', '.join(missing_expected or missing_predecessors)}；"
+                    + detail['decision_needed'])
+        return 'waiting_human', detail
     return None
 
 

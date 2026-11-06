@@ -1172,3 +1172,110 @@ def test_equal_weight_durable_branches_have_stable_tie_break(reverse):
     # not evidence that either concurrent branch happened later.
     for ordering in permutations(tasks):
         assert lineage_redispatch_candidates(ordering) == [tasks[1]]
+
+
+def rework_roles(scene, *, roles=True, plan=True):
+    """Persist real redo obligations; the first generation must respect causality."""
+    node_id = 'plan' if plan else 'implementation'
+    node = {'id': node_id, 'purpose': 'repair plan', 'depends_on': []}
+    if roles:
+        node['agent_policy'] = {'roles': [
+            {'name': 'executor'},
+            {'name': 'challenger', **({'depends_on_role': 'executor'} if plan else {})},
+        ]}
+    workflow = scene.store.get_workflow('wf')
+    workflow['config'] = {'nodes': [node]}
+    scene.store.save_workflow(workflow)
+    for role in ('executor', 'challenger'):
+        tid = 'wf-' + node_id + '-' + role
+        scene.store.save_task({'task_id': tid, 'workflow_id': 'wf', 'node': node_id,
+                              'run_id': 'run-' + role, 'execution_id': 'execution-1',
+                              'dispatch_role': role, 'status': 'cleaned'})
+        scene.store.transition_task(tid, 'superseded', 'same_node_redo',
+                                    metadata={'replacement_pending': True})
+    return node_id
+
+
+@pytest.mark.parametrize('roles', [True, False])
+def test_redispatch_stage_shape_reaches_real_store(scene, roles):
+    from herdr import node_dispatch_store as nd
+    rework_roles(scene, roles=roles)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'plan')
+    expected = [{'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}]
+    if not roles:
+        expected.insert(0, {'task_id': 'wf-plan-challenger', 'run_id': 'run-challenger'})
+    assert op['payload']['predecessors'] == expected
+
+
+def test_staged_rework_snapshots_only_the_dispatchable_role(scene):
+    from herdr import node_dispatch_store as nd
+    rework_roles(scene)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'plan')
+    assert op['payload']['predecessors'] == [{'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}]
+    for now in (2000, 10000):
+        nd.reconcile_workflow(scene.store.db_path, 'wf', now=now)
+        assert nd.operation_for_node(scene.store.db_path, 'wf', 'plan')['id'] == op['id']
+        assert len(dispatch_operations(scene)) == 1
+
+
+@pytest.mark.parametrize('order', [('executor', 'challenger'), ('challenger', 'executor')])
+def test_registration_order_does_not_change_parallel_role_resolution(scene, order):
+    from herdr import node_dispatch_store as nd
+    rework_roles(scene, plan=False)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+    nd.claim(scene.store.db_path, op['id'], 'owner', now=1000)
+    nd.start(scene.store.db_path, op['id'], 'owner', now=1000,
+             expected_task_ids=['wf-implementation-executor-r2', 'wf-implementation-challenger-r2'])
+    for index, role in enumerate(order):
+        predecessor = 'wf-implementation-' + role
+        register_task(scene, op, predecessor + '-r2', role, predecessor=predecessor)
+        nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+        current = nd.operation_for_node(scene.store.db_path, 'wf', 'implementation')
+        assert current['status'] == ('resolved' if index else 'running')
+
+
+def test_challenger_replacement_rejected_under_executor_generation(scene):
+    from herdr import node_dispatch_store as nd
+    from herdr.task_resources import begin_launch_intent
+    rework_roles(scene)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'plan')
+    nd.claim(scene.store.db_path, op['id'], 'owner', now=1000)
+    nd.start(scene.store.db_path, op['id'], 'owner', now=1000,
+             expected_task_ids=['wf-plan-executor-r2'])
+    before = scene.store.list_events(limit=1000)
+    with pytest.raises(ValueError, match='predecessor'):
+        begin_launch_intent(scene.store, workflow_id='wf', node_id='plan',
+            task_id='wf-plan-challenger-r2', role='challenger',
+            dispatch_operation_id=op['id'], run_id='wrong-run', execution_id='execution-1',
+            supersedes='wf-plan-challenger', dispatch_round=2, now=1000)
+    assert scene.store.get_task('wf-plan-challenger-r2') is None
+    assert scene.store.list_events(limit=1000) == before
+
+
+def test_executor_launch_absence_retries_without_creating_challenger_generation(scene):
+    from herdr import node_dispatch_store as nd
+    from herdr.task_resources import abort_launch_intent, begin_launch_intent
+    rework_roles(scene)
+    nd.reconcile_workflow(scene.store.db_path, 'wf', now=1000)
+    op = nd.operation_for_node(scene.store.db_path, 'wf', 'plan')
+    assert op['payload']['predecessors'] == [{'task_id': 'wf-plan-executor', 'run_id': 'run-executor'}]
+    for attempt in range(1, 4):
+        now = 1000 + attempt * 60
+        assert nd.claim(scene.store.db_path, op['id'], 'owner', now=now)
+        nd.start(scene.store.db_path, op['id'], 'owner', now=now,
+                 expected_task_ids=['wf-plan-executor-r2'])
+        intent = begin_launch_intent(scene.store, workflow_id='wf', node_id='plan',
+            task_id='wf-plan-executor-r2', role='executor', dispatch_operation_id=op['id'],
+            dispatch_attempt=attempt, run_id='retry-' + str(attempt), execution_id='execution-1',
+            supersedes='wf-plan-executor', dispatch_round=2, now=now)['intent']
+        abort_launch_intent(scene.store, intent, now=now)
+        result = nd.direct_finished(scene.store.db_path, op['id'], 'owner',
+                                    ['wf-plan-executor-r2'], now=now)
+        assert result['status'] == ('waiting_human' if attempt == 3 else 'pending')
+        nd.reconcile_workflow(scene.store.db_path, 'wf', now=now)
+        assert len(dispatch_operations(scene)) == 1
+    assert result['attempts'] == 3

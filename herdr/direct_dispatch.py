@@ -692,6 +692,68 @@ def experience_launch_flags(spec) -> list:
     return flags
 
 
+def redispatch_stage(node, node_tasks, workflow_id, *, tasks=None, project_root=None):
+    """Select the current causal replacement stage without persisting dispatch state."""
+    normalized = normalize_node(node)
+    node_id = normalized["id"]
+    roles = normalized.get("roles") or []
+    awaiting = sorted(
+        (task for task in lineage_redispatch_candidates(node_tasks) if not task.get("superseded_by")),
+        key=lambda task: (task.get("created_at") or 0, task.get("task_id") or ""),
+    )
+    stage = {"awaiting": awaiting, "running": [], "completed_roles": {}, "dispatchable": []}
+    if not roles:
+        stage["dispatchable"] = [{"task": task, "role": "", "definition": None} for task in awaiting]
+        return stage
+    from herdr.transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
+    stage["running"] = [task for task in node_tasks if str(task.get("status") or "") in ACTIVE_TASK_STATUSES]
+    if stage["running"]:
+        return stage
+    completed_role_tasks = {}
+    for t in node_tasks:
+        if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by"):
+            r_name = resolve_task_role(
+                t, role_names=[r.get("name") for r in roles],
+                workflow_id=workflow_id, node_id=node_id)
+            if r_name:
+                completed_role_tasks[r_name] = t
+
+    dispatchable_awaiting = []
+    for task in awaiting:
+        t_role = resolve_task_role(
+            task, role_names=[r.get("name") for r in roles],
+            workflow_id=workflow_id, node_id=node_id
+        )
+        r_def = next((r for r in roles if str(r.get("name") or "").strip().lower() == t_role), None)
+        dep_role = str(r_def.get("depends_on_role") or "").strip().lower() if r_def else ""
+        has_executor = any(str(x.get("name") or "").strip().lower() == "executor" for x in roles)
+        if not dep_role and node_id == "plan" and t_role in ("challenger", "review", "reviewer", "adversarial") and has_executor:
+            dep_role = "executor"
+
+        if dep_role:
+            if dep_role not in completed_role_tasks:
+                continue
+            if dep_role == "executor" or (node_id == "plan" and t_role in ("challenger", "review", "reviewer", "adversarial")):
+                from herdr.plan_parser import (
+                    find_plan_deliverables,
+                    validate_plan_deliverable_content,
+                )
+                deliv = find_plan_deliverables(workflow_id, tasks, project_root)
+                p_text = deliv[0] if deliv else None
+                p_meta = getattr(deliv, "meta", {})
+                p_ref = str(p_meta.get("plan_id") or "").strip()
+                if not p_text or not p_ref:
+                    continue
+                p_ok, _ = validate_plan_deliverable_content(p_text, role="executor")
+                if not p_ok:
+                    continue
+        dispatchable_awaiting.append({"task": task, "role": t_role, "definition": r_def})
+
+    stage["completed_roles"] = completed_role_tasks
+    stage["dispatchable"] = dispatchable_awaiting
+    return stage
+
+
 def plan_stage_dispatch(
     workflow_id,
     node,
@@ -756,53 +818,10 @@ def plan_stage_dispatch(
         roles = normalized.get("roles") or []
         if awaiting:
             if roles:
-                from herdr.transitions import ACTIVE_TASK_STATUSES, COMPLETED_TASK_STATUSES
-                running_tasks = [t for t in node_tasks if str(t.get("status") or "") in ACTIVE_TASK_STATUSES]
-                if running_tasks:
-                    return {
-                        "mode": "wait",
-                        "reason": f"node has active tasks ({len(running_tasks)} running)",
-                        "specs": [],
-                    }
-
-                completed_role_tasks = {}
-                for t in node_tasks:
-                    if str(t.get("status") or "") in COMPLETED_TASK_STATUSES and not t.get("superseded_by"):
-                        r_name = resolve_task_role(
-                            t, role_names=[r.get("name") for r in roles],
-                            workflow_id=workflow_id, node_id=node_id)
-                        if r_name:
-                            completed_role_tasks[r_name] = t
-
-                dispatchable_awaiting = []
-                for task in sorted(
-                    awaiting, key=lambda item: (item.get("created_at") or 0, item.get("task_id") or "")
-                ):
-                    t_role = resolve_task_role(
-                        task, role_names=[r.get("name") for r in roles],
-                        workflow_id=workflow_id, node_id=node_id
-                    )
-                    r_def = next((r for r in roles if str(r.get("name") or "").strip().lower() == t_role), None)
-                    dep_role = str(r_def.get("depends_on_role") or "").strip().lower() if r_def else ""
-                    has_executor = any(str(x.get("name") or "").strip().lower() == "executor" for x in roles)
-                    if not dep_role and node_id == "plan" and t_role in ("challenger", "review", "reviewer", "adversarial") and has_executor:
-                        dep_role = "executor"
-
-                    if dep_role:
-                        if dep_role not in completed_role_tasks:
-                            continue
-                        if dep_role == "executor" or (node_id == "plan" and t_role in ("challenger", "review", "reviewer", "adversarial")):
-                            from herdr.plan_parser import find_plan_deliverables, validate_plan_deliverable_content
-                            deliv = find_plan_deliverables(workflow_id, tasks, project_root)
-                            p_text = deliv[0] if deliv else None
-                            p_meta = getattr(deliv, "meta", {})
-                            p_ref = str(p_meta.get("plan_id") or "").strip()
-                            if not p_text or not p_ref:
-                                continue
-                            p_ok, _ = validate_plan_deliverable_content(p_text, role="executor")
-                            if not p_ok:
-                                continue
-                    dispatchable_awaiting.append((task, r_def, t_role))
+                stage = redispatch_stage(node, node_tasks, workflow_id, tasks=tasks, project_root=project_root)
+                if stage["running"]:
+                    return {"mode": "wait", "reason": f"node has active tasks ({len(stage['running'])} running)", "specs": []}
+                dispatchable_awaiting = stage["dispatchable"]
 
                 if not dispatchable_awaiting:
                     return {
@@ -818,7 +837,8 @@ def plan_stage_dispatch(
                 }
                 existing_ids.update(str(task_id) for task_id in (reserved_task_ids or ()) if task_id)
                 specs = []
-                for task, r_def, t_role in dispatchable_awaiting:
+                for item in dispatchable_awaiting:
+                    task, r_def, t_role = item["task"], item["definition"], item["role"]
                     old_id = str(task.get("task_id"))
                     new_id = next_replacement_id(old_id, existing_ids)
                     existing_ids.add(new_id)

@@ -2,8 +2,9 @@
 import json
 import time
 
-from . import node_dispatch as core, recovery_store as rs
-from .direct_dispatch import lineage_redispatch_candidates
+from . import node_dispatch as core
+from . import recovery_store as rs
+from .direct_dispatch import lineage_redispatch_candidates, redispatch_stage
 
 
 def _write(conn, op, status, detail, now, *, next_due=None, owner=None, lease=None, started=None, attempts=None):
@@ -192,8 +193,13 @@ def reconcile_workflow(db_path, wid, *, legacy_notified=(), discover=True, intak
                                         break
 
                 if candidates and (not previous or previous['status'] in core.TERMINAL):
-                    predecessors = sorted(({'task_id': t['task_id'], 'run_id': t.get('run_id')}
-                                           for t in candidates), key=lambda t: t['task_id'])
+                    stage = redispatch_stage(node, node_tasks, wid, tasks=current_tasks,
+                                             project_root=workflow.get('project_root'))
+                    if not stage['dispatchable']:
+                        continue
+                    predecessors = sorted(
+                        ({'task_id': item['task']['task_id'], 'run_id': item['task'].get('run_id')}
+                         for item in stage['dispatchable']), key=lambda task: task['task_id'])
                 elif has_staged_dispatch:
                     pass
                 elif node_tasks and (not node.get('depends_on') or not core.cancelled_inventory(node_tasks)):
