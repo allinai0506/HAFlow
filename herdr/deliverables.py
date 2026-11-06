@@ -297,6 +297,14 @@ def _task_items(task: Dict[str, Any], nodes: List[Dict[str, Any]]):
                     continue
                 items.append(_file_item(task,node_id,node_label,rel,retired,
                                         row.get("status")=="present" or any(_same_output(token,rel) for token in expected)))
+            url = _pr_url(task)
+            if url and not any(it.get("kind") == "git_pr" for it in items):
+                items.append(_base(
+                    task, node_id, node_label, kind="git_pr", key=url, name="Pull Request",
+                    type_label="代码交付", status="historical" if retired else "present",
+                    reason="所属任务已替代。" if retired else "",
+                    actions=["open"], readable=False, rel_path="", url=url,
+                ))
             return items, "", False
         except (OSError, ValueError, tarfile.TarError):
             return [], "任务成果归档不可读取或校验失败。", False
