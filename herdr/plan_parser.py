@@ -26,7 +26,7 @@ _TASK_HEADER_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _FILE_LINE_RE = re.compile(
-    r"[-*]\s*(?:Create|Modify|Test|新增|修改|测试)[:：]?\s*[`'\"]?([^`'\"\n\r\t]+)[`'\"]?",
+    r"[-*]\s*(?:Create|Modify|Test|新增|修改|测试)(?:\s*[（(][^）)\n]+[）)])?\s*[:：]?\s*[`'\"]?([^`'\"\n\r\t]+)[`'\"]?",
     re.IGNORECASE,
 )
 _DEP_LINE_RE = re.compile(
