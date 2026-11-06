@@ -840,6 +840,8 @@ def closure_required(store, task: Any) -> bool:
         return True  # pinned configuration unreadable → fail closed
     if not isinstance(file_config, dict):
         return True
+    if run_ceiling and _wrapup_flag(file_config):
+        return not _workspace_ceiling(run_ceiling)
     return _closure_demanded(file_config)
 
 

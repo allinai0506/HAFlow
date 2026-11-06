@@ -294,3 +294,47 @@ def test_run_level_delivery_ceiling_overrides_template_default(tmp_path):
                          "delivery_ceiling": "workspace",
                          "config": {**wrapup_cfg, "delivery_ceiling_default": "workspace"}})
     assert closure_required(store, {"workflow_id": "wf-ws2"}) is False
+
+
+@pytest.mark.parametrize(
+    "run_ceiling,pinned_default,expected",
+    [
+        ("workspace", "pr", False),
+        ("pr", "workspace", True),
+        ("workspace", "workspace", False),
+        ("pr", "pr", True),
+        ("", "pr", True),
+        ("", "workspace", False),
+    ],
+)
+def test_pinned_config_fallback_honors_run_level_ceiling(
+    tmp_path, run_ceiling, pinned_default, expected
+):
+    """G1：无 SQLite 快照时，Run 级授权必须覆盖 pinned 配置的模板默认。"""
+    from herdr.review_closure import closure_required
+    store = SQLiteStateStore(tmp_path / "state.db")
+    workflow = {"workflow_id": "wf-pinned", "status": "running"}
+    if run_ceiling:
+        workflow["delivery_ceiling"] = run_ceiling
+    store.save_workflow(workflow)
+    pinned = tmp_path / "workflow.json"
+    pinned.write_text(json.dumps({
+        "delivery_ceiling_default": pinned_default,
+        "nodes": [
+            {"id": "implementation"},
+            {"id": "wrapup", "review_closure_required": True},
+        ],
+    }))
+    task = {"workflow_id": "wf-pinned", "workflow_config": str(pinned)}
+    assert closure_required(store, task) is expected
+
+
+def test_closure_required_fails_closed_when_workflow_read_raises():
+    """授权读取异常必须 Fail-Closed 为“要求 Closure”，不得静默放行。"""
+    from herdr.review_closure import closure_required
+
+    class BrokenStore:
+        def get_workflow(self, workflow_id):
+            raise RuntimeError("state db unavailable")
+
+    assert closure_required(BrokenStore(), {"workflow_id": "wf-broken"}) is True

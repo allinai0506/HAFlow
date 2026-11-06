@@ -1,0 +1,165 @@
+Phase: preflight — BLOCKED, not a RED test result
+Task: wf-haflow-1105-01-implementation-auto
+Context: wc_acab01d1ee1649aabc7eb4f272285a10
+Plan: n-1793888865090-429b
+
+Executed baseline command:
+/Users/user/.herdr-controller/releases/ac311501319b52e8dbc3780388e94100cfacfdde/bin/herdr-task verify-baseline wf-haflow-1105-01-implementation-auto
+BASELINE_MATCH
+HERDR_BASELINE_RESULT={"task_id":"wf-haflow-1105-01-implementation-auto","baseline_match":true,"changes":[],"worktree_changed":false,"commits_ahead":0,"baseline_commit":"ac311501319b52e8dbc3780388e94100cfacfdde","head":"ac311501319b52e8dbc3780388e94100cfacfdde","basis":"baseline_commit"}
+
+Scope conflict:
+The approved plan requires adding two regression test functions (7 cases) to
+ tests/test_scattered_review_debt.py before the two-line production fix.
+The dispatched task whitelist and immutable working context permit only:
+- herdr/review_closure.py
+- docs/walkthroughs/wf-haflow-1105-01-delivery-authorization/red-evidence.txt
+- docs/walkthroughs/wf-haflow-1105-01-delivery-authorization/green-evidence.txt
+The required test file is absent from that whitelist.
+
+Controlling task instruction:
+"A scope conflict is a blocker for the coordinator to adjudicate; do not widen scope or bypass hooks."
+
+Requested coordinator adjudication:
+Add tests/test_scattered_review_debt.py to the task's authorized file scope and
+refresh the task context/contract, or provide a reconciled approved plan.
+Do not bypass TDD by applying production changes without the planned tests.
+
+No source or tests modified. No RED/GREEN suites executed. No commit, push, PR,
+merge, deployment, or repository acceptance claimed. Inner-loop evaluation has
+not been run; no completion marker or successful completion declaration issued.
+Baseline SHA follows the plan challenger's approved adjustment to use the actual
+recorded baseline rather than the historical 790b497 reference.
+
+RESUMED: coordinator ruling n-1793923394380-3dbf adds tests/test_scattered_review_debt.py to scope. GOAL.md verified updated.
+Goal: G1 pinned-config fallback honors explicit Run ceiling. No unrelated changes.
+Entry: kernel completion / bypass and task_cli_review -> check_completion_allowed -> closure_required -> same SQLiteStateStore registration; pinned JSON fallback when snapshot absent.
+Baseline remains ac31150; git fetch origin exit 0; no branch switch/reset.
+
+RED auth
+........................................................................ [ 98%]
+.                                                                        [100%]
+73 passed in 42.64s
+
+RED closure
+..........................................................               [100%]
+58 passed in 73.56s (0:01:13)
+
+RED delivery
+........................................................................ [ 41%]
+........................................................................ [ 82%]
+..............................                                           [100%]
+174 passed in 42.64s
+
+RED matrix
+run=workspace pinned_default=pr        -> True  expected=False FAIL
+run=pr        pinned_default=workspace -> False expected=True  FAIL
+run=workspace pinned_default=workspace -> False expected=False PASS
+run=pr        pinned_default=pr        -> True  expected=True  PASS
+run=-         pinned_default=pr        -> True  expected=True  PASS
+run=-         pinned_default=workspace -> False expected=False PASS
+
+RED target
+FF.....                                                                  [100%]
+=================================== FAILURES ===================================
+___ test_pinned_config_fallback_honors_run_level_ceiling[workspace-pr-False] ___
+
+tmp_path = PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-86/test_pinned_config_fallback_ho0')
+run_ceiling = 'workspace', pinned_default = 'pr', expected = False
+
+    @pytest.mark.parametrize(
+        "run_ceiling,pinned_default,expected",
+        [
+            ("workspace", "pr", False),
+            ("pr", "workspace", True),
+            ("workspace", "workspace", False),
+            ("pr", "pr", True),
+            ("", "pr", True),
+            ("", "workspace", False),
+        ],
+    )
+    def test_pinned_config_fallback_honors_run_level_ceiling(
+        tmp_path, run_ceiling, pinned_default, expected
+    ):
+        """G1：无 SQLite 快照时，Run 级授权必须覆盖 pinned 配置的模板默认。"""
+        from herdr.review_closure import closure_required
+        store = SQLiteStateStore(tmp_path / "state.db")
+        workflow = {"workflow_id": "wf-pinned", "status": "running"}
+        if run_ceiling:
+            workflow["delivery_ceiling"] = run_ceiling
+        store.save_workflow(workflow)
+        pinned = tmp_path / "workflow.json"
+        pinned.write_text(json.dumps({
+            "delivery_ceiling_default": pinned_default,
+            "nodes": [
+                {"id": "implementation"},
+                {"id": "wrapup", "review_closure_required": True},
+            ],
+        }))
+        task = {"workflow_id": "wf-pinned", "workflow_config": str(pinned)}
+>       assert closure_required(store, task) is expected
+E       AssertionError: assert True is False
+E        +  where True = <function closure_required at 0x107119850>(<herdr.state_store.SQLiteStateStore object at 0x1070f5940>, {'workflow_id': 'wf-pinned', 'workflow_config': '/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-86/test_pinned_config_fallback_ho0/workflow.json'})
+
+tests/test_scattered_review_debt.py:329: AssertionError
+___ test_pinned_config_fallback_honors_run_level_ceiling[pr-workspace-True] ____
+
+tmp_path = PosixPath('/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-86/test_pinned_config_fallback_ho1')
+run_ceiling = 'pr', pinned_default = 'workspace', expected = True
+
+    @pytest.mark.parametrize(
+        "run_ceiling,pinned_default,expected",
+        [
+            ("workspace", "pr", False),
+            ("pr", "workspace", True),
+            ("workspace", "workspace", False),
+            ("pr", "pr", True),
+            ("", "pr", True),
+            ("", "workspace", False),
+        ],
+    )
+    def test_pinned_config_fallback_honors_run_level_ceiling(
+        tmp_path, run_ceiling, pinned_default, expected
+    ):
+        """G1：无 SQLite 快照时，Run 级授权必须覆盖 pinned 配置的模板默认。"""
+        from herdr.review_closure import closure_required
+        store = SQLiteStateStore(tmp_path / "state.db")
+        workflow = {"workflow_id": "wf-pinned", "status": "running"}
+        if run_ceiling:
+            workflow["delivery_ceiling"] = run_ceiling
+        store.save_workflow(workflow)
+        pinned = tmp_path / "workflow.json"
+        pinned.write_text(json.dumps({
+            "delivery_ceiling_default": pinned_default,
+            "nodes": [
+                {"id": "implementation"},
+                {"id": "wrapup", "review_closure_required": True},
+            ],
+        }))
+        task = {"workflow_id": "wf-pinned", "workflow_config": str(pinned)}
+>       assert closure_required(store, task) is expected
+E       AssertionError: assert False is True
+E        +  where False = <function closure_required at 0x107119850>(<herdr.state_store.SQLiteStateStore object at 0x10645bb10>, {'workflow_id': 'wf-pinned', 'workflow_config': '/private/var/folders/hb/fw83wt2j5psblns41081bgh40000gn/T/pytest-of-user/pytest-86/test_pinned_config_fallback_ho1/workflow.json'})
+
+tests/test_scattered_review_debt.py:329: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_scattered_review_debt.py::test_pinned_config_fallback_honors_run_level_ceiling[workspace-pr-False]
+FAILED tests/test_scattered_review_debt.py::test_pinned_config_fallback_honors_run_level_ceiling[pr-workspace-True]
+2 failed, 5 passed, 13 deselected in 24.31s
+TASK_CHANGED:
+- [tracked] tests/test_scattered_review_debt.py
+- [untracked] docs/walkthroughs/wf-haflow-1105-01-delivery-authorization/red-evidence.txt
+HERDR_BASELINE_RESULT={"task_id": "wf-haflow-1105-01-implementation-auto", "baseline_match": false, "changes": [{"type": "tracked", "path": "tests/test_scattered_review_debt.py", "baseline": "__NOT_PRESENT__", "current": "bf630b0eacc8c572d6c41b394291ecce7aae18a59e363eb8446d2828ca4a729f"}, {"type": "untracked", "path": "docs/walkthroughs/wf-haflow-1105-01-delivery-authorization/red-evidence.txt", "baseline": "__NOT_PRESENT__", "current": "94ddeeff97289448c8f334a78a71e0435b3f466dfa984e99f92f47e89eea29b8"}], "worktree_changed": true, "commits_ahead": 0, "baseline_commit": "ac311501319b52e8dbc3780388e94100cfacfdde", "head": "ac311501319b52e8dbc3780388e94100cfacfdde", "basis": "baseline_commit"}
+
+NEW TOOL GATE BLOCKER (after verified RED; source fix not applied):
+apply_patch for the approved two-line herdr/review_closure.py fix was rejected by
+PreToolUse hook: Entry Gate missing, STOP. Hook requires a new file:
+.omc/entry-gate-01a1ae1f-4cd2-7dc1-9fc9-5366e12cc35b.md
+Required headings: 1. 理解和假设 / 2. 最小方案 / 3. 范围纪律 / 4. 验证计划;
+section 2 must list file scope, marking new files NEW:, at least 150 characters.
+This file is outside the coordinator-approved four-file whitelist. Per explicit
+scope-conflict contract, do not create it or bypass hook through another editor.
+Coordinator action: authorize this exact tool entry artifact (and reconcile its
+baseline/delivery handling), or adjust the hook through the coordinator.
+No source fix applied. No GREEN or completion claim. Regression test additions
+remain RED (2 failed, 5 passed). Previous initial scope blocker is resolved.
