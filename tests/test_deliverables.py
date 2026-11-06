@@ -647,7 +647,19 @@ def test_console_projects_persisted_pr_receipt_for_cleaned_task(tmp_path, monkey
     db = tmp_path / 'state.db'
     monkeypatch.setenv('HERDR_STATE_DB', str(db))
     monkeypatch.setattr(console.read_api, '_deliverable_pr_loader', console._load_deliverable_pr)
-    task = {'task_id': 'impl', 'workflow_id': 'wf-biz', 'node': 'impl', 'status': 'cleaned'}
+    monkeypatch.setattr("herdr.clone_archive.archive_manifest", lambda t: {"entries": {}})
+    task = {
+        'task_id': 'impl',
+        'workflow_id': 'wf-biz',
+        'node': 'impl',
+        'status': 'cleaned',
+        'clone_archive': {
+            'manifest_sha256': '0' * 64,
+            'deliverables': [
+                {'id': 'commit-1', 'kind': 'git_commit', 'name': '提交 aaaaa', 'rel_path': '', 'status': 'present'}
+            ],
+        },
+    }
     _seed_console_workflow(tmp_path, monkeypatch, [task], [])
     state_db.record_event({'workflow_id': 'wf-biz', 'task_id': 'impl',
                           'event_type': 'pull_request_created', 'source': 'herdr-task',

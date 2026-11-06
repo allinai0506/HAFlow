@@ -524,4 +524,4 @@ def dashboard_data(limit_tasks=50, limit_workflows=50, workflow_id=None):
     return herdr_dashboard.build_dashboard(all_tasks,blockers=blockers,actions_by_task=actions_by_task,deliveries=deliveries,stalls=stalls,anomalies=anomalies,runtimes=runtimes,decisions=decisions,scope=scope,workflows=wf_options,now=now,limits={'tasks':limit_tasks,'deliveries':10,'attention':30,'stuck':30,'decisions':30})
 
 _deliverable_observation_loader=None
-_deliverable_pr_loader=None
+_deliverable_pr_loader=_load_deliverable_pr
