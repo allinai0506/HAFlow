@@ -106,6 +106,13 @@ def test_pending_task_cannot_resolve_node_dispatch_operation(test_db):
     assert res_dispatched[0] == "resolved"
     assert res_dispatched[1]["registered_task_ids"] == ["task-req-1"]
 
+    # Even if task failed after launch, dispatch evidence is preserved so self-healing can supersede
+    failed_task = dict(pending_task, status="failed")
+    res_failed = core.result(op, workflow, config, [failed_task], now=1500.0)
+    assert res_failed is not None
+    assert res_failed[0] == "resolved"
+    assert res_failed[1]["registered_task_ids"] == ["task-req-1"]
+
 
 def test_replacement_complete_requires_non_pending_successor(test_db):
     """Replacement task in 'pending' status cannot satisfy replacement_complete."""

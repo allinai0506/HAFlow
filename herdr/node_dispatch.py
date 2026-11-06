@@ -286,7 +286,6 @@ def result(operation, workflow, config, tasks, now):
     dispatched_tasks = [
         t for t in registered
         if t.get('status') != 'pending'
-        and (t.get('status') in ACTIVE_TASK_STATUSES or t.get('status') in COMPLETED_TASK_STATUSES)
     ]
     dispatched_ids = sorted(t['task_id'] for t in dispatched_tasks)
     replacement_complete = not predecessors or {t.get('supersedes') for t in dispatched_tasks}.issuperset(
