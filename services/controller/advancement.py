@@ -191,6 +191,24 @@ def check_workflow_stage_advance(ports, workflow_id):
                     f"node={_nid} target lineage pending redispatch"
                 )
 
+        obligations = ports.list_invalidation_obligations(workflow_id)
+        if obligations:
+            nodes_by_id = {n["id"]: n for n in workflow_cfg.get("nodes", [])}
+            handled_gates = set()
+            for gate_node_id, ob in sorted(obligations.items()):
+                if gate_node_id in handled_gates:
+                    continue
+                merged = ob.get("merged_gates")
+                if merged:
+                    handled_gates.update(merged)
+                else:
+                    handled_gates.add(gate_node_id)
+                gate_cfg = ob.get("gate_cfg") or ports.resolve_gate_config(
+                    nodes_by_id.get(gate_node_id), gate_node_id
+                ) or {}
+                ports.handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg)
+            return
+
         if ports.is_workflow_completed(workflow_cfg, completed_nodes):
             # reopen 闩在先:重开现场(sweep 每 2s 一次)不得刷
             # [WORKFLOW COMPLETE] 噪音,更不得触发 close。
@@ -202,26 +220,16 @@ def check_workflow_stage_advance(ports, workflow_id):
 
             # 交付终态门禁:任一门禁节点 verdict=blocked 时不得关闭,
             # 回流 fix-loop(由 handle_fix_loop 原子作废并派发事件)。
-            nodes_by_id = {
-                n["id"]: n for n in workflow_cfg.get("nodes", [])
-            }
+            nodes_by_id = {n["id"]: n for n in workflow_cfg.get("nodes", [])}
             blocked_gates = []
-
             for node_id in sorted(completed_nodes):
-                gate_cfg = ports.resolve_gate_config(
-                    nodes_by_id.get(node_id), node_id
-                )
-                if (
-                    gate_cfg
-                    and ports.gate_verdict(workflow_id, node_id) == "blocked"
-                ):
+                gate_cfg = ports.resolve_gate_config(nodes_by_id.get(node_id), node_id)
+                if gate_cfg and ports.gate_verdict(workflow_id, node_id) == "blocked":
                     blocked_gates.append((node_id, gate_cfg))
 
             if blocked_gates:
                 for gate_node_id, gate_cfg in blocked_gates:
-                    ports.handle_fix_loop(
-                        workflow_id, gate_node_id, gate_cfg, workflow_cfg
-                    )
+                    ports.handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg)
                 return
 
             # 完成日志闩:close 可能失败或需要多轮,日志只允许出现一次,
@@ -475,7 +483,8 @@ DEPENDENCIES = {
         'blocked_gate_dependency', 'blocked_verdict_dep', 'clear_stage_advance',
         'coordinator_intake_enabled', 'coordinator_queue', 'gate_verdict',
         'get_ready_nodes', 'handle_fix_loop', 'is_node_complete', 'is_workflow_completed',
-        'liveness', 'load_tasks', 'mark_stage_advance_queued', 'maybe_close_completed_workflow',
+        'list_invalidation_obligations', 'liveness', 'load_tasks', 'mark_stage_advance_queued',
+        'maybe_close_completed_workflow',
         'notify_attention', 'apply_node_acceptance', 'project_for_workflow',
         'reconcile_node_dispatches', 'reconcile_stage_advance_states', 'resolve_gate_config',
         'selective_replan_core', 'time', 'workflow_closed', 'workflow_config_for',

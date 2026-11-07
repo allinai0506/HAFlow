@@ -22,6 +22,13 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         )
         retry_node = fallback
 
+    existing_obligation = ports.get_invalidation_obligation(workflow_id, gate_node_id)
+    if existing_obligation:
+        if "retry_node" in existing_obligation:
+            retry_node = existing_obligation["retry_node"]
+        if "gate_cfg" in existing_obligation and isinstance(existing_obligation["gate_cfg"], dict):
+            gate_cfg = dict(gate_cfg, **existing_obligation["gate_cfg"])
+
     # P1-2:同一 retry_node 的多门禁并行 blocked 时,先冻结本轮全部
     # blocked gate facts,再进入 invalidation。否则先处理的 gate 会把
     # 另一个 blocked gate Task 一并作废,后者的 affected_task_ids 丢失。
@@ -36,6 +43,22 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
     except Exception:
         _merge_enabled = False
     if _merge_enabled:
+        merged_gate_ids = (
+            existing_obligation.get("merged_gates")
+            if existing_obligation and existing_obligation.get("merged_gates")
+            else None
+        )
+        if merged_gate_ids and len(merged_gate_ids) > 1 and str(gate_node_id) in merged_gate_ids:
+            _merged = []
+            for gid in sorted(set(merged_gate_ids)):
+                ob = ports.get_invalidation_obligation(workflow_id, gid)
+                g_cfg = (ob.get("gate_cfg") if ob else None) or ports.resolve_gate_config(
+                    nodes_by_id.get(gid) if nodes_by_id else None, gid
+                ) or {}
+                _merged.append((gid, g_cfg))
+            if len(_merged) > 1:
+                ports._handle_merged_fix_loops(workflow_id, retry_node, _merged, workflow_cfg)
+                return
         try:
             _sibling_gates: dict = {}
             for _task in ports.load_tasks():
@@ -100,6 +123,11 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
             )
             blocked_gate_tasks.append(task)
 
+    if not blocked_gate_tasks:
+        if not existing_obligation:
+            return
+        blockers = existing_obligation.get("blockers") or []
+
     from herdr import fix_loop as fix_loop_core
 
     try:
@@ -133,9 +161,10 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
     ) == fingerprint:
         return
 
-    if fix_loop_core.fix_loop_exhausted(
-        prior_count, max_loops
-    ) or fix_loop_core.is_repeat_verdict(fingerprint, stored_fp):
+    if not existing_obligation and (
+        fix_loop_core.fix_loop_exhausted(prior_count, max_loops)
+        or fix_loop_core.is_repeat_verdict(fingerprint, stored_fp)
+    ):
         reason = (
             "max_loops_exhausted"
             if fix_loop_core.fix_loop_exhausted(prior_count, max_loops)
@@ -195,6 +224,8 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         workflow_id, gate_node_id, retry_node, workflow_cfg,
         blocked_gate_tasks, ports.load_tasks(),
     )
+    if selective_ids is None and existing_obligation and existing_obligation.get("selective_ids") is not None:
+        selective_ids = existing_obligation["selective_ids"]
 
     invalidated = ports.invalidate_for_fix_loop(
         workflow_id, gate_node_id, workflow_cfg, retry_node=retry_node,
@@ -204,8 +235,40 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
     if isinstance(
         invalidated, ports.SelectiveInvalidationResult
     ) and not invalidated.all_targets_applied:
-        # 无论是 Selective 还是 Legacy 模式,存在未完成作废责任必须 fail-closed。
-        # 无 latch、无计数、无通知;门禁仍 blocked,等待重试或人工介入。
+        # 无论是 Selective 还是 Legacy 模式,存在未完成作废责任必须 fail-closed 并持久化 obligation。
+        ports.record_invalidation_obligation(
+            workflow_id,
+            gate_node_id,
+            {
+                "workflow_id": workflow_id,
+                "gate_node_id": gate_node_id,
+                "retry_node": retry_node,
+                "gate_cfg": gate_cfg,
+                "selective_ids": list(selective_ids) if selective_ids is not None else None,
+                "pending_tasks": list(invalidated.pending),
+                "failed_tasks": dict(invalidated.failed),
+                "applied_tasks": list(invalidated.applied),
+                "blockers": blockers,
+                "created_at": (
+                    existing_obligation.get("created_at")
+                    if existing_obligation
+                    else ports.time.time()
+                ),
+                "updated_at": ports.time.time(),
+            },
+        )
+        attention_key = f"{workflow_id}:fixloop_obligation:{gate_node_id}"
+        if callable(getattr(ports, "attention_note", None)):
+            try:
+                ports.attention_note(
+                    attention_key,
+                    {"task_id": f"fixloop_obligation:{gate_node_id}", "workflow_id": workflow_id},
+                    "fix_loop_obligation",
+                    reason="phase2_invalidation_pending",
+                    detail=f"pending={','.join(invalidated.pending)}; failed={invalidated.failed}",
+                )
+            except Exception as exc:
+                print(f"[FIX LOOP OBLIGATION NOTE WARN] {exc}")
         print(
             f"[FIX LOOP INVALIDATION DEFERRED] workflow={workflow_id} "
             f"gate={gate_node_id} retry={retry_node} "
@@ -216,6 +279,14 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
 
     if not invalidated:
         return
+
+    ports.clear_invalidation_obligation(workflow_id, gate_node_id)
+    attention_key = f"{workflow_id}:fixloop_obligation:{gate_node_id}"
+    if callable(getattr(ports, "attention_clear", None)):
+        try:
+            ports.attention_clear(attention_key)
+        except Exception as exc:
+            print(f"[FIX LOOP OBLIGATION CLEAR WARN] {exc}")
 
     if selective_ids is not None:
         # 选择性作废了 retry_node 内部谱系:清除阶段推进闩,
@@ -282,9 +353,11 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
 DEPENDENCIES = {'handle_fix_loop': ('FIX_LOOP_MAX', 'SelectiveInvalidationResult', '_bump_fix_loop_count',
                      '_exhaustion_fingerprint', '_fix_loop_exhaustion_episode',
                      '_handle_merged_fix_loops', '_record_fix_loop_exhaustion',
-                     '_resolve_selective_replan', '_retry_node_for_gate', 'clear_stage_advance',
-                     'coordinator_queue', 'invalidate_for_fix_loop', 'latest_branch_for_node',
-                     'load_stage_state', 'load_tasks', 'lock', 'resolve_gate_config',
+                     '_resolve_selective_replan', '_retry_node_for_gate', 'attention_clear',
+                     'attention_note', 'clear_invalidation_obligation', 'clear_stage_advance',
+                     'coordinator_queue', 'get_invalidation_obligation', 'invalidate_for_fix_loop',
+                     'latest_branch_for_node', 'load_stage_state', 'load_tasks', 'lock',
+                     'record_invalidation_obligation', 'resolve_gate_config',
                      'save_stage_state', 'selective_replan_core', 'time')}
 
 __all__ = tuple(DEPENDENCIES)
