@@ -201,14 +201,13 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         selective_target_task_ids=selective_ids,
     )
 
-    if selective_ids is not None and isinstance(
+    if isinstance(
         invalidated, ports.SelectiveInvalidationResult
     ) and not invalidated.all_targets_applied:
-        # P1-1:部分作废 fail-closed。门禁/下游一律未动(两阶段提交),
-        # 无 latch、无计数、无通知;门禁仍 blocked,下轮 sweep 基于
-        # 已持久化 Fact 重试剩余目标,绝不带着全量 roots 去等 C-r2。
+        # 无论是 Selective 还是 Legacy 模式,存在未完成作废责任必须 fail-closed。
+        # 无 latch、无计数、无通知;门禁仍 blocked,等待重试或人工介入。
         print(
-            f"[SELECTIVE REPLAN DEFERRED] workflow={workflow_id} "
+            f"[FIX LOOP INVALIDATION DEFERRED] workflow={workflow_id} "
             f"gate={gate_node_id} retry={retry_node} "
             f"pending={','.join(invalidated.pending)} "
             "awaiting retry"

@@ -97,6 +97,10 @@ def invalidate_for_merged_fix_loop(ports,
     invalidated = list(reused)
     invalidated_nodes = set()
     gate_id_set = set(gate_ids)
+    phase2_applied = []
+    phase2_pending = []
+    phase2_failed = {}
+
     for task in ports.load_tasks():
         if task.get("workflow_id") != workflow_id:
             continue
@@ -122,15 +126,24 @@ def invalidate_for_merged_fix_loop(ports,
             and ports._fix_loop_keepable(task)
         ):
             continue
-        if status in ("completed", "cleanup_ready"):
+        if status in ("completed", "cleanup_ready", "integrated"):
             result = ports.subprocess.run(
                 [ports.TASK_MANAGER, "finalize", task_id],
                 text=True, capture_output=True,
             )
             if result.returncode != 0:
+                err = result.stderr.strip() or result.stdout.strip()
+                phase2_pending.append(task_id)
+                phase2_failed[task_id] = f"finalize:{err}"
                 continue
             status = (ports.get_task(task_id) or {}).get("status")
+            if status not in ports.FIX_LOOP_SUPERSEDEABLE:
+                phase2_pending.append(task_id)
+                phase2_failed[task_id] = f"finalize_status_invalid:{status}"
+                continue
         if status not in ports.FIX_LOOP_SUPERSEDEABLE:
+            phase2_pending.append(task_id)
+            phase2_failed[task_id] = f"status_not_supersedeable:{status}"
             continue
         result = ports.subprocess.run(
             [ports.TASK_MANAGER, "supersede", task_id,
@@ -140,8 +153,13 @@ def invalidate_for_merged_fix_loop(ports,
         )
         if result.returncode == 0:
             invalidated.append(task_id)
+            phase2_applied.append(task_id)
             if task_node:
                 invalidated_nodes.add(task_node)
+        else:
+            err = result.stderr.strip() or result.stdout.strip()
+            phase2_pending.append(task_id)
+            phase2_failed[task_id] = f"supersede:{err}"
     if invalidated:
         void_nodes = set(invalidated_nodes) | gate_id_set
         if retry_node:
@@ -154,13 +172,11 @@ def invalidate_for_merged_fix_loop(ports,
             phase1 = list(ordered_targets)
         except NameError:
             phase1 = sorted(selective_targets)
-        combined = list(phase1) + [t for t in invalidated if t not in phase1]
+        combined = list(phase1) + [t for t in phase2_applied if t not in phase1]
         return ports.SelectiveInvalidationResult(
-            combined, applied=list(phase1), pending=[], failed={})
-    void_primary = sorted(invalidated_nodes | {primary})
-    if retry_node:
-        void_primary.append(retry_node)
-    return invalidated
+            combined, applied=list(combined), pending=list(phase2_pending), failed=dict(phase2_failed))
+    return ports.SelectiveInvalidationResult(
+        invalidated, applied=list(invalidated), pending=list(phase2_pending), failed=dict(phase2_failed))
 
 def _handle_merged_fix_loops(ports, workflow_id, retry_node, gates, workflow_cfg):
     """同一 retry_node 多门禁 blocked 的单次合并处理(P1-2)。
@@ -294,6 +310,8 @@ def _handle_merged_fix_loops(ports, workflow_id, retry_node, gates, workflow_cfg
                 retry_node=ports._retry_node_for_gate(workflow_cfg, gcfg, gid),
                 selective_target_task_ids=None,
             )
+            if isinstance(_inv, ports.SelectiveInvalidationResult) and not _inv.all_targets_applied:
+                continue
             if _inv:
                 _lc = ports._bump_fix_loop_count(
                     workflow_id, ports._retry_node_for_gate(workflow_cfg, gcfg, gid))
