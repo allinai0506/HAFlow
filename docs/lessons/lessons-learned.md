@@ -9741,3 +9741,54 @@ git diff --check
 - `herdr/node_dispatch.py#result`
 - `tests/test_plan_causal_dispatch.py#TestPlanSameNodeRedoDurableClosure`
 - `tests/test_node_dispatch_contract.py#test_staged_rework_snapshots_only_the_dispatchable_role`
+
+---
+
+## 231. Fix-Loop Phase 2 部分作废责任丢失与门禁状态机重试闭环（2026-11-07）
+
+### 问题背景
+
+PR #409 修复了 Fix-Loop Phase 2 虚报成功以及 `integrated` 任务经 finalize 规范化作废路径，但在 Codex Review 与对抗审查中暴露了关键状态机缺陷：
+1. **作废责任丢失与阻断失效**：当门禁任务（`gate-1`）在 Phase 2 被成功标记为 `superseded`，但下游存在无法作废的任务（如 `committed`）时，Phase 2 整体 fail-closed 退出。然而 `node_policy.py::gate_verdict` 会忽略 `status == "superseded"` 的任务，导致在后续 Sweep 中阻断事实丢失，`blocked_gate_dependency` 返回 `None`；
+2. **就绪节点绕过与工作流提前关闭**：当工作流所有节点呈现 completed-like 状态时，控制器因无法感知历史阻断事实而误判为工作流完成，进入 `maybe_close_completed_workflow` 提前关闭工作流；在多阶段线性 DAG 中，门禁后续依赖更会被作为就绪节点重新派发，完全绕过未完成的作废责任；
+3. **合并门禁组身份丢失**：当合并门禁（如 `test` + `review`）任务均被 supersede 后，后续 Sweep 分别以单门禁 ID 调用 `handle_fix_loop`，因无活跃 blocked 任务而无法重组 sibling gates，导致退化为双重单门禁循环，造成循环计数重复累加（Double-bump）和重复派发冲突事件；
+4. **状态文件终结清理泄漏**：`clear_workflow_stage_state` 原本仅清理冒号前缀（`wf:`），导致以竖线（`wf|fixloop_obligation|`）分隔的责任记录在工作流终结后残留。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 阻断事实与任务状态强耦合 | 任务进入 `superseded` 不等于作废责任已闭环；仅凭任务状态表无法表达“跨任务未完成作废责任” | 采用 Option B：在 `stage-state.json` 引入持久化作废责任（`invalidation_obligation`），挂起期间责任持久留存，只有所有待作废任务全部落定才能清除 |
+| Sweep 就绪计算先于作废责任检查 | 未完成作废责任期间，工作流处于半作废或待人工介入状态，绝不能推进任何阶段或关闭工作流 | 在 `check_workflow_stage_advance` 顶部最先检查 `list_invalidation_obligations`，任一责任存在即阻断全流程推进（不进 completed 判定，不进 ready_nodes），仅驱动作废重试 |
+| 合并门禁重试缺乏持久化组身份 | 活任务一旦 supersede，按任务反查 sibling 的机制即失效 | 在 obligation 中持久化 `merged_gates` 列表，重试时感知合并组身份，原子恢复全组门禁并委托 `_handle_merged_fix_loops`，单次清空责任且仅递增 1 次计数 |
+| 状态键前缀清理不一致 | 同一工作流在 `stage-state.json` 中混合使用了冒号与竖线前缀 | `clear_workflow_stage_state` 必须覆盖 `wf:` 与 `wf|` 两种前缀，确保工作流关闭或销毁时无孤儿键 |
+
+### 操作规范（已固化到 `services/controller/` 源码与回归测试）
+
+1. **持久化责任模型 (`services/controller/stage_state.py`)**：通过 `record_invalidation_obligation`、`get_invalidation_obligation`、`clear_invalidation_obligation`、`list_invalidation_obligations` 维护 `<wf>|fixloop_obligation|<gate>`。`clear_workflow_stage_state` 同步清理冒号与竖线前缀。
+2. **Sweep 前置责任拦截 (`services/controller/advancement.py`)**：在 `check_workflow_stage_advance` 最开始检索 `list_invalidation_obligations`，存在未决责任时按合并组/单门禁重试 `handle_fix_loop` 并直接 `return`，阻断下游推进与关闭。
+3. **合并门禁重试组恢复 (`services/controller/fix_loop.py` & `merged_fix_loop.py`)**：`handle_fix_loop` 感知 `merged_gates`，自动重构门禁组委托合并作废；`_handle_merged_fix_loops` 从 `active_obs` 恢复原始 `selective_ids` 与 `blockers`，单次提交清空全组 obligation、仅递增 1 次 loop count 并发出 1 个合并事件。
+4. **不可变保护与人工升级通道**：`committed` 任务受 Git 交付链保护绝不强制作废，Phase 2 失败明确记录在 obligation 中并通过 `attention_note` 告警，留存结构化凭证待人工处理。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_fix_loop_phase2_p1_obligation_red.py
+pytest -v tests/test_fix_loop_phase2_invalidation_red.py
+pytest -v tests/test_controller_modularity.py
+pytest -v tests/test_fix_loop_*.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+期望：10 项 P1 专项测试全绿；PR #409 9 项测试全绿；99 项 fix-loop 领域测试全绿；各模块行数严格 $\le 500$ 行。
+
+### 相关文档 / 关联证据
+
+- PR #409 实施提交：`f3aced59`、`b712538`
+- `services/controller/stage_state.py#record_invalidation_obligation`
+- `services/controller/fix_loop.py#handle_fix_loop`
+- `services/controller/merged_fix_loop.py#_handle_merged_fix_loops`
+- `services/controller/advancement.py#check_workflow_stage_advance`
+- `services/controller/node_policy.py#blocked_gate_dependency`
+- `tests/test_fix_loop_phase2_p1_obligation_red.py#TestFixLoopPhase2ObligationP1`

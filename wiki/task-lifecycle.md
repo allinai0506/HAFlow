@@ -184,6 +184,12 @@ Evidence:
 超过 `HERDR_FIX_LOOP_MAX`（默认 3）后 fix_loop 事件切换为"必须请示用户"的
 升级文案——上限是纪律+通知，非引擎硬闸。
 
+`FACT` Fix-Loop Phase 2 作废责任持久化契约（PR #409）：
+- 当 Phase 2 作废存在未完成目标（如 `committed` 任务受 Git 交付链保护不可作废、或 finalize/supersede 失败）时，系统 fail-closed 退出，并将作废责任持久化于 `stage-state.json`（`<wf>|fixloop_obligation|<gate>`），并写入 `attention_note` 告警；
+- 门禁任务即便已被标记为 `superseded`，只要 obligation 仍存，Controller Sweep 在执行节点就绪与工作流关闭计算前前置拦截，阻断下游推进与提前关闭，仅驱动重试；
+- 多门禁合并（merged fix-loop）的 obligation 携带 `merged_gates` 组身份，重试时自动重构门禁组单次原子提交，避免循环计数重复累加和事件分裂；
+- 仅当全部作废目标均成功落定（`all_targets_applied == True`）后，才原子清空 obligation 并投递 `fix_loop` 事件。
+
 `FACT` `close-workflow` 遇未作废的 blocked verdict 拒绝执行（exit 2）；显式
 `--abandon` 可放弃交付（记录 workflow `outcome: abandoned`，正常关闭记录
 `delivered`）。console 的 `create_candidate`（真实 git merge）与
@@ -196,10 +202,14 @@ reopen 后旧任务仍全为完成系导致的 sweep 自消除窗口，任一任
 Evidence:
 - `services/herdr-controller.py` #resolve_gate_config / #gate_verdict /
   #invalidate_for_fix_loop / #handle_fix_loop / #build_fix_loop_message
+- `services/controller/stage_state.py#record_invalidation_obligation`
+- `services/controller/fix_loop.py#handle_fix_loop`
+- `services/controller/merged_fix_loop.py#_handle_merged_fix_loops`
+- `services/controller/advancement.py#check_workflow_stage_advance`
 - `bin/herdr-task` #set_status（verdict 落盘）/ #close_workflow（--abandon、
   outcome）/ #reopen_workflow / #_clear_suppress_auto_close
 - `console/herdr_factory_console.py` #create_candidate / #manual_advance
-- `tests/test_fix_loop_pr1.py`、`tests/test_fix_loop_gates.py`
+- `tests/test_fix_loop_pr1.py`、`tests/test_fix_loop_gates.py`、`tests/test_fix_loop_phase2_p1_obligation_red.py`
 
 ### 1.1.1 评审闭环操作员旁路认证（issue #228 后契约，2026-10-19）
 

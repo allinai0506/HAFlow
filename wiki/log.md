@@ -8,6 +8,25 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-07] fix | Fix-Loop Phase 2 部分作废责任持久化与调度保护（PR #409 / §231）
+
+- 背景：PR #409 对 Fix-Loop Phase 2 实施最小修复以规范化 integrated 任务作废与防止虚报成功。Codex Review 与对抗审查中暴露 P1 缺陷：当 blocker 任务成功进入 superseded 而下游任务（如 committed）失败时，原 blocker 的阻断效果丢失，导致后续 Controller Sweep 误将就绪节点重新派发甚至误判全部完成而提前关闭工作流；且多门禁合并（merged fix-loop）重试时因活任务丢失而退化为多单门禁重复计次与发信。
+- 根因分析：
+  1. `node_policy.py::gate_verdict` 忽略 `status == "superseded"` 任务，导致已作废 blocker 的阻断事实在后续 Sweep 丢失；
+  2. `advancement.py::check_workflow_stage_advance` 在就绪节点与工作流关闭判定时未前置检查未完成的作废责任，导致绕过责任提前调度或关闭；
+  3. 合并门禁重试缺乏持久化组身份，导致后续按单门禁重复触发。
+- 治理与修复：
+  1. **Option B 责任持久化模型**：在 `stage-state.json` 引入 `f"{workflow_id}|fixloop_obligation|{gate_node_id}"`，挂存待作废清单、失败原因与原始 blockers 快照，未完成前严格 fail-closed 并写入 `attention_note`；
+  2. **Sweep 前置责任拦截**：在 `check_workflow_stage_advance` 顶部优先处理 `list_invalidation_obligations`，存在未决责任时直接阻断后续推进与关闭，仅驱动作废重试；
+  3. **合并门禁组身份恢复**：obligation 记录 `merged_gates`，重试时自动重构门禁组单次原子提交，避免 Double-bump；
+  4. **状态文件终结清理规范**：`clear_workflow_stage_state` 同时清理 `:` 与 `|` 前缀，消除孤儿键。
+- 验收结果：
+  - `tests/test_fix_loop_phase2_p1_obligation_red.py` 10 项专项全绿；
+  - `tests/test_fix_loop_phase2_invalidation_red.py` 9 项核心全绿；
+  - `tests/test_controller_modularity.py` 10 项全绿，全文件保持 $\le 500$ 行；
+  - `tests/test_fix_loop_*.py` 99 项领域回归全绿；
+  - 沉淀系统教训至 `docs/lessons/lessons-learned.md` §231。
+
 ## [2026-11-05] fix | 审查角色的验收语义与 Same-Node Redo 因果重派自治闭环（PR #397 / §227）
 
 - 背景：真实工作流 `wf-haflow-1105-01` 在 `plan` 阶段因 Challenger 质询阻断（`HERDR_GATE_VERDICT: blocked`）导致任务停滞在 `agent_done`。PR #396 在 `auto_acceptance.py` 误将审查阻断作为任务验收失败丢弃，导致任务无法结算（settled）且阻断元数据丢失，既饿死了 `node_acceptance.py` 的 Same-Node Redo，又在重派时并发派发未就绪的审查工位。
