@@ -122,7 +122,7 @@ def _invalidate_single_task(ports, task_id, gate_node_id, reuse=False):
             return ports._rework_retry_task(task, gate_node_id)
         except (OSError, ports.subprocess.TimeoutExpired) as exc:
             return False, str(exc)
-    if status in ("completed", "cleanup_ready"):
+    if status in ("completed", "cleanup_ready", "integrated"):
         result = ports.subprocess.run(
             [ports.TASK_MANAGER, "finalize", task_id],
             text=True,
@@ -267,6 +267,9 @@ def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retr
     supersedeable = ports.FIX_LOOP_SUPERSEDEABLE
     invalidated = list(reused)
     invalidated_nodes = set()
+    phase2_applied = []
+    phase2_pending = []
+    phase2_failed = {}
 
     for task in ports.load_tasks():
         if task.get("workflow_id") != workflow_id:
@@ -313,7 +316,7 @@ def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retr
             )
             continue
 
-        if status in ("completed", "cleanup_ready"):
+        if status in ("completed", "cleanup_ready", "integrated"):
             if before_effect:
                 before_effect()
             result = ports.subprocess.run(
@@ -322,18 +325,30 @@ def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retr
                 capture_output=True,
             )
             if result.returncode != 0:
+                err = result.stderr.strip() or result.stdout.strip()
                 print(
-                    f"[FIX LOOP INVALIDATE ERROR] finalize {task_id}: "
-                    f"{result.stderr.strip() or result.stdout.strip()}"
+                    f"[FIX LOOP INVALIDATE ERROR] finalize {task_id}: {err}"
                 )
+                phase2_pending.append(task_id)
+                phase2_failed[task_id] = f"finalize:{err}"
                 continue
             status = (ports.get_task(task_id) or {}).get("status")
+            if status not in supersedeable:
+                print(
+                    f"[FIX LOOP INVALIDATE ERROR] finalize {task_id} "
+                    f"unreached supersedeable state: {status}"
+                )
+                phase2_pending.append(task_id)
+                phase2_failed[task_id] = f"finalize_status_invalid:{status}"
+                continue
 
         if status not in supersedeable:
             print(
                 f"[FIX LOOP INVALIDATE SKIP] task={task_id} "
                 f"status={status} cannot be superseded"
             )
+            phase2_pending.append(task_id)
+            phase2_failed[task_id] = f"status_not_supersedeable:{status}"
             continue
 
         if before_effect:
@@ -350,13 +365,16 @@ def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retr
 
         if result.returncode == 0:
             invalidated.append(task_id)
+            phase2_applied.append(task_id)
             if task_node:
                 invalidated_nodes.add(task_node)
         else:
+            err = result.stderr.strip() or result.stdout.strip()
             print(
-                f"[FIX LOOP INVALIDATE ERROR] supersede {task_id}: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
+                f"[FIX LOOP INVALIDATE ERROR] supersede {task_id}: {err}"
             )
+            phase2_pending.append(task_id)
+            phase2_failed[task_id] = f"supersede:{err}"
 
     if invalidated:
         void_nodes = invalidated_nodes | {gate_node_id}
@@ -375,16 +393,21 @@ def invalidate_for_fix_loop(ports, workflow_id, gate_node_id, workflow_cfg, retr
         except NameError:
             phase1_applied = sorted(selective_targets)
         combined = list(phase1_applied) + [
-            tid for tid in invalidated if tid not in phase1_applied
+            tid for tid in phase2_applied if tid not in phase1_applied
         ]
         return ports.SelectiveInvalidationResult(
             combined,
-            applied=list(phase1_applied),
-            pending=[],
-            failed={},
+            applied=list(combined),
+            pending=list(phase2_pending),
+            failed=dict(phase2_failed),
         )
 
-    return invalidated
+    return ports.SelectiveInvalidationResult(
+        invalidated,
+        applied=list(invalidated),
+        pending=list(phase2_pending),
+        failed=dict(phase2_failed),
+    )
 
 
 DEPENDENCIES = {'_record_invalidation_note': (),

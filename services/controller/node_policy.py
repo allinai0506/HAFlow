@@ -116,18 +116,21 @@ def blocked_verdict_dep(ports, workflow_id, node):
     return None
 
 def blocked_gate_dependency(ports, workflow_id, ready_node, workflow_cfg):
-    """ready_node 的依赖中是否存在 verdict=blocked 的门禁节点。"""
+    """ready_node 的依赖中是否存在 verdict=blocked 或未决作废责任的门禁节点。"""
     nodes_by_id = {
         n["id"]: n for n in workflow_cfg.get("nodes", [])
     }
+    obligations = ports.list_invalidation_obligations(workflow_id)
 
     for dep in ready_node.get("depends_on", []):
         gate_cfg = ports.resolve_gate_config(nodes_by_id.get(dep), dep)
+        if not gate_cfg and dep in obligations:
+            gate_cfg = obligations[dep].get("gate_cfg")
 
         if not gate_cfg:
             continue
 
-        if ports.gate_verdict(workflow_id, dep) == "blocked":
+        if ports.gate_verdict(workflow_id, dep) == "blocked" or dep in obligations:
             return dep, gate_cfg
 
     return None
@@ -189,7 +192,7 @@ DEPENDENCIES = {'resolve_gate_config': ('FIX_LOOP_MAX', 'GATE_DEFAULTS', 'get_st
  'gate_verdict': ('load_tasks',),
  'latest_branch_for_node': ('load_tasks',),
  'blocked_verdict_dep': ('gate_verdict',),
- 'blocked_gate_dependency': ('gate_verdict', 'resolve_gate_config'),
+ 'blocked_gate_dependency': ('gate_verdict', 'list_invalidation_obligations', 'resolve_gate_config'),
  'load_stage_policies': ('STAGE_POLICIES_FILE', 'json'),
  'get_stage_policy': ('load_stage_policies',),
  'direct_stage_dispatch_enabled': ('os',),

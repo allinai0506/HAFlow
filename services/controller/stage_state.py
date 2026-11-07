@@ -85,12 +85,16 @@ def clear_stage_advance(ports,
 def clear_workflow_stage_state(ports,
     workflow_id
 ):
-    """Clear every queued/notified latch of one workflow (close-workflow semantics)."""
-    prefix = f"{workflow_id}:"
+    """Clear every queued/notified latch and obligation of one workflow (close-workflow semantics)."""
+    prefix_colon = f"{workflow_id}:"
+    prefix_pipe = f"{workflow_id}|"
 
     with ports.lock:
         state = ports.load_stage_state()
-        removed = [key for key in state if key.startswith(prefix)]
+        removed = [
+            key for key in state
+            if key.startswith(prefix_colon) or key.startswith(prefix_pipe)
+        ]
         for key in removed:
             del state[key]
         if removed:
@@ -417,6 +421,43 @@ def reconcile_stage_advance_states(ports, workflow_id, workflow_cfg):
             ports.save_stage_state(state)
 
 
+# Invalidation obligations (PR #409 P1 durable invalidation retry)
+def invalidation_obligation_key(ports, workflow_id, gate_node_id):
+    return f"{workflow_id}|fixloop_obligation|{gate_node_id}"
+
+def record_invalidation_obligation(ports, workflow_id, gate_node_id, obligation):
+    key = ports.invalidation_obligation_key(workflow_id, gate_node_id)
+    with ports.lock:
+        state = ports.load_stage_state()
+        state[key] = obligation
+        ports.save_stage_state(state)
+
+def get_invalidation_obligation(ports, workflow_id, gate_node_id):
+    key = ports.invalidation_obligation_key(workflow_id, gate_node_id)
+    with ports.lock:
+        state = ports.load_stage_state()
+        return state.get(key)
+
+def clear_invalidation_obligation(ports, workflow_id, gate_node_id):
+    key = ports.invalidation_obligation_key(workflow_id, gate_node_id)
+    with ports.lock:
+        state = ports.load_stage_state()
+        if key in state:
+            del state[key]
+            ports.save_stage_state(state)
+
+def list_invalidation_obligations(ports, workflow_id):
+    prefix = f"{workflow_id}|fixloop_obligation|"
+    with ports.lock:
+        state = ports.load_stage_state()
+        obligations = {}
+        for k, v in state.items():
+            if k.startswith(prefix) and isinstance(v, dict):
+                gid = k[len(prefix):]
+                obligations[gid] = v
+        return obligations
+
+
 DEPENDENCIES = {'load_stage_state': ('STAGE_STATE_FILE', 'json', 'os'),
  'save_stage_state': ('STAGE_STATE_FILE', 'json', 'os'),
  'stage_advance_key': (),
@@ -430,6 +471,11 @@ DEPENDENCIES = {'load_stage_state': ('STAGE_STATE_FILE', 'json', 'os'),
  'dispatch_awaiting_human': ('_get_store',),
  'reconcile_stage_advance_states': ('direct_dispatch_planner', 'dispatch_awaiting_human',
                                     'is_node_complete', 'load_stage_state', 'load_tasks',
-                                    'lock', 'save_stage_state')}
+                                    'lock', 'save_stage_state'),
+ 'invalidation_obligation_key': (),
+ 'record_invalidation_obligation': ('invalidation_obligation_key', 'load_stage_state', 'lock', 'save_stage_state'),
+ 'get_invalidation_obligation': ('invalidation_obligation_key', 'load_stage_state', 'lock'),
+ 'clear_invalidation_obligation': ('invalidation_obligation_key', 'load_stage_state', 'lock', 'save_stage_state'),
+ 'list_invalidation_obligations': ('load_stage_state', 'lock')}
 
 __all__ = tuple(DEPENDENCIES)
