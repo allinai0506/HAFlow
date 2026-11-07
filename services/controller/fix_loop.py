@@ -236,6 +236,9 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         invalidated, ports.SelectiveInvalidationResult
     ) and not invalidated.all_targets_applied:
         # 无论是 Selective 还是 Legacy 模式,存在未完成作废责任必须 fail-closed 并持久化 obligation。
+        _ob_roots = list((replan_plan or {}).get("target_lineage_roots") or [])
+        if not _ob_roots and existing_obligation and existing_obligation.get("target_lineage_roots"):
+            _ob_roots = list(existing_obligation["target_lineage_roots"])
         ports.record_invalidation_obligation(
             workflow_id,
             gate_node_id,
@@ -245,6 +248,7 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
                 "retry_node": retry_node,
                 "gate_cfg": gate_cfg,
                 "selective_ids": list(selective_ids) if selective_ids is not None else None,
+                "target_lineage_roots": _ob_roots if _ob_roots else None,
                 "pending_tasks": list(invalidated.pending),
                 "failed_tasks": dict(invalidated.failed),
                 "applied_tasks": list(invalidated.applied),
@@ -277,16 +281,28 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         )
         return
 
-    if not invalidated:
-        return
+    if existing_obligation:
+        ports.clear_invalidation_obligation(workflow_id, gate_node_id)
+        attention_key = f"{workflow_id}:fixloop_obligation:{gate_node_id}"
+        if callable(getattr(ports, "attention_clear", None)):
+            try:
+                ports.attention_clear(attention_key)
+            except Exception as exc:
+                print(f"[FIX LOOP OBLIGATION CLEAR WARN] {exc}")
 
-    ports.clear_invalidation_obligation(workflow_id, gate_node_id)
-    attention_key = f"{workflow_id}:fixloop_obligation:{gate_node_id}"
-    if callable(getattr(ports, "attention_clear", None)):
-        try:
-            ports.attention_clear(attention_key)
-        except Exception as exc:
-            print(f"[FIX LOOP OBLIGATION CLEAR WARN] {exc}")
+    effective_invalidated = list(invalidated)
+    if not effective_invalidated and existing_obligation:
+        recovered = []
+        for tid in (existing_obligation.get("applied_tasks") or []):
+            if tid not in recovered:
+                recovered.append(tid)
+        for tid in (existing_obligation.get("pending_tasks") or []):
+            if tid not in recovered:
+                recovered.append(tid)
+        effective_invalidated = recovered
+
+    if not effective_invalidated:
+        return
 
     if selective_ids is not None:
         # 选择性作废了 retry_node 内部谱系:清除阶段推进闩,
@@ -303,9 +319,10 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         }
         if selective_ids is not None:
             pending_redo["mode"] = "selective"
-            pending_redo["target_lineage_roots"] = list(
-                (replan_plan or {}).get("target_lineage_roots") or []
-            )
+            _roots = list((replan_plan or {}).get("target_lineage_roots") or [])
+            if not _roots and existing_obligation and existing_obligation.get("target_lineage_roots"):
+                _roots = list(existing_obligation["target_lineage_roots"])
+            pending_redo["target_lineage_roots"] = _roots
             # P1-1: latch 边界取 Fact 创建时间(首轮持久化时刻),
             # 而非本轮作废完成时刻。部分重试场景下 B-r2 可能在首轮
             # 部分作废后提前派发;若 latch 取第二轮时间,会把已完成
@@ -315,6 +332,11 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
                 _fact_ts = float((replan_plan or {}).get("created_at") or 0)
             except (TypeError, ValueError):
                 _fact_ts = 0
+            if _fact_ts <= 0 and existing_obligation:
+                try:
+                    _fact_ts = float(existing_obligation.get("created_at") or 0)
+                except (TypeError, ValueError):
+                    _fact_ts = 0
             if _fact_ts > 0:
                 pending_redo["ts"] = _fact_ts
         _state[f"{workflow_id}|fixloop|{retry_node}|pending_redo"] = pending_redo
@@ -327,7 +349,7 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         "gate_stage": gate_node_id,
         "retry_node": retry_node,
         "blockers": blockers,
-        "invalidated": list(invalidated),
+        "invalidated": list(effective_invalidated),
         "loop_count": loop_count,
         "max_loops": gate_cfg.get("max_loops", ports.FIX_LOOP_MAX),
         "suggested_branch": suggested_branch,
@@ -336,7 +358,7 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         # 目标上下文随通知持久化,coordinator 补投判断保持 target-aware。
         fix_loop_item["mode"] = "selective"
         fix_loop_item["target_lineage_roots"] = list(
-            (replan_plan or {}).get("target_lineage_roots") or []
+            pending_redo.get("target_lineage_roots") or []
         )
     ports.coordinator_queue.put(fix_loop_item)
 
@@ -346,7 +368,7 @@ def handle_fix_loop(ports, workflow_id, gate_node_id, gate_cfg, workflow_cfg):
         f"gate={gate_node_id} "
         f"retry={retry_node} "
         f"loop={loop_count} "
-        f"invalidated={len(invalidated)}"
+        f"invalidated={len(effective_invalidated)}"
     )
 
 
