@@ -9792,3 +9792,43 @@ git diff --check
 - `services/controller/advancement.py#check_workflow_stage_advance`
 - `services/controller/node_policy.py#blocked_gate_dependency`
 - `tests/test_fix_loop_phase2_p1_obligation_red.py#TestFixLoopPhase2ObligationP1`
+
+---
+
+## 232. Fix-Loop 责任重试生命周期：返工谱系根持久化与空新作废责任闭环（2026-11-07）
+
+### 问题背景
+
+在 PR #409 引入持久化作废责任（`invalidation_obligation`）后，通过条件性风险分析与 RED 测试捕获了两个深层边界缺陷：
+1. **返工范围丢失与等待闩过早解除**：选择性返工（Selective Replan）在部分作废挂起后，门禁任务已被标记为 `superseded`。随后的重试调用由于缺乏活跃的 blocked 门禁任务，`_resolve_selective_replan` 降级为 `legacy_fallback` 且 `target_lineage_roots=[]`。原 `invalidation_obligation` 仅持久化了 `selective_ids`，导致恢复后写入 `pending_redo` 的 `target_lineage_roots` 变为 `[]`。这使得 `latch_blocks_advance` 降级为非选择性模式，节点内任意未波及的不相干保留任务（Preserved Task）一旦在 `since` 后更新/完成，即错误地提前解除了等待闩，导致下游阶段在真正的返工代际（-r1）尚未重做前错误推进；
+2. **所有任务已作废时重启导致遗留责任死锁**：若剩余作废任务落定后（如人工干预或重试作废完成）发生重启，恢复后的第一轮 Sweep 会再次调用 `handle_fix_loop`。由于此时所有任务均已处于 `superseded`，`invalidate_for_fix_loop` 无需执行新的系统调用作废，返回空的 `SelectiveInvalidationResult([], applied=[], pending=[], failed={})`。原逻辑在 `clear_invalidation_obligation` 前存在 `if not invalidated: return`，导致当 `len(invalidated) == 0` 时提前退出，遗留责任无法从 `stage-state.json` 清除。后续每一轮 Sweep 顶部的前置拦截均触发并直接 return，使工作流永久挂起死锁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 返工范围仅存目标 ID 忽略谱系根 | 目标 ID（`selective_ids`）与谱系根（`target_lineage_roots`）在选择性等待闩中具有不同的拓扑约束；缺少根会导致选择性等待降级 | 在 `invalidation_obligation` 中同步持久化 `target_lineage_roots`；重试时优先从 obligation 恢复谱系根，保证 `pending_redo` 始终携带完整的谱系根名单 |
+| 责任清除与本轮新作废副作用耦合 | 责任是否已闭环（`all_targets_applied`）不等于本轮是否产生了新的作废调用副作用（`len(invalidated) > 0`） | 责任清除（`clear_invalidation_obligation`）必须位于 `all_targets_applied` 判断之后、且在 `if not invalidated: return` 之前；当 `len(invalidated) == 0` 但存在遗留责任时，重构历史已作废任务清单补发 `pending_redo` 与事件，确保自愈闭环 |
+
+### 操作规范（已固化到 `services/controller/` 源码与回归测试）
+
+1. **谱系根随责任持久化 (`services/controller/fix_loop.py` & `merged_fix_loop.py`)**：在记录 obligation 时存入 `target_lineage_roots`；重试时无论单门禁还是合并门禁，均从 obligation 中恢复 `target_lineage_roots`，确保 `pending_redo` 不发生降级。
+2. **解耦责任清除与副作用检查**：确认所有作废目标均已落定后，立即原子清除 obligation；若当前调用未执行新作废但存在历史责任，从 obligation 的 `applied_tasks` 与 `pending_tasks` 重构 `effective_invalidated`，继续完成计数递增、`pending_redo` 写入及事件投递。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_fix_loop_phase2_p1_boundaries_red.py
+pytest -v tests/test_fix_loop_phase2_p1_obligation_red.py
+pytest -v tests/test_controller_modularity.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+期望：4 项边界守护测试全绿；所有模块代码严格 $\le 500$ 行。
+
+### 相关文档 / 关联证据
+
+- `services/controller/fix_loop.py#handle_fix_loop`
+- `services/controller/merged_fix_loop.py#_handle_merged_fix_loops`
+- `tests/test_fix_loop_phase2_p1_boundaries_red.py#TestFixLoopPhase2Boundaries`

@@ -8,6 +8,21 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-07] fix | Fix-Loop 责任重试生命周期：返工谱系根持久化与空新作废责任闭环（§232）
+
+- 背景：在 PR #409 持久化作废责任（`invalidation_obligation`）后，复核发现两个深层状态机边界：1) 部分作废恢复后因门禁任务已 supersede，`_resolve_selective_replan` 退化丢失 `target_lineage_roots`，导致选择性等待闩失效、同阶段无关保留任务完成过早解除等待；2) 最后一个任务作废后若恰好重启，`invalidate_for_fix_loop` 无新作废任务返回空列表，因 `if not invalidated: return` 拦截导致遗留责任无法清除，全流程永久死锁。
+- 根因分析：
+  1. `invalidation_obligation` 仅存 `selective_ids` 未持久化 `target_lineage_roots`，且恢复时未对空根执行兜底；
+  2. 将责任是否闭环与本轮新作废副作用（`len(invalidated) > 0`）强绑定，导致自愈重试时无法执行 `clear_invalidation_obligation`。
+- 治理与修复：
+  1. **谱系根随责任持久化**：在 `fix_loop.py` 与 `merged_fix_loop.py` 的 obligation 载荷中加入 `target_lineage_roots`；重试时优先从 obligation 恢复谱系根，保证 `pending_redo["target_lineage_roots"]` 完整性，守护选择性等待闩；
+  2. **解耦责任清除与副作用检查**：确认所有作废目标均已落定后立即原子清除 obligation；若当前调用无新作废任务但存在历史责任，从 obligation 恢复 `applied_tasks` 与 `pending_tasks` 补发 `pending_redo` 与 `fix_loop` 事件，彻底解除死锁。
+- 验收结果：
+  - `tests/test_fix_loop_phase2_p1_boundaries_red.py` 4 项守护测试从全部 RED 转为 100% GREEN；
+  - `tests/test_controller_modularity.py` 10 项全绿，全模块代码保持 $\le 500$ 行；
+  - `tests/test_fix_loop_*.py` 等 226 项回归测试 100% 通过；
+  - 沉淀系统教训至 `docs/lessons/lessons-learned.md` §232。
+
 ## [2026-11-07] fix | Fix-Loop Phase 2 部分作废责任持久化与调度保护（PR #409 / §231）
 
 - 背景：PR #409 对 Fix-Loop Phase 2 实施最小修复以规范化 integrated 任务作废与防止虚报成功。Codex Review 与对抗审查中暴露 P1 缺陷：当 blocker 任务成功进入 superseded 而下游任务（如 committed）失败时，原 blocker 的阻断效果丢失，导致后续 Controller Sweep 误将就绪节点重新派发甚至误判全部完成而提前关闭工作流；且多门禁合并（merged fix-loop）重试时因活任务丢失而退化为多单门禁重复计次与发信。

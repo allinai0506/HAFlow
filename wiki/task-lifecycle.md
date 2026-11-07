@@ -184,11 +184,12 @@ Evidence:
 超过 `HERDR_FIX_LOOP_MAX`（默认 3）后 fix_loop 事件切换为"必须请示用户"的
 升级文案——上限是纪律+通知，非引擎硬闸。
 
-`FACT` Fix-Loop Phase 2 作废责任持久化契约（PR #409）：
+`FACT` Fix-Loop Phase 2 作废责任持久化契约（PR #409 / §231 / §232）：
 - 当 Phase 2 作废存在未完成目标（如 `committed` 任务受 Git 交付链保护不可作废、或 finalize/supersede 失败）时，系统 fail-closed 退出，并将作废责任持久化于 `stage-state.json`（`<wf>|fixloop_obligation|<gate>`），并写入 `attention_note` 告警；
+- obligation 同步持久化 `target_lineage_roots` 谱系根列表，重试时完整恢复并注入 `pending_redo`，防止选择性等待闩降级为非选择性模式而让无关任务的完成过早放行下游；
 - 门禁任务即便已被标记为 `superseded`，只要 obligation 仍存，Controller Sweep 在执行节点就绪与工作流关闭计算前前置拦截，阻断下游推进与提前关闭，仅驱动重试；
 - 多门禁合并（merged fix-loop）的 obligation 携带 `merged_gates` 组身份，重试时自动重构门禁组单次原子提交，避免循环计数重复累加和事件分裂；
-- 仅当全部作废目标均成功落定（`all_targets_applied == True`）后，才原子清空 obligation 并投递 `fix_loop` 事件。
+- 责任清除与新作废副作用解耦：仅当全部作废目标均成功落定（`all_targets_applied == True`）后原子清空 obligation。若重启时任务已全部处于 `superseded`，控制器自愈清空 obligation，并从历史责任重构任务清单补发 `pending_redo` 与 `fix_loop` 事件，彻底避免因 `len(invalidated) == 0` 导致流程永久卡死。
 
 `FACT` `close-workflow` 遇未作废的 blocked verdict 拒绝执行（exit 2）；显式
 `--abandon` 可放弃交付（记录 workflow `outcome: abandoned`，正常关闭记录
