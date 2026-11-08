@@ -9852,7 +9852,7 @@ git diff --check
 ### 操作规范（已固化到 `herdr/scheduler.py`、`services/controller/stage_state.py`、`services/controller/direct_dispatch.py` 与回归测试）
 
 1. **唯一完成判定收口**：在 `herdr/scheduler.py:node_is_complete`（角色与单任务分支）以及 `services/controller/stage_state.py:is_node_complete` 中，完成断言必须附带 `and not t.get("finalize_escalated")`。
-2. **因果等待释放排队闩**：在 `services/controller/direct_dispatch.py` 中，当 `mode == "wait"` 时，若持有持久化操作租约（`dispatch_operation_id`），调用 `defer` 安全重置状态，并统一通过 `ports.clear_stage_advance` 释放阶段排队闩，绝不标记 `notified`。
+2. **因果等待释放排队闩且不消耗派发重试预算**：在 `services/controller/direct_dispatch.py` 中，当 `mode == "wait"` 时，若持有持久化操作租约（`dispatch_operation_id`），调用 `defer(..., consume_attempt=False)` 安全重置状态，恢复被 claim 预占的重试计数，避免因果前置等待空耗 3 次预算误入 `waiting_human`；并统一通过 `ports.clear_stage_advance` 释放阶段排队闩，绝不标记 `notified`。
 3. **模块依赖合规**：在 `services/controller/direct_dispatch.py:DEPENDENCIES` 显式声明 `clear_stage_advance`，维持控制器模块 DAG 严格无环且所有模块 $\le 500$ 行。
 
 ### 验证命令 / 守护测试

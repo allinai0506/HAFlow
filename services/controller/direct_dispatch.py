@@ -254,6 +254,7 @@ def try_direct_stage_advance(ports, item):
                 dispatch_operation_id,
                 plan.get("reason") or "causal_wait",
                 owner=dispatch_owner,
+                consume_attempt=False,
             )
         ports.clear_stage_advance(workflow_id, ready_id)
         print(
