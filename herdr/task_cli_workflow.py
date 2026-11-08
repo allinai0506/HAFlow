@@ -55,7 +55,10 @@ def node_status(
         ),
         {},
     )
-    complete = node_delivery_complete(tasks, cfg_node.get("required_task_ids"))
+    try:
+        complete = node_delivery_complete(tasks, cfg_node.get("required_task_ids"), node=cfg_node)
+    except TypeError:
+        complete = node_delivery_complete(tasks, cfg_node.get("required_task_ids"))
     result = {
         "workflow_id": workflow_id,
         "node_id": node_key,

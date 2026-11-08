@@ -498,6 +498,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
     def setUp(self):
         self.ctrl = _load_controller()
         self.notified = []
+        self.cleared = []
         self.commands = []
 
         def fake_run(cmd, **kwargs):
@@ -524,6 +525,11 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
                 self.ctrl,
                 "mark_stage_advance_notified",
                 side_effect=lambda wf, node, **kwargs: self.notified.append(node),
+            ),
+            patch.object(
+                self.ctrl,
+                "clear_stage_advance",
+                side_effect=lambda wf, node, **kwargs: self.cleared.append(node),
             ),
             # 阶段边界的总指挥 /compact 注入有独立契约测试;
             # 这里打桩,保证本组测试只观察派发行为。
@@ -865,7 +871,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(notes, [])
 
-    def test_wait_mode_marks_notified_without_launch(self):
+    def test_wait_mode_clears_stage_advance_without_launch(self):
         with patch.object(
             self.ctrl,
             "load_tasks",
@@ -873,7 +879,8 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         ):
             result = self.ctrl.try_direct_stage_advance(self._item())
         self.assertTrue(result)
-        self.assertEqual(self.notified, ["test"])
+        self.assertEqual(self.notified, [])
+        self.assertEqual(self.cleared, ["test"])
         self.assertEqual(self.commands, [])
 
     def test_disabled_by_env(self):

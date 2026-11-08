@@ -133,13 +133,14 @@ def _normalize_workflow_nodes(workflow):
         nodes = workflow.get("stages", [])
     return [
         {
+            **item,
             "id": item.get("id") or item.get("key"),
             "label": item.get("label") or item.get("name") or item.get("id") or item.get("key"),
             "next": item.get("next"),
             "required_task_ids": item.get("required_task_ids"),
         }
         for item in nodes
-        if (item.get("id") or item.get("key"))
+        if isinstance(item, dict) and (item.get("id") or item.get("key"))
     ]
 
 def _node_task_status_counts(tasks_for_node):
@@ -263,6 +264,7 @@ def _collect_workflow_node_metadata(workflow):
                 "label": node.get("label", node_id),
                 "next": node.get("next"),
                 "required_task_ids": node.get("required_task_ids"),
+                "node": node,
             }
     return node_meta
 
@@ -470,6 +472,6 @@ def _select_drilldown_task(tasks_for_node):
     candidates.sort(key=_sort_key, reverse=True)
     return candidates[0]
 
-def _node_delivery_complete(tasks, required_task_ids=None):
+def _node_delivery_complete(tasks, required_task_ids=None, *, node=None):
     from herdr.scheduler import node_is_complete
-    return node_is_complete(tasks, required_task_ids)
+    return node_is_complete(tasks, required_task_ids, node=node)

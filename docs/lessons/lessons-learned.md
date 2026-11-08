@@ -9832,3 +9832,101 @@ git diff --check
 - `services/controller/fix_loop.py#handle_fix_loop`
 - `services/controller/merged_fix_loop.py#_handle_merged_fix_loops`
 - `tests/test_fix_loop_phase2_p1_boundaries_red.py#TestFixLoopPhase2Boundaries`
+
+## 233. 隐式状态机 P1 缺陷治理：finalize_escalated 完成语义对齐与因果等待闩解耦（2026-11-08）
+
+### 问题背景
+
+全仓隐式状态机审计（Implicit State Machine Audit V1）确认了两个核心 P1 缺陷：
+1. **F-01（完成与关闭语义分歧）**：当 Git 终化失败或重试耗尽时，系统为 Task 标记 `finalize_escalated=True`。`services/controller/workflow_close.py:git_escalated_tasks` 识别到人工升级标记并拒绝自动关闭（`[CLOSE DEFERRED]`）。然而底层 `herdr/scheduler.py:node_is_complete` 与 `services/controller/stage_state.py:is_node_complete` 仅检查了 `t.get("status") in NODE_DONE_STATUSES`，未检查 `finalize_escalated`，导致节点被误判为完成，上层 `is_workflow_completed` 判定为 True，Controller 每一轮 Sweep 周期性打印 `[WORKFLOW COMPLETE]` 并触发 close 检查，陷入死循环空转；当下游节点依赖该节点时，还会导致下游在未集成代码上错误推进。
+2. **F-03（因果等待误写 notified 派发锁）**：直接调度 `services/controller/direct_dispatch.py` 在规划器返回 `mode == "wait"` 时（如等待 executor 方案交付物、角色依赖未满足、活跃任务在途），错误调用了 `ports.mark_stage_advance_notified`。但 `wait` 仅表示因果前置条件尚未满足，根本未发生物理派发；虚假的 `notified` 锁导致后继 Sweep 判定 `mark_stage_advance_queued` 为 False 无法入队；若节点尚未创建物理 Task（`node_t` 为空），`reconcile_stage_advance_states` 因守卫检查无法撤销通知锁，导致派发链路永久死锁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 终化升级状态未纳入完成门禁 | 升级是排障停机标志，绝非可交付证明；不能在关闭层拦截却在节点层判定完成 | `scheduler.node_is_complete` 与 `stage_state.is_node_complete` 统一切断 `finalize_escalated` 任务的完成判定；未解除升级前节点与工作流均视为未完成 |
+| 因果等待与派发完成事实混淆 | 等待前置产物不是派发完成；绝不能为尚未发生的派发写入终态闩 | `mode == "wait"` 时严禁调用 `mark_stage_advance_notified`，必须调用 `ports.clear_stage_advance` 清除排队闩并释放/defer 持久化代际，允许后继 Sweep 自然重估 |
+| 无物理任务节点的通知锁死锁 | 依赖 `tasks.json` 反向撤销虚假通知锁治标不治本；源头禁止假性通知才是根治之道 | 派发通知锁 `notified` 只能在子进程 `launch` 成功后写入；因果等待链路零写入通知锁，彻底消除空节点撤销死锁 |
+
+### 操作规范（已固化到 `herdr/scheduler.py`、`services/controller/stage_state.py`、`services/controller/direct_dispatch.py` 与回归测试）
+
+1. **唯一完成判定收口**：在 `herdr/scheduler.py:node_is_complete`（角色与单任务分支）以及 `services/controller/stage_state.py:is_node_complete` 中，完成断言必须附带 `and not t.get("finalize_escalated")`。
+2. **因果等待释放排队闩**：在 `services/controller/direct_dispatch.py` 中，当 `mode == "wait"` 时，若持有持久化操作租约（`dispatch_operation_id`），调用 `defer` 安全重置状态，并统一通过 `ports.clear_stage_advance` 释放阶段排队闩，绝不标记 `notified`。
+3. **模块依赖合规**：在 `services/controller/direct_dispatch.py:DEPENDENCIES` 显式声明 `clear_stage_advance`，维持控制器模块 DAG 严格无环且所有模块 $\le 500$ 行。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_p1_state_machine_defects_red.py
+pytest -q tests/test_controller_modularity.py
+pytest -q tests/test_plan_causal_dispatch.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+期望：7 项 P1 状态机缺陷回归测试全部 PASS；控制器依赖无环且模块源码严格 $\le 500$ 行；代码检查 clean。
+
+### 相关文档 / 关联证据
+
+- `herdr/scheduler.py#node_is_complete`
+- `services/controller/stage_state.py#is_node_complete`
+- `services/controller/direct_dispatch.py#try_direct_stage_advance`
+- `tests/test_p1_state_machine_defects_red.py#TestF01FinalizeEscalatedCompletion`
+- `tests/test_p1_state_machine_defects_red.py#TestF03DirectDispatchCausalWaitLatch`
+
+## 234. 隐式状态机 P2 缺陷治理：多角色节点完成投影对齐与中继透传（2026-11-08）
+
+### 问题背景
+
+全仓隐式状态机审计（Implicit State Machine Audit V1）确认了 P2 缺陷 **F-02（多角色节点完成判定在可视化投影与调度内核间语义分歧）**：
+1. **中继函数签名与参数丢失**：`herdr/ops_center_helpers.py:_node_delivery_complete` 签名仅为 `(tasks, required_task_ids=None)`，未能接收和透传 `node` 对象给底层纯函数 `herdr/scheduler.py:node_is_complete(..., node=node)`。并且 `_collect_workflow_node_metadata` 与 `_normalize_workflow_nodes` 在提取节点元数据时将节点原始字段及 `roles` 过滤丢弃，导致向底层传递的始终为 `node=None`。
+2. **多角色节点早完成假象**：多角色节点（如 `plan` 节点的 executor + challenger）在执行器任务完成而挑战者尚未被调度发射时，`node_is_complete(..., node=None)` 仅依据全部活跃任务（此时仅有 executor）已完成即判定完成。导致 Web 控制台 Ops Center 卡片、`bin/herdr-task workflow node-status` CLI 输出以及前端画布渲染 `workflow_graph_projection` 均显示 `status = "completed"`，甚至使下游节点错误亮起可执行状态（`ready_nodes`），而 Controller 内核调度却判定未完成并继续发射挑战者任务。
+3. **CI E2E 瞬态超时**：在多进程并行跑全量测试时，CI 环境 CPU/EventLoop 负载导致局部 `page.goto` 偶发超过 15 秒并抛出 `PageNavigationTimeoutError`，而现有 `browser()` 仅捕获了 CDP 级别的超时，未重试导航超时，导致 CI 偶发飘红。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 中继函数签名阉割丢失语义 | 中继函数切忌擅自截断核心调度纯函数所必需的上下文契约 | 凡包裹 `node_is_complete` 的中继（如 `_node_delivery_complete`、`node_status` 等）必须完整透传 `*, node=None` |
+| 节点元数据归一化字段丢失 | 归一化字典必须保留上游策略定义的原始角色及核心配置 | `_normalize_workflow_nodes` 与 `_collect_workflow_node_metadata` 必须完整保留 `roles`、`agent_policy` 与原始 `node` 引用 |
+| 视图投影与内核判断割裂 | 视觉与 CLI 呈现必须与 Controller 调度内核保持完全一致的完成标准 | Canvas、Card 与 CLI 的完成状态均统一绑定 `scheduler.node_is_complete(tasks, required_ids, node=node)`，多角色未齐时保持 `working`/`in_progress` |
+| CI 浏览器端到端超时防护不足 | 高并发 CI 运行易发生瞬态页面加载抖动 | 端到端测试需对 `PageNavigationTimeoutError` 及高负载导航设立适度超时（30s）与重试保护 |
+
+### 操作规范（已固化到 `herdr/` 与回归测试）
+
+1. **中继与元数据透传**：
+   - `herdr/ops_center_helpers.py:_node_delivery_complete` 扩充关键字参数 `*, node=None` 并转发至 `node_is_complete`。
+   - `_normalize_workflow_nodes` 与 `_collect_workflow_node_metadata` 携带 `{**item, ...}` 与 `"node": node`。
+   - `herdr/workflow.py:_normalize_workflow_body` 确保 `norm_node` 完整保留 `roles`。
+2. **调用层对齐**：
+   - `herdr/ops_center_projection.py` 在卡片投影判定完成时传入 `node=node`。
+   - `herdr/task_cli_workflow.py:node_status` 传入 `node=cfg_node`。
+   - `herdr/workflow_graph.py:workflow_graph_projection` 在工作流运行中（非强制终化/人工特权）调用 `node_is_complete(..., node=n)`，多角色任务在途或待发射时保持 `working`，杜绝下游节点提前 `ready`。
+3. **CI 健壮性增强**：
+   - `tests/test_console_controller_cockpit_e2e.py` 将导航与等待超时提升至 30 秒，并在重试分支中覆盖 `PageNavigationTimeoutError`。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_p2_f02_multirole_projection_red.py
+pytest -v tests/test_p1_state_machine_defects_red.py
+pytest -q tests/test_workflow_graph_projection.py tests/test_herdr_task_ops_center.py
+pytest -q tests/test_console_controller_cockpit_e2e.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+期望：F-02 多角色投影对齐测试全部 PASS；历史用例全量兼容；代码检查 clean。
+
+### 相关文档 / 关联证据
+
+- `herdr/ops_center_helpers.py#_node_delivery_complete`
+- `herdr/ops_center_projection.py#_build_workflow_cards`
+- `herdr/task_cli_workflow.py#node_status`
+- `herdr/workflow.py#_normalize_workflow_body`
+- `herdr/workflow_graph.py#workflow_graph_projection`
+- `tests/test_p2_f02_multirole_projection_red.py#TestF02MultiRoleNodeDeliveryComplete`
+- `tests/test_p2_f02_multirole_projection_red.py#TestF02OpsCenterCardProjection`
+- `tests/test_p2_f02_multirole_projection_red.py#TestF02TaskCLINodeStatus`
+- `tests/test_p2_f02_multirole_projection_red.py#TestF02WorkflowGraphProjection`

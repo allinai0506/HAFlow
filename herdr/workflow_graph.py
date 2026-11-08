@@ -307,11 +307,15 @@ def workflow_graph_projection(
             workflow_id=workflow_id, node_id=nid)
         if norm.get("configuration_error") or (workflow or {}).get("configuration_error"):
             issues = [{"task_id":None,"reason":"workflow_config_invalid"}] + issues
+        node_policy = n.get("agent_policy") or n.get("worker_policy") or {}
+        has_roles = bool(node_policy.get("roles") or n.get("roles"))
         if issues or ("required_task_ids" in n and status == "completed" and not node_is_complete(lineage,n["required_task_ids"])):
             if not issues:
                 issues = [{"task_id":None,"reason":"required_task_incomplete"}]
             status = "blocked"
             has_attention = True
+        elif has_roles and not is_wf_completed and not gate_passed and status == "completed" and not node_is_complete(lineage, n.get("required_task_ids"), node=n):
+            status = "working"
 
         nodes.append(
             {

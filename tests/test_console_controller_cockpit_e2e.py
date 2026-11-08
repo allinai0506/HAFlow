@@ -141,7 +141,12 @@ def browser(script, *, page_label):
         if result.returncode == 0:
             return result.stdout + result.stderr
         output = result.stdout + result.stderr
-        if ("CDP request timed out" in output or "CdpRequestTimeoutError" in output) and attempt < 2:
+        if (
+            "CDP request timed out" in output
+            or "CdpRequestTimeoutError" in output
+            or "PageNavigationTimeoutError" in output
+            or "page.goto timed out" in output
+        ) and attempt < 2:
             time.sleep(1.0)
             continue
         break
@@ -241,7 +246,7 @@ def cockpit(tmp_path, monkeypatch):
 def open_cockpit(fixture, wid="wf-e2e"):
     fixture.browser(f"""
         await page.cdp('Emulation.setDeviceMetricsOverride',{{width:1440,height:1800,deviceScaleFactor:1,mobile:false}});
-        await page.goto({json.dumps(fixture.url + '/?workflow_id=' + wid)});
+        await page.goto({json.dumps(fixture.url + '/?workflow_id=' + wid)}, {{timeout: 30000}});
         await page.evaluate(()=>{{
             if(!window.__inFlightFetches){{
                 window.__inFlightFetches=new Map();
@@ -254,7 +259,7 @@ def open_cockpit(fixture, wid="wf-e2e"):
                 }};
             }}
         }});
-        await page.waitForFunction(()=>typeof openControllerCockpit==='function'&&state.overview&&state.workflow?.workflow?.workflow_id==={json.dumps(wid)}&&!state.controllerActionsData?.pending&&state.decisionData!==undefined,undefined,{{timeout:15000}});
+        await page.waitForFunction(()=>typeof openControllerCockpit==='function'&&state.overview&&state.workflow?.workflow?.workflow_id==={json.dumps(wid)}&&!state.controllerActionsData?.pending&&state.decisionData!==undefined,undefined,{{timeout:30000}});
         await page.evaluate(()=>openControllerCockpit({{workflowId:{json.dumps(wid)}}}));
         await page.waitForFunction(()=>state.controllerCockpit?.workflow?.workflow_id==={json.dumps(wid)}&&state.controllerCockpit.read_state==='confirmed');
     """)

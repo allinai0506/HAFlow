@@ -222,6 +222,7 @@ def is_node_complete(ports, workflow_id, node_id):
             )
             and (t.get("integration_mode") != "git"
                  or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
+            and not t.get("finalize_escalated")
             for t in active
         )
     if not complete:

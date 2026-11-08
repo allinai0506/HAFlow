@@ -52,7 +52,10 @@ def _build_workflow_cards(workflows_tasks, now, all_tasks=None, workflow_lookup=
             elif counts["blocked"] > 0:
                 status = "blocked"
             elif not (workflow or {}).get("configuration_error") and _node_delivery_complete(
-                    node_tasks, (node_meta.get(node_id) or {}).get("required_task_ids")):
+                    node_tasks,
+                    (node_meta.get(node_id) or {}).get("required_task_ids"),
+                    node=(node_meta.get(node_id) or {}).get("node"),
+            ):
                 status = "completed"
             elif counts["active"] > 0:
                 status = "in_progress"

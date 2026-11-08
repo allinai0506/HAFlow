@@ -4168,3 +4168,26 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   3. `herdr/node_dispatch.py#result` deadline 分支新增 `missing_expected_task_ids` / `missing_predecessor_ids` 精确诊断，保留 #407 非 pending 消解口径。
 - 验证：真实 Controller/StateStore/SQLite 闭环与边界测试专项 `113 passed`、回归 `170 passed, 60 subtests`；RED 在 base `b5f4301` 复现 10 failed；`compileall` 与 `git diff --check` clean。
 - 教训：`docs/lessons/lessons-learned.md` §230。
+
+## [2026-11-08] Fix | 隐式状态机 P1 缺陷修复：finalize_escalated 完成语义对齐与因果等待锁解耦（F-01 & F-03）
+- 现场：
+  1. **F-01**：Task 终化升级（`finalize_escalated=True`）时，`workflow_close.py:git_escalated_tasks` 拒绝关闭（`[CLOSE DEFERRED]`），但 `herdr/scheduler.py:node_is_complete` 与 `services/controller/stage_state.py:is_node_complete` 误判为完成，导致 Controller 每一轮 Sweep 周期性打印 `[WORKFLOW COMPLETE]` 并陷入无效 close 检查空转；
+  2. **F-03**：直接调度 `services/controller/direct_dispatch.py` 在规划器因果等待（`mode == "wait"`）时错误写入 `ports.mark_stage_advance_notified`，导致无物理任务注册时阶段锁永久死锁无法重新派发。
+- 修复：
+  1. `herdr/scheduler.py:node_is_complete`（角色与节点完成分支）及 `services/controller/stage_state.py:is_node_complete` 补全 `and not t.get("finalize_escalated")` 约束；
+  2. `services/controller/direct_dispatch.py` 在 `mode == "wait"` 时解耦虚假通知锁，持有操作租约时安全 defer，并调用 `ports.clear_stage_advance` 释放排队闩；
+  3. `direct_dispatch.py:DEPENDENCIES` 显式声明 `clear_stage_advance`，保持控制器依赖图无环且文件严格 $\le 500$ 行。
+- 验证：`tests/test_p1_state_machine_defects_red.py` 7 项反证与边界测试全绿；`test_controller_modularity.py`、`test_plan_causal_dispatch.py` 等 133 项回归全绿；`compileall` 与 `git diff --check` clean。
+- 教训：`docs/lessons/lessons-learned.md` §233。
+
+## [2026-11-08] Fix | 隐式状态机 P2 缺陷修复：多角色节点完成投影对齐与 CI 瞬态重试增强（F-02 & CI E2E）
+- 现场：
+  1. **F-02**：`herdr/ops_center_helpers.py:_node_delivery_complete` 签名缺乏 `node` 参数，且元数据归一化阶段丢失 `roles`，导致 Ops Center 卡片、`herdr-task workflow node-status` CLI 与 `workflow_graph_projection` 画布在多角色节点仅部分角色（如 executor 完成、challenger 待派发）时被误判为 `completed`，并使下游依赖提前亮起 `ready`，而 Controller 内核调度仍判定未完成并继续发射任务；
+  2. **CI E2E 超时**：多进程并行运行 7000+ 测试时，`test_console_controller_cockpit_e2e.py` 因机器负载偶发 `PageNavigationTimeoutError`（15s），而 `browser()` 仅捕获了 CDP 超时未做导航超时重试。
+- 修复：
+  1. `herdr/ops_center_helpers.py`: `_node_delivery_complete` 支持 `*, node=None` 并转发至 `node_is_complete`；`_normalize_workflow_nodes` 与 `_collect_workflow_node_metadata` 完整保留 `{**item, ...}` 与 `"node": node`；
+  2. `herdr/workflow.py`: `_normalize_workflow_body` 确保规范化节点保留 `"roles"` 声明；
+  3. `herdr/ops_center_projection.py`、`herdr/task_cli_workflow.py`、`herdr/workflow_graph.py` 全面对齐 `node=node` 契约，工作流未整体完成且未通过人工门禁时，多角色未齐节点保持 `working`/`in_progress`；
+  4. `tests/test_console_controller_cockpit_e2e.py` 导航超时提至 30s，并在重试机制中覆盖 `PageNavigationTimeoutError`。
+- 验证：`tests/test_p2_f02_multirole_projection_red.py` 4 项专项用例全绿；`tests/test_console_controller_cockpit_e2e.py` 16 项用例全部 PASS；全套受影响测试回归 76 项全绿；`compileall` 与 `git diff --check` clean。
+- 教训：`docs/lessons/lessons-learned.md` §234。

@@ -515,6 +515,8 @@ def _normalize_workflow_body(workflow: Dict[str, Any]) -> Dict[str, Any]:
                                        node_id=node_id, task_type=norm_node["default_task_type"])
             if "artifact_mode" in node:
                 norm_node["artifact_mode"] = node["artifact_mode"]
+            if "roles" in node:
+                norm_node["roles"] = node["roles"]
             if "max_tasks_per_node" in node:
                 norm_node["max_tasks_per_node"] = node["max_tasks_per_node"]
             if "required_task_ids" in node:
