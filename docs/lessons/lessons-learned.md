@@ -9741,3 +9741,94 @@ git diff --check
 - `herdr/node_dispatch.py#result`
 - `tests/test_plan_causal_dispatch.py#TestPlanSameNodeRedoDurableClosure`
 - `tests/test_node_dispatch_contract.py#test_staged_rework_snapshots_only_the_dispatchable_role`
+
+---
+
+## 231. Fix-Loop Phase 2 部分作废责任丢失与门禁状态机重试闭环（2026-11-07）
+
+### 问题背景
+
+PR #409 修复了 Fix-Loop Phase 2 虚报成功以及 `integrated` 任务经 finalize 规范化作废路径，但在 Codex Review 与对抗审查中暴露了关键状态机缺陷：
+1. **作废责任丢失与阻断失效**：当门禁任务（`gate-1`）在 Phase 2 被成功标记为 `superseded`，但下游存在无法作废的任务（如 `committed`）时，Phase 2 整体 fail-closed 退出。然而 `node_policy.py::gate_verdict` 会忽略 `status == "superseded"` 的任务，导致在后续 Sweep 中阻断事实丢失，`blocked_gate_dependency` 返回 `None`；
+2. **就绪节点绕过与工作流提前关闭**：当工作流所有节点呈现 completed-like 状态时，控制器因无法感知历史阻断事实而误判为工作流完成，进入 `maybe_close_completed_workflow` 提前关闭工作流；在多阶段线性 DAG 中，门禁后续依赖更会被作为就绪节点重新派发，完全绕过未完成的作废责任；
+3. **合并门禁组身份丢失**：当合并门禁（如 `test` + `review`）任务均被 supersede 后，后续 Sweep 分别以单门禁 ID 调用 `handle_fix_loop`，因无活跃 blocked 任务而无法重组 sibling gates，导致退化为双重单门禁循环，造成循环计数重复累加（Double-bump）和重复派发冲突事件；
+4. **状态文件终结清理泄漏**：`clear_workflow_stage_state` 原本仅清理冒号前缀（`wf:`），导致以竖线（`wf|fixloop_obligation|`）分隔的责任记录在工作流终结后残留。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 阻断事实与任务状态强耦合 | 任务进入 `superseded` 不等于作废责任已闭环；仅凭任务状态表无法表达“跨任务未完成作废责任” | 采用 Option B：在 `stage-state.json` 引入持久化作废责任（`invalidation_obligation`），挂起期间责任持久留存，只有所有待作废任务全部落定才能清除 |
+| Sweep 就绪计算先于作废责任检查 | 未完成作废责任期间，工作流处于半作废或待人工介入状态，绝不能推进任何阶段或关闭工作流 | 在 `check_workflow_stage_advance` 顶部最先检查 `list_invalidation_obligations`，任一责任存在即阻断全流程推进（不进 completed 判定，不进 ready_nodes），仅驱动作废重试 |
+| 合并门禁重试缺乏持久化组身份 | 活任务一旦 supersede，按任务反查 sibling 的机制即失效 | 在 obligation 中持久化 `merged_gates` 列表，重试时感知合并组身份，原子恢复全组门禁并委托 `_handle_merged_fix_loops`，单次清空责任且仅递增 1 次计数 |
+| 状态键前缀清理不一致 | 同一工作流在 `stage-state.json` 中混合使用了冒号与竖线前缀 | `clear_workflow_stage_state` 必须覆盖 `wf:` 与 `wf|` 两种前缀，确保工作流关闭或销毁时无孤儿键 |
+
+### 操作规范（已固化到 `services/controller/` 源码与回归测试）
+
+1. **持久化责任模型 (`services/controller/stage_state.py`)**：通过 `record_invalidation_obligation`、`get_invalidation_obligation`、`clear_invalidation_obligation`、`list_invalidation_obligations` 维护 `<wf>|fixloop_obligation|<gate>`。`clear_workflow_stage_state` 同步清理冒号与竖线前缀。
+2. **Sweep 前置责任拦截 (`services/controller/advancement.py`)**：在 `check_workflow_stage_advance` 最开始检索 `list_invalidation_obligations`，存在未决责任时按合并组/单门禁重试 `handle_fix_loop` 并直接 `return`，阻断下游推进与关闭。
+3. **合并门禁重试组恢复 (`services/controller/fix_loop.py` & `merged_fix_loop.py`)**：`handle_fix_loop` 感知 `merged_gates`，自动重构门禁组委托合并作废；`_handle_merged_fix_loops` 从 `active_obs` 恢复原始 `selective_ids` 与 `blockers`，单次提交清空全组 obligation、仅递增 1 次 loop count 并发出 1 个合并事件。
+4. **不可变保护与人工升级通道**：`committed` 任务受 Git 交付链保护绝不强制作废，Phase 2 失败明确记录在 obligation 中并通过 `attention_note` 告警，留存结构化凭证待人工处理。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_fix_loop_phase2_p1_obligation_red.py
+pytest -v tests/test_fix_loop_phase2_invalidation_red.py
+pytest -v tests/test_controller_modularity.py
+pytest -v tests/test_fix_loop_*.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+期望：10 项 P1 专项测试全绿；PR #409 9 项测试全绿；99 项 fix-loop 领域测试全绿；各模块行数严格 $\le 500$ 行。
+
+### 相关文档 / 关联证据
+
+- PR #409 实施提交：`f3aced59`、`b712538`
+- `services/controller/stage_state.py#record_invalidation_obligation`
+- `services/controller/fix_loop.py#handle_fix_loop`
+- `services/controller/merged_fix_loop.py#_handle_merged_fix_loops`
+- `services/controller/advancement.py#check_workflow_stage_advance`
+- `services/controller/node_policy.py#blocked_gate_dependency`
+- `tests/test_fix_loop_phase2_p1_obligation_red.py#TestFixLoopPhase2ObligationP1`
+
+---
+
+## 232. Fix-Loop 责任重试生命周期：返工谱系根持久化与空新作废责任闭环（2026-11-07）
+
+### 问题背景
+
+在 PR #409 引入持久化作废责任（`invalidation_obligation`）后，通过条件性风险分析与 RED 测试捕获了两个深层边界缺陷：
+1. **返工范围丢失与等待闩过早解除**：选择性返工（Selective Replan）在部分作废挂起后，门禁任务已被标记为 `superseded`。随后的重试调用由于缺乏活跃的 blocked 门禁任务，`_resolve_selective_replan` 降级为 `legacy_fallback` 且 `target_lineage_roots=[]`。原 `invalidation_obligation` 仅持久化了 `selective_ids`，导致恢复后写入 `pending_redo` 的 `target_lineage_roots` 变为 `[]`。这使得 `latch_blocks_advance` 降级为非选择性模式，节点内任意未波及的不相干保留任务（Preserved Task）一旦在 `since` 后更新/完成，即错误地提前解除了等待闩，导致下游阶段在真正的返工代际（-r1）尚未重做前错误推进；
+2. **所有任务已作废时重启导致遗留责任死锁**：若剩余作废任务落定后（如人工干预或重试作废完成）发生重启，恢复后的第一轮 Sweep 会再次调用 `handle_fix_loop`。由于此时所有任务均已处于 `superseded`，`invalidate_for_fix_loop` 无需执行新的系统调用作废，返回空的 `SelectiveInvalidationResult([], applied=[], pending=[], failed={})`。原逻辑在 `clear_invalidation_obligation` 前存在 `if not invalidated: return`，导致当 `len(invalidated) == 0` 时提前退出，遗留责任无法从 `stage-state.json` 清除。后续每一轮 Sweep 顶部的前置拦截均触发并直接 return，使工作流永久挂起死锁。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 返工范围仅存目标 ID 忽略谱系根 | 目标 ID（`selective_ids`）与谱系根（`target_lineage_roots`）在选择性等待闩中具有不同的拓扑约束；缺少根会导致选择性等待降级 | 在 `invalidation_obligation` 中同步持久化 `target_lineage_roots`；重试时优先从 obligation 恢复谱系根，保证 `pending_redo` 始终携带完整的谱系根名单 |
+| 责任清除与本轮新作废副作用耦合 | 责任是否已闭环（`all_targets_applied`）不等于本轮是否产生了新的作废调用副作用（`len(invalidated) > 0`） | 责任清除（`clear_invalidation_obligation`）必须位于 `all_targets_applied` 判断之后、且在 `if not invalidated: return` 之前；当 `len(invalidated) == 0` 但存在遗留责任时，重构历史已作废任务清单补发 `pending_redo` 与事件，确保自愈闭环 |
+
+### 操作规范（已固化到 `services/controller/` 源码与回归测试）
+
+1. **谱系根随责任持久化 (`services/controller/fix_loop.py` & `merged_fix_loop.py`)**：在记录 obligation 时存入 `target_lineage_roots`；重试时无论单门禁还是合并门禁，均从 obligation 中恢复 `target_lineage_roots`，确保 `pending_redo` 不发生降级。
+2. **解耦责任清除与副作用检查**：确认所有作废目标均已落定后，立即原子清除 obligation；若当前调用未执行新作废但存在历史责任，从 obligation 的 `applied_tasks` 与 `pending_tasks` 重构 `effective_invalidated`，继续完成计数递增、`pending_redo` 写入及事件投递。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_fix_loop_phase2_p1_boundaries_red.py
+pytest -v tests/test_fix_loop_phase2_p1_obligation_red.py
+pytest -v tests/test_controller_modularity.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+期望：4 项边界守护测试全绿；所有模块代码严格 $\le 500$ 行。
+
+### 相关文档 / 关联证据
+
+- `services/controller/fix_loop.py#handle_fix_loop`
+- `services/controller/merged_fix_loop.py#_handle_merged_fix_loops`
+- `tests/test_fix_loop_phase2_p1_boundaries_red.py#TestFixLoopPhase2Boundaries`

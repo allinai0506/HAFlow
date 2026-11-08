@@ -378,6 +378,13 @@ def _handle_merged_fix_loops(ports, workflow_id, retry_node, gates, workflow_cfg
         for plan in per_gate_plans.values()
         for r in ((plan or {}).get("target_lineage_roots") or [])
         if str(r).strip()})
+    if not union_roots and active_obs:
+        union_roots = sorted({
+            str(r).strip()
+            for ob in active_obs.values()
+            for r in (ob.get("target_lineage_roots") or [])
+            if str(r).strip()
+        })
     # 单次原子作废(目标两阶段,门禁取并集)。
     invalidated = ports.invalidate_for_merged_fix_loop(
         workflow_id, gate_ids, workflow_cfg, retry_node=retry_node,
@@ -398,6 +405,7 @@ def _handle_merged_fix_loops(ports, workflow_id, retry_node, gates, workflow_cfg
                     "applied_tasks": list(invalidated.applied),
                     "blockers": blockers,
                     "selective_ids": list(union_targets) if union_targets else None,
+                    "target_lineage_roots": list(union_roots) if union_roots else None,
                     "created_at": (
                         active_obs.get(gid, {}).get("created_at")
                         if active_obs.get(gid)
@@ -408,10 +416,21 @@ def _handle_merged_fix_loops(ports, workflow_id, retry_node, gates, workflow_cfg
             )
         print(f"[SELECTIVE REPLAN DEFERRED] workflow={workflow_id} gates={'+'.join(sorted(gate_ids))} pending={','.join(invalidated.pending)} awaiting retry")
         return
-    if not invalidated:
-        return
     for gid in gate_ids:
         ports.clear_invalidation_obligation(workflow_id, gid)
+    effective_invalidated = list(invalidated)
+    if not effective_invalidated and active_obs:
+        recovered = []
+        for ob in active_obs.values():
+            for tid in (ob.get("applied_tasks") or []):
+                if tid not in recovered:
+                    recovered.append(tid)
+            for tid in (ob.get("pending_tasks") or []):
+                if tid not in recovered:
+                    recovered.append(tid)
+        effective_invalidated = recovered
+    if not effective_invalidated:
+        return
     ports.clear_stage_advance(workflow_id, retry_node)
     loop_count = ports._bump_fix_loop_count(workflow_id, retry_node)
     # latch 取各事实最早创建时间(恒早于一切 replacement,避免重试 race)。
@@ -423,6 +442,14 @@ def _handle_merged_fix_loops(ports, workflow_id, retry_node, gates, workflow_cfg
             cand = 0
         if cand and (not fact_ts or cand < fact_ts):
             fact_ts = cand
+    if not fact_ts and active_obs:
+        for ob in active_obs.values():
+            try:
+                cand = float(ob.get("created_at") or 0)
+            except (TypeError, ValueError):
+                cand = 0
+            if cand and (not fact_ts or cand < fact_ts):
+                fact_ts = cand
     with ports.lock:
         _state = ports.load_stage_state()
         _pending = {"ts": fact_ts or ports.time.time(),
@@ -436,12 +463,12 @@ def _handle_merged_fix_loops(ports, workflow_id, retry_node, gates, workflow_cfg
     ports.coordinator_queue.put({
         "kind": "fix_loop", "workflow_id": workflow_id,
         "gate_stage": "+".join(sorted(gate_ids)), "retry_node": retry_node,
-        "blockers": blockers, "invalidated": list(invalidated),
+        "blockers": blockers, "invalidated": list(effective_invalidated),
         "loop_count": loop_count,
         "max_loops": max_loops, "suggested_branch": suggested_branch,
         "mode": "selective", "target_lineage_roots": union_roots,
     })
-    print(f"[FIX LOOP QUEUED] workflow={workflow_id} gates={'+'.join(sorted(gate_ids))} retry={retry_node} loop={loop_count} invalidated={len(invalidated)}")
+    print(f"[FIX LOOP QUEUED] workflow={workflow_id} gates={'+'.join(sorted(gate_ids))} retry={retry_node} loop={loop_count} invalidated={len(effective_invalidated)}")
 
 
 DEPENDENCIES = {'invalidate_for_merged_fix_loop': ('FIX_LOOP_SUPERSEDEABLE', 'SelectiveInvalidationResult',
