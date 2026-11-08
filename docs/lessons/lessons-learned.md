@@ -9874,3 +9874,59 @@ git diff --check
 - `services/controller/direct_dispatch.py#try_direct_stage_advance`
 - `tests/test_p1_state_machine_defects_red.py#TestF01FinalizeEscalatedCompletion`
 - `tests/test_p1_state_machine_defects_red.py#TestF03DirectDispatchCausalWaitLatch`
+
+## 234. 隐式状态机 P2 缺陷治理：多角色节点完成投影对齐与中继透传（2026-11-08）
+
+### 问题背景
+
+全仓隐式状态机审计（Implicit State Machine Audit V1）确认了 P2 缺陷 **F-02（多角色节点完成判定在可视化投影与调度内核间语义分歧）**：
+1. **中继函数签名与参数丢失**：`herdr/ops_center_helpers.py:_node_delivery_complete` 签名仅为 `(tasks, required_task_ids=None)`，未能接收和透传 `node` 对象给底层纯函数 `herdr/scheduler.py:node_is_complete(..., node=node)`。并且 `_collect_workflow_node_metadata` 与 `_normalize_workflow_nodes` 在提取节点元数据时将节点原始字段及 `roles` 过滤丢弃，导致向底层传递的始终为 `node=None`。
+2. **多角色节点早完成假象**：多角色节点（如 `plan` 节点的 executor + challenger）在执行器任务完成而挑战者尚未被调度发射时，`node_is_complete(..., node=None)` 仅依据全部活跃任务（此时仅有 executor）已完成即判定完成。导致 Web 控制台 Ops Center 卡片、`bin/herdr-task workflow node-status` CLI 输出以及前端画布渲染 `workflow_graph_projection` 均显示 `status = "completed"`，甚至使下游节点错误亮起可执行状态（`ready_nodes`），而 Controller 内核调度却判定未完成并继续发射挑战者任务。
+3. **CI E2E 瞬态超时**：在多进程并行跑全量测试时，CI 环境 CPU/EventLoop 负载导致局部 `page.goto` 偶发超过 15 秒并抛出 `PageNavigationTimeoutError`，而现有 `browser()` 仅捕获了 CDP 级别的超时，未重试导航超时，导致 CI 偶发飘红。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 中继函数签名阉割丢失语义 | 中继函数切忌擅自截断核心调度纯函数所必需的上下文契约 | 凡包裹 `node_is_complete` 的中继（如 `_node_delivery_complete`、`node_status` 等）必须完整透传 `*, node=None` |
+| 节点元数据归一化字段丢失 | 归一化字典必须保留上游策略定义的原始角色及核心配置 | `_normalize_workflow_nodes` 与 `_collect_workflow_node_metadata` 必须完整保留 `roles`、`agent_policy` 与原始 `node` 引用 |
+| 视图投影与内核判断割裂 | 视觉与 CLI 呈现必须与 Controller 调度内核保持完全一致的完成标准 | Canvas、Card 与 CLI 的完成状态均统一绑定 `scheduler.node_is_complete(tasks, required_ids, node=node)`，多角色未齐时保持 `working`/`in_progress` |
+| CI 浏览器端到端超时防护不足 | 高并发 CI 运行易发生瞬态页面加载抖动 | 端到端测试需对 `PageNavigationTimeoutError` 及高负载导航设立适度超时（30s）与重试保护 |
+
+### 操作规范（已固化到 `herdr/` 与回归测试）
+
+1. **中继与元数据透传**：
+   - `herdr/ops_center_helpers.py:_node_delivery_complete` 扩充关键字参数 `*, node=None` 并转发至 `node_is_complete`。
+   - `_normalize_workflow_nodes` 与 `_collect_workflow_node_metadata` 携带 `{**item, ...}` 与 `"node": node`。
+   - `herdr/workflow.py:_normalize_workflow_body` 确保 `norm_node` 完整保留 `roles`。
+2. **调用层对齐**：
+   - `herdr/ops_center_projection.py` 在卡片投影判定完成时传入 `node=node`。
+   - `herdr/task_cli_workflow.py:node_status` 传入 `node=cfg_node`。
+   - `herdr/workflow_graph.py:workflow_graph_projection` 在工作流运行中（非强制终化/人工特权）调用 `node_is_complete(..., node=n)`，多角色任务在途或待发射时保持 `working`，杜绝下游节点提前 `ready`。
+3. **CI 健壮性增强**：
+   - `tests/test_console_controller_cockpit_e2e.py` 将导航与等待超时提升至 30 秒，并在重试分支中覆盖 `PageNavigationTimeoutError`。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_p2_f02_multirole_projection_red.py
+pytest -v tests/test_p1_state_machine_defects_red.py
+pytest -q tests/test_workflow_graph_projection.py tests/test_herdr_task_ops_center.py
+pytest -q tests/test_console_controller_cockpit_e2e.py
+python3 -m compileall -q herdr services bin tests
+git diff --check
+```
+
+期望：F-02 多角色投影对齐测试全部 PASS；历史用例全量兼容；代码检查 clean。
+
+### 相关文档 / 关联证据
+
+- `herdr/ops_center_helpers.py#_node_delivery_complete`
+- `herdr/ops_center_projection.py#_build_workflow_cards`
+- `herdr/task_cli_workflow.py#node_status`
+- `herdr/workflow.py#_normalize_workflow_body`
+- `herdr/workflow_graph.py#workflow_graph_projection`
+- `tests/test_p2_f02_multirole_projection_red.py#TestF02MultiRoleNodeDeliveryComplete`
+- `tests/test_p2_f02_multirole_projection_red.py#TestF02OpsCenterCardProjection`
+- `tests/test_p2_f02_multirole_projection_red.py#TestF02TaskCLINodeStatus`
+- `tests/test_p2_f02_multirole_projection_red.py#TestF02WorkflowGraphProjection`

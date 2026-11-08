@@ -312,6 +312,8 @@ def workflow_graph_projection(
                 issues = [{"task_id":None,"reason":"required_task_incomplete"}]
             status = "blocked"
             has_attention = True
+        elif not is_wf_completed and not gate_passed and status == "completed" and not node_is_complete(lineage, n.get("required_task_ids"), node=n):
+            status = "working"
 
         nodes.append(
             {
