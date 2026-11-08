@@ -427,7 +427,7 @@ def direct_finished(db_path, operation_id, owner, attempted_task_ids, now=None):
                       now, next_due=now + core.CHECK_SECONDS)
 
 
-def defer(db_path, operation_id, reason, now=None, owner=None):
+def defer(db_path, operation_id, reason, now=None, owner=None, *, consume_attempt=True):
     now = time.time() if now is None else now
     with rs._transaction(db_path) as conn:
         op = rs._get(conn, operation_id)
@@ -436,7 +436,12 @@ def defer(db_path, operation_id, reason, now=None, owner=None):
         if (op['started'] or (not held and (op['status'] != 'pending' or op['next_due_at'] > now))
                 or not core.active(workflow) or not core.current(op, workflow, config)):
             return op
-        attempts = op['attempts'] if held else op['attempts'] + 1
+        if not consume_attempt and held:
+            attempts = max(0, op['attempts'] - 1)
+        elif held:
+            attempts = op['attempts']
+        else:
+            attempts = op['attempts'] + 1
         return _write(conn, op, 'waiting_human' if attempts >= 3 else 'pending',
                       {'reason': reason, 'decision_needed': '检查总指挥工位与需求，处理前置问题后重试'},
                       now, next_due=now + core.CHECK_SECONDS, attempts=attempts)

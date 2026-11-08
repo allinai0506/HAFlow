@@ -344,8 +344,25 @@ class TestF03DirectDispatchCausalWaitLatch:
             assert op_after["status"] == "pending", (
                 f"Operation should be deferred back to pending on causal wait, got {op_after['status']}"
             )
-            # Held defer does not count as failed attempt
-            assert op_after["attempts"] == 1
+            # Causal wait does NOT consume launch attempt budget
+            assert op_after["attempts"] == 0
+
+        # Simulate 5 consecutive claim -> causal-wait cycles (e.g. over 2.5 minutes of sweeps)
+        for cycle in range(5):
+            t_cycle = time.time() + (cycle + 1) * 35
+            claim_cycle = nds.claim(db_path, op_id, owner_id, now=t_cycle)
+            assert claim_cycle is not None, f"Operation must remain claimable on cycle {cycle+1}"
+            assert claim_cycle["status"] == "running"
+            cycle_item = {**item, "dispatch_owner": owner_id}
+            assert try_direct_stage_advance(ports, cycle_item) is True
+            with nds.rs._transaction(db_path) as conn:
+                cycle_op = nds.rs._get(conn, op_id)
+                assert cycle_op["status"] == "pending", (
+                    f"Causal wait must remain pending, never escalate to waiting_human; cycle {cycle+1} got {cycle_op['status']}"
+                )
+                assert cycle_op["attempts"] == 0, (
+                    f"Causal wait must not accumulate attempts; cycle {cycle+1} got {cycle_op['attempts']}"
+                )
 
     def test_causal_wait_transitions_to_dispatch_when_prerequisite_ready(self, tmp_path):
         from services.controller.direct_dispatch import try_direct_stage_advance

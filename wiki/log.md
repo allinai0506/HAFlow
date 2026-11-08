@@ -4191,3 +4191,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   4. `tests/test_console_controller_cockpit_e2e.py` 导航超时提至 30s，并在重试机制中覆盖 `PageNavigationTimeoutError`。
 - 验证：`tests/test_p2_f02_multirole_projection_red.py` 4 项专项用例全绿；`tests/test_console_controller_cockpit_e2e.py` 16 项用例全部 PASS；全套受影响测试回归 76 项全绿；`compileall` 与 `git diff --check` clean。
 - 教训：`docs/lessons/lessons-learned.md` §234。
+
+## [2026-11-08] Fix | 派发因果等待重试预算解耦（Codex Review P2 Finding 闭环）
+- 现场：`herdr/node_dispatch_store.py:claim` 每次认领持久化操作时递增 `attempts`，而 `defer` 默认保持递增后的计数；当操作因前置未完成持续处于因果等待（`mode == "wait"`）时，经过 3 轮 Sweep 会耗尽预算误入 `waiting_human`。
+- 修复：`node_dispatch_store.py:defer` 扩充 `consume_attempt=True` 参数；`direct_dispatch.py` 在 `mode == "wait"` 调用时传入 `consume_attempt=False`，安全还原认领计次，杜绝因果等待消耗派发预算。
+- 验证：`tests/test_p1_state_machine_defects_red.py` 扩充连续 5 轮 claim->wait 压测用例，验证持久操作始终保持 `pending` 且 `attempts=0`，不误升 `waiting_human`；`test_node_dispatch_contract.py` 等 155 项派发契约用例全绿。
+- 教训：`docs/lessons/lessons-learned.md` §233。
