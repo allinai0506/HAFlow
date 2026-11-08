@@ -234,6 +234,7 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
                         if str(t.get("status") or "") in NODE_DONE_STATUSES
                         and (t.get("integration_mode") != "git"
                              or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
+                        and not t.get("finalize_escalated")
                     }
                     if not required_roles.issubset(completed_roles):
                         return False
@@ -272,6 +273,7 @@ def node_is_complete(tasks_for_node: Sequence[Dict[str, Any]], required_task_ids
         str(t.get("status") or "") in NODE_DONE_STATUSES
         and (t.get("integration_mode") != "git"
              or t.get("status") in ("integrated", "cleanup_ready", "cleaned"))
+        and not t.get("finalize_escalated")
         for t in active
     )
 

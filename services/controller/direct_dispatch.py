@@ -245,8 +245,17 @@ def try_direct_stage_advance(ports, item):
         return fallback(plan.get("reason") or "planner_refused")
 
     if mode == "wait":
-        # 节点已有活跃任务:推进会自然由状态机完成,不再唤醒总指挥。
-        ports.mark_stage_advance_notified(workflow_id, ready_id)
+        dispatch_operation_id = item.get("dispatch_operation_id")
+        dispatch_owner = item.get("dispatch_owner")
+        if dispatch_operation_id is not None:
+            from herdr.node_dispatch_store import defer
+            defer(
+                ports._get_store().db_path,
+                dispatch_operation_id,
+                plan.get("reason") or "causal_wait",
+                owner=dispatch_owner,
+            )
+        ports.clear_stage_advance(workflow_id, ready_id)
         print(
             f"[DIRECT DISPATCH WAIT] "
             f"workflow={workflow_id} "
@@ -484,6 +493,6 @@ def try_direct_stage_advance(ports, item):
 
 DEPENDENCIES = {'try_direct_stage_advance': (
     'DIRECT_DISPATCH_LAUNCH_TIMEOUT', 'TASK_MANAGER', '_all_selective_facts', '_dispatch_candidate_ready', '_get_store', '_record_blocked_event', '_reverification_reused_node', '_scheduler_current_frozen_branch', '_scheduler_current_frozen_candidate_sha', '_scheduler_expected_candidate_sha', '_scheduler_join_gate_allows', '_selective_gate_inventory_block', '_selective_redispatch_blocker_notes', 'attention_get', 'attention_note',
-    'blocked_verdict_dep', 'direct_dispatch_planner', 'direct_stage_dispatch_enabled', 'find_node', 'get_stage_policy', 'get_task', 'load_tasks', 'mark_stage_advance_notified', 'maybe_compact_coordinator', 'maybe_dispatch_node_handoffs', 'node_is_gate', 'project_for_workflow', 'selective_replan_core', 'shared_docs_block', 'subprocess', 'workflow_config_for')}
+    'blocked_verdict_dep', 'clear_stage_advance', 'direct_dispatch_planner', 'direct_stage_dispatch_enabled', 'find_node', 'get_stage_policy', 'get_task', 'load_tasks', 'mark_stage_advance_notified', 'maybe_compact_coordinator', 'maybe_dispatch_node_handoffs', 'node_is_gate', 'project_for_workflow', 'selective_replan_core', 'shared_docs_block', 'subprocess', 'workflow_config_for')}
 
 __all__ = tuple(DEPENDENCIES)

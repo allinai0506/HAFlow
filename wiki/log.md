@@ -4168,3 +4168,14 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   3. `herdr/node_dispatch.py#result` deadline 分支新增 `missing_expected_task_ids` / `missing_predecessor_ids` 精确诊断，保留 #407 非 pending 消解口径。
 - 验证：真实 Controller/StateStore/SQLite 闭环与边界测试专项 `113 passed`、回归 `170 passed, 60 subtests`；RED 在 base `b5f4301` 复现 10 failed；`compileall` 与 `git diff --check` clean。
 - 教训：`docs/lessons/lessons-learned.md` §230。
+
+## [2026-11-08] Fix | 隐式状态机 P1 缺陷修复：finalize_escalated 完成语义对齐与因果等待锁解耦（F-01 & F-03）
+- 现场：
+  1. **F-01**：Task 终化升级（`finalize_escalated=True`）时，`workflow_close.py:git_escalated_tasks` 拒绝关闭（`[CLOSE DEFERRED]`），但 `herdr/scheduler.py:node_is_complete` 与 `services/controller/stage_state.py:is_node_complete` 误判为完成，导致 Controller 每一轮 Sweep 周期性打印 `[WORKFLOW COMPLETE]` 并陷入无效 close 检查空转；
+  2. **F-03**：直接调度 `services/controller/direct_dispatch.py` 在规划器因果等待（`mode == "wait"`）时错误写入 `ports.mark_stage_advance_notified`，导致无物理任务注册时阶段锁永久死锁无法重新派发。
+- 修复：
+  1. `herdr/scheduler.py:node_is_complete`（角色与节点完成分支）及 `services/controller/stage_state.py:is_node_complete` 补全 `and not t.get("finalize_escalated")` 约束；
+  2. `services/controller/direct_dispatch.py` 在 `mode == "wait"` 时解耦虚假通知锁，持有操作租约时安全 defer，并调用 `ports.clear_stage_advance` 释放排队闩；
+  3. `direct_dispatch.py:DEPENDENCIES` 显式声明 `clear_stage_advance`，保持控制器依赖图无环且文件严格 $\le 500$ 行。
+- 验证：`tests/test_p1_state_machine_defects_red.py` 7 项反证与边界测试全绿；`test_controller_modularity.py`、`test_plan_causal_dispatch.py` 等 133 项回归全绿；`compileall` 与 `git diff --check` clean。
+- 教训：`docs/lessons/lessons-learned.md` §233。
