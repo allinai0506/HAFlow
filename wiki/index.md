@@ -38,6 +38,7 @@
 | **修改任务状态流转或添加新状态** | [[task-lifecycle]] | `herdr/transitions.py`, `herdr/kernel.py:transition_task/workflow` |
 | **回放一次 Agent 执行的历史事实** | [[task-lifecycle]] §1.2 | `herdr/trajectory.py`, `herdr/state_db.py`, `bin/herdr-task`, `services/herdr-controller.py` |
 | **在任务详情查看 Agent 执行轨迹** | [[execution-trace]] | `herdr/execution_trace.py`, `herdr/native_session_trace.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
+| **找回某次任务实际投递的 Agent Prompt，并核验它有没有被改写** | [[prompt-ledger]] | `herdr/prompt_ledger.py`, `herdr/supervisor_delivery.py`, `herdr/state/schema.py`, `bin/herdr-task prompt-ledger` |
 | **评估一次 Agent 执行的业务结果和过程质量** | [[quality-assessment]] | `herdr/quality_assessment.py`, `herdr/quality_sources.py`, `bin/herdr-quality` |
 | **诊断一次运行是否卡住/异常/重复失败 (Trajectory Observer)** | [[trajectory-observer]] | `herdr/observer/`, `herdr/state_db.py:trajectory_findings`, `herdr/state/observation_finding.py`, `services/herdr-controller.py:registry_watcher`, `bin/herdr-task:observe` |
 | **为下一 Agent 生成可追溯的当前工作记忆 (Semantic Context Compact)** | [[semantic-context-compact]] | `herdr/context_compact.py`, `herdr/state_db.py:context_packs`, `herdr/state/context_pack.py`, `bin/herdr-task:compact` |
@@ -89,6 +90,7 @@
 - **[[review-benchmark]]**: 代码审查基准评测、同模型单变量对照、基础 diff 一致性与真实 Token 用量审计
 - **[[enterprise-experience-hub]]**: 企业业务规则自动提炼（基于 qualified_success 与人工纠偏证据）、脱敏出站、内网 Hub 审核发布与跨员工无感注入复用
 - **[[quality-assessment]]**: 单次执行的只读质量评估。业务结论复制已结算 Outcome，过程问题单独标记，缺失保持 unknown
+- **[[prompt-ledger]]**: 每次 Agent 投递的不可变最终 Prompt、SHA-256 和传输证据。终端通道核验不等于模型已接收
 - **[[common-change-paths]]**: 常见业务修改的完整关联文件、注意陷阱与验证命令
 - **[[ops-center]]**: 分层 Agent 运维视图、运行时/任务状态对照、时长与异常聚合
 - **[[WIKI]]**: Wiki 维护规范、证据契约与更新触发条件

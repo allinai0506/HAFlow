@@ -114,11 +114,11 @@ def handle_rework(
 
             def send(pane, text):
                 from herdr.supervisor_delivery import current_delivery_task
+                from herdr.prompt_ledger import raise_for_transport
 
                 pane = current_delivery_task(task, store, native=True)["pane_id"]
                 sent = herdr("agent", "prompt", str(pane), text)
-                if sent.returncode != 0:
-                    raise RuntimeError("Rework native prompt transport failed")
+                return raise_for_transport(sent)
 
             result = deliver(
                 task,

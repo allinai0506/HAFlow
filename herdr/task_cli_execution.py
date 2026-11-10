@@ -312,13 +312,21 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
 
         def send(pane, text):
             from herdr.supervisor_delivery import current_delivery_task
+            from herdr.prompt_ledger import PromptTransportError, classify_transport_result, raise_for_transport
             pane = current_delivery_task(task, store, native=True)["pane_id"]
-            result = subprocess.run(
-                ["herdr", "agent", "prompt", str(pane), text], text=True,
-                capture_output=True, timeout=timeout,
-            )
-            if result.returncode != 0:
-                raise RuntimeError("Initial native prompt transport failed")
+            try:
+                result = subprocess.run(
+                    ["herdr", "agent", "prompt", str(pane), text], text=True,
+                    capture_output=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PromptTransportError(classify_transport_result(
+                    returncode=124,
+                    stdout=getattr(exc, "stdout", "") or "",
+                    stderr=getattr(exc, "stderr", "") or "",
+                    timed_out=True,
+                )) from exc
+            return raise_for_transport(result)
 
         return deliver(
             task, store, "INITIAL", {"intervention_id": "initial:" + task["run_id"], "action": "INITIAL"},
@@ -327,6 +335,27 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
 
     pane_id = task["pane_id"]
     marker = "HERDR_ORCH_TASK:" + task_id
+    ledger_id = None
+    try:
+        from herdr.prompt_ledger import apply_outcome, legacy_terminal_outcome, open_snapshot
+        ledger_id = open_snapshot(
+            store, task, prompt, action="LEGACY",
+            intervention_id="legacy:" + task_id + ":" + uuid.uuid4().hex,
+        )["prompt_id"]
+    except Exception as exc:
+        print(f"[PROMPT LEDGER] {type(exc).__name__}: {exc}")
+        legacy_terminal_outcome = None
+
+    def settle(primary_returncode, timed_out, screen, fallback, agent_status=None):
+        if not ledger_id or legacy_terminal_outcome is None:
+            return
+        try:
+            apply_outcome(store, ledger_id, legacy_terminal_outcome(
+                primary_returncode=primary_returncode, timed_out=timed_out, screen=screen,
+                prompt=prompt, fallback=fallback, agent_status=agent_status,
+            ), task=task)
+        except Exception as exc:
+            print(f"[PROMPT LEDGER] {type(exc).__name__}: {exc}")
 
     def run_command(command, command_timeout=None):
         try:
@@ -392,6 +421,7 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
         if current_status in {"working", "blocked", "done"}:
             print(f"[PROMPT DELIVERED] task={task_id} via=agent-prompt state={current_status}")
             print(f"Task dispatched: {task_id} -> {pane_id}")
+            settle(primary.returncode, primary.returncode == 124, screen, None, current_status)
             return
         if marker in screen and current_status in {"idle", "unknown", None}:
             focus()
@@ -401,15 +431,20 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
             if current_status in {"working", "blocked", "done"}:
                 print(f"[PROMPT DELIVERED] task={task_id} via=enter-fallback state={current_status}")
                 print(f"Task dispatched: {task_id} -> {pane_id}")
+                settle(primary.returncode, primary.returncode == 124, screen, None, current_status)
                 return
         time.sleep(0.5)
 
-    if marker not in visible():
+    final_screen = visible()
+    if marker not in final_screen:
         if not send_full_prompt():
+            settle(primary.returncode, primary.returncode == 124, final_screen, "rejected", status())
             set_status(task_id, "failed")
             print(f"Prompt delivery failed for {task_id}: {primary.stderr or primary.stdout}")
             sys.exit(3)
         print(f"[PROMPT FALLBACK] task={task_id} via=send-text+enter")
+        settle(primary.returncode, primary.returncode == 124, visible(), "accepted", status())
     else:
         print(f"[PROMPT PENDING] task={task_id} marker-visible; sentinel will monitor")
+        settle(primary.returncode, primary.returncode == 124, final_screen, None, status())
     print(f"Task dispatched: {task_id} -> {pane_id}")

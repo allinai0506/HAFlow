@@ -171,13 +171,13 @@ def _dispatch_supervisor_retry(ports, task, decision, store):
         from herdr.supervisor_delivery import deliver
         def send(pane, text):
             from herdr.supervisor_delivery import current_delivery_task
+            from herdr.prompt_ledger import raise_for_transport
             pane = current_delivery_task(task, store, native=True)['pane_id']
             result = ports.subprocess.run(
                 ["herdr", "agent", "prompt", str(pane), text],
                 text=True, capture_output=True, timeout=ports.SUPERVISOR_VERIFY_DISPATCH_TIMEOUT,
             )
-            if result.returncode != 0:
-                raise RuntimeError("Supervisor native prompt transport failed")
+            return raise_for_transport(result)
         return deliver(task, store, 'RETRY', payload, prompt, send)
     result = ports.subprocess.run(
         ["herdr", "agent", "prompt", str(pane_id), prompt],
@@ -322,13 +322,13 @@ def _dispatch_supervisor_verification(ports, task, decision, store):
         from herdr.supervisor_delivery import deliver
         def send(pane, text):
             from herdr.supervisor_delivery import current_delivery_task
+            from herdr.prompt_ledger import raise_for_transport
             pane = current_delivery_task(task, store, native=True)['pane_id']
             result = ports.subprocess.run(
                 ["herdr", "agent", "prompt", str(pane), text],
                 text=True, capture_output=True, timeout=ports.SUPERVISOR_VERIFY_DISPATCH_TIMEOUT,
             )
-            if result.returncode != 0:
-                raise RuntimeError("Supervisor native prompt transport failed")
+            return raise_for_transport(result)
         return deliver(task, store, 'VERIFY', dispatch_payload, prompt, send)
     result = ports.subprocess.run(
         ["herdr", "agent", "prompt", str(pane_id), prompt],

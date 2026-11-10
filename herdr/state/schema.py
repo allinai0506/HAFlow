@@ -116,6 +116,81 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
+    # Immutable Prompt Ledger snapshots. Status and evidence may advance;
+    # the delivered text and its SHA-256 may not. See herdr/prompt_ledger.py.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS prompt_snapshots (
+            prompt_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            workflow_id TEXT,
+            run_id TEXT,
+            node_id TEXT,
+            agent_kind TEXT,
+            agent_name TEXT,
+            candidate_sha TEXT,
+            prompt_content TEXT NOT NULL,
+            prompt_sha256 TEXT NOT NULL,
+            content_bytes INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            dispatched_at REAL,
+            dispatch_status TEXT NOT NULL,
+            delivery_evidence_json TEXT NOT NULL DEFAULT '{}',
+            rules_digest TEXT,
+            skills_digest TEXT,
+            workflow_digest TEXT,
+            composition_json TEXT NOT NULL DEFAULT '{}',
+            action TEXT,
+            intervention_id TEXT,
+            redaction_policy TEXT NOT NULL DEFAULT 'local_operator_reveal',
+            retain_until REAL,
+            content_purged INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS prompt_snapshots_immutable
+        BEFORE UPDATE ON prompt_snapshots
+        FOR EACH ROW
+        WHEN NOT (
+            OLD.prompt_id = NEW.prompt_id
+            AND OLD.task_id = NEW.task_id
+            AND OLD.workflow_id IS NEW.workflow_id
+            AND OLD.run_id IS NEW.run_id
+            AND OLD.node_id IS NEW.node_id
+            AND OLD.agent_kind IS NEW.agent_kind
+            AND OLD.agent_name IS NEW.agent_name
+            AND OLD.candidate_sha IS NEW.candidate_sha
+            AND OLD.prompt_sha256 = NEW.prompt_sha256
+            AND OLD.content_bytes = NEW.content_bytes
+            AND OLD.created_at = NEW.created_at
+            AND OLD.rules_digest IS NEW.rules_digest
+            AND OLD.skills_digest IS NEW.skills_digest
+            AND OLD.workflow_digest IS NEW.workflow_digest
+            AND OLD.composition_json = NEW.composition_json
+            AND OLD.action IS NEW.action
+            AND OLD.intervention_id IS NEW.intervention_id
+            AND OLD.redaction_policy = NEW.redaction_policy
+            AND OLD.retain_until IS NEW.retain_until
+            AND (
+                (OLD.prompt_content = NEW.prompt_content AND OLD.content_purged = NEW.content_purged)
+                OR (
+                    OLD.content_purged = 0 AND NEW.content_purged = 1
+                    AND NEW.prompt_content = ''
+                    AND OLD.dispatch_status = NEW.dispatch_status
+                )
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'prompt snapshot is immutable');
+        END;
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_snapshots_task ON prompt_snapshots(task_id, created_at, prompt_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_snapshots_node ON prompt_snapshots(workflow_id, node_id, created_at, prompt_id);")
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_snapshots_intervention
+        ON prompt_snapshots(task_id, ifnull(run_id, ''), intervention_id)
+        WHERE intervention_id IS NOT NULL AND intervention_id != '';
+    """)
+
     # Observer analysis (NOT facts): findings are judgments derived from the
     # trajectory/events ledger and must stay queryable apart from it.
     conn.execute("""

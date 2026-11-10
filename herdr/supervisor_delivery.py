@@ -43,6 +43,8 @@ def deliver(task, store, action, payload, prompt, send, *, boundary=lambda phase
     intervention_id = payload.get('intervention_id')
     if not intervention_id:
         raise ValueError('Receipt delivery requires intervention identity')
+    from .prompt_ledger import DeliveryHook
+    hook = DeliveryHook(store, task, action, intervention_id)
     identity = dict(workflow_id=task.get('workflow_id'), node_id=task.get('node') or task.get('stage'),
                     task_id=task['task_id'], agent_id=task.get('agent'), source=('herdr-task' if action in ('INITIAL','REWORK','RENEW') else 'supervisor'),run_id=task['run_id'])
     def record(event_type, body, conn=None):
@@ -63,6 +65,7 @@ def deliver(task, store, action, payload, prompt, send, *, boundary=lambda phase
                 raise DeliveryUnknown(action,intervention_id)
             return {prefix+'_dispatched':True,'already_applied':True}
         if prefix+'_transport_started' in phases:
+            hook.on_ambiguous(phases[prefix+'_transport_started'].get('prompt'))
             raise DeliveryUnknown(action,intervention_id)
         prepared=phases.get(prefix+'_dispatch_prepared')
         if prepared is None and prefix+'_dispatch_intent' in phases:
@@ -83,6 +86,7 @@ def deliver(task, store, action, payload, prompt, send, *, boundary=lambda phase
                     extra += checkpoint_instruction_block(dict(task, completion_epoch=contract['epoch']), contract['epoch'])
                 body=dict(payload,completion_epoch=contract['epoch'],identity_path=contract['path'],
                     prompt=prompt+extra+'\nWhen finished, submit the structured completion declaration:\n'+shlex.quote(str(cli_path()))+' report-completion '+shlex.quote(task['task_id'])+' --identity-file '+shlex.quote(contract['path'])+'\nThe server credential expires after 24 hours; ask the controller to renew and deliver a new contract if expired.\nThis declaration does not certify acceptance, merge, or deployment.\n')
+                hook.on_prepared(conn, body)
                 record(prefix+'_dispatch_prepared',body,conn)
                 prepared=body
             issue_completion_contract(task['task_id'],store,prepare=prepare,renew=(action == 'RENEW'))
@@ -98,6 +102,7 @@ def deliver(task, store, action, payload, prompt, send, *, boundary=lambda phase
                 raise DeliveryUnknown(action, intervention_id)
             current_delivery_task(task, store)
             record(prefix+'_transport_started',dict(prepared,delivery_phase='transport_started'))
+            hook.on_pending()
             boundary('before_prompt')
             try:
                 current = current_delivery_task(task, store)
@@ -105,9 +110,11 @@ def deliver(task, store, action, payload, prompt, send, *, boundary=lambda phase
                         or current.get('completion_identity_path') != prepared['identity_path']
                         or _expiry_error(current, time.time())):
                     raise DeliveryUnknown(action, intervention_id)
-                send(current['pane_id'],prepared['prompt'])
+                sent = send(current['pane_id'],prepared['prompt'])
             except Exception as exc:
+                hook.on_exception(exc)
                 raise DeliveryUnknown(action,intervention_id) from exc
             boundary('after_prompt')
+            hook.on_success(sent)
             record(prefix+'_dispatched',dict(prepared,delivery_phase='dispatched'))
             return {prefix+'_dispatched':True}

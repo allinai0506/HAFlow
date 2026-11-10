@@ -8,6 +8,12 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-10] add | Prompt Ledger V1：Agent 最终指令快照与投递审计
+
+- 背景：HAFlow 能组装并发出 Agent Prompt，但最终文本只出现在可改写的回执事件里。任务失败后无法稳定回答当时发出了哪一版指令、传输命令是否成功、终端通道是否收下全文。
+- 变更：新增 [[prompt-ledger]]。状态库增加 `prompt_snapshots` 与不可变触发器；回执投递和遗留派发尾部各写一份快照；`bin/herdr-task prompt-ledger` 提供查询、校验和差异比较。
+- 边界：`DELIVERY_VERIFIED` 只证明未截断终端缓冲包含全文。模型内部 system prompt 与厂商全局指令保持 `UNOBSERVABLE`。非回执 supervisor 直发、steering 和 compact 不入账。保留期 90 天，尚无定时清除。
+
 ## [2026-11-07] fix | Fix-Loop 责任重试生命周期：返工谱系根持久化与空新作废责任闭环（§232）
 
 - 背景：在 PR #409 持久化作废责任（`invalidation_obligation`）后，复核发现两个深层状态机边界：1) 部分作废恢复后因门禁任务已 supersede，`_resolve_selective_replan` 退化丢失 `target_lineage_roots`，导致选择性等待闩失效、同阶段无关保留任务完成过早解除等待；2) 最后一个任务作废后若恰好重启，`invalidate_for_fix_loop` 无新作废任务返回空列表，因 `if not invalidated: return` 拦截导致遗留责任无法清除，全流程永久死锁。
