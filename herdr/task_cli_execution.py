@@ -366,6 +366,11 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
             return subprocess.CompletedProcess(
                 command, 124, "", f"command timed out after {command_timeout}s: {exc}"
             )
+        except OSError as exc:
+            import errno
+            if getattr(exc, "errno", None) == errno.E2BIG:
+                settle(1, False, "", "e2big", None)
+            raise
 
     def status():
         result = run_command(["herdr", "agent", "get", pane_id])

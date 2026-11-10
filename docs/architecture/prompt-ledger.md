@@ -46,21 +46,23 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 
 回执投递（`INITIAL`、`REWORK`、`RETRY`、`VERIFY`、`RENEW`）在 `herdr/supervisor_delivery.py` 的 `deliver()` 旁路记录。Ledger 失败使用 SAVEPOINT 回滚自己的写入，并打印 `[PROMPT LEDGER]`，不改变原来的投递结果。`transport_started` 已记录而快照仍停在生成或待投递时，恢复路径标成 `DELIVERY_UNVERIFIED`，然后继续抛出 `DeliveryUnknown`，不重发。
 
-无回执的任务派发尾部在 `herdr/task_cli_execution.py` 建快照。intervention id 形如 `legacy:{task_id}:{uuid}`。任务状态和退出码保持原样。
+无回执的任务派发尾部在 `herdr/task_cli_execution.py` 建快照。intervention id 形如 `legacy:{task_id}:{uuid}`。任务状态和退出码保持原样。无回执的 `herdr-task rework` 同样在发送前建快照，发送结果写入同一行，退出码仍是原来的 2。续期和交付修复的回执发送改用同一套传输分类。
 
-`herdr agent prompt` 返回 0 只表示命令被接受。超时变成返回码 124 时记为 `DELIVERY_UNVERIFIED`。本版不在回执热路径上额外调用 `herdr agent get` 或 `pane read`。
+`herdr agent prompt` 返回 0 只表示命令被接受。超时变成返回码 124 时记为 `DELIVERY_UNVERIFIED`。`OSError` 的 `E2BIG` 记为 `DELIVERY_FAILED`，级别 `argv_rejected`，`channel_bytes` 为 `NONE`。本版不在回执热路径上额外调用 `herdr agent get` 或 `pane read`。
+
+遗留派发使用的 `herdr pane read` 文本输出不能证明缓冲未截断，所以这条路径默认不升到 `DELIVERY_VERIFIED`。只有调用方明确给出未截断缓冲时，分类函数才允许升级。主命令超时之后，若 send-text 回退被拒绝并且任务因此被标为失败，快照记为 `DELIVERY_FAILED`，`channel_bytes` 仍是 `UNKNOWN`。
 
 ## 组成摘要
 
-在任务 `clone_path` 下读取 `AGENTS.md`、`CLAUDE.md`、`RULES.md`、`Agents.md`、`Claude.md`，以及最多 32 个 `.agents/skills/*/SKILL.md`。符号链接不跟随。Workflow 摘要来自状态库里可读的 workflow config。动态协议标记为 `OBSERVED`，并写上实际组装入口：回执路径是 `herdr.supervisor_delivery.deliver`，遗留路径是 `herdr.task_cli_execution.handle_dispatch_task`。存在 `working_context_id` 或 `context_id` 时，运行上下文标记为 `OBSERVED`，否则是 `UNKNOWN`。
+在任务 `clone_path` 下读取 `AGENTS.md`、`CLAUDE.md`、`RULES.md`、`Agents.md`、`Claude.md`，以及最多 32 个 `.agents/skills/*/SKILL.md`。从 clone 根到文件的每一层只要是符号链接就跳过，因此 `.agents` 本身是链接时不会读到链接目标里的 Skill。Workflow 摘要来自状态库里可读的 workflow config。动态协议标记为 `OBSERVED`，并写上实际组装入口：回执路径是 `herdr.supervisor_delivery.deliver`，遗留路径是 `herdr.task_cli_execution.handle_dispatch_task`。存在 `working_context_id` 或 `context_id` 时，运行上下文标记为 `OBSERVED`，否则是 `UNKNOWN`。
 
 厂商全局指令和模型内部 system prompt 固定为 `UNOBSERVABLE`。
 
 ## 读取、保留和完整性
 
-默认读取走现有 `redact_text`，只返回 240 字摘录。完整正文和 diff 需要 `reveal=True`，CLI 对应 `--reveal`。访问边界是本机状态库加上这个开关，策略名是 `local_operator_reveal`。
+默认读取走现有 `redact_text`，只返回 240 字摘录，并去掉传输证据里的 `detail`。完整正文、diff 和传输细节需要 `reveal=True`，CLI 对应 `--reveal`。访问边界是本机状态库加上这个开关，策略名是 `local_operator_reveal`。现有脱敏只覆盖已知密钥模式，不能把任意词都当成密钥。
 
-`retain_until` 是创建时间加 90 天，触发器禁止改这个字段。`purge_expired` 是唯一允许的正文变化：清空 `prompt_content`，置 `content_purged=1`，保留哈希和状态。清除后校验返回 `HASH_RETAINED_CONTENT_PURGED`。V1 没有后台任务调用 `purge_expired`。
+`retain_until` 是创建时间加 90 天，触发器禁止改这个字段。正文清空还要求 `retain_until` 已经到期，并且状态和证据保持不变。触发器同时拒绝 `DELETE` 和覆盖同一 `prompt_id` 的 `INSERT OR REPLACE`。`purge_expired` 是应用层唯一的清空入口：清空 `prompt_content`，置 `content_purged=1`，保留哈希和状态。清除后校验返回 `HASH_RETAINED_CONTENT_PURGED`。V1 没有后台任务调用 `purge_expired`。
 
 查询入口是 `bin/herdr-task prompt-ledger`，子命令为 `list`、`get`、`verify`、`diff`、`history`、`usage`。JSON 打到标准输出，参数错误退出码 2。
 

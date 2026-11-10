@@ -179,16 +179,37 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                 OR (OLD.dispatch_status = 'DELIVERY_UNVERIFIED' AND NEW.dispatch_status IN ('DELIVERY_VERIFIED', 'DELIVERY_FAILED'))
             )
             AND (
+                OLD.delivery_evidence_json = NEW.delivery_evidence_json
+                OR OLD.dispatch_status != NEW.dispatch_status
+            )
+            AND (
                 (OLD.prompt_content = NEW.prompt_content AND OLD.content_purged = NEW.content_purged)
                 OR (
                     OLD.content_purged = 0 AND NEW.content_purged = 1
                     AND NEW.prompt_content = ''
                     AND OLD.dispatch_status = NEW.dispatch_status
+                    AND OLD.retain_until IS NOT NULL
+                    AND OLD.retain_until <= CAST(strftime('%s','now') AS REAL)
                 )
             )
         )
         BEGIN
             SELECT RAISE(ABORT, 'prompt snapshot is immutable');
+        END;
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS prompt_snapshots_no_delete
+        BEFORE DELETE ON prompt_snapshots
+        BEGIN
+            SELECT RAISE(ABORT, 'prompt snapshot cannot be deleted');
+        END;
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS prompt_snapshots_no_replace
+        BEFORE INSERT ON prompt_snapshots
+        WHEN EXISTS (SELECT 1 FROM prompt_snapshots WHERE prompt_id = NEW.prompt_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'prompt snapshot cannot be replaced');
         END;
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_snapshots_task ON prompt_snapshots(task_id, created_at, prompt_id);")

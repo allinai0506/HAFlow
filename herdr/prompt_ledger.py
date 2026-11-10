@@ -71,9 +71,21 @@ def _component_digest(status, payload):
     return hashlib.sha256(_canon(payload).encode("utf-8")).hexdigest()
 
 
+def _safe_child(base, *parts):
+    current = base
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return None
+        except OSError:
+            return None
+    return current
+
+
 def _file_sha(path):
     try:
-        if path.is_symlink() or not path.is_file():
+        if path is None or path.is_symlink() or not path.is_file():
             return None
         digest = hashlib.sha256()
         with path.open("rb") as handle:
@@ -93,17 +105,17 @@ def observe_composition(task, store=None):
         rules_status = skills_status = "OBSERVED"
         base = Path(root)
         for name in _INSTRUCTION_FILES:
-            digest = _file_sha(base / name)
+            digest = _file_sha(_safe_child(base, name))
             if digest:
                 rules.append({"path": name, "sha256": digest})
-        skill_root = base / ".agents" / "skills"
-        if skill_root.is_dir() and not skill_root.is_symlink():
+        skill_root = _safe_child(base, ".agents", "skills")
+        if skill_root is not None and skill_root.is_dir():
             names = sorted(
                 path.name for path in skill_root.iterdir()
                 if path.is_dir() and not path.is_symlink()
             )[:32]
             for name in names:
-                digest = _file_sha(skill_root / name / "SKILL.md")
+                digest = _file_sha(_safe_child(skill_root, name, "SKILL.md"))
                 if digest:
                     skills.append({
                         "name": name,
@@ -233,8 +245,16 @@ def apply_readiness(outcome, *, interactive_ready=None, agent_status=None):
     return {"status": status, "evidence": evidence}
 
 
-def legacy_terminal_outcome(*, primary_returncode, timed_out, screen, prompt, fallback, agent_status=None):
-    """Classify the pre-receipt dispatch tail without changing its control flow."""
+def legacy_terminal_outcome(
+    *, primary_returncode, timed_out, screen, prompt, fallback, agent_status=None, screen_truncated=True,
+):
+    """Classify the pre-receipt dispatch tail without changing its control flow.
+
+    screen_truncated defaults to true because `herdr pane read` text output does
+    not prove the buffer was complete. Callers pass false only with that proof.
+    """
+    if fallback == "e2big":
+        return classify_transport_result(returncode=1, errno_name="E2BIG")
     if fallback == "rejected":
         outcome = {
             "status": "DELIVERY_FAILED",
@@ -257,7 +277,7 @@ def legacy_terminal_outcome(*, primary_returncode, timed_out, screen, prompt, fa
         outcome = classify_transport_result(returncode=0)
     else:
         outcome = classify_transport_result(returncode=primary_returncode, timed_out=bool(timed_out))
-    outcome = upgrade_with_tty_buffer(outcome, prompt, screen or "", truncated=False)
+    outcome = upgrade_with_tty_buffer(outcome, prompt, screen or "", truncated=bool(screen_truncated))
     return apply_readiness(outcome, agent_status=agent_status)
 
 
@@ -562,8 +582,13 @@ class DeliveryHook:
             if isinstance(exc, PromptTransportError):
                 outcome = exc.outcome
             else:
+                import errno
                 import subprocess
-                if isinstance(exc, subprocess.TimeoutExpired):
+                if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.E2BIG:
+                    outcome = classify_transport_result(
+                        returncode=1, stderr=str(exc), errno_name="E2BIG",
+                    )
+                elif isinstance(exc, subprocess.TimeoutExpired):
                     outcome = classify_transport_result(
                         returncode=124,
                         stdout=getattr(exc, "stdout", "") or "",
@@ -623,6 +648,7 @@ def _public(row, *, reveal):
     data["composition"] = json.loads(data.pop("composition_json") or "{}")
     data["content_redacted"] = not reveal
     if not reveal:
+        data["delivery_evidence"].pop("detail", None)
         content = "" if data.get("content_purged") else (data.get("prompt_content") or "")
         data["prompt_excerpt"] = redact_text(content)[:_EXCERPT]
         data.pop("prompt_content", None)

@@ -237,7 +237,9 @@ def test_queries_usage_history_and_node_filter(store, tmp_path):
     ]
 
 
-def test_snapshot_is_immutable_redacted_and_purge_keeps_the_hash(store):
+def test_snapshot_is_immutable_redacted_and_purge_keeps_the_hash(store, monkeypatch):
+    import herdr.prompt_ledger as ledger
+    monkeypatch.setattr(ledger, "RETENTION_SECONDS", -1)
     _deliver(store, _task(), "token=api_key=supersecretvalue please", "secret", lambda *_: None)
     row = _snapshot_for(store, "t")
     public = get_snapshot(store, row["prompt_id"], reveal=False)
@@ -300,12 +302,18 @@ def test_illegal_transition_and_legacy_fallback_classification(store):
     assert rejected["status"] == "DELIVERY_FAILED"
     accepted = legacy_terminal_outcome(
         primary_returncode=124, timed_out=True, screen="plain", prompt="plain", fallback="accepted",
+        screen_truncated=False,
     )
     assert accepted["status"] == "DELIVERY_VERIFIED"
     assert accepted["evidence"]["level"] == "tty_channel_accepted"
+    unproven = legacy_terminal_outcome(
+        primary_returncode=0, timed_out=False, screen="plain", prompt="plain", fallback=None,
+    )
+    assert unproven["status"] == "DISPATCHED"
+    assert unproven["evidence"]["tty_channel"] == "pane_read_truncated"
     pending = legacy_terminal_outcome(
         primary_returncode=0, timed_out=False, screen="HERDR_ORCH_TASK:legacy", prompt="plain",
-        fallback=None, agent_status="idle",
+        fallback=None, agent_status="idle", screen_truncated=False,
     )
     assert pending["status"] == "DISPATCHED"
     assert pending["evidence"]["tty_channel"] == "tty_echo_not_observed"
@@ -377,6 +385,88 @@ def test_composition_skips_symlinks_and_names_the_legacy_assembler(store, tmp_pa
     assert row["composition"]["skills"]["files"] == []
     assert row["composition"]["dynamic_protocol"]["assembler"] == "herdr.task_cli_execution.handle_dispatch_task"
     assert "do not follow" not in json.dumps(row["composition"])
+
+
+def test_parent_symlink_is_not_followed_for_skills(store, tmp_path):
+    outside = tmp_path / "outside-agents" / "skills" / "evil"
+    outside.mkdir(parents=True)
+    (outside / "SKILL.md").write_text("outside skill\n", encoding="utf-8")
+    root = tmp_path / "clone"
+    root.mkdir()
+    (root / ".agents").symlink_to(tmp_path / "outside-agents")
+    task = _task(clone_path=str(root), task_id="sym-parent", run_id="sym-run")
+    store.save_task(task)
+    opened = open_snapshot(store, task, "job", action="INITIAL", intervention_id="sym-parent")
+    row = get_snapshot(store, opened["prompt_id"], reveal=True)
+    assert row["composition"]["skills"]["files"] == []
+    assert "evil" not in json.dumps(row["composition"])
+    assert "outside skill" not in json.dumps(row["composition"])
+
+
+def test_oserror_e2big_is_failed_and_does_not_resend(store):
+    import errno
+
+    def send_once(pane, text):
+        raise OSError(errno.E2BIG, "Argument list too long")
+
+    with pytest.raises(Exception) as raised:
+        _deliver(store, _task(task_id="e2big", run_id="e2"), "too-big", "i-e2big", send_once)
+    assert raised.type.__name__ == "DeliveryUnknown"
+    row = _snapshot_for(store, "e2big")
+    assert row["dispatch_status"] == "DELIVERY_FAILED"
+    assert row["delivery_evidence"]["level"] == "argv_rejected"
+    assert row["delivery_evidence"]["channel_bytes"] == "NONE"
+
+
+def test_default_read_hides_transport_detail(store):
+    task = _task(task_id="detail", run_id="detail-run")
+    store.save_task(task)
+    opened = open_snapshot(store, task, "body", action="INITIAL", intervention_id="detail-1")
+    apply_outcome(store, opened["prompt_id"], classify_transport_result(
+        returncode=1, stderr="hunter2 stayed visible",
+    ), task=task)
+    public = get_snapshot(store, opened["prompt_id"], reveal=False)
+    assert "hunter2" not in json.dumps(public)
+    assert "detail" not in public["delivery_evidence"]
+    revealed = get_snapshot(store, opened["prompt_id"], reveal=True)
+    assert "hunter2" in revealed["delivery_evidence"]["detail"]
+
+
+def test_trigger_blocks_early_purge_delete_and_replace(store):
+    task = _task(task_id="guard", run_id="guard-run")
+    store.save_task(task)
+    opened = open_snapshot(store, task, "keep", action="INITIAL", intervention_id="guard-1")
+    conn = sqlite3.connect(store.db_path)
+    try:
+        with pytest.raises(sqlite3.Error):
+            conn.execute(
+                "UPDATE prompt_snapshots SET prompt_content='', content_purged=1 WHERE prompt_id=?",
+                (opened["prompt_id"],),
+            )
+        conn.rollback()
+        with pytest.raises(sqlite3.Error):
+            conn.execute(
+                "UPDATE prompt_snapshots SET delivery_evidence_json=? WHERE prompt_id=?",
+                ('{"level":"forged"}', opened["prompt_id"]),
+            )
+        conn.rollback()
+        with pytest.raises(sqlite3.Error):
+            conn.execute("DELETE FROM prompt_snapshots WHERE prompt_id=?", (opened["prompt_id"],))
+        conn.rollback()
+        with pytest.raises(sqlite3.Error):
+            conn.execute(
+                """INSERT OR REPLACE INTO prompt_snapshots (
+                    prompt_id, task_id, prompt_content, prompt_sha256, content_bytes,
+                    created_at, dispatch_status
+                ) VALUES (?,?,?,?,?,?,?)""",
+                (opened["prompt_id"], "guard", "tampered", "0" * 64, 8, 1, "GENERATED"),
+            )
+        conn.rollback()
+    finally:
+        conn.close()
+    kept = get_snapshot(store, opened["prompt_id"], reveal=True)
+    assert kept["prompt_content"] == "keep"
+    assert kept["dispatch_status"] == "GENERATED"
 
 
 def test_direct_sqlite_store_receives_the_table(tmp_path):

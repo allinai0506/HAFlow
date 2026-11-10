@@ -21,7 +21,7 @@ bin/herdr-task prompt-ledger usage --task-id <task_id>
 
 ## 如何解读状态
 
-`DISPATCHED` 表示 `herdr agent prompt` 或等价传输命令返回成功。`DELIVERY_VERIFIED` 表示未截断的终端缓冲里出现了同一份完整文本。两条都不表示模型已经收到或理解指令。模型内部 system prompt 和厂商 CLI 全局指令在组成摘要里是 `UNOBSERVABLE`。
+`DISPATCHED` 表示 `herdr agent prompt` 或等价传输命令返回成功。`DELIVERY_VERIFIED` 表示调用方证明未截断的终端缓冲里出现了同一份完整文本。`herdr pane read` 的文本输出没有这个证明，遗留派发不会因此升到已核验。两条都不表示模型已经收到或理解指令。模型内部 system prompt 和厂商 CLI 全局指令在组成摘要里是 `UNOBSERVABLE`。默认查询不返回传输细节。
 
 同一任务的多轮返工各有自己的 `prompt_id`。相同 intervention 不会覆盖已有正文。
 

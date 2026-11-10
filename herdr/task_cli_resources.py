@@ -88,9 +88,9 @@ def handle_renew_completion(args, *, get_store, herdr):
         from herdr.supervisor_delivery import current_delivery_task
 
         pane = current_delivery_task(task, store, native=True)["pane_id"]
+        from herdr.prompt_ledger import raise_for_transport
         sent = herdr("agent", "prompt", str(pane), text)
-        if sent.returncode != 0:
-            raise RuntimeError("Renewal native prompt transport failed")
+        return raise_for_transport(sent)
 
     result = deliver(
         task,
