@@ -21,12 +21,12 @@ python3 -m pytest -q tests/test_prompt_ledger.py tests/test_supervisor_delivery.
   tests/test_dispatch_delivery_timeout.py tests/test_task_delivery.py \
   tests/test_runtime_prompt_binding.py tests/test_delivery_rework.py \
   tests/test_completion_renewal.py
-96 passed in 38.96s
+97 passed in 38.56s
 ```
 
 同一轮还跑了 `tests/test_task_cli_rework.py`。`python3 -m compileall -q` 覆盖改动模块，`git diff --check` 无输出。测试覆盖短文本、20 万字以上长文本、`agent_blocked`、超时、`OSError E2BIG`、Agent 未就绪、截断缓冲、同一 intervention 不覆盖、两轮返工都保留、传输中断后恢复、状态写入失败后的补记、不同指令文件摘要、直接符号链接和 `.agents` 父链接都不跟随、默认读取去掉传输 detail、触发器拒绝改写正文、提前清空、删除、替换和跳转状态、到期清空后哈希仍在、边界行不清空时旧行仍被清空、打开数据库会换掉更弱的触发器、Ledger 故障不阻断投递。
 
-只读审查第一轮针对 `b46466250c4531337bb7972da9f01b3a5be4a04b`，第二轮针对 `845134fa85482429b9470e15ff2a4500a6a4ef19`，结论都是 FAIL。第二轮剩下的两点是：整秒时钟差导致一次清空回滚整批，以及旧库不会换上新触发器。随后的提交处理这两点。主命令超时后 send-text 被拒绝，仍记为 `DELIVERY_FAILED`，因为任务本身已经按失败退出；`channel_bytes` 保持 `UNKNOWN`。
+只读审查前三轮分别针对 `b464662`、`845134f`、`3050bc0`，结论都是 FAIL。第三轮确认清空和旧触发器替换已经修好，并指出三条触发器的 `DROP` 各自自动提交，窗口里可以改写正文。随后的提交把替换放进同一个 `BEGIN IMMEDIATE`；失败会回滚，旧触发器还在。主命令超时后 send-text 被拒绝，仍记为 `DELIVERY_FAILED`，因为任务本身已经按失败退出；`channel_bytes` 保持 `UNKNOWN`。
 
 同一命令里的既有投递、返工、回执和完成续期测试同时通过。没有在本机重跑全库 `pytest`。
 

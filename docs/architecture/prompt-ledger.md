@@ -62,7 +62,7 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 
 默认读取走现有 `redact_text`，只返回 240 字摘录，并去掉传输证据里的 `detail`。完整正文、diff 和传输细节需要 `reveal=True`，CLI 对应 `--reveal`。访问边界是本机状态库加上这个开关，策略名是 `local_operator_reveal`。现有脱敏只覆盖已知密钥模式，不能把任意词都当成密钥。
 
-`retain_until` 是创建时的整秒时间加 90 天，触发器禁止改这个字段。正文清空还要求它不晚于 SQLite 的当前整秒，并且状态和证据保持不变。每次打开状态库都会重建这三条快照触发器，避免旧库留下更弱的规则。触发器同时拒绝 `DELETE` 和覆盖同一 `prompt_id` 的 `INSERT OR REPLACE`。`purge_expired` 只选择至少早了一秒的行，并按行保存点清空：清空 `prompt_content`，置 `content_purged=1`，保留哈希和状态。一行被拒绝不会回滚其它行。清除后校验返回 `HASH_RETAINED_CONTENT_PURGED`。V1 没有后台任务调用 `purge_expired`。
+`retain_until` 是创建时的整秒时间加 90 天，触发器禁止改这个字段。正文清空还要求它不晚于 SQLite 的当前整秒，并且状态和证据保持不变。每次打开状态库都会在同一个 `BEGIN IMMEDIATE` 里重建这三条快照触发器。替换失败会回滚，旧触发器还在；其它连接要等这次写入结束才能改快照。触发器同时拒绝 `DELETE` 和覆盖同一 `prompt_id` 的 `INSERT OR REPLACE`。`purge_expired` 只选择至少早了一秒的行，并按行保存点清空：清空 `prompt_content`，置 `content_purged=1`，保留哈希和状态。一行被拒绝不会回滚其它行。清除后校验返回 `HASH_RETAINED_CONTENT_PURGED`。V1 没有后台任务调用 `purge_expired`。
 
 查询入口是 `bin/herdr-task prompt-ledger`，子命令为 `list`、`get`、`verify`、`diff`、`history`、`usage`。JSON 打到标准输出，参数错误退出码 2。
 

@@ -20,6 +20,34 @@ def _schema_initialization_lock(path: Path):
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+def _run_exclusive(conn: sqlite3.Connection, statements) -> None:
+    """Run schema statements in one immediate transaction.
+
+    Each statement would otherwise autocommit. A failure, or another
+    connection writing between them, must not leave the previous triggers
+    already dropped.
+    """
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")
+    else:
+        conn.execute("SAVEPOINT prompt_snapshot_triggers")
+    try:
+        for statement in statements:
+            conn.execute(statement)
+        if own:
+            conn.commit()
+        else:
+            conn.execute("RELEASE prompt_snapshot_triggers")
+    except Exception:
+        if own:
+            conn.rollback()
+        else:
+            conn.execute("ROLLBACK TO prompt_snapshot_triggers")
+            conn.execute("RELEASE prompt_snapshot_triggers")
+        raise
+
+
 def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """Execute table and index creation DDL once per database path."""
     if path_key in _INITIALIZED_DBS:
@@ -147,11 +175,13 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
     # Replace these three triggers on every open so an older database
-    # cannot keep a weaker immutability rule.
-    conn.execute("DROP TRIGGER IF EXISTS prompt_snapshots_immutable")
-    conn.execute("DROP TRIGGER IF EXISTS prompt_snapshots_no_delete")
-    conn.execute("DROP TRIGGER IF EXISTS prompt_snapshots_no_replace")
-    conn.execute("""
+    # cannot keep a weaker immutability rule. One immediate transaction
+    # keeps the previous triggers in place if the replacement fails.
+    _run_exclusive(conn, [
+        "DROP TRIGGER IF EXISTS prompt_snapshots_immutable",
+        "DROP TRIGGER IF EXISTS prompt_snapshots_no_delete",
+        "DROP TRIGGER IF EXISTS prompt_snapshots_no_replace",
+        """
         CREATE TRIGGER prompt_snapshots_immutable
         BEFORE UPDATE ON prompt_snapshots
         FOR EACH ROW
@@ -201,22 +231,23 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         BEGIN
             SELECT RAISE(ABORT, 'prompt snapshot is immutable');
         END;
-    """)
-    conn.execute("""
+        """,
+        """
         CREATE TRIGGER prompt_snapshots_no_delete
         BEFORE DELETE ON prompt_snapshots
         BEGIN
             SELECT RAISE(ABORT, 'prompt snapshot cannot be deleted');
         END;
-    """)
-    conn.execute("""
+        """,
+        """
         CREATE TRIGGER prompt_snapshots_no_replace
         BEFORE INSERT ON prompt_snapshots
         WHEN EXISTS (SELECT 1 FROM prompt_snapshots WHERE prompt_id = NEW.prompt_id)
         BEGIN
             SELECT RAISE(ABORT, 'prompt snapshot cannot be replaced');
         END;
-    """)
+        """,
+    ])
     conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_snapshots_task ON prompt_snapshots(task_id, created_at, prompt_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_snapshots_node ON prompt_snapshots(workflow_id, node_id, created_at, prompt_id);")
     conn.execute("""

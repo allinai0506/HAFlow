@@ -510,6 +510,35 @@ def test_opening_the_store_replaces_a_weaker_snapshot_trigger(tmp_path):
     assert first.db_path == store.db_path
 
 
+def test_failed_trigger_rewrite_keeps_the_previous_trigger(tmp_path):
+    from herdr.state.schema import _run_exclusive
+    path = tmp_path / "state.db"
+    store = SQLiteStateStore(path)
+    task = _task(task_id="atomic", run_id="atomic")
+    store.save_task(task)
+    opened = open_snapshot(store, task, "original", action="INITIAL", intervention_id="atomic-1")
+    conn = sqlite3.connect(path, isolation_level=None)
+    with pytest.raises(sqlite3.Error):
+        _run_exclusive(conn, [
+            "DROP TRIGGER IF EXISTS prompt_snapshots_immutable",
+            """CREATE TRIGGER prompt_snapshots_immutable
+               BEFORE UPDATE ON prompt_snapshots
+               BEGIN
+                   SELECT RAISE(ABORT, 'temporary');
+               END;""",
+            "SELECT RAISE(ABORT, 'stop before commit');",
+        ])
+    conn.close()
+    conn = sqlite3.connect(path)
+    with pytest.raises(sqlite3.Error, match="prompt snapshot is immutable"):
+        conn.execute(
+            "UPDATE prompt_snapshots SET prompt_content='pwned' WHERE prompt_id=?",
+            (opened["prompt_id"],),
+        )
+    conn.close()
+    assert get_snapshot(store, opened["prompt_id"], reveal=True)["prompt_content"] == "original"
+
+
 def test_direct_sqlite_store_receives_the_table(tmp_path):
     store = SQLiteStateStore(tmp_path / "direct.db")
     task = _task()
