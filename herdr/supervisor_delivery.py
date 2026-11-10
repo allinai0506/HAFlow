@@ -63,6 +63,7 @@ def deliver(task, store, action, payload, prompt, send, *, boundary=lambda phase
             fresh = store.get_task(task['task_id']) or {}
             if fresh.get('completion_identity_path') != phases[prefix+'_dispatched'].get('identity_path'):
                 raise DeliveryUnknown(action,intervention_id)
+            hook.reconcile_dispatched()
             return {prefix+'_dispatched':True,'already_applied':True}
         if prefix+'_transport_started' in phases:
             hook.on_ambiguous(phases[prefix+'_transport_started'].get('prompt'))

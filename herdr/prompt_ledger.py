@@ -596,6 +596,24 @@ class DeliveryHook:
         except Exception as exc:
             _warn(exc)
 
+    def reconcile_dispatched(self):
+        """Catch a snapshot left behind after the send callable already returned."""
+        try:
+            self._remember()
+            if not self.prompt_id:
+                return
+            conn = _connect(self.store)
+            try:
+                row = _row(conn, self.prompt_id)
+            finally:
+                conn.close()
+            if row and row["dispatch_status"] in {"GENERATED", "DISPATCH_PENDING"}:
+                apply_outcome(
+                    self.store, self.prompt_id, classify_transport_result(returncode=0), task=self.task,
+                )
+        except Exception as exc:
+            _warn(exc)
+
 
 def _public(row, *, reveal):
     if row is None:

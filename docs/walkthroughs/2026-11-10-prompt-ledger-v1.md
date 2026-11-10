@@ -21,10 +21,10 @@ python3 -m pytest -q tests/test_prompt_ledger.py tests/test_supervisor_delivery.
   tests/test_dispatch_delivery_timeout.py tests/test_task_delivery.py \
   tests/test_runtime_prompt_binding.py tests/test_delivery_rework.py \
   tests/test_completion_renewal.py
-87 passed in 38.95s
+89 passed in 39.86s
 ```
 
-`python3 -m compileall -q` 覆盖改动模块，`git diff --check` 无输出。测试覆盖短文本、20 万字以上长文本、`agent_blocked`、超时、Agent 未就绪、截断缓冲、`E2BIG`、同一 intervention 不覆盖、两轮返工都保留、传输中断后恢复、不同指令文件摘要、符号链接不跟随、脱敏、触发器拒绝改写、过期清空后哈希仍在、Ledger 故障不阻断投递。
+`python3 -m compileall -q` 覆盖改动模块，`git diff --check` 无输出。测试覆盖短文本、20 万字以上长文本、`agent_blocked`、超时、Agent 未就绪、截断缓冲、`E2BIG`、同一 intervention 不覆盖、两轮返工都保留、传输中断后恢复、状态写入失败后的补记、不同指令文件摘要、符号链接不跟随、脱敏、触发器拒绝改写正文和跳转状态、过期清空后哈希仍在、Ledger 故障不阻断投递。
 
 同一命令里的既有投递、返工、回执和完成续期测试同时通过。没有在本机重跑全库 `pytest`。
 
@@ -35,7 +35,8 @@ python3 -m pytest -q tests/test_prompt_ledger.py tests/test_supervisor_delivery.
 - `before_prompt` 崩溃后第二次投递不重发，原文还在，状态成为 `DELIVERY_UNVERIFIED`。
 - 命令成功记为 `DISPATCHED`，证据级别 `transport_command_accepted`，`model_receipt` 为 `UNOBSERVABLE`。
 - 输入前拒绝记为 `DELIVERY_FAILED`；超时记为 `DELIVERY_UNVERIFIED`。
-- 直接 `UPDATE` 正文会被触发器拒绝。
+- 直接 `UPDATE` 正文会被触发器拒绝。直接把 `GENERATED` 改成 `DELIVERY_VERIFIED` 也会被拒绝。
+- 发送已返回但状态写入失败时，下一次同一 intervention 不重发，并把仍处于 `DISPATCH_PENDING` 的快照补到 `DISPATCHED`。
 
 ## 尚未验证
 

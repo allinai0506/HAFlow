@@ -170,6 +170,14 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             AND OLD.intervention_id IS NEW.intervention_id
             AND OLD.redaction_policy = NEW.redaction_policy
             AND OLD.retain_until IS NEW.retain_until
+            AND (OLD.dispatched_at IS NEW.dispatched_at OR OLD.dispatched_at IS NULL)
+            AND (
+                OLD.dispatch_status = NEW.dispatch_status
+                OR (OLD.dispatch_status = 'GENERATED' AND NEW.dispatch_status = 'DISPATCH_PENDING')
+                OR (OLD.dispatch_status = 'DISPATCH_PENDING' AND NEW.dispatch_status IN ('DISPATCHED', 'DELIVERY_FAILED', 'DELIVERY_UNVERIFIED'))
+                OR (OLD.dispatch_status = 'DISPATCHED' AND NEW.dispatch_status IN ('DELIVERY_VERIFIED', 'DELIVERY_FAILED', 'DELIVERY_UNVERIFIED'))
+                OR (OLD.dispatch_status = 'DELIVERY_UNVERIFIED' AND NEW.dispatch_status IN ('DELIVERY_VERIFIED', 'DELIVERY_FAILED'))
+            )
             AND (
                 (OLD.prompt_content = NEW.prompt_content AND OLD.content_purged = NEW.content_purged)
                 OR (

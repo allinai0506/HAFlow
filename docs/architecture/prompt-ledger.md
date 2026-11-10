@@ -23,7 +23,9 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 - `DISPATCHED` → `DELIVERY_VERIFIED`、`DELIVERY_FAILED`、`DELIVERY_UNVERIFIED`
 - `DELIVERY_UNVERIFIED` → `DELIVERY_VERIFIED`、`DELIVERY_FAILED`
 
-`DELIVERY_VERIFIED` 和 `DELIVERY_FAILED` 是终态。`apply_outcome` 会补齐中间状态，只有最后一步写入真实证据。
+`DELIVERY_VERIFIED` 和 `DELIVERY_FAILED` 是终态。`apply_outcome` 会补齐中间状态，只有最后一步写入真实证据。触发器同样拒绝跳过中间状态，并在 `dispatched_at` 一旦写入后禁止改它。
+
+若发送已经返回、但快照仍停在 `GENERATED` 或 `DISPATCH_PENDING`，下一次发现 `*_dispatched` 事件时只把快照补到 `DISPATCHED`，不重发，也不升到 `DELIVERY_VERIFIED`。
 
 证据级别：
 

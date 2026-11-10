@@ -319,6 +319,45 @@ def test_parser_exposes_prompt_ledger_commands():
     assert args.reveal is True
 
 
+def test_dispatched_delivery_reconciles_a_snapshot_left_at_pending(store, monkeypatch):
+    import herdr.prompt_ledger as ledger
+    real = ledger.apply_outcome
+
+    def fail_dispatched(store, prompt_id, outcome, *, task):
+        if outcome["status"] == "DISPATCHED":
+            raise RuntimeError("status write failed")
+        return real(store, prompt_id, outcome, task=task)
+
+    monkeypatch.setattr(ledger, "apply_outcome", fail_dispatched)
+    calls = []
+    first = _deliver(store, _task(), "kept", "i-recon", lambda *_: calls.append(1))
+    assert first["retry_dispatched"] is True
+    assert _snapshot_for(store, "t")["dispatch_status"] == "DISPATCH_PENDING"
+    monkeypatch.setattr(ledger, "apply_outcome", real)
+    second = _deliver(store, store.get_task("t"), "ignored", "i-recon", lambda *_: calls.append(1))
+    assert second["already_applied"] is True
+    assert calls == [1]
+    restored = _snapshot_for(store, "t")
+    assert restored["dispatch_status"] == "DISPATCHED"
+    assert restored["prompt_content"].startswith("kept")
+    assert "ignored" not in restored["prompt_content"]
+
+
+def test_database_rejects_a_status_jump_to_verified(store):
+    task = _task(task_id="jump")
+    store.save_task(task)
+    opened = open_snapshot(store, task, "alpha", action="INITIAL", intervention_id="jump-1")
+    conn = sqlite3.connect(store.db_path)
+    with pytest.raises(sqlite3.Error):
+        conn.execute(
+            "UPDATE prompt_snapshots SET dispatch_status='DELIVERY_VERIFIED' WHERE prompt_id=?",
+            (opened["prompt_id"],),
+        )
+        conn.commit()
+    conn.close()
+    assert get_snapshot(store, opened["prompt_id"])["dispatch_status"] == "GENERATED"
+
+
 def test_composition_skips_symlinks_and_names_the_legacy_assembler(store, tmp_path):
     root = tmp_path / "clone"
     outside = tmp_path / "outside.md"
