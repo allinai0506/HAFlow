@@ -235,6 +235,37 @@ def test_queries_usage_history_and_node_filter(store, tmp_path):
     assert [item["payload"]["to_status"] for item in history["transitions"]] == [
         "GENERATED", "DISPATCH_PENDING", "DISPATCHED",
     ]
+    assert usage["snapshots"][0]["agent_name"] == "codex"
+
+
+def test_snapshot_reads_the_runtime_instance_name(store):
+    from herdr.runtime_state import build_runtime_state
+
+    launched = _task(agent="codex", agent_kind="codex", agent_name="codex")
+    launched["runtime"] = build_runtime_state(
+        agent="codex",
+        agent_name="worker-instance-42",
+        pane_id="pane-1",
+    )
+    store.save_task(launched)
+    loaded = store.get_task("t")
+    opened = open_snapshot(
+        store, loaded, "ship the parser", action="INITIAL", intervention_id="runtime-1",
+    )
+    assert opened["agent_kind"] == "codex"
+    assert opened["agent_name"] == "worker-instance-42"
+    usage = task_usage(store, "t")
+    assert usage["snapshots"][0]["agent_name"] == "worker-instance-42"
+    assert usage["snapshots"][0]["agent_kind"] == "codex"
+
+    unnamed = _task(task_id="unnamed", agent="codex", agent_kind="codex")
+    store.save_task(unnamed)
+    bare = open_snapshot(
+        store, store.get_task("unnamed"), "no worker name",
+        action="INITIAL", intervention_id="unnamed-1",
+    )
+    assert bare["agent_kind"] == "codex"
+    assert bare["agent_name"] == "UNKNOWN"
 
 
 def test_snapshot_is_immutable_redacted_and_purge_keeps_the_hash(store, monkeypatch):

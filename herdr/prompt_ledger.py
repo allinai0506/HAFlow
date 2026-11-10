@@ -336,6 +336,17 @@ def _find_intervention(conn, task, intervention_id):
     return dict(found) if found else None
 
 
+def _instance_name(task):
+    """Worker instance recorded at launch. The agent type is not that name."""
+    from herdr.runtime_state import get_task_runtime
+
+    runtime = get_task_runtime(task) or {}
+    for value in (runtime.get("agent_name"), task.get("agent_name")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "UNKNOWN"
+
+
 def record_generated(conn, *, task, prompt, action, intervention_id, store=None):
     if not isinstance(prompt, str):
         raise PromptLedgerError("refusing to snapshot a non-str prompt")
@@ -373,7 +384,7 @@ def record_generated(conn, *, task, prompt, action, intervention_id, store=None)
             (
                 prompt_id, identity["task_id"], identity["workflow_id"], identity["run_id"], identity["node_id"],
                 task.get("agent_kind") or task.get("agent") or "UNKNOWN",
-                task.get("agent_name") or task.get("agent") or "UNKNOWN",
+                _instance_name(task),
                 task.get("candidate_sha") or "",
                 prompt, prompt_sha256(prompt), len(encoded), now, "GENERATED",
                 _canon({"level": "none", "model_receipt": "UNOBSERVABLE"}),

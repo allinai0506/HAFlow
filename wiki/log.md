@@ -8,6 +8,11 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-11] fix | Prompt Ledger 记录运行时工位名
+
+- 背景：快照的 `agent_name` 只读任务顶层，缺失时退回 Agent 类型。正常启动把具体工位名写在 `runtime.agent_name`。
+- 变更：快照先读运行时工位名。没有工位名时记 `UNKNOWN`。`agent_kind` 仍是类型。
+
 ## [2026-11-10] add | Prompt Ledger V1：Agent 最终指令快照与投递审计
 
 - 背景：HAFlow 能组装并发出 Agent Prompt，但最终文本只出现在可改写的回执事件里。任务失败后无法稳定回答当时发出了哪一版指令、传输命令是否成功、终端通道是否收下全文。

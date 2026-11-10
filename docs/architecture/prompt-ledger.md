@@ -12,6 +12,8 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 
 每次新的投递生成新的 `prompt_id`（`ps_` 加随机十六进制）。同一 `task_id + run_id + intervention_id` 只能有一行。相同正文再次记录时返回原行；正文变了就拒绝覆盖。新的返工使用新的 intervention id，因此保留上一轮。
 
+`agent_kind` 是任务上的 Agent 类型。`agent_name` 是启动时写入 `runtime.agent_name` 的具体工位名；调用方若只在任务顶层给出工位名，也采用该值。两处都没有工位名时记 `UNKNOWN`，不用类型填这个字段。
+
 `prompt_sha256` 是最终投递字符串的 UTF-8（`surrogatepass`）SHA-256。脱敏摘录、截断屏幕和转换后的文本都不是这个哈希的输入。单份正文上限是 4_000_000 字节；超过上限时拒绝建快照，不保存截断副本。
 
 ## 状态
