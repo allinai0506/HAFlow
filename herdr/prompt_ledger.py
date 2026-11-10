@@ -632,10 +632,16 @@ class DeliveryHook:
         except Exception as exc:
             _warn(exc)
 
-    def reconcile_dispatched(self):
+    def reconcile_dispatched(self, prompt=None):
         """Catch a snapshot left behind after the send callable already returned."""
         try:
             self._remember()
+            if not self.prompt_id and isinstance(prompt, str) and prompt:
+                row = open_snapshot(
+                    self.store, self.task, prompt, action=self.action,
+                    intervention_id=self.intervention_id,
+                )
+                self.prompt_id = row["prompt_id"]
             if not self.prompt_id:
                 return
             conn = _connect(self.store)
@@ -845,10 +851,8 @@ def purge_expired(store, now=None):
         conn.close()
 
 
-def cli_prompt_ledger(args):
+def cli_prompt_ledger(args, store):
     import sys
-    from herdr.state_store import get_state_store
-    store = get_state_store()
     command = args.ledger_command
     try:
         if command == "list":

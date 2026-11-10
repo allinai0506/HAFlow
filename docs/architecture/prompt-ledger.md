@@ -27,7 +27,7 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 
 `DELIVERY_VERIFIED` 和 `DELIVERY_FAILED` 是终态。`apply_outcome` 会补齐中间状态，只有最后一步写入真实证据。触发器同样拒绝跳过中间状态，并在 `dispatched_at` 一旦写入后禁止改它。
 
-若发送已经返回、但快照仍停在 `GENERATED` 或 `DISPATCH_PENDING`，下一次发现 `*_dispatched` 事件时只把快照补到 `DISPATCHED`，不重发，也不升到 `DELIVERY_VERIFIED`。
+若发送已经返回、但快照仍停在 `GENERATED` 或 `DISPATCH_PENDING`，下一次发现 `*_dispatched` 事件时只把快照补到 `DISPATCHED`，不重发，也不升到 `DELIVERY_VERIFIED`。若当时快照根本没有写入，而这条事件里仍有当时发出的字符串，同一次补记用那段原文新建快照，再标成 `DISPATCHED`。事件里没有这段原文时不编造快照。
 
 证据级别：
 
@@ -66,7 +66,7 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 
 `retain_until` 是创建时的整秒时间加 90 天，触发器禁止改这个字段。正文清空还要求它不晚于 SQLite 的当前整秒，并且状态和证据保持不变。每次打开状态库都会在同一个 `BEGIN IMMEDIATE` 里重建这三条快照触发器。替换失败会回滚，旧触发器还在；其它连接要等这次写入结束才能改快照。触发器同时拒绝 `DELETE` 和覆盖同一 `prompt_id` 的 `INSERT OR REPLACE`。`purge_expired` 只选择至少早了一秒的行，并按行保存点清空：清空 `prompt_content`，置 `content_purged=1`，保留哈希和状态。一行被拒绝不会回滚其它行。清除后校验返回 `HASH_RETAINED_CONTENT_PURGED`。V1 没有后台任务调用 `purge_expired`。
 
-查询入口是 `bin/herdr-task prompt-ledger`，子命令为 `list`、`get`、`verify`、`diff`、`history`、`usage`。JSON 打到标准输出，参数错误退出码 2。
+查询入口是 `bin/herdr-task prompt-ledger`，子命令为 `list`、`get`、`verify`、`diff`、`history`、`usage`。它使用这条命令已经选中的状态库，包括只设置了 `WORKFLOW_FILE` 的命名空间，不另走生产默认路径。JSON 打到标准输出，参数错误退出码 2。
 
 ## 本版不覆盖
 

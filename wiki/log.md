@@ -8,6 +8,11 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-11] fix | Prompt Ledger 查询选中的状态库，并补记丢失的快照
+
+- 背景：`prompt-ledger` 自己打开生产默认库，忽略 CLI 已按 `WORKFLOW_FILE` 选中的库。另有一条路径：首次写入快照失败后发送仍成功，再次进入已投递分支时因为没有 `prompt_id` 就直接返回，发出的原文留在事件里，账本没有记录。
+- 变更：查询改用 `herdr-task` 已经选中的状态库。已投递且快照缺失时，用事件里保存的原文补建快照并标成 `DISPATCHED`，不重发，不升到 `DELIVERY_VERIFIED`。事件里没有原文时不编造。
+
 ## [2026-11-11] fix | Prompt Ledger 记录运行时工位名
 
 - 背景：快照的 `agent_name` 只读任务顶层，缺失时退回 Agent 类型。正常启动把具体工位名写在 `runtime.agent_name`。

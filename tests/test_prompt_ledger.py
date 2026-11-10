@@ -1,8 +1,10 @@
 """Prompt Ledger V1: immutable delivered text, transport evidence, and history."""
 
 import json
+import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -380,6 +382,95 @@ def test_dispatched_delivery_reconciles_a_snapshot_left_at_pending(store, monkey
     assert restored["dispatch_status"] == "DISPATCHED"
     assert restored["prompt_content"].startswith("kept")
     assert "ignored" not in restored["prompt_content"]
+
+
+def test_completed_delivery_recovers_a_snapshot_the_first_send_never_wrote(store, monkeypatch):
+    import herdr.prompt_ledger as ledger
+
+    real = ledger.record_generated
+
+    def refuse_insert(*_args, **_kwargs):
+        raise RuntimeError("snapshot insert failed")
+
+    monkeypatch.setattr(ledger, "record_generated", refuse_insert)
+    calls = []
+    task = _task()
+    first = _deliver(store, task, "kept-text", "i-missing", lambda *_: calls.append(1))
+    assert first["retry_dispatched"] is True
+    assert list_snapshots(store, task_id="t") == []
+    monkeypatch.setattr(ledger, "record_generated", real)
+    before = store.get_task("t")["status"]
+    second = _deliver(store, store.get_task("t"), "ignored-later", "i-missing", lambda *_: calls.append(1))
+    assert second["already_applied"] is True
+    assert calls == [1]
+    assert store.get_task("t")["status"] == before
+    restored = _snapshot_for(store, "t")
+    assert restored["prompt_content"].startswith("kept-text")
+    assert "ignored-later" not in restored["prompt_content"]
+    assert restored["dispatch_status"] == "DISPATCHED"
+    assert restored["delivery_evidence"]["level"] == "transport_command_accepted"
+    assert restored["delivery_evidence"]["model_receipt"] == "UNOBSERVABLE"
+    assert restored["delivery_evidence"]["tty_channel"] == "NOT_CONFIRMED"
+
+
+def test_completed_delivery_does_not_invent_a_snapshot_without_the_sent_text(store, monkeypatch):
+    import herdr.prompt_ledger as ledger
+
+    real = ledger.record_generated
+
+    def refuse_insert(*_args, **_kwargs):
+        raise RuntimeError("snapshot insert failed")
+
+    monkeypatch.setattr(ledger, "record_generated", refuse_insert)
+    calls = []
+    first = _deliver(store, _task(task_id="gap"), "kept-text", "i-gap", lambda *_: calls.append(1))
+    assert first["retry_dispatched"] is True
+    conn = sqlite3.connect(store.db_path)
+    row = conn.execute(
+        "SELECT id, payload_json FROM events WHERE event_type=?",
+        ("retry_dispatched",),
+    ).fetchone()
+    payload = json.loads(row[1])
+    payload.pop("prompt", None)
+    conn.execute("UPDATE events SET payload_json=? WHERE id=?", (json.dumps(payload), row[0]))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(ledger, "record_generated", real)
+    second = _deliver(store, store.get_task("gap"), "ignored-later", "i-gap", lambda *_: calls.append(1))
+    assert second["already_applied"] is True
+    assert calls == [1]
+    assert list_snapshots(store, task_id="gap") == []
+
+
+def test_prompt_ledger_list_reads_the_workflow_file_namespace(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    work = tmp_path / "ns"
+    work.mkdir()
+    workflow = work / "workflow.json"
+    workflow.write_text("{}", encoding="utf-8")
+    selected = get_state_store(work / "state.db")
+    task = _task(task_id="review-task")
+    selected.save_task(task)
+    opened = open_snapshot(
+        selected, task, "namespace prompt", action="INITIAL", intervention_id="review-1",
+    )
+    env = os.environ.copy()
+    for name in ("HERDR_STATE_DB", "TASKS_FILE", "WORKFLOWS_FILE", "CHECKPOINTS_DIR"):
+        env.pop(name, None)
+    env["HOME"] = str(home)
+    env["WORKFLOW_FILE"] = str(workflow)
+    root = Path(__file__).resolve().parent.parent
+    proc = subprocess.run(
+        [sys.executable, str(root / "bin" / "herdr-task"),
+         "prompt-ledger", "list", "--task-id", "review-task"],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert [item["prompt_id"] for item in payload] == [opened["prompt_id"]]
+    assert payload[0]["task_id"] == "review-task"
+    assert not (home / ".herdr-controller" / "state.db").exists()
 
 
 def test_database_rejects_a_status_jump_to_verified(store):
