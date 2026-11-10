@@ -469,6 +469,47 @@ def test_trigger_blocks_early_purge_delete_and_replace(store):
     assert kept["dispatch_status"] == "GENERATED"
 
 
+def test_purge_keeps_an_old_row_when_a_borderline_row_is_present(store, monkeypatch):
+    import herdr.prompt_ledger as ledger
+    monkeypatch.setattr(ledger, "RETENTION_SECONDS", -30)
+    _deliver(store, _task(task_id="old", run_id="old"), "old-secret", "old", lambda *_: None)
+    monkeypatch.setattr(ledger, "RETENTION_SECONDS", 0)
+    _deliver(store, _task(task_id="edge", run_id="edge"), "edge-secret", "edge", lambda *_: None)
+    assert purge_expired(store) >= 1
+    old = _snapshot_for(store, "old")
+    assert old["prompt_content"] == ""
+    assert verify_snapshot(store, old["prompt_id"])["status"] == "HASH_RETAINED_CONTENT_PURGED"
+
+
+def test_opening_the_store_replaces_a_weaker_snapshot_trigger(tmp_path):
+    path = tmp_path / "state.db"
+    first = SQLiteStateStore(path)
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TRIGGER IF EXISTS prompt_snapshots_immutable")
+    conn.execute("""
+        CREATE TRIGGER prompt_snapshots_immutable
+        BEFORE UPDATE ON prompt_snapshots
+        BEGIN
+            SELECT 1;
+        END;
+    """)
+    conn.commit()
+    conn.close()
+    store = SQLiteStateStore(path)
+    task = _task(task_id="refresh", run_id="refresh")
+    store.save_task(task)
+    opened = open_snapshot(store, task, "keep", action="INITIAL", intervention_id="refresh-1")
+    conn = sqlite3.connect(path)
+    with pytest.raises(sqlite3.Error):
+        conn.execute(
+            "UPDATE prompt_snapshots SET prompt_content='', content_purged=1 WHERE prompt_id=?",
+            (opened["prompt_id"],),
+        )
+    conn.close()
+    assert get_snapshot(store, opened["prompt_id"], reveal=True)["prompt_content"] == "keep"
+    assert first.db_path == store.db_path
+
+
 def test_direct_sqlite_store_receives_the_table(tmp_path):
     store = SQLiteStateStore(tmp_path / "direct.db")
     task = _task()

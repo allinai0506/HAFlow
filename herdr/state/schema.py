@@ -146,8 +146,13 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
             content_purged INTEGER NOT NULL DEFAULT 0
         );
     """)
+    # Replace these three triggers on every open so an older database
+    # cannot keep a weaker immutability rule.
+    conn.execute("DROP TRIGGER IF EXISTS prompt_snapshots_immutable")
+    conn.execute("DROP TRIGGER IF EXISTS prompt_snapshots_no_delete")
+    conn.execute("DROP TRIGGER IF EXISTS prompt_snapshots_no_replace")
     conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS prompt_snapshots_immutable
+        CREATE TRIGGER prompt_snapshots_immutable
         BEFORE UPDATE ON prompt_snapshots
         FOR EACH ROW
         WHEN NOT (
@@ -198,14 +203,14 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         END;
     """)
     conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS prompt_snapshots_no_delete
+        CREATE TRIGGER prompt_snapshots_no_delete
         BEFORE DELETE ON prompt_snapshots
         BEGIN
             SELECT RAISE(ABORT, 'prompt snapshot cannot be deleted');
         END;
     """)
     conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS prompt_snapshots_no_replace
+        CREATE TRIGGER prompt_snapshots_no_replace
         BEFORE INSERT ON prompt_snapshots
         WHEN EXISTS (SELECT 1 FROM prompt_snapshots WHERE prompt_id = NEW.prompt_id)
         BEGIN

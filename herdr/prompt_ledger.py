@@ -379,7 +379,7 @@ def record_generated(conn, *, task, prompt, action, intervention_id, store=None)
                 _canon({"level": "none", "model_receipt": "UNOBSERVABLE"}),
                 digests["rules_digest"], digests["skills_digest"], digests["workflow_digest"],
                 _canon(composition), action, intervention_id or None, _REDACTION_POLICY,
-                now + RETENTION_SECONDS,
+                int(now) + RETENTION_SECONDS,
             ),
         )
         _emit(conn, task, prompt_id, None, "GENERATED", {"level": "none"})
@@ -797,23 +797,36 @@ def task_usage(store, task_id):
 
 def purge_expired(store, now=None):
     now = time.time() if now is None else now
+    # The trigger compares retain_until to SQLite's integer second. Stay one
+    # second behind that clock, and do not let one rejected row undo the rest.
+    cutoff = int(now) - 1
     conn = _connect(store)
+    cleared = 0
     try:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             """SELECT prompt_id FROM prompt_snapshots
                WHERE content_purged=0 AND retain_until IS NOT NULL AND retain_until<=?""",
-            (now,),
+            (cutoff,),
         ).fetchall()
         for item in rows:
-            conn.execute(
-                """UPDATE prompt_snapshots
-                   SET prompt_content='', content_purged=1
-                   WHERE prompt_id=? AND content_purged=0""",
-                (item["prompt_id"],),
-            )
+            name = "prompt_purge_" + uuid.uuid4().hex[:8]
+            conn.execute(f"SAVEPOINT {name}")
+            try:
+                conn.execute(
+                    """UPDATE prompt_snapshots
+                       SET prompt_content='', content_purged=1
+                       WHERE prompt_id=? AND content_purged=0""",
+                    (item["prompt_id"],),
+                )
+            except Exception:
+                conn.execute(f"ROLLBACK TO {name}")
+                conn.execute(f"RELEASE {name}")
+                continue
+            conn.execute(f"RELEASE {name}")
+            cleared += 1
         conn.commit()
-        return len(rows)
+        return cleared
     except Exception:
         conn.rollback()
         raise
