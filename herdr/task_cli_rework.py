@@ -114,11 +114,11 @@ def handle_rework(
 
             def send(pane, text):
                 from herdr.supervisor_delivery import current_delivery_task
+                from herdr.prompt_ledger import raise_for_transport
 
                 pane = current_delivery_task(task, store, native=True)["pane_id"]
                 sent = herdr("agent", "prompt", str(pane), text)
-                if sent.returncode != 0:
-                    raise RuntimeError("Rework native prompt transport failed")
+                return raise_for_transport(sent)
 
             result = deliver(
                 task,
@@ -167,11 +167,47 @@ def handle_rework(
 
             prompt += completion_instruction(args.task_id, store)
             contract_version = store.get_task(args.task_id).get("version")
+        from herdr.prompt_ledger import apply_outcome, classify_transport_result, open_snapshot
+        ledger_id = None
+        try:
+            ledger_id = open_snapshot(
+                store, task, prompt, action="REWORK",
+                intervention_id="rework:" + str(execution_token) + ":" + uuid.uuid4().hex,
+            )["prompt_id"]
+        except Exception as exc:
+            print(f"[PROMPT LEDGER] {type(exc).__name__}: {exc}")
+
+        def settle_rework(outcome):
+            if not ledger_id:
+                return
+            try:
+                apply_outcome(store, ledger_id, outcome, task=task)
+            except Exception as exc:
+                print(f"[PROMPT LEDGER] {type(exc).__name__}: {exc}")
+
         try:
             sent = herdr("agent", "prompt", str(pane_reference(task)), prompt)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            settle_rework(classify_transport_result(
+                returncode=124, stderr=str(exc), timed_out=True,
+            ))
             print(f"Rework delivery pending: {exc}")
             sys.exit(2)
+        except OSError as exc:
+            import errno
+            if getattr(exc, "errno", None) == errno.E2BIG:
+                settle_rework(classify_transport_result(
+                    returncode=1, stderr=str(exc), errno_name="E2BIG",
+                ))
+            else:
+                settle_rework(classify_transport_result(returncode=1, stderr=str(exc)))
+            print(f"Rework delivery pending: {exc}")
+            sys.exit(2)
+        settle_rework(classify_transport_result(
+            returncode=sent.returncode,
+            stdout=getattr(sent, "stdout", "") or "",
+            stderr=getattr(sent, "stderr", "") or "",
+        ))
         if sent.returncode != 0:
             print("Rework delivery pending; retry herdr-task rework on the same task")
             sys.exit(2)

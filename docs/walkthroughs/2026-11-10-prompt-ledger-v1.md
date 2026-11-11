@@ -1,0 +1,61 @@
+# Prompt Ledger V1 交付记录
+
+日期：2026-11-10。沙盒分支 `feat/prompt-ledger-v1`，基线 `62078b280a6a4d8d18bc0f7f2bb677703e190acf`。本记录在独立审查完成前不把审查标为通过。
+
+## 已经实现
+
+- 状态库表 `prompt_snapshots`、不可变触发器、按 task 与 workflow/node 的索引，以及 intervention 唯一约束。建表发生在现有连接的 schema 初始化，没有第二套数据库。
+- `herdr/prompt_ledger.py`：最终投递文本的 SHA-256、组成摘要、状态机、查询、diff、历史、usage、90 天保留清除。
+- 回执投递 `deliver()` 在准备、待传输、成功、异常和已启动但结果不明五处旁路记快照。Ledger 失败不改变投递。
+- 遗留无回执派发尾部按现有返回点记状态，不改变任务状态和退出码。
+- receipt-v1 的 retry、verify、rework 传输命令按退出码、`agent_blocked` 和超时分类。
+- CLI：`bin/herdr-task prompt-ledger` 的 `list`、`get`、`verify`、`diff`、`history`、`usage`。
+- 架构说明 `docs/architecture/prompt-ledger.md`，知识页 `wiki/prompt-ledger.md`。
+
+## 已经测试
+
+2026-11-10 在沙盒 `/Users/user/.sandboxes/prompt-ledger-v1` 执行：
+
+```text
+python3 -m pytest -q tests/test_prompt_ledger.py tests/test_supervisor_delivery.py \
+  tests/test_dispatch_delivery_timeout.py tests/test_task_delivery.py \
+  tests/test_runtime_prompt_binding.py tests/test_delivery_rework.py \
+  tests/test_completion_renewal.py
+97 passed in 38.56s
+```
+
+同一轮还跑了 `tests/test_task_cli_rework.py`。`python3 -m compileall -q` 覆盖改动模块，`git diff --check` 无输出。测试覆盖短文本、20 万字以上长文本、`agent_blocked`、超时、`OSError E2BIG`、Agent 未就绪、截断缓冲、同一 intervention 不覆盖、两轮返工都保留、传输中断后恢复、状态写入失败后的补记、不同指令文件摘要、直接符号链接和 `.agents` 父链接都不跟随、默认读取去掉传输 detail、触发器拒绝改写正文、提前清空、删除、替换和跳转状态、到期清空后哈希仍在、边界行不清空时旧行仍被清空、打开数据库会换掉更弱的触发器、Ledger 故障不阻断投递。
+
+只读审查前三轮分别针对 `b464662`、`845134f`、`3050bc0`，结论都是 FAIL。第三轮确认清空和旧触发器替换已经修好，并指出三条触发器的 `DROP` 各自自动提交，窗口里可以改写正文。`33d16843cb42ceaccc5521c6364f208d523e3268` 把替换放进同一个 `BEGIN IMMEDIATE`。针对这个 SHA 的只读复核结论是 PASS：失败会回滚并留下旧触发器；六条替换语句都处在同一次事务里，另一连接的正文更新得到 `database is locked`，不能在窗口里提交。主命令超时后 send-text 被拒绝，仍记为 `DELIVERY_FAILED`，因为任务本身已经按失败退出；`channel_bytes` 保持 `UNKNOWN`。
+
+同一命令里的既有投递、返工、回执和完成续期测试同时通过。没有在本机重跑全库 `pytest`。
+
+## 已经验证
+
+- 快照正文等于 `deliver()` 交给 send 的字符串，SHA-256 可由该字符串重算。
+- 两轮不同 intervention 产生两行，diff 能看到两边正文。
+- `before_prompt` 崩溃后第二次投递不重发，原文还在，状态成为 `DELIVERY_UNVERIFIED`。
+- 命令成功记为 `DISPATCHED`，证据级别 `transport_command_accepted`，`model_receipt` 为 `UNOBSERVABLE`。
+- 输入前拒绝记为 `DELIVERY_FAILED`；超时记为 `DELIVERY_UNVERIFIED`。
+- 直接 `UPDATE` 正文会被触发器拒绝。直接把 `GENERATED` 改成 `DELIVERY_VERIFIED` 也会被拒绝。
+- 发送已返回但状态写入失败时，下一次同一 intervention 不重发，并把仍处于 `DISPATCH_PENDING` 的快照补到 `DISPATCHED`。
+
+## 尚未验证
+
+- 真实 `herdr agent prompt` / `pane send-text` 对运行中的 Agent。测试里的 send 是桩。
+- 生产 LaunchAgent。服务跑的是已安装快照，本次没有重启。
+- 全库 CI。
+- `purge_expired` 没有被任何定时任务调用。
+- 非 receipt-v1 的 supervisor 直发、steering 注入、coordinator `/compact` 和续跑通知不写 Ledger。
+
+## 无法观测
+
+- 模型是否收到或理解 Prompt。
+- 厂商 CLI 的全局指令正文，以及模型内部 system prompt。组成摘要把二者标为 `UNOBSERVABLE`。
+- 终端读回被截断时，通道里究竟有多少字节。证据记为 `UNKNOWN` 或 `pane_read_truncated`，不升为已验证。
+
+## 已知限制
+
+- 回执事件仍保留一份可改写的 Prompt 副本。审计以 `prompt_snapshots` 为准。
+- `herdr/prompt_ledger.py` 超过仓库对 `herdr/` 核心文件 300 到 500 行的建议。它是一个模块，没有再拆。
+- 默认查询只返回脱敏摘录。完整正文需要本机 `--reveal`。

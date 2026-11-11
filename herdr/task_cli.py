@@ -717,6 +717,9 @@ def main(argv=None, *, handlers):
             head_ref_name=getattr(args, "head_ref", ""),
             repo_path=getattr(args, "repo_path", None),
         )
+    elif args.command == "prompt-ledger":
+        from herdr.prompt_ledger import cli_prompt_ledger
+        cli_prompt_ledger(args, _get_store())
     elif args.command == "observe":
         cmd_observe(args)
     elif args.command == "compact":

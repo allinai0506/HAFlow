@@ -24,7 +24,7 @@
     "herdr/state/observation_finding.py": "08321a0ed77584aebea530372de210dbfec54110a59dec8ce0313406bf16aced",
     "herdr/state/outcome_route.py": "5f7b64479728ce81dc8b87f984a7b78f32f7270959d049654f3ecd8259b76496",
     "herdr/state/rollout.py": "b4fde8b5cad37c09c6d42c43c5512e66e19ab2d7905ab7dcce6376b25daa9225",
-    "herdr/state/schema.py": "dd26db06125531df6afa73cacea0cbb8b3e9ad123f6d79d066935c12591c0b1d",
+    "herdr/state/schema.py": "58c2343b91a137253d80fe21216f5ac4fc3180aebe03a52dee20323a3f471032",
     "herdr/state/schema_ddl_helpers.py": "96eb80c2a159db280cac02cb86f7704cedb0ad59681d36629ee5f3a23bf51d69",
     "herdr/state/schema_ddl_txn.py": "fd9d1855a181ad3f4bf53a4039859d8a5535116f80c8cf9c9f6e37b190f2f763",
     "herdr/state/schema_v1.py": "02241f2399191c17e6b3b28396b07773b098d7a92e73a367fac18c4bcd1ffa03",

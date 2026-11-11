@@ -122,12 +122,11 @@ def repair_delivery(task_id, run_id, request_id, *, store, probe=None, send=None
                 if send is None:
                     import subprocess
                     from .node_capacity import pane_reference
+                    from .prompt_ledger import raise_for_transport
                     result = subprocess.run(['herdr', 'agent', 'prompt', str(pane_reference(current)), text],
                                             capture_output=True, text=True, timeout=30)
-                    if result.returncode:
-                        raise RuntimeError('delivery repair native transport failed')
-                else:
-                    send(pane, text)
+                    return raise_for_transport(result)
+                return send(pane, text)
             result = deliver(task, store, 'REWORK', {'intervention_id': request_id, 'action': 'REWORK'},
                              prompt, native_send, prepare_task=prepare)
         conn = state_db.get_db_connection(store.db_path)

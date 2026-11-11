@@ -89,7 +89,45 @@ def _clear_db_env(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+# Prompt Ledger DDL is pinned here, then removed, so the frozen split
+# baseline still compares every older statement in its original order.
+_PROMPT_SNAPSHOT_DDL = (
+    "CREATE TABLE IF NOT EXISTS prompt_snapshots ( prompt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, workflow_id TEXT, run_id TEXT, node_id TEXT, agent_kind TEXT, agent_name TEXT, candidate_sha TEXT, prompt_content TEXT NOT NULL, prompt_sha256 TEXT NOT NULL, content_bytes INTEGER NOT NULL, created_at REAL NOT NULL, dispatched_at REAL, dispatch_status TEXT NOT NULL, delivery_evidence_json TEXT NOT NULL DEFAULT '{}', rules_digest TEXT, skills_digest TEXT, workflow_digest TEXT, composition_json TEXT NOT NULL DEFAULT '{}', action TEXT, intervention_id TEXT, redaction_policy TEXT NOT NULL DEFAULT 'local_operator_reveal', retain_until REAL, content_purged INTEGER NOT NULL DEFAULT 0 );",
+    "BEGIN IMMEDIATE",
+    "DROP TRIGGER IF EXISTS prompt_snapshots_immutable",
+    "DROP TRIGGER IF EXISTS prompt_snapshots_no_delete",
+    "DROP TRIGGER IF EXISTS prompt_snapshots_no_replace",
+    "CREATE TRIGGER prompt_snapshots_immutable BEFORE UPDATE ON prompt_snapshots FOR EACH ROW WHEN NOT ( OLD.prompt_id = NEW.prompt_id AND OLD.task_id = NEW.task_id AND OLD.workflow_id IS NEW.workflow_id AND OLD.run_id IS NEW.run_id AND OLD.node_id IS NEW.node_id AND OLD.agent_kind IS NEW.agent_kind AND OLD.agent_name IS NEW.agent_name AND OLD.candidate_sha IS NEW.candidate_sha AND OLD.prompt_sha256 = NEW.prompt_sha256 AND OLD.content_bytes = NEW.content_bytes AND OLD.created_at = NEW.created_at AND OLD.rules_digest IS NEW.rules_digest AND OLD.skills_digest IS NEW.skills_digest AND OLD.workflow_digest IS NEW.workflow_digest AND OLD.composition_json = NEW.composition_json AND OLD.action IS NEW.action AND OLD.intervention_id IS NEW.intervention_id AND OLD.redaction_policy = NEW.redaction_policy AND OLD.retain_until IS NEW.retain_until AND (OLD.dispatched_at IS NEW.dispatched_at OR OLD.dispatched_at IS NULL) AND ( OLD.dispatch_status = NEW.dispatch_status OR (OLD.dispatch_status = 'GENERATED' AND NEW.dispatch_status = 'DISPATCH_PENDING') OR (OLD.dispatch_status = 'DISPATCH_PENDING' AND NEW.dispatch_status IN ('DISPATCHED', 'DELIVERY_FAILED', 'DELIVERY_UNVERIFIED')) OR (OLD.dispatch_status = 'DISPATCHED' AND NEW.dispatch_status IN ('DELIVERY_VERIFIED', 'DELIVERY_FAILED', 'DELIVERY_UNVERIFIED')) OR (OLD.dispatch_status = 'DELIVERY_UNVERIFIED' AND NEW.dispatch_status IN ('DELIVERY_VERIFIED', 'DELIVERY_FAILED')) ) AND ( OLD.delivery_evidence_json = NEW.delivery_evidence_json OR OLD.dispatch_status != NEW.dispatch_status ) AND ( (OLD.prompt_content = NEW.prompt_content AND OLD.content_purged = NEW.content_purged) OR ( OLD.content_purged = 0 AND NEW.content_purged = 1 AND NEW.prompt_content = '' AND OLD.dispatch_status = NEW.dispatch_status AND OLD.retain_until IS NOT NULL AND OLD.retain_until <= CAST(strftime('%s','now') AS REAL) ) ) ) BEGIN SELECT RAISE(ABORT, 'prompt snapshot is immutable'); END;",
+    "CREATE TRIGGER prompt_snapshots_no_delete BEFORE DELETE ON prompt_snapshots BEGIN SELECT RAISE(ABORT, 'prompt snapshot cannot be deleted'); END;",
+    "CREATE TRIGGER prompt_snapshots_no_replace BEFORE INSERT ON prompt_snapshots WHEN EXISTS ( SELECT 1 FROM prompt_snapshots WHERE prompt_id = NEW.prompt_id OR ( NEW.intervention_id IS NOT NULL AND NEW.intervention_id != '' AND intervention_id = NEW.intervention_id AND task_id = NEW.task_id AND ifnull(run_id, '') = ifnull(NEW.run_id, '') ) ) BEGIN SELECT RAISE(ABORT, 'prompt snapshot cannot be replaced'); END;",
+    "COMMIT",
+    "CREATE INDEX IF NOT EXISTS idx_prompt_snapshots_task ON prompt_snapshots(task_id, created_at, prompt_id);",
+    "CREATE INDEX IF NOT EXISTS idx_prompt_snapshots_node ON prompt_snapshots(workflow_id, node_id, created_at, prompt_id);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_snapshots_intervention ON prompt_snapshots(task_id, ifnull(run_id, ''), intervention_id) WHERE intervention_id IS NOT NULL AND intervention_id != '';",
+)
+
+
+def _without_prompt_snapshot_ddl(actual: list[str]) -> list[str]:
+    block = list(_PROMPT_SNAPSHOT_DDL)
+    width = len(block)
+    found = [
+        index for index in range(len(actual) - width + 1)
+        if actual[index:index + width] == block
+    ]
+    events_at = next(
+        index for index, statement in enumerate(actual)
+        if statement.startswith("CREATE TABLE IF NOT EXISTS events ")
+    )
+    assert found == [events_at + 1]
+    assert actual[found[0] + width].startswith(
+        "CREATE TABLE IF NOT EXISTS trajectory_findings "
+    )
+    start = found[0]
+    return actual[:start] + actual[start + width:]
+
+
 def _assert_trace(name: str, actual: list[str]) -> None:
+    actual = _without_prompt_snapshot_ddl(actual)
     # The Controller Cockpit adds two guarded expression indexes after the
     # frozen split baseline.  Exclude only those exact statements so this gate
     # continues to prove that the upstream state_db split preserves every

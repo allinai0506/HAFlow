@@ -8,6 +8,27 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-11] fix | Prompt Ledger 补记未完成的准备，并守住干预键
+
+- 背景：准备事件已经提交而快照写入失败时，下一次直接继续发送，账本仍然是空的。另外，SQLite 默认不递归触发；用新的 `prompt_id` 对同一干预键执行 `INSERT OR REPLACE` 会删掉原快照，删除触发器不会执行。
+- 变更：继续发送前用准备事件里的原文补建快照。插入保护同时拒绝同一干预键上的替换。
+
+## [2026-11-11] fix | Prompt Ledger 查询选中的状态库，并补记丢失的快照
+
+- 背景：`prompt-ledger` 自己打开生产默认库，忽略 CLI 已按 `WORKFLOW_FILE` 选中的库。另有一条路径：首次写入快照失败后发送仍成功，再次进入已投递分支时因为没有 `prompt_id` 就直接返回，发出的原文留在事件里，账本没有记录。
+- 变更：查询改用 `herdr-task` 已经选中的状态库。已投递且快照缺失时，用事件里保存的原文补建快照并标成 `DISPATCHED`，不重发，不升到 `DELIVERY_VERIFIED`。事件里没有原文时不编造。
+
+## [2026-11-11] fix | Prompt Ledger 记录运行时工位名
+
+- 背景：快照的 `agent_name` 只读任务顶层，缺失时退回 Agent 类型。正常启动把具体工位名写在 `runtime.agent_name`。
+- 变更：快照先读运行时工位名。没有工位名时记 `UNKNOWN`。`agent_kind` 仍是类型。
+
+## [2026-11-10] add | Prompt Ledger V1：Agent 最终指令快照与投递审计
+
+- 背景：HAFlow 能组装并发出 Agent Prompt，但最终文本只出现在可改写的回执事件里。任务失败后无法稳定回答当时发出了哪一版指令、传输命令是否成功、终端通道是否收下全文。
+- 变更：新增 [[prompt-ledger]]。状态库增加 `prompt_snapshots` 与不可变触发器；回执投递和遗留派发尾部各写一份快照；`bin/herdr-task prompt-ledger` 提供查询、校验和差异比较。
+- 边界：`DELIVERY_VERIFIED` 只证明未截断终端缓冲包含全文。模型内部 system prompt 与厂商全局指令保持 `UNOBSERVABLE`。非回执 supervisor 直发、steering 和 compact 不入账。保留期 90 天，尚无定时清除。
+
 ## [2026-11-07] fix | Fix-Loop 责任重试生命周期：返工谱系根持久化与空新作废责任闭环（§232）
 
 - 背景：在 PR #409 持久化作废责任（`invalidation_obligation`）后，复核发现两个深层状态机边界：1) 部分作废恢复后因门禁任务已 supersede，`_resolve_selective_replan` 退化丢失 `target_lineage_roots`，导致选择性等待闩失效、同阶段无关保留任务完成过早解除等待；2) 最后一个任务作废后若恰好重启，`invalidate_for_fix_loop` 无新作废任务返回空列表，因 `if not invalidated: return` 拦截导致遗留责任无法清除，全流程永久死锁。
