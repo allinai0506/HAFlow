@@ -102,6 +102,7 @@ def deliver(task, store, action, payload, prompt, send, *, boundary=lambda phase
             if not acquired:
                 raise DeliveryUnknown(action, intervention_id)
             current_delivery_task(task, store)
+            hook.ensure_generated(prepared.get('prompt'))
             record(prefix+'_transport_started',dict(prepared,delivery_phase='transport_started'))
             hook.on_pending()
             boundary('before_prompt')

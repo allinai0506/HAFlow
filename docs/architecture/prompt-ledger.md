@@ -29,6 +29,8 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 
 若发送已经返回、但快照仍停在 `GENERATED` 或 `DISPATCH_PENDING`，下一次发现 `*_dispatched` 事件时只把快照补到 `DISPATCHED`，不重发，也不升到 `DELIVERY_VERIFIED`。若当时快照根本没有写入，而这条事件里仍有当时发出的字符串，同一次补记用那段原文新建快照，再标成 `DISPATCHED`。事件里没有这段原文时不编造快照。
 
+若准备事件已经提交、快照没有写入，下一次从这个准备继续发送之前，用准备事件里的原文补建快照，再按这次发送的结果推进状态。原文为空时不编造，也不拦住发送。
+
 证据级别：
 
 | 状态 | 含义 |
@@ -64,7 +66,7 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 
 默认读取走现有 `redact_text`，只返回 240 字摘录，并去掉传输证据里的 `detail`。完整正文、diff 和传输细节需要 `reveal=True`，CLI 对应 `--reveal`。访问边界是本机状态库加上这个开关，策略名是 `local_operator_reveal`。现有脱敏只覆盖已知密钥模式，不能把任意词都当成密钥。
 
-`retain_until` 是创建时的整秒时间加 90 天，触发器禁止改这个字段。正文清空还要求它不晚于 SQLite 的当前整秒，并且状态和证据保持不变。每次打开状态库都会在同一个 `BEGIN IMMEDIATE` 里重建这三条快照触发器。替换失败会回滚，旧触发器还在；其它连接要等这次写入结束才能改快照。触发器同时拒绝 `DELETE` 和覆盖同一 `prompt_id` 的 `INSERT OR REPLACE`。`purge_expired` 只选择至少早了一秒的行，并按行保存点清空：清空 `prompt_content`，置 `content_purged=1`，保留哈希和状态。一行被拒绝不会回滚其它行。清除后校验返回 `HASH_RETAINED_CONTENT_PURGED`。V1 没有后台任务调用 `purge_expired`。
+`retain_until` 是创建时的整秒时间加 90 天，触发器禁止改这个字段。正文清空还要求它不晚于 SQLite 的当前整秒，并且状态和证据保持不变。每次打开状态库都会在同一个 `BEGIN IMMEDIATE` 里重建这三条快照触发器。替换失败会回滚，旧触发器还在；其它连接要等这次写入结束才能改快照。触发器同时拒绝 `DELETE`，以及覆盖同一 `prompt_id` 或同一 `(task_id, ifnull(run_id, ''), intervention_id)` 的 `INSERT OR REPLACE`。默认不启用递归触发器，所以后一种冲突必须在插入触发器里拒绝，不能依赖删除触发器。`purge_expired` 只选择至少早了一秒的行，并按行保存点清空：清空 `prompt_content`，置 `content_purged=1`，保留哈希和状态。一行被拒绝不会回滚其它行。清除后校验返回 `HASH_RETAINED_CONTENT_PURGED`。V1 没有后台任务调用 `purge_expired`。
 
 查询入口是 `bin/herdr-task prompt-ledger`，子命令为 `list`、`get`、`verify`、`diff`、`history`、`usage`。它使用这条命令已经选中的状态库，包括只设置了 `WORKFLOW_FILE` 的命名空间，不另走生产默认路径。JSON 打到标准输出，参数错误退出码 2。
 

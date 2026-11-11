@@ -242,7 +242,17 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         """
         CREATE TRIGGER prompt_snapshots_no_replace
         BEFORE INSERT ON prompt_snapshots
-        WHEN EXISTS (SELECT 1 FROM prompt_snapshots WHERE prompt_id = NEW.prompt_id)
+        WHEN EXISTS (
+            SELECT 1 FROM prompt_snapshots
+            WHERE prompt_id = NEW.prompt_id
+            OR (
+                NEW.intervention_id IS NOT NULL
+                AND NEW.intervention_id != ''
+                AND intervention_id = NEW.intervention_id
+                AND task_id = NEW.task_id
+                AND ifnull(run_id, '') = ifnull(NEW.run_id, '')
+            )
+        )
         BEGIN
             SELECT RAISE(ABORT, 'prompt snapshot cannot be replaced');
         END;

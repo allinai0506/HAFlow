@@ -442,6 +442,94 @@ def test_completed_delivery_does_not_invent_a_snapshot_without_the_sent_text(sto
     assert list_snapshots(store, task_id="gap") == []
 
 
+def test_resumed_preparation_records_the_snapshot_before_the_send(store, monkeypatch):
+    import herdr.prompt_ledger as ledger
+    from herdr import supervisor_delivery as api
+
+    real = ledger.record_generated
+
+    def refuse_insert(*_args, **_kwargs):
+        raise RuntimeError("snapshot insert failed")
+
+    monkeypatch.setattr(ledger, "record_generated", refuse_insert)
+    calls = []
+    task = _task()
+    store.save_task(task)
+
+    def boundary(phase):
+        if phase == "after_prepared":
+            raise RuntimeError("stop after prepared")
+
+    with pytest.raises(RuntimeError, match="stop after prepared"):
+        api.deliver(
+            task, store, "RETRY",
+            {"intervention_id": "i-prep", "action": "RETRY"},
+            "kept-text", lambda *_: calls.append(1), boundary=boundary,
+        )
+    assert calls == []
+    assert list_snapshots(store, task_id="t") == []
+    monkeypatch.setattr(ledger, "record_generated", real)
+    second = api.deliver(
+        store.get_task("t"), store, "RETRY",
+        {"intervention_id": "i-prep", "action": "RETRY"},
+        "ignored-later", lambda *_: calls.append(1),
+    )
+    assert second["retry_dispatched"] is True
+    assert calls == [1]
+    restored = _snapshot_for(store, "t")
+    assert restored["prompt_content"].startswith("kept-text")
+    assert "ignored-later" not in restored["prompt_content"]
+    assert restored["dispatch_status"] == "DISPATCHED"
+    assert restored["delivery_evidence"]["level"] == "transport_command_accepted"
+    assert restored["delivery_evidence"]["model_receipt"] == "UNOBSERVABLE"
+    assert store.get_task("t")["status"] == "rework"
+
+
+def test_resumed_preparation_does_not_invent_a_snapshot_or_block_the_send(store, monkeypatch):
+    import herdr.prompt_ledger as ledger
+    from herdr import supervisor_delivery as api
+
+    real = ledger.record_generated
+
+    def refuse_insert(*_args, **_kwargs):
+        raise RuntimeError("snapshot insert failed")
+
+    monkeypatch.setattr(ledger, "record_generated", refuse_insert)
+    seen = []
+    task = _task(task_id="prep-gap")
+    store.save_task(task)
+
+    def boundary(phase):
+        if phase == "after_prepared":
+            raise RuntimeError("stop after prepared")
+
+    with pytest.raises(RuntimeError, match="stop after prepared"):
+        api.deliver(
+            task, store, "RETRY",
+            {"intervention_id": "i-prep-gap", "action": "RETRY"},
+            "kept-text", lambda _pane, text: seen.append(text), boundary=boundary,
+        )
+    conn = sqlite3.connect(store.db_path)
+    row = conn.execute(
+        "SELECT id, payload_json FROM events WHERE event_type=?",
+        ("retry_dispatch_prepared",),
+    ).fetchone()
+    payload = json.loads(row[1])
+    payload["prompt"] = ""
+    conn.execute("UPDATE events SET payload_json=? WHERE id=?", (json.dumps(payload), row[0]))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(ledger, "record_generated", real)
+    second = api.deliver(
+        store.get_task("prep-gap"), store, "RETRY",
+        {"intervention_id": "i-prep-gap", "action": "RETRY"},
+        "ignored-later", lambda _pane, text: seen.append(text),
+    )
+    assert second["retry_dispatched"] is True
+    assert seen == [""]
+    assert list_snapshots(store, task_id="prep-gap") == []
+
+
 def test_prompt_ledger_list_reads_the_workflow_file_namespace(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -486,6 +574,54 @@ def test_database_rejects_a_status_jump_to_verified(store):
         conn.commit()
     conn.close()
     assert get_snapshot(store, opened["prompt_id"])["dispatch_status"] == "GENERATED"
+
+
+def _replace_snapshot(conn, source_id, **changes):
+    cursor = conn.execute("SELECT * FROM prompt_snapshots WHERE prompt_id=?", (source_id,))
+    row = cursor.fetchone()
+    names = [item[0] for item in cursor.description]
+    values = dict(zip(names, row))
+    values.update(changes)
+    conn.execute(
+        f"INSERT OR REPLACE INTO prompt_snapshots ({','.join(names)}) VALUES ({','.join('?' for _ in names)})",
+        [values[name] for name in names],
+    )
+
+
+def test_replace_cannot_overwrite_a_snapshot_through_the_intervention_key(store):
+    task = _task(task_id="repl")
+    store.save_task(task)
+    opened = open_snapshot(store, task, "original-text", action="INITIAL", intervention_id="same-key")
+    conn = sqlite3.connect(store.db_path)
+    assert conn.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
+    with pytest.raises(sqlite3.Error):
+        _replace_snapshot(
+            conn, opened["prompt_id"], prompt_id="ps_replacement",
+            prompt_content="forged", prompt_sha256="f" * 64,
+        )
+        conn.commit()
+    conn.close()
+    kept = get_snapshot(store, opened["prompt_id"], reveal=True)
+    assert kept["prompt_content"] == "original-text"
+    assert get_snapshot(store, "ps_replacement") is None
+
+    bare = _task(task_id="repl-null", run_id=None)
+    store.save_task(bare)
+    opened_null = open_snapshot(
+        store, bare, "null-run", action="INITIAL", intervention_id="null-key",
+    )
+    conn = sqlite3.connect(store.db_path)
+    with pytest.raises(sqlite3.Error):
+        _replace_snapshot(
+            conn, opened_null["prompt_id"], prompt_id="ps_null_replacement",
+            run_id="", prompt_content="forged-null", prompt_sha256="e" * 64,
+        )
+        conn.commit()
+    conn.close()
+    kept_null = get_snapshot(store, opened_null["prompt_id"], reveal=True)
+    assert kept_null["prompt_content"] == "null-run"
+    assert kept_null["run_id"] in (None, "")
+    assert get_snapshot(store, "ps_null_replacement") is None
 
 
 def test_composition_skips_symlinks_and_names_the_legacy_assembler(store, tmp_path):

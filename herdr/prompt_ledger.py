@@ -577,6 +577,20 @@ class DeliveryHook:
         except Exception as exc:
             _warn(exc)
 
+    def ensure_generated(self, prompt=None):
+        """Record a persisted prompt when preparation did not leave a snapshot."""
+        try:
+            self._remember()
+            if self.prompt_id or not isinstance(prompt, str) or not prompt:
+                return
+            row = open_snapshot(
+                self.store, self.task, prompt, action=self.action,
+                intervention_id=self.intervention_id,
+            )
+            self.prompt_id = row["prompt_id"]
+        except Exception as exc:
+            _warn(exc)
+
     def on_pending(self):
         try:
             self._remember()
