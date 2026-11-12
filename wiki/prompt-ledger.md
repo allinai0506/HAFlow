@@ -28,3 +28,7 @@ bin/herdr-task prompt-ledger usage --task-id <task_id>
 ## 边界
 
 Ledger 写入失败不改变原投递。回执事件里的 Prompt 副本仍可能变化，审计时以 `prompt_snapshots` 为准。保留期 90 天，清除要显式调用 `purge_expired`；当前没有定时任务。非回执的 supervisor 直发、steering 注入和 compact 续写不在本表中。
+
+## 任务抽屉
+
+`/api/task/projection` 附带 `prompt_ledger`。这一格用只读连接，不初始化状态库。概览页「发出的指令」显示最近一条的状态、工位名、哈希前缀和脱敏摘录。两轮投递只说明相同或不同，并给出本机 diff 命令。响应里没有 `prompt_content`。`workflow_id` 对不上的快照不显示。账本读失败时这一格写「指令记录暂时无法读取」，任务其余字段仍返回。没有这条字段的旧响应不显示该格。

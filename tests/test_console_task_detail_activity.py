@@ -221,7 +221,7 @@ class TestTaskDetailActivity(unittest.TestCase):
         node_bin = shutil.which("node")
         if not node_bin:
             self.skipTest("node not found; skipping JS execution test")
-        for fn in ["renderTaskRuntime", "renderTaskArtifacts", "renderTaskOverview"]:
+        for fn in ["renderTaskRuntime", "renderTaskArtifacts", "renderPromptLedger", "renderTaskOverview"]:
             src = _extract_fn(self.html, fn)
             self.assertIsNotNone(src, f"{fn} not found")
         harness = (
@@ -234,6 +234,7 @@ class TestTaskDetailActivity(unittest.TestCase):
             + "\n" + _extract_fn(self.html, "taskDurationSecs")
             + "\n" + _extract_fn(self.html, "renderTaskRuntime")
             + "\n" + _extract_fn(self.html, "renderTaskArtifacts")
+            + "\n" + _extract_fn(self.html, "renderPromptLedger")
             + "\n" + _extract_fn(self.html, "renderTaskOverview")
             + "\nconsole.log(JSON.stringify(["
             + "renderTaskRuntime({},{}).length>0,"

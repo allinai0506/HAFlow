@@ -2,6 +2,7 @@ import json, sqlite3, subprocess, time
 from pathlib import Path
 from herdr import human_decisions as herdr_human_decisions
 from herdr.kernel import state_db_path
+from herdr.prompt_ledger_view import project_task_prompt
 from herdr import projection as herdr_projection
 from herdr import deliverables as herdr_deliverables
 from herdr import archive as herdr_archive
@@ -339,7 +340,26 @@ def api_task_projection(tid):
             proj['deliverables'] = herdr_deliverables.pack([])
     except Exception:
         proj['deliverables'] = herdr_deliverables.pack([], error='成果目录读取失败')
+    proj['prompt_ledger'] = _task_prompt_ledger(tid, proj.get('workflow_id'))
     return proj
+
+
+def _task_prompt_ledger(task_id, workflow_id):
+    try:
+        return project_task_prompt(state_db_path(), task_id, workflow_id=workflow_id)
+    except Exception:
+        print('[PROMPT LEDGER WARN] task card could not be read', flush=True)
+        return {
+            'task_id': task_id,
+            'workflow_id': workflow_id,
+            'available': False,
+            'rounds': 0,
+            'rounds_capped': False,
+            'latest': None,
+            'previous_prompt_id': None,
+            'compare': None,
+            'error': '指令记录暂时无法读取',
+        }
 
 def api_workflow_projection(wid):
     if not wid:raise RuntimeError('workflow_id 不能为空')

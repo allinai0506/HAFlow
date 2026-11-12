@@ -70,6 +70,8 @@ Prompt Ledger 记录 HAFlow 交给 Agent 传输通道的最终文本，以及这
 
 查询入口是 `bin/herdr-task prompt-ledger`，子命令为 `list`、`get`、`verify`、`diff`、`history`、`usage`。它使用这条命令已经选中的状态库，包括只设置了 `WORKFLOW_FILE` 的命名空间，不另走生产默认路径。JSON 打到标准输出，参数错误退出码 2。
 
+任务抽屉读的是同一张表。`herdr/prompt_ledger_view.py` 用只读连接按 `task_id` 取最近的已脱敏行，不在这个 GET 上初始化或迁移状态库；调用方给出 `workflow_id` 时，别的工作流的同名任务不会进来。卡片只有状态、工位名、哈希、240 字摘录，以及上一轮是否相同。完整 diff 仍要在本机执行 `prompt-ledger diff --reveal`。读取失败时任务投影的其他字段照常返回。
+
 ## 本版不覆盖
 
 Coordinator 的 `/compact`、续跑通知、blocked SLA 重推、steering 注入，以及非 receipt-v1 的 supervisor 直接 `agent prompt`，仍不写 Ledger。生产 LaunchAgent 跑的是已安装快照，工作区改动不会自动生效。
