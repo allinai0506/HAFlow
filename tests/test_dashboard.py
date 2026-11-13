@@ -195,3 +195,39 @@ def test_dashboard_carries_reply_mode_and_live_counts():
     stuck_stall = next(s for s in payload["stuck"] if not s["task_id"])
     assert stuck_stall["reply_mode"] == "none"
     assert stuck_stall["workflow_title"] == "项目 Alpha"
+
+
+def test_dashboard_stuck_card_derives_mode_from_task_status_not_hardcoded_resume():
+    now = 1700003600.0
+    tasks = [
+        _task("t-block", "blocked", workflow_id="wf-1", blocker="依赖资源被占用", stage_verdict="blocked"),
+        _task("t-fail", "failed", workflow_id="wf-1", failure_reason="编译错误"),
+    ]
+    # BLOCKED anomaly must derive mode 'steer' and not say '任务失败了'
+    anomalies = [
+        {"kind": "BLOCKED", "task_id": "t-block", "workflow_id": "wf-1", "last_activity_at": 1700001000},
+        {"kind": "FAILED", "task_id": "t-fail", "workflow_id": "wf-1", "last_activity_at": 1700001100},
+    ]
+    payload = d.build_dashboard(
+        tasks,
+        blockers=[tasks[0]],
+        actions_by_task={},
+        deliveries=[],
+        stalls={},
+        anomalies=anomalies,
+        now=now,
+    )
+
+    stuck_blocked = next(s for s in payload["stuck"] if s["task_id"] == "t-block")
+    assert stuck_blocked["reply_mode"] == "steer"
+    assert stuck_blocked["reply_mode"] == d.reply_mode_for(tasks[0])
+    assert "失败" not in stuck_blocked["reason"]
+    assert "卡住" in stuck_blocked["reason"] or "占用" in stuck_blocked["reason"]
+
+    att_blocked = next(a for a in payload["attention"] if a["task_id"] == "t-block")
+    assert att_blocked["reply_mode"] == stuck_blocked["reply_mode"]
+
+    stuck_failed = next(s for s in payload["stuck"] if s["task_id"] == "t-fail")
+    assert stuck_failed["reply_mode"] == "resume"
+    assert stuck_failed["reply_mode"] == d.reply_mode_for(tasks[1])
+    assert "失败" in stuck_failed["reason"] or "编译" in stuck_failed["reason"]

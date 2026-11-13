@@ -78,6 +78,18 @@ def reply_mode_for(task: Mapping[str, Any]) -> str:
     return "none"
 
 
+def _reopen_target_for(task: Mapping[str, Any]) -> str:
+    """If a paused/interrupted task came from rework, return 'rework', else 'working'."""
+    history = task.get("status_history") or []
+    for h in reversed(history):
+        if isinstance(h, dict) and h.get("to") in {"paused", "interrupted"}:
+            prev = h.get("from")
+            if prev in {"working", "rework"}:
+                return prev
+            break
+    return "working"
+
+
 def reply_plan(task: Mapping[str, Any], instruction: Any) -> Dict[str, Any]:
     """Decide how one human sentence continues a task. No I/O, no force-pass."""
     text = str(instruction or "").strip()
@@ -90,7 +102,9 @@ def reply_plan(task: Mapping[str, Any], instruction: Any) -> Dict[str, Any]:
     mode = reply_mode_for(task)
     tid = str(task.get("task_id"))
     if mode == "steer":
-        return {
+        status = str(task.get("status") or "")
+        reopen_to = _reopen_target_for(task) if status in {"paused", "interrupted"} else None
+        res: Dict[str, Any] = {
             "ok": True,
             "mode": "steer",
             "task_id": tid,
@@ -98,6 +112,9 @@ def reply_plan(task: Mapping[str, Any], instruction: Any) -> Dict[str, Any]:
             "urgent": True,
             "message": "已经送到这个工位，它会按你的话继续。",
         }
+        if reopen_to:
+            res["reopen_to"] = reopen_to
+        return res
     if mode != "resume":
         return {"ok": False, "error": "这个任务已经结束，回复送不进去。"}
     wid = str(task.get("workflow_id") or "").strip()
@@ -362,13 +379,44 @@ def build_dashboard(
         la = _epoch(a.get("last_activity_at"))
         awid = a.get("workflow_id") or "unknown"
         atid = a.get("task_id") or ""
+        src = by_id.get(atid) or {}
+        kind = str(a.get("kind") or src.get("status") or "").lower()
+        rmode = (
+            reply_mode_for(src)
+            if src
+            else ("resume" if kind == "failed" else ("steer" if kind == "blocked" else "none"))
+        )
+
+        if kind == "blocked" or rmode == "steer":
+            reason_text = human_reason(
+                src.get("failure_reason")
+                or src.get("blocker")
+                or a.get("reason")
+                or "任务被卡住了，写一句话就能让它按你的话继续"
+            )
+            suggestion = "告诉工位接下来做什么"
+        elif kind == "failed" or rmode == "resume":
+            reason_text = human_reason(
+                src.get("failure_reason")
+                or a.get("reason")
+                or "任务失败了，写一句话就能让它按你的话继续"
+            )
+            suggestion = "写一句话，按原执行者继续"
+        else:
+            reason_text = human_reason(
+                src.get("failure_reason")
+                or a.get("reason")
+                or "任务异常"
+            )
+            suggestion = "检查任务状态"
+
         stuck.append({
             "task_id": atid,
             "workflow_id": awid,
             "workflow_title": titles.get(awid) or awid,
-            "reason": "任务失败了，写一句话就能让它按你的话继续",
-            "suggestion": "写一句话，按原执行者继续",
-            "reply_mode": "resume" if atid else "none",
+            "reason": str(reason_text)[:300],
+            "suggestion": str(suggestion)[:100],
+            "reply_mode": rmode,
             "last_event_text": format_clock(la),
         })
     stuck = stuck[: lim["stuck"]]

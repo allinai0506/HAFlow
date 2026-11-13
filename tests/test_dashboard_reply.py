@@ -202,3 +202,160 @@ def test_api_dashboard_reply_validates_inputs():
             {"task_id": "t-1", "instruction": ""},
             load_task=lambda tid: task,
         )
+
+
+def test_steer_rejects_unowned_or_mismatched_pane_identity(monkeypatch):
+    from console.dashboard_reply import _steer
+    from herdr import steering
+
+    queued_steers = []
+    monkeypatch.setattr(steering, "queue_steer", lambda *a, **kw: queued_steers.append((a, kw)))
+
+    task = {
+        "task_id": "t-reused",
+        "status": "blocked",
+        "workflow_id": "wf-1",
+        "pane_id": "pane-stale-99",
+    }
+    plan = reply_plan(task, "继续执行")
+    assert plan["ok"] is True
+
+    # Identity mismatch / dead pane probe: must fail closed before steering.queue_steer
+    mismatched_probe = lambda t: (False, "identity_mismatch")
+    res = _steer(plan, task=task, probe_pane=mismatched_probe)
+    assert res["ok"] is False
+    assert res["status"] == "blocked"
+    assert res["reason"] == "identity_mismatch"
+    assert len(queued_steers) == 0, "No interrupt or injection must occur when pane identity is mismatched"
+
+    # api_dashboard_reply must translate to friendly error without calling queue_steer
+    with pytest.raises(RuntimeError, match="没有活着的工位"):
+        api_dashboard_reply(
+            {"task_id": "t-reused", "instruction": "继续执行"},
+            load_task=lambda tid: task,
+            probe_pane=mismatched_probe,
+        )
+    assert len(queued_steers) == 0
+
+
+def test_reply_plan_reopens_paused_and_interrupted_tasks():
+    # Regular paused task reopens to working
+    task_paused = {"task_id": "t-p", "status": "paused", "workflow_id": "wf-1"}
+    plan_paused = reply_plan(task_paused, "继续做")
+    assert plan_paused["ok"] is True
+    assert plan_paused["mode"] == "steer"
+    assert plan_paused["reopen_to"] == "working"
+
+    # Paused task that originated from rework reopens to rework
+    task_from_rework = {
+        "task_id": "t-pr",
+        "status": "paused",
+        "workflow_id": "wf-1",
+        "status_history": [
+            {"from": "working", "to": "rework"},
+            {"from": "rework", "to": "paused"},
+        ],
+    }
+    plan_rework = reply_plan(task_from_rework, "继续做")
+    assert plan_rework["ok"] is True
+    assert plan_rework["reopen_to"] == "rework"
+
+    # Interrupted task reopens to working
+    task_interrupted = {"task_id": "t-i", "status": "interrupted", "workflow_id": "wf-1"}
+    plan_interrupted = reply_plan(task_interrupted, "继续做")
+    assert plan_interrupted["ok"] is True
+    assert plan_interrupted["reopen_to"] == "working"
+
+
+def test_api_dashboard_reply_reopens_paused_task_before_steering(monkeypatch):
+    from console.dashboard_reply import _steer
+    from herdr import steering
+
+    reopened = []
+    queued = []
+
+    monkeypatch.setattr(steering, "queue_steer", lambda *a, **kw: queued.append((a, kw)) or {"ok": True, "status": "dispatched"})
+
+    task = {
+        "task_id": "t-p1",
+        "status": "paused",
+        "workflow_id": "wf-1",
+        "pane_id": "pane-1",
+    }
+    res = api_dashboard_reply(
+        {"task_id": "t-p1", "instruction": "继续推进"},
+        load_task=lambda tid: task,
+        probe_pane=lambda t: (True, "identity_match"),
+        reopen_task=lambda tid, target: reopened.append((tid, target)),
+    )
+    assert res["ok"] is True
+    assert len(reopened) == 1
+    assert reopened[0] == ("t-p1", "working")
+    assert len(queued) == 1
+
+
+def test_paused_task_reopen_allows_task_listener_to_consume_events(tmp_path, monkeypatch):
+    """Reproduce: working/done events after successful reply transition out of paused."""
+    from herdr import kernel, state_db
+    from herdr.state_store import SQLiteStateStore
+    from services.controller import task_listener
+
+    db_file = tmp_path / "test.db"
+    store = SQLiteStateStore(db_file)
+    monkeypatch.setattr(kernel, "get_state_store", lambda: store)
+
+    store.save_workflow({"workflow_id": "wf-1", "title": "WF 1", "status": "running"})
+    store.save_task({
+        "task_id": "t-paused",
+        "workflow_id": "wf-1",
+        "node": "impl",
+        "stage": "implementation",
+        "agent": "codex",
+        "status": "paused",
+        "pane_id": "pane-1",
+    })
+
+    # 1. Before reply: task_listener ignores working/done because status is 'paused'
+    class FakePorts:
+        def __init__(self):
+            self.observed = []
+            self.acked = []
+        def get_task(self, task_id):
+            return store.get_task(task_id)
+        def blocked_event_type(self, task):
+            return None
+        def _set_observed_status(self, task, to_status, reason):
+            self.observed.append((task["task_id"], to_status, reason))
+            return True
+        def maybe_ack_on_working(self, task_id):
+            self.acked.append(task_id)
+        def _completion_marker_snapshot(self, task):
+            return True, "ALL TASKS COMPLETED"
+        def _record_completion_sample(self, task, has_marker, agent_status):
+            self.observed.append((task["task_id"], "completion_sample", agent_status))
+
+    ports = FakePorts()
+    # Emitting events while paused produces no transition
+    task_listener.handle_event(ports, "t-paused", "working")
+    assert len(ports.observed) == 0, "task_listener ignores events for paused tasks"
+
+    # 2. User replies from dashboard -> reopens task to working
+    task_obj = store.get_task("t-paused")
+    reply_res = api_dashboard_reply(
+        {"task_id": "t-paused", "instruction": "按计划继续"},
+        load_task=lambda tid: store.get_task(tid),
+        probe_pane=lambda t: (True, "identity_match"),
+        steer=lambda p: {"ok": True, "status": "dispatched"},
+        reopen_task=lambda tid, target: kernel.transition_task(
+            task_id=tid, to_status=target, reason="dashboard_reply_resume", store=store
+        ),
+    )
+    assert reply_res["ok"] is True
+    reopened_task = store.get_task("t-paused")
+    assert reopened_task["status"] == "working", "Task must leave paused and enter working"
+
+    # 3. After reply: agent reports working -> task_listener processes it
+    ports.observed.clear()
+    task_listener.handle_event(ports, "t-paused", "working")
+    task_listener.handle_event(ports, "t-paused", "done")
+    assert any(item[1] == "completion_sample" for item in ports.observed), "Completion sample is processed now that task is working"
