@@ -3,7 +3,7 @@ var {
   stopDashTimer, toggleLinearSelectMenu, closeLinearSelectMenu, togglePopoverGroup,
   handleLinearSelectSearch, handleLinearSelectKeydown, selectLinearWorkflow, showDashboard,
   exitDashboard, loadDashboard, dashSelectWorkflow, dashOpenWorkflowOf,
-  dashOpenWorkflow, dashSignoff, dashExec, renderDashboard
+  dashOpenWorkflow, dashSignoff, dashExec, renderDashboard, dashReply, dashReplyDrafts
 } = (function({
   state, saveViewState, syncOpsUi,
   api, pageRead, toast,
@@ -16,6 +16,7 @@ let dashTimer=null;
 let dashNavigationSequence=0;
 function stopDashTimer(){if(dashTimer){clearInterval(dashTimer);dashTimer=null}}
 let dashLinearKeyboardIdx = 0;
+const dashReplyDrafts = {};
 
 function toggleLinearSelectMenu(e){
   if(e) e.stopPropagation();
@@ -310,35 +311,120 @@ function renderDashboard(){
     +'<div class="dash-kpi"><div class="k">等你的问题</div><div class="v'+(d.attention.length?' warn':'')+'">'+d.attention.length+' <small>个</small></div><div class="s">默认动作已就绪</div></div>'
     +'<div class="dash-kpi"><div class="k">卡住</div><div class="v'+(d.stuck.length?' warn':'')+'">'+d.stuck.length+'</div><div class="s">'+(d.stuck.length?'需要处理':'Clear')+'</div></div>'
     +'<div class="dash-kpi"><div class="k">交付物</div><div class="v">'+d.deliveries.length+'</div><div class="s">最新有效交付</div></div></div>';
-  const taskRows=d.tasks.length?d.tasks.map((t,i)=>'<div class="dash-task"><span class="n">'+(i+1)+'</span><div><div class="t">'+esc(t.task_id)+'</div><div class="d">'+esc(t.goal||t.node)+'</div><div class="m">工位 '+esc(t.pane_id||'—')+' · 执行者 '+esc(t.agent)+(t.runtime_status?(' · '+esc(t.runtime_status)):'')+' · 更新于 '+esc(t.updated_at_text)+'</div></div><div>'+dashPillFor(t)+'</div></div>').join(''):'<div class="empty">当前没有任务</div>';
-  const attRows=d.attention.length?d.attention.map(a=>{
-    if(a.decision_id)return '<div class="dash-q"><div class="qt"><span>待你裁决 · '+esc(a.decision_id)+'</span><span class="dash-default">'+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.reason||a.default_action_text)+'</span></div><div class="qm">'+esc(a.workflow_id)+' · '+esc(a.node||'—')+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(a.workflow_id)+')">进入工作流裁决</button></div></div>';
+  const prevTasksEl=document.getElementById('tasks');
+  let focusedTaskId=null;
+  let focusedSelStart=0;
+  let focusedSelEnd=0;
+  if(prevTasksEl){
+    prevTasksEl.querySelectorAll('textarea[data-task-id]').forEach(el=>{
+      const tid=el.getAttribute('data-task-id');
+      if(tid){
+        if(el.value)dashReplyDrafts[tid]=el.value;
+        if(document.activeElement===el){
+          focusedTaskId=tid;
+          try{
+            focusedSelStart=el.selectionStart;
+            focusedSelEnd=el.selectionEnd;
+          }catch(_){}
+        }
+      }
+    });
+  }
+  const taskRows=d.tasks.length?d.tasks.map((t,i)=>'<div class="dash-task"><span class="n">'+(i+1)+'</span><div><div class="t">'+esc(t.task_id)+'</div><div class="d">'+esc(t.goal||t.node)+'</div><div class="m">工位 '+esc(t.pane_id||'—')+' · 执行者 '+esc(t.agent)+(t.runtime_status?(' · '+esc(t.runtime_status)):'')+' · 更新于 '+esc(t.updated_at_text)+'</div></div><div>'+dashPillFor(t)+'</div></div>').join(''):'<div class="dash-quiet">当前没有执行中的任务</div>';
+  const attRows=d.attention.length?d.attention.map((a,idx)=>{
+    if(a.decision_id)return '<div class="dash-q"><div class="qt"><span>待你裁决 · '+esc(a.decision_id)+'</span><span class="dash-default">'+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.reason||a.default_action_text)+'</span></div><div class="qm">'+esc(a.workflow_title||a.workflow_id)+' · '+esc(a.node||'—')+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(a.workflow_id)+')">进入工作流裁决</button></div></div>';
     const target={nodeId:a.node||'',taskId:a.task_id||'',runId:a.run_id||'',paneId:a.pane_id||'',operationId:a.operation_id||null};
-    return '<div class="dash-q"><div class="qt"><span>'+esc(a.reason||a.task_id)+'</span><span class="dash-default">默认: '+esc(a.default_action)+'</span></div><div class="qd"><b>说明</b><span>'+esc(a.default_action_text)+'</span></div><div class="qm">'+esc(a.task_id)+' · 工位 '+esc(a.pane_id||'—')+' · '+esc(a.workflow_id)+' · '+esc(a.updated_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(a.workflow_id)+','+esc(JSON.stringify(target))+')">在 Controller 中处理</button></div></div>';
+    const replyMode=a.reply_mode||'none';
+    const canReply=Boolean(a.task_id&&(replyMode==='steer'||replyMode==='resume'));
+    const inputId='dash-att-reply-'+idx;
+    const ph=replyMode==='resume'?'说明接下来怎么做，将按原执行者继续…':'告诉工位接下来做什么，它会按你的话继续…';
+    const titleText=a.workflow_title?(a.workflow_title+' · '+(a.node||a.task_id)):(a.reason||a.task_id);
+    const draft=dashReplyDrafts[a.task_id]||'';
+    return '<div class="dash-q">'
+      +'<div class="qt"><span>'+esc(titleText)+'</span><span class="dash-default">默认: '+esc(a.default_action)+'</span></div>'
+      +'<div class="dash-why">'+esc(a.reason||a.default_action_text)+'</div>'
+      +'<div class="qm">'+esc(a.task_id)+(a.pane_id?(' · 工位 '+esc(a.pane_id)):'')+' · '+esc(a.workflow_id)+' · '+esc(a.updated_at_text)+'</div>'
+      +(canReply?(
+        '<div class="dash-reply">'
+        +'<textarea id="'+inputId+'" data-task-id="'+esc(a.task_id)+'" placeholder="'+ph+'" oninput="dashReplyDrafts['+jsArg(a.task_id)+']=this.value" onkeydown="if((event.metaKey||event.ctrlKey)&&event.key===\'Enter\'){event.preventDefault();dashReply('+jsArg(a.task_id)+',this.value);}">'+esc(draft)+'</textarea>'
+        +'<div class="dash-btns">'
+        +'<button class="btn primary" onclick="dashReply('+jsArg(a.task_id)+',document.getElementById('+jsArg(inputId)+').value)">回复并继续</button>'
+        +'<button class="btn" onclick="dashOpenWorkflowOf('+jsArg(a.workflow_id)+','+esc(JSON.stringify(target))+')">在 Controller 中处理</button>'
+        +'</div></div>'
+      ):(
+        '<div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(a.workflow_id)+','+esc(JSON.stringify(target))+')">在 Controller 中处理</button></div>'
+      ))
+      +'</div>';
   }).join(''):'<div class="dash-ok"><span class="dash-dot green"></span>没有等你的问题</div>';
   const decRows=(d.decisions||[]).length?d.decisions.map(x=>'<div class="dash-q"><div class="qt"><span>'+esc(x.decision_id)+'</span><span class="dash-default">'+esc(x.node||'—')+'</span></div><div class="qd"><b>问题</b><span>'+esc(x.question||x.title)+'</span></div>'+((x.options||[]).length?'<div class="qm">可选：'+esc((x.options||[]).join(' / '))+(x.recommended?('（建议：'+esc(x.recommended)+'）'):'')+'</div>':'')+'<div class="qm">'+esc(x.workflow_id)+' · '+esc(x.raised_at_text)+'</div><div class="dash-btns"><button class="btn primary" onclick="dashOpenWorkflowOf('+jsArg(x.workflow_id)+')">去拍板</button></div></div>').join(''):'<div class="dash-ok"><span class="dash-dot green"></span>没有待裁决项</div>';
   const dlvRows=d.deliveries.length?d.deliveries.map(x=>'<div class="dash-task"><span class="n">✓</span><div><div class="t">'+esc(x.title||x.candidate_sha)+'</div><div class="m">'+esc(x.workflow_id)+' · '+esc(x.updated_at_text)+'</div></div><div><span class="badge cleaned">交付</span></div></div>').join(''):'<div class="empty">暂无交付物</div>';
-  const stuckRows=d.stuck.length?d.stuck.map(s=>'<div class="dash-task"><span class="n">!</span><div><div class="t">'+esc(s.task_id||s.workflow_id)+'</div><div class="d">'+esc(s.reason)+'</div><div class="m">'+esc(s.workflow_id)+' · '+esc(s.last_event_text||'')+'</div></div><div><span class="badge blocked">卡住</span></div></div>').join(''):'<div class="dash-ok"><span class="dash-dot green"></span>一切正常，没有卡住</div>';
+  const stuckRows=d.stuck.length?d.stuck.map((s,idx)=>{
+    const wid=s.workflow_id;
+    const tid=s.task_id;
+    const canReply=Boolean(tid&&(s.reply_mode==='steer'||s.reply_mode==='resume'));
+    if(canReply){
+      const inputId='dash-stuck-reply-'+idx;
+      const ph=s.reply_mode==='resume'?'说明接下来怎么做，将按原执行者继续…':'告诉工位接下来做什么，它会按你的话继续…';
+      const badgeText=s.reply_mode==='resume'?'失败':'卡住';
+      const draft=dashReplyDrafts[tid]||'';
+      return '<div class="dash-q"><div class="qt"><span>'+esc((s.workflow_title||wid)+' · '+tid)+'</span><span class="badge blocked">'+badgeText+'</span></div>'
+        +'<div class="dash-why">'+esc(s.reason)+'</div>'
+        +'<div class="qm">'+esc(wid)+' · '+esc(s.last_event_text||'')+'</div>'
+        +'<div class="dash-reply">'
+        +'<textarea id="'+inputId+'" data-task-id="'+esc(tid)+'" placeholder="'+ph+'" oninput="dashReplyDrafts['+jsArg(tid)+']=this.value" onkeydown="if((event.metaKey||event.ctrlKey)&&event.key===\'Enter\'){event.preventDefault();dashReply('+jsArg(tid)+',this.value);}">'+esc(draft)+'</textarea>'
+        +'<div class="dash-btns">'
+        +'<button class="btn primary" onclick="dashReply('+jsArg(tid)+',document.getElementById('+jsArg(inputId)+').value)">回复并继续</button>'
+        +'<button class="btn" onclick="dashOpenWorkflowOf('+jsArg(wid)+')">在 Controller 中处理</button>'
+        +'</div></div></div>';
+    }
+    return '<div class="dash-task"><span class="n">!</span><div><div class="t">'+esc(s.task_id||s.workflow_id)+'</div><div class="d">'+esc(s.reason)+'</div><div class="m">'+esc(s.workflow_id)+' · '+esc(s.last_event_text||'')+'</div></div><div><span class="badge blocked">卡住</span></div></div>';
+  }).join(''):'<div class="dash-ok"><span class="dash-dot green"></span>一切正常，没有卡住</div>';
+  const tasksCountLabel=d.tasks.length+' / '+d.counts.tasks;
   document.getElementById('tasks').innerHTML=kpis
     +'<div class="dash-layout"><div class="dash-main">'
-    +'<div class="dash-sec"><div class="dash-sec-h"><span>任务及其状态</span><span class="count">'+d.tasks.length+' / '+d.counts.tasks+'</span></div>'+taskRows+'</div>'
+    +'<div class="dash-sec"><div class="dash-sec-h"><span>任务及其状态</span><span class="count">'+tasksCountLabel+'</span></div>'+taskRows+'</div>'
     +'<div class="dash-sec"><div class="dash-sec-h"><span>最新交付物</span><span class="count">'+d.deliveries.length+' 个</span></div>'+dlvRows+'</div>'
     +'</div><div class="dash-rail">'
+    +'<div class="dash-lead">人看懂卡在哪，在卡片上写一句话就能继续。活着的工位走紧急插话，失败的任务重新派发。</div>'
     +'<div class="dash-sec"><div class="dash-sec-h"><span>待你裁决</span><span class="count">'+(d.decisions||[]).length+' 个</span></div>'+decRows+'</div>'
     +'<div class="dash-sec"><div class="dash-sec-h"><span>等你的问题</span><span class="count">'+d.attention.length+' 个</span></div>'+attRows+'</div>'
     +'<div class="dash-sec"><div class="dash-sec-h"><span>卡住的东西</span><span class="count">'+d.stuck.length+' 项</span></div>'+stuckRows+'</div>'
     +'</div></div>';
+  if(focusedTaskId){
+    const nextEl=document.querySelector('#tasks textarea[data-task-id="'+focusedTaskId+'"]');
+    if(nextEl){
+      nextEl.focus();
+      try{
+        nextEl.setSelectionRange(focusedSelStart,focusedSelEnd);
+      }catch(_){}
+    }
+  }
   document.getElementById('agents').innerHTML='<div class="empty">工位实时已合并到任务列表。</div>';
   document.getElementById('slots').innerHTML='<div class="empty">点击任务可进入详情。</div>';
   document.getElementById('alerts').innerHTML='<div class="empty">卡住事项见上方。</div>';
 }
 async function dashSignoff(taskId,wid,node,act){return dashOpenWorkflowOf(wid,{nodeId:node,taskId})}
 async function dashExec(endpoint,payload){payload=payload||{};return dashOpenWorkflowOf(payload.workflow_id||state.dashWorkflowId,{nodeId:payload.node_id||payload.node||'',taskId:payload.task_id||'',runId:payload.run_id||'',paneId:payload.pane_id||'',operationId:payload.operation_id||null})}
+async function dashReply(taskId,instruction){
+  const text=String(instruction||'').trim();
+  if(!text)return toast('请先写一句话，说明接下来怎么做',true);
+  try{
+    const res=await api('/api/dashboard/reply',{
+      method:'POST',
+      body:JSON.stringify({task_id:taskId,instruction:text})
+    });
+    delete dashReplyDrafts[taskId];
+    toast((res&&res.message)||'回复已送达');
+    await loadDashboard();
+  }catch(e){
+    toast((e&&e.message)||'回复失败',true);
+  }
+}
 return {
   stopDashTimer, toggleLinearSelectMenu, closeLinearSelectMenu, togglePopoverGroup,
   handleLinearSelectSearch, handleLinearSelectKeydown, selectLinearWorkflow, showDashboard,
   exitDashboard, loadDashboard, dashSelectWorkflow, dashOpenWorkflowOf,
-  dashOpenWorkflow, dashSignoff, dashExec, renderDashboard
+  dashOpenWorkflow, dashSignoff, dashExec, renderDashboard, dashReply, dashReplyDrafts
 };
 })({
   state, saveViewState, syncOpsUi,

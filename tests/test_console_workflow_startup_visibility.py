@@ -424,3 +424,30 @@ if(flowCardFoot({status:'completed',task_count:0,agents:[]})!=='已完成') proc
 """,
         tmp_path,
     )
+
+
+def test_dashboard_reply_drafts_preserved_in_module(tmp_path):
+    script = _DOM_PRELUDE + """
+let state={overview:null,project:null,workflow:null,ops:null,dash:null,projectId:null,workflowId:null,openWorkflowTabIds:[],sidebarCollapsed:false,completedExpanded:false,completedVisibleLimit:5,spaceId:null,space:null,templateSelections:{},opsMode:false,dashMode:false,dashWorkflowId:null,shellView:'workbench',taskFilter:'all',drawerTab:'tty',selectedTaskId:null,taskDrawerTab:'overview',taskTrace:null,taskTraceSeq:0,taskTracePoll:null,selectedTaskDetail:null,workflowView:'flow',flowSelectedNodeId:null,flowInspectorTab:'summary',flowGraph:null,flowGraphWfId:null,flowHtmlReady:false};
+const VIEW_KEY='herdrConsoleView';
+""" + _compose_console_scripts() + r"""
+if (typeof dashReplyDrafts !== 'object') process.exit(1);
+dashReplyDrafts['t-100'] = '我的回复草稿';
+const sampleDash = {
+  counts: { tasks: 1, live: 1, history: 0, attention: 1, decisions: 0, deliveries: 0, stuck: 0 },
+  tasks: [{ task_id: 't-100', status: 'working', goal: '写代码', agent: 'codex', updated_at_text: '2026-11-13 11:00:00' }],
+  attention: [{ task_id: 't-100', reply_mode: 'steer', reason: '卡住了', default_action: '回复', updated_at_text: '2026-11-13 11:00:00' }],
+  decisions: [],
+  deliveries: [],
+  stuck: [],
+  workflows: []
+};
+state.dash = sampleDash;
+renderDashboard();
+const tasksHtml = document.getElementById('tasks').innerHTML;
+if (!tasksHtml.includes('我的回复草稿')) {
+  console.error('Draft not restored in textarea HTML:', tasksHtml);
+  process.exit(2);
+}
+"""
+    _run_node(script, tmp_path)

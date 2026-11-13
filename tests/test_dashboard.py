@@ -154,3 +154,80 @@ def test_dashboard_scope_and_workflows_passthrough():
     payload2 = d.build_dashboard(tasks, now=now)
     assert payload2["scope"] == "all"
     assert payload2["workflows"] == []
+
+
+def test_dashboard_carries_reply_mode_and_live_counts():
+    now = 1700003600.0
+    tasks = [
+        _task("t-live", "working", workflow_id="wf-1", goal="正在写代码"),
+        _task("t-block", "blocked", workflow_id="wf-1", blocker="需要确认", stage_verdict="blocked"),
+        _task("t-fail", "failed", workflow_id="wf-1", goal="写坏了"),
+        _task("t-done", "cleaned", workflow_id="wf-1"),
+        _task("t-old", "superseded", workflow_id="wf-1", superseded_by="t-live"),
+    ]
+    workflows = [{"workflow_id": "wf-1", "title": "项目 Alpha", "active": 2, "attention": 1}]
+    anomalies = [{"kind": "FAILED", "task_id": "t-fail", "workflow_id": "wf-1", "last_activity_at": 1700001000}]
+    stalls = {"wf-1": {"message": "hard_timeout_watchdog", "suggested_action": "retry_advance"}}
+
+    payload = d.build_dashboard(
+        tasks,
+        blockers=[tasks[1]],
+        actions_by_task={},
+        deliveries=[],
+        stalls=stalls,
+        anomalies=anomalies,
+        workflows=workflows,
+        now=now,
+    )
+
+    assert payload["counts"]["live"] == 1  # t-live (working)
+    assert payload["counts"]["history"] == 2  # t-done (cleaned) + t-old (superseded)
+
+    att_block = next(a for a in payload["attention"] if a["task_id"] == "t-block")
+    assert att_block["reply_mode"] == "steer"
+    assert att_block["workflow_title"] == "项目 Alpha"
+    assert att_block["status"] == "blocked"
+
+    stuck_anomaly = next(s for s in payload["stuck"] if s["task_id"] == "t-fail")
+    assert stuck_anomaly["reply_mode"] == "resume"
+    assert stuck_anomaly["workflow_title"] == "项目 Alpha"
+
+    stuck_stall = next(s for s in payload["stuck"] if not s["task_id"])
+    assert stuck_stall["reply_mode"] == "none"
+    assert stuck_stall["workflow_title"] == "项目 Alpha"
+
+
+def test_dashboard_stuck_card_derives_mode_from_task_status_not_hardcoded_resume():
+    now = 1700003600.0
+    tasks = [
+        _task("t-block", "blocked", workflow_id="wf-1", blocker="依赖资源被占用", stage_verdict="blocked"),
+        _task("t-fail", "failed", workflow_id="wf-1", failure_reason="编译错误"),
+    ]
+    # BLOCKED anomaly must derive mode 'steer' and not say '任务失败了'
+    anomalies = [
+        {"kind": "BLOCKED", "task_id": "t-block", "workflow_id": "wf-1", "last_activity_at": 1700001000},
+        {"kind": "FAILED", "task_id": "t-fail", "workflow_id": "wf-1", "last_activity_at": 1700001100},
+    ]
+    payload = d.build_dashboard(
+        tasks,
+        blockers=[tasks[0]],
+        actions_by_task={},
+        deliveries=[],
+        stalls={},
+        anomalies=anomalies,
+        now=now,
+    )
+
+    stuck_blocked = next(s for s in payload["stuck"] if s["task_id"] == "t-block")
+    assert stuck_blocked["reply_mode"] == "steer"
+    assert stuck_blocked["reply_mode"] == d.reply_mode_for(tasks[0])
+    assert "失败" not in stuck_blocked["reason"]
+    assert "卡住" in stuck_blocked["reason"] or "占用" in stuck_blocked["reason"]
+
+    att_blocked = next(a for a in payload["attention"] if a["task_id"] == "t-block")
+    assert att_blocked["reply_mode"] == stuck_blocked["reply_mode"]
+
+    stuck_failed = next(s for s in payload["stuck"] if s["task_id"] == "t-fail")
+    assert stuck_failed["reply_mode"] == "resume"
+    assert stuck_failed["reply_mode"] == d.reply_mode_for(tasks[1])
+    assert "失败" in stuck_failed["reason"] or "编译" in stuck_failed["reason"]

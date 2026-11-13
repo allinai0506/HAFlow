@@ -80,7 +80,7 @@ def test_dashboard_integrated_into_homepage():
                   "renderDashboard", "dashMode", "dashButton", "qView",
                   "view=dashboard", "dashTimer",
                   "setInterval(()=>{if(state.dashMode",
-                  "dashSignoff", "dashExec"):
+                  "dashSignoff", "dashExec", "dashReply"):
         assert token in src, f"missing homepage integration token: {token}"
     assert "DASHBOARD_HTML" not in src, "standalone dark page must be gone"
     assert "302" in src and "/?view=dashboard" in src
@@ -89,7 +89,8 @@ def test_dashboard_integrated_into_homepage():
 def test_dashboard_light_theme_reuses_homepage_tokens():
     html = c.HTML
     for token in ("dash-kpis", "dash-sec", "dash-task", "dash-q",
-                  "dash-default", "dash-btns"):
+                  "dash-default", "dash-btns", "dash-reply",
+                  "dash-why", "dash-lead", "dash-quiet"):
         assert token in html, f"missing light dash style: {token}"
     for bad in ("❶", "❷", "❸", "❹", "--bg:#08090b"):
         assert bad not in html, "dark standalone markers must go"
@@ -159,3 +160,10 @@ def test_dashboard_double_click_entry():
     text = cmd.read_text(encoding="utf-8")
     assert "view=dashboard" in text
     assert "com.user.herdr-factory-console" in text
+
+
+def test_dashboard_reply_and_live_filter_tokens():
+    src = console_source(ROOT)
+    for token in ("dashReply", "回复并继续", "dash-reply", "dash-why",
+                  "dash-lead", "dash-quiet", "当前没有执行中的任务"):
+        assert token in src, f"missing reply/live token: {token}"

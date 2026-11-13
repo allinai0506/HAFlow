@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-13] fix | 仪表板回复工位所有权校验、暂停任务恢复与草稿保持 (PR #415 评审修复)
+
+- 背景：PR #415 审查提出四项缺陷：紧急插话未校验易失工位归属（违背 AGENTS.md Invariant 11）、paused/interrupted 任务 steer 后未重开导致后续事件被 Controller 忽略、stuck 异常卡片将 blocked 错标为 failed resume、仪表板 10 秒轮询刷新冲刷用户正在输入的草稿与光标。
+- 变更：
+  1. `console/dashboard_reply.py` 紧急插话前复用 `task_resources.owned_live_pane()` 强校验工位所有权与会话身份，错配或失活安全拒绝，防止指令注入串台工位；
+  2. `herdr/dashboard.py` 与 `console/dashboard_reply.py` 支持 paused/interrupted 任务在插话时通过恢复跃迁（working / rework）重开任务，打通 Controller task_listener 与完成回执；
+  3. `herdr/dashboard.py` stuck 异常投影按任务真实状态推导 reply_mode 与中文原因（blocked 推导 steer，failed 推导 resume）；
+  4. `console/static/console/scripts/dashboard.js` 引入 `dashReplyDrafts` 跨轮询保存输入草稿，并在 DOM 更新后恢复文本、焦点及光标选区。
+
+## [2026-11-13] feat | 仪表板卡点中文提示与一句话回复继续
+
+- 背景：`/api/dashboard` 卡点原因原为英文码（如 hard_timeout_watchdog、router_isolation_rejected、integrate_rebase_conflict），且卡片仅有「在 Controller 中处理」，卡住列表无法直接回复，无法原地闭环。
+- 变更：
+  1. `herdr/reason_labels.py`、`services/herdr-notifier.py` 与控制台补全看门狗超时、隔离检查拒绝、合并冲突的中文提示；
+  2. `herdr/dashboard.py` 提供纯函数 `reply_mode_for` 与 `reply_plan`：活跃任务规划 urgent steer，失败任务规划包含人回复的 replacement launch（禁止 force_pass 绕行）；
+  3. 新增 `console/dashboard_reply.py` 与 `/api/dashboard/reply` 接口执行回复；
+  4. 仪表板任务列表按执行中优先排序，卡点卡支持直接输入一句话「回复并继续」。
+
 ## [2026-11-13] add | 任务抽屉只读展示最近一条 Prompt 快照
 
 - 背景：Prompt Ledger 已能按任务查询最终投递文本，但控制台任务抽屉不读这张表。操作者仍要离开界面执行 CLI。

@@ -65,7 +65,10 @@ function workflowStartupHint(w){
 function humanReason(value){
   const text=String(value??'').trim();
   const labels={
-    inner_loop_exhausted:'工位内循环已耗尽全部重试次数，无法自愈，需要总指挥仲裁'
+    inner_loop_exhausted:'工位内循环已耗尽全部重试次数，无法自愈，需要总指挥仲裁',
+    hard_timeout_watchdog:'执行超时后被看门狗停下，需要你回复后继续',
+    router_isolation_rejected:'派发时被隔离检查拒绝，任务没有真正开始',
+    integrate_rebase_conflict:'合并时遇到代码冲突，需要你决定怎么继续'
   };
   return Object.prototype.hasOwnProperty.call(labels, text)?labels[text]:text;
 }
