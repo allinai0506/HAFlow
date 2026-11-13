@@ -11,7 +11,13 @@ from pathlib import Path
 
 from herdr.dashboard import build_dashboard
 from herdr.projection import extract_task_blockers
-from herdr.reason_labels import INNER_LOOP_EXHAUSTED_TEXT, human_reason
+from herdr.reason_labels import (
+    HARD_TIMEOUT_TEXT,
+    INNER_LOOP_EXHAUSTED_TEXT,
+    REBASE_CONFLICT_TEXT,
+    ROUTER_ISOLATION_TEXT,
+    human_reason,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONSOLE = console_source(ROOT)
@@ -22,6 +28,9 @@ SENTINEL = (ROOT / "services" / "herdr-sentinel.py").read_text(encoding="utf-8")
 def test_known_code_is_chinese_and_other_text_is_kept():
     assert human_reason("inner_loop_exhausted") == INNER_LOOP_EXHAUSTED_TEXT
     assert human_reason("  inner_loop_exhausted  ") == INNER_LOOP_EXHAUSTED_TEXT
+    assert human_reason("hard_timeout_watchdog") == HARD_TIMEOUT_TEXT
+    assert human_reason("router_isolation_rejected") == ROUTER_ISOLATION_TEXT
+    assert human_reason("integrate_rebase_conflict") == REBASE_CONFLICT_TEXT
     assert human_reason(None) == ""
     assert human_reason("No disk space") == "No disk space"
     assert "无法自愈" in INNER_LOOP_EXHAUSTED_TEXT
@@ -66,6 +75,9 @@ def test_notifier_reason_matches_shared_label():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.reason({"sentinel_reason": "inner_loop_exhausted"}) == INNER_LOOP_EXHAUSTED_TEXT
+    assert module.reason({"sentinel_reason": "hard_timeout_watchdog"}) == HARD_TIMEOUT_TEXT
+    assert module.reason({"sentinel_reason": "router_isolation_rejected"}) == ROUTER_ISOLATION_TEXT
+    assert module.reason({"sentinel_reason": "integrate_rebase_conflict"}) == REBASE_CONFLICT_TEXT
     assert module.reason({"failure_reason": "磁盘满了"}) == "磁盘满了"
     assert INNER_LOOP_EXHAUSTED_TEXT in NOTIFIER
 

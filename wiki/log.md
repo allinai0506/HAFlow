@@ -8,6 +8,15 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-13] feat | 仪表板卡点中文提示与一句话回复继续
+
+- 背景：`/api/dashboard` 卡点原因原为英文码（如 hard_timeout_watchdog、router_isolation_rejected、integrate_rebase_conflict），且卡片仅有「在 Controller 中处理」，卡住列表无法直接回复，无法原地闭环。
+- 变更：
+  1. `herdr/reason_labels.py`、`services/herdr-notifier.py` 与控制台补全看门狗超时、隔离检查拒绝、合并冲突的中文提示；
+  2. `herdr/dashboard.py` 提供纯函数 `reply_mode_for` 与 `reply_plan`：活跃任务规划 urgent steer，失败任务规划包含人回复的 replacement launch（禁止 force_pass 绕行）；
+  3. 新增 `console/dashboard_reply.py` 与 `/api/dashboard/reply` 接口执行回复；
+  4. 仪表板任务列表按执行中优先排序，卡点卡支持直接输入一句话「回复并继续」。
+
 ## [2026-11-13] add | 任务抽屉只读展示最近一条 Prompt 快照
 
 - 背景：Prompt Ledger 已能按任务查询最终投递文本，但控制台任务抽屉不读这张表。操作者仍要离开界面执行 CLI。

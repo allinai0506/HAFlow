@@ -320,6 +320,9 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/retry-advance':return self.send_json(200,control_api.api_workflow_retry_advance(b))
             if p=='/api/task/coordinator':return self.send_json(200,workflow_api.ask_coordinator(str(b['task_id'])))
             if p=='/api/task/steer':return self.send_json(200,task_api.api_task_steer(b))
+            if p=='/api/dashboard/reply':
+                from console.dashboard_reply import api_dashboard_reply
+                return self.send_json(200,api_dashboard_reply(b))
             if p=='/api/task/halt':return self.send_json(200,task_api.api_task_halt(b))
             if p=='/api/task/signoff':
                 b = b or {}

@@ -17,6 +17,9 @@ from .reason_labels import human_reason
 
 ACTIVE_STATUSES = {"pending", "dispatched", "working", "blocked",
                    "agent_done", "rework", "failed"}
+EXECUTING_STATUSES = {"pending", "dispatched", "working", "agent_done", "rework"}
+REPLY_STEER_STATUSES = {"dispatched", "working", "rework", "blocked", "paused", "interrupted"}
+CLOSED_STATUSES = {"completed", "committed", "integrated", "cleaned", "superseded"}
 HISTORY_STATUSES = {"superseded", "cleaned"}
 
 STATUS_TEXT = {
@@ -65,6 +68,77 @@ def _is_history(task: Mapping[str, Any]) -> bool:
     return bool(task.get("superseded_by"))
 
 
+def reply_mode_for(task: Mapping[str, Any]) -> str:
+    """How a person can answer this task from the dashboard. No I/O."""
+    status = str((task or {}).get("status") or "")
+    if status in REPLY_STEER_STATUSES:
+        return "steer"
+    if status == "failed":
+        return "resume"
+    return "none"
+
+
+def reply_plan(task: Mapping[str, Any], instruction: Any) -> Dict[str, Any]:
+    """Decide how one human sentence continues a task. No I/O, no force-pass."""
+    text = str(instruction or "").strip()
+    if not text:
+        return {"ok": False, "error": "请先写一句话，说明接下来怎么做"}
+    if len(text) > 1000:
+        return {"ok": False, "error": "一句话太长了，请收短到 1000 字以内"}
+    if not task or not task.get("task_id"):
+        return {"ok": False, "error": "找不到这件任务"}
+    mode = reply_mode_for(task)
+    tid = str(task.get("task_id"))
+    if mode == "steer":
+        return {
+            "ok": True,
+            "mode": "steer",
+            "task_id": tid,
+            "instruction": text,
+            "urgent": True,
+            "message": "已经送到这个工位，它会按你的话继续。",
+        }
+    if mode != "resume":
+        return {"ok": False, "error": "这个任务已经结束，回复送不进去。"}
+    wid = str(task.get("workflow_id") or "").strip()
+    if not wid:
+        return {"ok": False, "error": "这件任务没有工作流，不能重新开始"}
+    from .controller_actions import inherit_experience_policy, next_replacement_id
+
+    stage = str(task.get("stage") or task.get("node") or "implementation").strip() or "implementation"
+    agent = str(task.get("agent") or "auto").strip() or "auto"
+    goal = str(task.get("goal") or f"继续完成{stage}")[:500]
+    new_id = next_replacement_id(tid, f"{wid}-{stage}-r2")
+    prompt = (
+        f"人的回复：{text}\n\n"
+        "请按这句话继续完成原来的任务，不要另起一套方案。"
+        f"原目标：{goal}"
+    )
+    launch: Dict[str, Any] = {
+        "type": "launch",
+        "task_id": new_id,
+        "workflow_id": wid,
+        "stage": stage,
+        "agent": agent,
+        "supersedes": tid,
+        "supersede_reason": "human replied and asked to continue",
+        "goal": goal,
+        "prompt": prompt[:4000],
+        **inherit_experience_policy(dict(task)),
+    }
+    source = str(task.get("project_root") or task.get("source") or "").strip()
+    if source:
+        launch["source"] = source
+    return {
+        "ok": True,
+        "mode": "resume",
+        "task_id": tid,
+        "new_task_id": new_id,
+        "message": "已按你的话重新开始，旧任务保留备查。",
+        "launch": launch,
+    }
+
+
 def _attention_reason(task: Mapping[str, Any]) -> str:
     if task.get("finalize_escalated"):
         return str(task.get("finalize_escalate_reason") or "终化冲突，需你确认后关闭")
@@ -111,9 +185,14 @@ def build_dashboard(
 
     # --- tasks section: active first, then most recently updated ---
     def _task_rank(t: Mapping[str, Any]) -> tuple:
-        active = 0 if (t.get("status") in ACTIVE_STATUSES and not _is_history(t)) else 1
+        if _is_history(t) or t.get("status") in CLOSED_STATUSES:
+            bucket = 2
+        elif t.get("status") in EXECUTING_STATUSES:
+            bucket = 0
+        else:
+            bucket = 1
         upd = _epoch(t.get("last_activity_at")) or _epoch(t.get("updated_at")) or 0.0
-        return (active, -upd)
+        return (bucket, -upd)
 
     ordered_tasks = sorted(task_list, key=_task_rank)
     task_items = []
@@ -168,6 +247,17 @@ def build_dashboard(
     decision_list.sort(key=lambda x: -(x.get("raised_at") or 0.0))
     decision_items = decision_list[: lim["decisions"]]
 
+    titles = {
+        w.get("workflow_id"): (w.get("title") or w.get("workflow_id"))
+        for w in (workflows or [])
+        if isinstance(w, Mapping) and w.get("workflow_id")
+    }
+    by_id = {}
+    for src in task_list:
+        src_id = src.get("task_id")
+        if src_id and src_id not in by_id:
+            by_id[src_id] = src
+
     # --- attention: union of explicit blockers + escalated + blocked/failed ---
     seen: Dict[str, Dict[str, Any]] = {}
     candidates: List[Mapping[str, Any]] = []
@@ -183,19 +273,25 @@ def build_dashboard(
         if not tid or tid in seen or _is_history(t):
             continue
         act = actions.get(tid) or {}
-        reason = _attention_reason(t)
+        src = by_id.get(tid) or t
+        reason = _attention_reason(src)
         if not reason:
-            reason = str(t.get("blocker") or t.get("stage_verdict_note") or "等你看一眼")
+            reason = str(src.get("blocker") or src.get("stage_verdict_note") or "等你看一眼")
         reason = human_reason(reason)
-        upd = _epoch(t.get("last_activity_at")) or _epoch(t.get("updated_at"))
+        upd = _epoch(src.get("last_activity_at")) or _epoch(src.get("updated_at")) or _epoch(t.get("last_activity_at")) or _epoch(t.get("updated_at"))
+        wid = src.get("workflow_id") or t.get("workflow_id") or "unknown"
         seen[tid] = {
             "task_id": tid,
-            "workflow_id": t.get("workflow_id") or "unknown",
-            "node": t.get("node") or t.get("stage") or "—",
-            "pane_id": t.get("pane_id") or "",
+            "workflow_id": wid,
+            "workflow_title": titles.get(wid) or wid,
+            "node": src.get("node") or src.get("stage") or t.get("node") or t.get("stage") or "—",
+            "pane_id": src.get("pane_id") or t.get("pane_id") or "",
+            "status": src.get("status") or t.get("status") or "",
+            "goal": str(src.get("goal") or "")[:160],
+            "reply_mode": reply_mode_for(src),
             "reason": reason[:300],
-            "default_action": str(act.get("title") or _default_action_title(t))[:100],
-            "default_action_text": str(act.get("effect") or _default_action_text(t))[:300],
+            "default_action": str(act.get("title") or _default_action_title(src))[:100],
+            "default_action_text": str(act.get("effect") or _default_action_text(src))[:300],
             "command": str(act.get("command_line") or "")[:300],
             "endpoint": str(act.get("api_endpoint") or "")[:200],
             "payload": dict(act.get("api_payload") or {}) if isinstance(act.get("api_payload"), Mapping) else {},
@@ -210,8 +306,12 @@ def build_dashboard(
             "task_id": "",
             "decision_id": dec["decision_id"],
             "workflow_id": dec["workflow_id"],
+            "workflow_title": titles.get(dec["workflow_id"]) or dec["workflow_id"],
             "node": dec["node"],
             "pane_id": "",
+            "status": "",
+            "goal": "",
+            "reply_mode": "decide",
             "reason": dec["reason"],
             "default_action": dec["default_action"],
             "default_action_text": dec["default_action_text"],
@@ -252,17 +352,23 @@ def build_dashboard(
         stuck.append({
             "task_id": s.get("target_task_id") or "",
             "workflow_id": wid,
-            "reason": str(s.get("message"))[:300],
+            "workflow_title": titles.get(wid) or wid,
+            "reason": human_reason(str(s.get("message")))[:300],
             "suggestion": str(s.get("suggested_action") or "")[:100],
+            "reply_mode": "none",
             "last_event_text": format_clock(now_f),
         })
     for a in anomaly_list:
         la = _epoch(a.get("last_activity_at"))
+        awid = a.get("workflow_id") or "unknown"
+        atid = a.get("task_id") or ""
         stuck.append({
-            "task_id": a.get("task_id") or "",
-            "workflow_id": a.get("workflow_id") or "unknown",
-            "reason": f"{a.get('kind', 'STUCK')}: {a.get('task_id', '')}",
-            "suggestion": "打开任务看详情，必要时换人重跑",
+            "task_id": atid,
+            "workflow_id": awid,
+            "workflow_title": titles.get(awid) or awid,
+            "reason": "任务失败了，写一句话就能让它按你的话继续",
+            "suggestion": "写一句话，按原执行者继续",
+            "reply_mode": "resume" if atid else "none",
             "last_event_text": format_clock(la),
         })
     stuck = stuck[: lim["stuck"]]
@@ -279,6 +385,8 @@ def build_dashboard(
         "stuck": stuck,
         "counts": {
             "tasks": len(task_list),
+            "live": sum(1 for t in task_list if t.get("status") in EXECUTING_STATUSES and not _is_history(t)),
+            "history": sum(1 for t in task_list if _is_history(t) or t.get("status") in CLOSED_STATUSES),
             # Count what is actually rendered, not the pre-slice total, so the
             # KPI can never disagree with the list underneath it.
             "attention": len(attention),
