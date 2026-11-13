@@ -156,6 +156,45 @@ pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-
 .ops-empty-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .ops-empty-sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
 
+/* Ops Guide, Search & Table Enhancements */
+.ops-guide-banner { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 16px; box-shadow: var(--shadow-sm); }
+.ops-guide-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ops-guide-title { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-primary); flex-wrap: wrap; }
+.ops-guide-icon { font-size: 16px; }
+.ops-guide-sub { font-size: 12px; color: var(--text-secondary); font-weight: normal; }
+.ops-guide-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+.ops-guide-item { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 12px; font-size: 12px; line-height: 1.5; }
+.ops-guide-item p { margin: 4px 0 0; color: var(--text-secondary); }
+.ops-guide-badge-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+
+.ops-head-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ops-search-box { position: relative; display: flex; align-items: center; }
+.ops-search-input { background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 4px 24px 4px 8px; font-size: 11.5px; color: var(--text-primary); width: 150px; transition: width .2s ease, border-color .2s ease; }
+.ops-search-input:focus { width: 200px; border-color: var(--primary); outline: none; background: var(--bg-surface); }
+.ops-clear-btn { position: absolute; right: 4px; background: transparent; border: none; color: var(--text-tertiary); cursor: pointer; font-size: 11px; padding: 0 4px; }
+.ops-clear-btn:hover { color: var(--text-primary); }
+.ops-view-toggle { display: inline-flex; background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 2px; gap: 2px; }
+.ops-toggle-btn { border: none; background: transparent; font-size: 11px; padding: 4px 8px; border-radius: 2px; cursor: pointer; color: var(--text-secondary); }
+.ops-toggle-btn.active { background: var(--bg-surface); color: var(--text-primary); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+
+.ops-table-wrap { overflow-x: auto; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); margin-bottom: 12px; }
+.ops-wf-table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+.ops-wf-table th { background: var(--bg-subtle); padding: 8px 12px; font-weight: 600; color: var(--text-secondary); border-bottom: 1px solid var(--border-default); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.ops-wf-table td { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+.ops-wf-table tr.ops-table-row { cursor: pointer; transition: background .12s ease; }
+.ops-wf-table tr.ops-table-row:hover { background: var(--bg-hover); }
+.ops-table-name { font-weight: 600; color: var(--text-primary); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ops-table-sub { font-size: 11px; color: var(--text-secondary); }
+
+.ops-anom-filter-pills { display: inline-flex; background: var(--bg-subtle); padding: 2px; border-radius: 6px; border: 1px solid var(--border-subtle); gap: 2px; }
+.ops-anom-tip { font-size: 11.5px; color: var(--text-secondary); background: var(--bg-subtle); border-radius: 4px; padding: 4px 8px; margin-bottom: 8px; border-left: 2px solid var(--primary); }
+.ops-stale-tag { font-size: 10px; background: var(--bg-subtle); border: 1px solid var(--border-subtle); color: var(--text-tertiary); padding: 2px 4px; border-radius: 4px; }
+.ops-link { cursor: pointer; color: var(--primary); text-decoration: none; }
+.ops-link:hover { text-decoration: underline; }
+.ops-filter-pill.has-alert { color: var(--danger); font-weight: 600; }
+.ops-anomaly-card.is-escalated { border-color: rgba(217, 119, 6, 0.35); border-left-color: var(--warning); }
+
+
 
 @media (max-width: 1000px) {
   .shell { grid-template-columns: 1fr; }
