@@ -63,7 +63,7 @@ function renderTaskOverview(task,proj){
   else{h+=`<div class="td-sec"><div class="td-lbl">结果</div><div class="empty" style="padding:8px 0">当前任务尚未产生结果</div></div>`}
   h+=`<div class="td-sec"><div class="td-lbl">状态</div><div>${badge(task.status||'unknown')}</div></div>`;
   if(blocker)h+=`<div class="td-sec"><div class="td-lbl">阻塞原因</div><div class="td-txt">${esc(blocker)}</div></div>`;
-  if(verdict)h+=`<div class="td-sec"><div class="td-lbl">阶段结论</div><div class="td-txt">${esc(verdict)}${note?' · '+esc(note):''}</div></div>`;
+  if(verdict)h+=`<div class="td-sec"><div class="td-lbl">阶段结论</div><div class="td-txt">${esc(verdict)}${note?' · '+esc(note):''}</div></div>`;h+=renderPromptLedger(proj);
   return h;
 }
 function renderTaskActivity(task,proj){

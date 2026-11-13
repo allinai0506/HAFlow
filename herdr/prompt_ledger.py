@@ -694,7 +694,7 @@ def _query(store, sql, params):
         conn.close()
 
 
-def list_snapshots(store, *, task_id=None, workflow_id=None, node_id=None, limit=100):
+def list_snapshots(store, *, task_id=None, workflow_id=None, node_id=None, limit=100, newest_first=False):
     clauses, params = [], []
     if task_id:
         clauses.append("task_id=?")
@@ -708,10 +708,11 @@ def list_snapshots(store, *, task_id=None, workflow_id=None, node_id=None, limit
     if not clauses:
         raise PromptLedgerError("prompt query requires task_id, workflow_id, or node_id")
     params.append(int(limit))
+    direction = "DESC" if newest_first else "ASC"
     rows = _query(
         store,
         "SELECT * FROM prompt_snapshots WHERE " + " AND ".join(clauses)
-        + " ORDER BY created_at ASC, prompt_id ASC LIMIT ?",
+        + f" ORDER BY created_at {direction}, prompt_id {direction} LIMIT ?",
         params,
     )
     return [_public(row, reveal=False) for row in rows]

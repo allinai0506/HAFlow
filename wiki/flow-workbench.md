@@ -238,6 +238,8 @@ Evidence:
 
 **FACT**：`workspace.js` 负责页面导航/项目水合，`workflow-reader.js` 负责选中工作流读取，`task-board.js` 负责列表/关注/交互，`task-detail.js` 负责抽屉和轨迹，`flow-canvas.js` 负责画布/Inspector，`controller-cockpit.js` 负责控制/决策/恢复。模板、运维、仪表盘、成果、经验中心、日志、归档各有完整能力入口。完整职责与迁移顺序见 `docs/plans/2026-10-20-console-ui-modules.md`。
 
+**FACT**：任务抽屉概览从 `/api/task/projection` 的 `prompt_ledger` 读取该任务最近一条投递快照。展示状态、工位名、哈希前缀和脱敏摘录。完整 Prompt 与 diff 正文不进这个响应。读取失败只替换这一格，不替换成果或轨迹。
+
 **FACT**：页签关闭通过 `logs.js#stopLogAutoRefresh` 停止日志轮询；后置增强通过 `sidebar-tabs.js#setWorkflowTabsRenderer` 接回原页签渲染装饰。修改这两个边界时应运行完整装配的生命周期测试，不能只单独提取渲染函数。
 
 Evidence:
