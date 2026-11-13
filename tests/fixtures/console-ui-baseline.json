@@ -238,7 +238,7 @@
 "canForceReviewTask": {"owner": "task-detail", "sha256": "07072b5f2025a65cb634e62c3996bbb31f6321c56109fa0f4f9360288f6e5de9"},
 "canForcePassTask": {"owner": "task-detail", "sha256": "555db2263c4c3f9d610bdf2339268586e1b9c9835d535f389f85f65cc9d40d82"},
 "buildTaskEvents": {"owner": "task-detail", "sha256": "4685e0e71a6a6ec703caf9acc8383a816bd3a02f65c623ff748bfd2950439c17"},
-"renderTaskOverview": {"owner": "task-detail", "sha256": "148a6bdd8ff2022fd3c2fe08d5298d1f2067c54bc9dffc49616b12a5e48d6c47"},
+"renderTaskOverview": {"owner": "task-detail", "sha256": "33d57af7565dcab5202cd9d05cb2b831a1f96199e0041b2dacc47da386825f5d"},
 "renderTaskActivity": {"owner": "task-detail", "sha256": "a56a040bf4103004a098c40b35676577946c8447e70033cb13f78ee5342093c2"},
 "renderTaskArtifacts": {"owner": "task-detail", "sha256": "31fa4187b3d058ca029d59ca03fed35e95d09417aa3cf85f2a9fd7f1be38c0d5"},
 "renderTaskRuntime": {"owner": "task-detail", "sha256": "2779a74616e72ac7a2768921c13f482988a096421ba9585153745953a780b0e1"},
