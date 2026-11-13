@@ -379,7 +379,7 @@ function renderOpsCenter(){
     <div class="ops-dashboard-grid">
       <div class="ops-col-left">
         <div class="ops-section-head">
-          <div class="ops-section-title"><span>工作流全景大盘</span><span class="ops-badge" id="opsWfCount">${filteredCards.length} / ${cards.length}</span></div>
+          <div class="ops-section-title"><span>工作流 / 阶段节点</span><span class="ops-badge" id="opsWfCount">${filteredCards.length} / ${cards.length}</span></div>
           <div class="ops-head-tools">
             <div class="ops-search-box">
               <input type="text" class="ops-search-input" placeholder="🔍 搜索工作流..." value="${esc(state.opsWfSearch||'')}" oninput="searchOpsWorkflows(this.value)">
@@ -414,7 +414,7 @@ function renderOpsCenter(){
           <div id="opsAnomalyList" class="ops-anomaly-container">${anomsHtml}</div>
         </div>
         <div class="ops-panel-fleet">
-          <div class="ops-section-head"><div class="ops-section-title"><span>🤖 智能体执行机队</span><span class="ops-badge" id="opsFleetCount">${fleet.length} 在线</span></div><span class="task-meta">${fleet.some(a=>a.health==='BUSY')?'⚡ 任务执行中':'🟢 全员就绪待命'}</span></div>
+          <div class="ops-section-head"><div class="ops-section-title"><span>执行者舰队</span><span class="ops-badge" id="opsFleetCount">${fleet.length} 在线</span></div><span class="task-meta">${fleet.some(a=>a.health==='BUSY')?'⚡ 任务执行中':'🟢 全员就绪待命'}</span></div>
           <div id="opsFleetList" class="fleet-table-wrap">${fleetHtml}</div>
         </div>
       </div>
