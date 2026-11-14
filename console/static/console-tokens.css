@@ -1,45 +1,66 @@
-/* Shared Console palette. Keep both workbenches on this source. */
+/* Shared Console palette. Keep both workbenches on this source.
+ * Affect UI / Linear Modern AI Agent Design Tokens
+ */
 :root {
-  /* Linear Clean Light Palette */
-  --bg-page: #f8f9fa;
-  --bg-sidebar: #fafafa;
+  /* Modern Neutral Canvas & Surfaces */
+  --bg-page: #f8fafc;
+  --bg-sidebar: #f1f5f9;
   --bg-surface: #ffffff;
-  --bg-subtle: #f4f5f7;
-  --bg-hover: #f0f1f3;
-  --bg-active: #eceef2;
+  --bg-subtle: #f8fafc;
+  --bg-hover: #f1f5f9;
+  --bg-active: #e2e8f0;
   --bg-elevated: #ffffff;
 
-  /* Typography */
-  --text-primary: #121316;
-  --text-secondary: #5f6368;
-  --text-tertiary: #8c919a;
+  /* High-Contrast Typography */
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-tertiary: #94a3b8;
   --text-inverse: #ffffff;
 
+  /* Typography Stacks */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Geist Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
   /* Borders & Dividers */
-  --border-default: #e5e7eb;
-  --border-subtle: #f0f1f3;
-  --border-focus: #5e6ad2;
+  --border-default: #e2e8f0;
+  --border-subtle: #f1f5f9;
+  --border-focus: #6366f1;
 
-  /* Primary Brand (Linear Blue-Violet / Royal Blue) */
-  --primary: #5e6ad2;
-  --primary-hover: #4f5bc4;
-  --primary-subtle: rgba(94, 106, 210, 0.08);
+  /* Primary Brand (Affect UI Electric Indigo) */
+  --primary: #6366f1;
+  --primary-hover: #4f46e5;
+  --primary-subtle: rgba(99, 102, 241, 0.08);
+  --primary-glow: rgba(99, 102, 241, 0.2);
 
-  /* Status Colors */
-  --success: #16a34a;
-  --success-bg: #f0fdf4;
-  --warning: #d97706;
+  /* Status Colors (Agent Telemetry & Lifecycle) */
+  --success: #10b981;
+  --success-bg: #ecfdf5;
+  --success-border: #a7f3d0;
+  --warning: #f59e0b;
   --warning-bg: #fffbeb;
-  --danger: #dc2626;
-  --danger-bg: #fef2f2;
+  --warning-border: #fde68a;
+  --danger: #f43f5e;
+  --danger-bg: #fff1f2;
+  --danger-border: #fecdd3;
+
+  /* Agent States */
+  --agent-idle: #64748b;
+  --agent-active: #6366f1;
+  --agent-done: #10b981;
+  --agent-decision: #f59e0b;
+  --agent-blocked: #f43f5e;
 
   /* Radius & Shadows */
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 8px;
-  --radius-lg: 10px;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.09);
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --shadow-xs: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
+  --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.06), 0 1px 2px -1px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 4px 12px -2px rgba(15, 23, 42, 0.08), 0 2px 6px -2px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 12px 24px -4px rgba(15, 23, 42, 0.1), 0 4px 10px -2px rgba(15, 23, 42, 0.05);
+  --shadow-glow: 0 0 20px rgba(99, 102, 241, 0.18);
 
   /* Compatibility Aliases */
   --bg: var(--bg-page);
@@ -53,15 +74,46 @@
   --muted: var(--text-secondary);
   --subtle: var(--text-tertiary);
   --accent: var(--primary);
-  --accent-glow: rgba(94, 106, 210, 0.12);
+  --accent-glow: var(--primary-glow);
   --good: var(--success);
   --warn: var(--warning);
   --bad: var(--danger);
 }
 
 /* Shared workbench mode navigation; current mode is static page identity. */
-.workbenchModes { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--border-default); border-radius: 7px; background: var(--bg-subtle); white-space: nowrap; }
-.workbenchModes > a, .workbenchModes > span { display: block; padding: 5px 6px; border-radius: 4px; font-size: 11px; line-height: 18px; font-weight: 500; color: var(--text-secondary); text-decoration: none; }
-.workbenchModes > a:hover { background: var(--bg-hover); color: var(--text-primary); text-decoration: none; }
-.workbenchModes > [aria-current="page"] { color: var(--primary); background: var(--bg-surface); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-.workbenchModes > a:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.workbenchModes {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  white-space: nowrap;
+}
+.workbenchModes > a, .workbenchModes > span {
+  display: block;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+.workbenchModes > a:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+.workbenchModes > [aria-current="page"] {
+  color: var(--primary);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-xs);
+  font-weight: 600;
+}
+.workbenchModes > a:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
