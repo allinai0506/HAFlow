@@ -115,6 +115,11 @@ async function refreshAll(){
 
     renderOverview();
     if(state.spaceId)await selectSpace(state.spaceId,false);
+    else if(state.overview.projects&&state.overview.projects.length){
+      const p=state.overview.projects[0];
+      state.projectId=p.project_id;
+      await loadProject(p.project_id,false);
+    }
     if(sequence!==state.refreshSequence||state.opsMode||state.dashMode)return;
     if(state.shellView==='experience')return;
     if(state.shellView&&state.shellView!=='workbench')paintShellPage(state.shellView);

@@ -4252,3 +4252,16 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   5. **工作流节点拓扑图（Flow Canvas）**：在 `console/static/console/styles/shell-workspace.css` 与 `shell-inspector.css` 中实现执行态节点的双层环境扩散呼吸微光（`nodeActiveBreathing`）、连线锚点脉冲环与电流虚线动效；
   6. **间距栅格与指纹合规**：修复所有潜在的 4px Spacing 栅格违规项，更新 `tests/fixtures/console-ui-baseline.json` 样式签名。
 - 验证：`tests/test_simple_workbench.py`、`tests/test_console_ui_modules.py`、`tests/test_console_execution_trace.py`、`tests/test_console_frontend_syntax.py`、`tests/test_console_module_boundaries.py`、`tests/test_console_standard_layout_tabs.py` 等 135 项控制台回归测试全部 PASS；`compileall` 与 `git diff --check` clean。
+
+## [2026-11-14] Fix | 控制台离线终端空间兜底与空态提示优化
+- 现场：用户反馈 Web 控制台在纯浏览器查阅场景下，侧边栏永久停留在「空间工作流 正在加载 / 正在读取空间工作流…」，顶部空间选择器停留在初始占位符「选择空间 / 当前工厂」。
+- 根因：
+  1. `console/runtime.py:spaces()` 仅遍历 `herdr_workspaces()`，当本地 Herdr 终端 Socket 离线时（`server_not_running`），即便已登记工厂项目（`inventory.projects()`），`spaces()` 依然返回空数组 `[]`；
+  2. `console/static/console/scripts/workspace.js:refreshAll()` 在 `spaces` 为空时将 `state.spaceId` 置为 `null`，导致级联跳过 `selectSpace` 与 `loadProject`，使 `state.project` 永久为 `null`；
+  3. `sidebar-tabs.js` 中 `if(!state.project)` 无条件输出「正在加载…」，在无空间/项目场景下产生死循环假死假象。
+- 修复：
+  1. `console/runtime.py:spaces()` 增加兜底逻辑：遍历登记项目 `inventory.projects()`，将未在活动终端中出现（或终端离线）的工厂项目作为离线工厂空间补入 `spaces`，保证控制台脱离终端守护也能正常读取工作流；
+  2. `workspace.js:refreshAll()` 增加项目兜底：当空间为空但存在已登记项目时，回落加载首个项目；
+  3. `sidebar-tabs.js:renderSidebarWorkflows()` 完善空态提示：当不存在空间时，明确显示「暂无工厂空间，请先创建空间」并将计数置为 0，不再假死停在「正在加载」；
+  4. 新增 `tests/test_console_offline_space_fallback.py` 覆盖离线空间补入、去重与总览聚合行为；同步在 `test_console_ui_modules.py` 中登记函数变更。
+- 验证：`tests/test_console_offline_space_fallback.py` 全绿；516 项控制台专项测试全绿；curl `/api/overview` 验证 `spaces` 正确输出离线工厂空间 `HAFlow (w1H)`。

@@ -196,9 +196,12 @@ def spaces():
     ps = inventory.projects()
     by_workspace = {p.get('workspace_id'): p for p in ps if p.get('workspace_id')}
     out = []
+    seen_wids = set()
 
     for ws in herdr_workspaces():
         wid = ws.get('workspace_id')
+        if wid:
+            seen_wids.add(wid)
         p = by_workspace.get(wid)
         root = p.get('project_root') if p else infer_space_root(wid)
 
@@ -221,6 +224,24 @@ def spaces():
             'factory_workspace_id': p.get('workspace_id') if p else None,
         })
         out.append(item)
+
+    for p in ps:
+        wid = p.get('workspace_id') or p.get('project_id')
+        if not wid or wid in seen_wids:
+            continue
+        seen_wids.add(wid)
+        out.append({
+            'workspace_id': wid,
+            'label': p.get('project_name') or wid,
+            'number': 0,
+            'tab_count': 0,
+            'pane_count': 0,
+            'relation': 'current_factory',
+            'project_root': p.get('project_root'),
+            'project_id': p.get('project_id'),
+            'project_name': p.get('project_name'),
+            'factory_workspace_id': wid,
+        })
 
     rank = {'current_factory': 0, 'historical': 1, 'unregistered': 2}
     return sorted(out, key=lambda x: (
