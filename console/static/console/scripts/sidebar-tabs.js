@@ -34,6 +34,11 @@ function renderSidebarWorkflows(){
   const ws = (state.project && state.project.workflows) || [];
   const totalEl = document.getElementById('sidebarWfTotalCount');
   if(!state.project){
+    if(state.overview&&(!state.overview.spaces||!state.overview.spaces.length)){
+      if(totalEl)totalEl.textContent='0';
+      container.innerHTML='<div class="empty" role="status">暂无工厂空间，请先创建空间</div>';
+      return;
+    }
     if(totalEl)totalEl.textContent='正在加载';
     container.innerHTML='<div class="empty" role="status">正在读取空间工作流…</div>';return;
   }
