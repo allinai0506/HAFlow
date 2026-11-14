@@ -4241,3 +4241,14 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - 修复：`node_dispatch_store.py:defer` 扩充 `consume_attempt=True` 参数；`direct_dispatch.py` 在 `mode == "wait"` 调用时传入 `consume_attempt=False`，安全还原认领计次，杜绝因果等待消耗派发预算。
 - 验证：`tests/test_p1_state_machine_defects_red.py` 扩充连续 5 轮 claim->wait 压测用例，验证持久操作始终保持 `pending` 且 `attempts=0`，不误升 `waiting_human`；`test_node_dispatch_contract.py` 等 155 项派发契约用例全绿。
 - 教训：`docs/lessons/lessons-learned.md` §233。
+
+## [2026-11-14] Feat | 控制台 UI 现代科技感全面升级（Affect UI 风格与智能体态势动效）
+- 背景：对齐开源 AI Agent 专有设计系统 Affect UI，针对 HAFlow 控制台进行视觉与交互层面的全面现代化改造，显著提升多智能体协同、人机交互与拓扑态势的可视化体验。
+- 改造范围：
+  1. **设计系统（Design Tokens）**：升级 `console/static/console-tokens.css`，引入 Slate 级阶梯表面中性色、Affect UI 电光靛蓝（Electric Indigo `#6366f1`）主色谱与多智能体状态色（Emerald/Amber/Rose），补齐等宽字体栈与复合阴影；
+  2. **执行轨迹与工具调用（Tool Calls & Traces）**：在 `console/static/console/styles/task-drawer.css` 中重构工具调用为卡片式交互项，增加光晕环时序节点、工具名胶囊 Badge、终端风格代码容器及产物浮雕卡片；
+  3. **人机协同与审批卡片（Handoff & Approval Cards）**：在 `console/static/console/styles/controller-cockpit.css` 与 `progress.css` 中强化等待人工决策的高权重琥珀色横幅与交互 Chip 按钮；
+  4. **工作流分组树（Sidebar Workflow Tree）**：在 `console/static/console/styles/shell-navigation.css` 中实现贯穿垂直导轨与水平分支的树状连线，并引入智能体活跃呼吸微光动效；
+  5. **工作流节点拓扑图（Flow Canvas）**：在 `console/static/console/styles/shell-workspace.css` 与 `shell-inspector.css` 中实现执行态节点的双层环境扩散呼吸微光（`nodeActiveBreathing`）、连线锚点脉冲环与电流虚线动效；
+  6. **间距栅格与指纹合规**：修复所有潜在的 4px Spacing 栅格违规项，更新 `tests/fixtures/console-ui-baseline.json` 样式签名。
+- 验证：`tests/test_simple_workbench.py`、`tests/test_console_ui_modules.py`、`tests/test_console_execution_trace.py`、`tests/test_console_frontend_syntax.py`、`tests/test_console_module_boundaries.py`、`tests/test_console_standard_layout_tabs.py` 等 135 项控制台回归测试全部 PASS；`compileall` 与 `git diff --check` clean。
