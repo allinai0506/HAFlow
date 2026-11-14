@@ -53,7 +53,7 @@ def tail_log(kind='controller',n=180):
 
 HOME=Path.home()
 HERDR_ROOT=_resolve_herdr_root()
-ROOT=Path(os.environ.get('HERDR_CONTROLLER_DIR') or (HOME/'.herdr-controller'))
+ROOT=HOME/'.herdr-controller'
 sys.path.insert(0, str(HERDR_ROOT))
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 CONSOLE_STATIC_DIR=Path(__file__).resolve().parent/'static'
