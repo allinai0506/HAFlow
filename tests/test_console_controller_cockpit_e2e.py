@@ -146,6 +146,7 @@ def browser(script, *, page_label):
             or "CdpRequestTimeoutError" in output
             or "PageNavigationTimeoutError" in output
             or "page.goto timed out" in output
+            or "waitForFunction timed out" in output
         ) and attempt < 2:
             time.sleep(1.0)
             continue
