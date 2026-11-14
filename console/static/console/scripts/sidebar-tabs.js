@@ -283,10 +283,11 @@ function renderWorkflowTabs(){
     if(dotClass==='default')dotClass='waiting';
     const statusLabel=workflowStatusLabel(w);
     const statusHint=workflowStartupHint(w);
-    return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('${esc(wid)}')" title="${esc(title)} (${esc(wid)})" role="tab" aria-selected="${isActive}">`+
+    const fullTitle=`${title} (${wid})${statusHint?'\n'+statusHint:''}`;
+    return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('${esc(wid)}')" title="${esc(fullTitle)}" role="tab" aria-selected="${isActive}">`+
       `<span class="tab-dot ${dotClass}" aria-hidden="true"></span>`+
       `<span class="tab-title">${esc(title)}</span>`+
-      `<span class="tab-status">${esc(statusLabel)}${statusHint?' · '+esc(statusHint):''}</span>`+
+      `<span class="tab-status ${dotClass}">${esc(statusLabel)}</span>`+
       `<button type="button" class="tab-close" onclick="closeWorkflowTab('${esc(wid)}',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
       `</div>`;
   }).join('');

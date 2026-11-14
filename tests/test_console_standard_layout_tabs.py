@@ -165,6 +165,46 @@ assert.ok(!state.openWorkflowTabIds.includes('__logs__'));
         res = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, timeout=10)
         self.assertEqual(res.returncode, 0, f"Node tab lifecycle test failed: {res.stderr}")
 
+    def test_workflow_tabs_single_line_and_status_badge(self):
+        """Verify tab labels, status badges and titles guarantee single-line display without vertical wrapping."""
+        source = console_source(ROOT)
+        self.assertIn(".tab-status", source)
+        self.assertIn("white-space: nowrap", source)
+        node_script = r"""
+const assert = require('node:assert/strict');
+const elements = new Map();
+const document = {
+  getElementById(id) {
+    if (!elements.has(id)) elements.set(id, {textContent: '', innerHTML: '', hidden: false, style: {}, classList: {toggle(){}}});
+    return elements.get(id);
+  }
+};
+function esc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function workflowSubject(w) { return (w && (w.title || w.requirement_subject)) || ''; }
+function workflowStatusTone(w) { return w.status === 'completed' ? 'completed' : 'danger'; }
+function workflowStatusLabel(w) { return w.status === 'completed' ? '已完成' : '启动失败'; }
+function workflowStartupHint(w) { return w.status === 'completed' ? '' : '阶段：init；原因：timeout。人工清理：herdr-task close-workflow ' + w.workflow_id; }
+""" + f"""
+let state = {{
+  workflowId: 'wf-long',
+  openWorkflowTabIds: ['wf-long'],
+  project: {{
+    workflows: [
+      {{workflow_id: 'wf-long', title: '预归档库-记账凭证，电子发票', status: 'failed'}}
+    ]
+  }}
+}};
+{re.search(r'function renderWorkflowTabs\(\)\{.*?\n\}', self.js, re.DOTALL).group(0)}
+renderWorkflowTabs();
+const html = document.getElementById('workflowTabsList').innerHTML;
+assert.ok(html.includes('class="tab-title">预归档库-记账凭证，电子发票</span>'));
+assert.ok(html.includes('class="tab-status danger">启动失败</span>'));
+assert.ok(!html.includes('class="tab-status danger">启动失败 · 阶段'));
+assert.ok(html.includes('人工清理：herdr-task close-workflow wf-long'));
+"""
+        res = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(res.returncode, 0, f"Node tab single line test failed: {res.stderr}")
+
     def test_pure_light_theme_palette(self):
         """4. 100% Light theme: No dark terminal backgrounds in sidebar, top bar, or main canvas."""
         source = console_source(ROOT)
