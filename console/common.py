@@ -51,7 +51,16 @@ def tail_log(kind='controller',n=180):
         text='[日志尾部已截断，较早内容超出读取上限]'+('\n'+text if text else '')
     return text
 
-HOME=Path.home()
+def _resolve_home():
+    env_home = os.environ.get('HOME', '')
+    if 'Antigravity CLI Isolated' in env_home:
+        candidate = Path('/Users/user')
+        if (candidate / '.herdr-controller').exists():
+            os.environ['HOME'] = str(candidate)
+            return candidate
+    return Path.home()
+
+HOME=_resolve_home()
 HERDR_ROOT=_resolve_herdr_root()
 ROOT=HOME/'.herdr-controller'
 sys.path.insert(0, str(HERDR_ROOT))
