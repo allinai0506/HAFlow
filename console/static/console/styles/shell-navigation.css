@@ -264,16 +264,17 @@
   height: 32px;
   padding: 0 8px;
   border-radius: 6px;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   background: transparent;
   color: #5e636e;
   font-size: 12px;
   cursor: pointer;
   position: relative;
   flex-shrink: 0;
-  max-width: 220px;
+  white-space: nowrap;
+  max-width: 280px;
   transition: all 0.12s ease;
   border: 1px solid transparent;
   user-select: none;
@@ -300,39 +301,55 @@
   border-radius: 2px;
 }
 .tab-dot {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 .tab-dot.running { background: #10b981; box-shadow: 0 0 0 2px #ecfdf5; }
 .tab-dot.decision { background: #f59e0b; box-shadow: 0 0 0 2px #fffbeb; }
-.tab-dot.blocked { background: #ef4444; box-shadow: 0 0 0 2px #fef2f2; }
+.tab-dot.blocked, .tab-dot.danger { background: #ef4444; box-shadow: 0 0 0 2px #fef2f2; }
+.tab-dot.warning { background: #f59e0b; box-shadow: 0 0 0 2px #fffbeb; }
 .tab-dot.completed { background: #9ca3af; }
 .tab-dot.waiting { background: #d1d5db; }
 .tab-title {
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  min-width: 32px;
+  max-width: 140px;
+}
+.tab-status {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  color: #6b7280;
 }
 .tab-close {
   width: 16px;
   height: 16px;
   border-radius: 4px;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   color: #8b909a;
   opacity: 0.6;
   transition: all 0.1s ease;
-  margin-left: 4px;
+  margin-left: 2px;
   border: 0;
   background: transparent;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
   cursor: pointer;
   padding: 0;
+  flex-shrink: 0;
 }
 .tab-close:hover {
   background: #e4e6ec;

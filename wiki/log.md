@@ -4265,3 +4265,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   3. `sidebar-tabs.js:renderSidebarWorkflows()` 完善空态提示：当不存在空间时，明确显示「暂无工厂空间，请先创建空间」并将计数置为 0，不再假死停在「正在加载」；
   4. 新增 `tests/test_console_offline_space_fallback.py` 覆盖离线空间补入、去重与总览聚合行为；同步在 `test_console_ui_modules.py` 中登记函数变更。
 - 验证：`tests/test_console_offline_space_fallback.py` 全绿；516 项控制台专项测试全绿；curl `/api/overview` 验证 `spaces` 正确输出离线工厂空间 `HAFlow (w1H)`。
+
+## [2026-11-14] Fix | 顶部页签菜单单行文本与状态微标优化
+- 现场：用户反馈控制台顶部页签菜单（Workflow Tabs）存在文字折行排版混乱问题，如「已完成」被挤压竖折为「已\n完\n成」，或者异常时将超长的 CLI 清理提示（`herdr-task close-workflow ...`）直接注入标签内，导致标签撑高并多行断行。
+- 根因：
+  1. `console/static/console/scripts/sidebar-tabs.js` 中直接将 `workflowStartupHint(w)`（包含多行/长字符命令行）拼入 `tab-status` 标签内，污染了界面标题排版；
+  2. 样式表 `shell-navigation.css` 与 `polish-shell.css` 中缺失 `.tab-status` 专用规则，且 `.wf-tab` 未设置强制 `white-space: nowrap` 与 `flex-shrink: 0`，导致 flex 容器内部文字受压纵向折行。
+- 修复：
+  1. `sidebar-tabs.js` 将 `statusHint` 剥离并移至外层容器的 `title` 悬浮提示（Tooltip）中，保持标签内文字短小精炼；
+  2. `tab-status` 仅展示核心简明状态词，并携带对应状态音阶 class（`running`、`danger`、`warning`、`completed`）；
+  3. `shell-navigation.css` 与 `polish-shell.css` 为 `.wf-tab`、`.tab-title` 与 `.tab-status` 设置严谨的单行排版约束（`white-space: nowrap !important`、`overflow: hidden`、`text-overflow: ellipsis`、`flex-shrink: 0`）与精致微标胶囊样式，严格遵守 4px 间距栅格；
+  4. 新增单测 `test_workflow_tabs_single_line_and_status_badge` 锁定单行展示与长提示剥离保障，更新基线哈希签名。
+- 验证：`tests/test_console_standard_layout_tabs.py` 与全部 517 项控制台测试全部 PASS。
