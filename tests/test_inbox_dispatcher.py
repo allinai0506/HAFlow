@@ -569,21 +569,33 @@ def test_default_git_template_retry_does_not_pollute_context_binding(tmp_path: P
     assert len(retried.get("execution_history", [])) == 1
     assert "execution_history" not in retried.get("context", {})
 
-    # Launch task with Dispatcher default runner
-    captured_kwargs = {}
-    def mock_run_workflow(**kwargs):
-        captured_kwargs.update(kwargs)
-        return "WORKFLOW_ID=wf_second_success"
+    # Launch task with Dispatcher default runner calling real workflow_api.run_workflow
+    captured_cmd = []
+    class MockProcess:
+        returncode = 0
+        stdout = "WORKFLOW_ID=wf_second_success\n"
+        stderr = ""
+
+    def mock_common_run(cmd, timeout=600):
+        captured_cmd.extend(cmd)
+        return MockProcess()
 
     with patch("herdr.inbox.dispatcher.load_projects", return_value=mock_projects), \
-         patch("console.workflow_api.run_workflow", side_effect=mock_run_workflow):
+         patch("console.common.run", side_effect=mock_common_run):
         claimed = dispatcher.claim_next_task("ws-git-1")
         assert claimed is not None
         launched = dispatcher.launch_task(claimed)
         assert launched["status"] == "RUNNING"
         assert launched["workflow_id"] == "wf_second_success"
-        # Context must be None so no --context CLI flag is passed to Git template!
-        assert captured_kwargs.get("context") is None
+        # Verify real CLI command constructed by workflow_api:
+        # 1. Must NOT contain --context
+        assert "--context" not in captured_cmd
+        # 2. Must contain git template
+        assert "--template" in captured_cmd
+        assert "software-development-v1" in captured_cmd
+        # 3. Execution history retained in inbox task
+        assert len(launched.get("execution_history", [])) == 1
+        assert launched["execution_history"][0]["error"] == "Crash on attempt 1"
 
 
 def test_factory_and_dispatcher_gate_alignment_on_active_workflows(tmp_path: Path):
