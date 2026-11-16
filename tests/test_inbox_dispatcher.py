@@ -347,7 +347,7 @@ def test_launcher_fencing_token_mismatch_halts_orphan_workflow(tmp_path: Path):
 
         # Verify task is NOT RUNNING with the old workflow
         task_in_db = store.get_task(t["id"])
-        assert task_in_db["workflow_id"] is None
+        assert task_in_db["workflow_id"] != "wf_orphan_99"
         assert task_in_db["status"] == "CLAIMED"
         assert task_in_db["worker_id"] == "different_worker_fencing_token"
 
@@ -401,3 +401,138 @@ def test_launcher_heartbeat_keeps_lease_alive_during_long_launch(tmp_path: Path)
             assert recovered2[0]["id"] == t["id"]
             # Returned to PENDING queue because worker died
             assert store.get_task(t["id"])["status"] == "PENDING"
+
+
+def test_crash_recovery_preserves_running_workflow_without_duplicate(tmp_path: Path):
+    """P1-02: If process crashes after launching workflow, recover_stale_tasks connects to existing workflow."""
+    db_file = tmp_path / "dispatcher_crash_recovery.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
+        t = store.create_task(
+            title="Crash Simulation Task", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
+        )
+        claimed = dispatcher.claim_next_task("w1", lease_duration_seconds=10.0)
+        assert claimed is not None
+
+        # Pre-assigned workflow_id in DB
+        task_before_crash = store.get_task(t["id"])
+        pre_wid = f"wf_pre_{t['id'][:6]}"
+
+        conn = sqlite3.connect(str(db_file))
+        conn.execute("UPDATE user_inbox_tasks SET workflow_id = ? WHERE id = ?", (pre_wid, t["id"]))
+        conn.commit()
+        conn.close()
+
+        # The workflow was indeed registered in SQLite by launcher before crash
+        save_workflow(
+            {"workflow_id": pre_wid, "title": "Crashed Worker WF", "status": "running"},
+            db_path=db_file,
+        )
+
+        # Worker process crashed, lease expires
+        future_time = time.time() + 20.0
+        with patch("time.time", return_value=future_time):
+            recovered = dispatcher.recover_stale_tasks()
+            assert len(recovered) == 1
+            rec_task = store.get_task(t["id"])
+            # MUST NOT be reset to PENDING! Must be recovered to RUNNING with existing workflow!
+            assert rec_task["status"] == "RUNNING"
+            assert rec_task["workflow_id"] == pre_wid
+
+
+def test_waiting_task_releases_workspace_for_next_pending_task(tmp_path: Path):
+    """P1-03: When a task enters WAITING (e.g. human approval), subsequent queued tasks can execute in the workspace."""
+    db_file = tmp_path / "dispatcher_waiting_mutex.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
+        t1 = store.create_task(
+            title="Task 1 Human Gate", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
+        )
+        t2 = store.create_task(
+            title="Task 2 Queued", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
+        )
+
+        # Claim and run Task 1
+        c1 = dispatcher.claim_next_task("w1")
+        assert c1["id"] == t1["id"]
+        store.update_task_status(t1["id"], "RUNNING", workflow_id="wf_gate_1")
+        save_workflow({"workflow_id": "wf_gate_1", "status": "paused"}, db_path=db_file)
+
+        # Reconcile Task 1 -> enters WAITING
+        dispatcher.reconcile_running_tasks()
+        assert store.get_task(t1["id"])["status"] == "WAITING"
+
+        # Workspace w1 is now FREE for other tasks!
+        is_busy, _ = dispatcher.is_workspace_busy("w1")
+        assert is_busy is False
+
+        # Task 2 can now be claimed and executed!
+        c2 = dispatcher.claim_next_task("w1")
+        assert c2 is not None
+        assert c2["id"] == t2["id"]
+
+
+def test_resumed_waiting_task_waits_for_busy_workspace(tmp_path: Path):
+    """P1-03: When a WAITING task's workflow is resumed, it waits until the running task finishes before entering RUNNING."""
+    db_file = tmp_path / "dispatcher_resumed_wait.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
+        t1 = store.create_task(title="Task 1", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+        t2 = store.create_task(title="Task 2", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+
+        store.update_task_status(t1["id"], "CLAIMED")
+        store.update_task_status(t1["id"], "RUNNING", workflow_id="wf_resumable_1")
+        store.update_task_status(t1["id"], "WAITING")
+
+        store.update_task_status(t2["id"], "CLAIMED")
+        store.update_task_status(t2["id"], "RUNNING", workflow_id="wf_occupying_2")
+
+        save_workflow({"workflow_id": "wf_resumable_1", "status": "running"}, db_path=db_file)
+        save_workflow({"workflow_id": "wf_occupying_2", "status": "running"}, db_path=db_file)
+
+        # Reconcile while Task 2 is still running: Task 1 cannot jump to RUNNING yet!
+        dispatcher.reconcile_running_tasks()
+        assert store.get_task(t1["id"])["status"] == "WAITING"
+
+        # Now Task 2 finishes
+        save_workflow({"workflow_id": "wf_occupying_2", "status": "completed", "outcome": "success"}, db_path=db_file)
+        dispatcher.reconcile_running_tasks()
+        assert store.get_task(t2["id"])["status"] == "COMPLETED"
+
+        # Next reconcile: Task 1 can now safely transition to RUNNING!
+        dispatcher.reconcile_running_tasks()
+        assert store.get_task(t1["id"])["status"] == "RUNNING"
+
+
+def test_lost_workflow_handled_after_grace_period(tmp_path: Path):
+    """P2-05: Missing workflow in RUNNING state fails with informative error after 60s grace period."""
+    db_file = tmp_path / "dispatcher_lost_workflow.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
+        t = store.create_task(title="Lost WF Task", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+        store.update_task_status(t["id"], "CLAIMED")
+        store.update_task_status(t["id"], "RUNNING", workflow_id="wf_ghost_404")
+
+        # Initial check at current time: within 60s grace period, task remains RUNNING
+        now = time.time()
+        with patch("time.time", return_value=now + 10.0):
+            reconciled = dispatcher.reconcile_running_tasks()
+            assert len(reconciled) == 0
+            assert store.get_task(t["id"])["status"] == "RUNNING"
+
+        # Check after 70s (> 60s): grace period expired, marked FAILED and frees workspace
+        with patch("time.time", return_value=now + 75.0):
+            reconciled = dispatcher.reconcile_running_tasks()
+            assert len(reconciled) == 1
+            assert reconciled[0]["id"] == t["id"]
+            assert reconciled[0]["status"] == "FAILED"
+            assert "lost workflow" in reconciled[0]["error"]
+            assert store.get_task(t["id"])["status"] == "FAILED"

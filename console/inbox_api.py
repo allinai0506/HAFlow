@@ -64,12 +64,12 @@ def _resolve_current_user(requested_user: Optional[str] = None) -> str:
 
     Ensures server-side identity isolation so tasks are scoped to the actual
     operator rather than arbitrary client-spoofed identities.
+    Only admin or root server identities may act on behalf of requested_user.
     """
     server_user = os.environ.get("HAFLOW_USER") or os.environ.get("USER") or "default"
-    if requested_user and str(requested_user).strip():
-        req = str(requested_user).strip()
-        if req == server_user or server_user in ("root", "admin", "default"):
-            return req
+    if server_user in ("root", "admin"):
+        if requested_user and str(requested_user).strip():
+            return str(requested_user).strip()
     return server_user
 
 
@@ -100,12 +100,14 @@ def api_inbox_tasks(q: Dict[str, Any]) -> Dict[str, Any]:
     except (ValueError, TypeError):
         offset = 0
 
+    server_user = _resolve_current_user()
+    is_admin = server_user in ("root", "admin")
     if user_id_param == "all":
-        effective_user = None
-    elif user_id_param:
-        effective_user = _resolve_current_user(user_id_param)
+        effective_user = None if is_admin else server_user
+    elif user_id_param and is_admin:
+        effective_user = str(user_id_param).strip()
     else:
-        effective_user = _resolve_current_user()
+        effective_user = server_user
 
     tasks, total = get_inbox_store().list_tasks(
         status=status or None,
@@ -143,18 +145,17 @@ def api_inbox_create_task(b: Dict[str, Any]) -> Dict[str, Any]:
     source_id = str(b.get("source_id") or "").strip() or None
     idempotency_key = str(b.get("idempotency_key") or "").strip() or None
 
-    # Strict scope and confirmation source enforcement
+    # Strict scope and user confirmation enforcement (P1-01)
     if auto_confirm:
-        if not project_id or not workspace_id:
-            raise ValueError("project_id and workspace_id must be provided when auto_confirm is enabled")
-        ok, err, _ = validate_project_and_workspace(project_id, workspace_id)
-        if not ok:
-            raise ValueError(f"Project and workspace validation failed: {err}")
-        if confirmation_source in ("auto", "detector"):
-            # Automated confirmation requires verified high confidence
-            det = detect_project_and_workspace(instruction=instruction, title=title)
-            if not det.get("is_confident") or det.get("recommended_project_id") != project_id:
-                auto_confirm = False
+        # Automated detector/recommendation can NEVER confirm to PENDING without explicit user confirmation
+        if confirmation_source != "user":
+            auto_confirm = False
+        else:
+            if not project_id or not workspace_id:
+                raise ValueError("project_id and workspace_id must be provided when auto_confirm is enabled")
+            ok, err, _ = validate_project_and_workspace(project_id, workspace_id)
+            if not ok:
+                raise ValueError(f"Project and workspace validation failed: {err}")
 
     task = get_inbox_store().create_task(
         title=title,
@@ -268,13 +269,15 @@ def api_inbox_detect(b: Dict[str, Any]) -> Dict[str, Any]:
 
 def api_inbox_stats(q: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """GET /api/inbox/stats"""
-    user_id = q.get("user_id", [None])[0] if q and isinstance(q.get("user_id"), list) else (q.get("user_id") if q else None)
-    if user_id == "all":
-        effective_user = None
-    elif user_id:
-        effective_user = _resolve_current_user(user_id)
+    user_id_param = q.get("user_id", [None])[0] if q and isinstance(q.get("user_id"), list) else (q.get("user_id") if q else None)
+    server_user = _resolve_current_user()
+    is_admin = server_user in ("root", "admin")
+    if user_id_param == "all":
+        effective_user = None if is_admin else server_user
+    elif user_id_param and is_admin:
+        effective_user = str(user_id_param).strip()
     else:
-        effective_user = _resolve_current_user()
+        effective_user = server_user
 
     stats = get_inbox_store().get_inbox_stats(user_id=effective_user)
     return {"ok": True, **stats}

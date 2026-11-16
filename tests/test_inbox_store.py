@@ -198,3 +198,72 @@ def test_reorder_dense_normalization_four_tasks(tmp_path: Path):
     store.reorder_pending_task(tb["id"], direction="down")
     tasks_after2, _ = store.list_tasks(workspace_id="w1", status="PENDING")
     assert [t["title"] for t in tasks_after2] == ["A", "C", "D", "B"]
+
+
+def test_user_scoped_idempotency(tmp_path: Path):
+    """P2-02: Idempotency keys must be scoped per user; Alice and Bob using same key get distinct tasks."""
+    db_file = tmp_path / "inbox_user_idempotency.db"
+    store = InboxStore(db_file)
+
+    t_alice = store.create_task(
+        title="Alice Task", instruction="...", project_id="p1", workspace_id="w1",
+        user_id="alice", idempotency_key="shared-req-1", auto_confirm=True
+    )
+    t_bob = store.create_task(
+        title="Bob Task", instruction="...", project_id="p1", workspace_id="w1",
+        user_id="bob", idempotency_key="shared-req-1", auto_confirm=True
+    )
+    assert t_alice["id"] != t_bob["id"]
+    assert t_alice["user_id"] == "alice"
+    assert t_bob["user_id"] == "bob"
+
+    # Alice submitting again gets the same task
+    t_alice_repeat = store.create_task(
+        title="Alice Task Duplicate", instruction="...", project_id="p1", workspace_id="w1",
+        user_id="alice", idempotency_key="shared-req-1", auto_confirm=True
+    )
+    assert t_alice_repeat["id"] == t_alice["id"]
+
+
+def test_new_task_appended_to_tail_after_reorder(tmp_path: Path):
+    """P2-03: New tasks must be appended to the end of the priority queue, not cutting in front."""
+    db_file = tmp_path / "inbox_tail_insert.db"
+    store = InboxStore(db_file)
+
+    ta = store.create_task(title="A", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    tb = store.create_task(title="B", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    tc = store.create_task(title="C", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+
+    # Reorder: move C up -> [A, C, B]
+    store.reorder_pending_task(tc["id"], direction="up")
+    tasks, _ = store.list_tasks(workspace_id="w1", status="PENDING")
+    assert [t["title"] for t in tasks] == ["A", "C", "B"]
+
+    # Now add new task D: it MUST land at the tail [A, C, B, D], NOT before C or B!
+    td = store.create_task(title="D", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    tasks_with_d, _ = store.list_tasks(workspace_id="w1", status="PENDING")
+    assert [t["title"] for t in tasks_with_d] == ["A", "C", "B", "D"]
+
+
+def test_retry_preserves_execution_history(tmp_path: Path):
+    """Execution history must be preserved in context_json when a task is retried."""
+    db_file = tmp_path / "inbox_retry_history.db"
+    store = InboxStore(db_file)
+
+    t = store.create_task(title="Fail and Retry", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    store.update_task_status(t["id"], "CLAIMED")
+    store.update_task_status(t["id"], "RUNNING", workflow_id="wf_101")
+    store.update_task_status(t["id"], "FAILED", error="Simulated test crash")
+
+    # Retry the task
+    retried = store.retry_task(t["id"])
+    assert retried["status"] == "PENDING"
+    assert retried["workflow_id"] is None
+    assert retried["error"] is None
+
+    # Check preserved history
+    ctx = retried.get("context", {})
+    history = ctx.get("execution_history", [])
+    assert len(history) == 1
+    assert history[0]["workflow_id"] == "wf_101"
+    assert history[0]["error"] == "Simulated test crash"

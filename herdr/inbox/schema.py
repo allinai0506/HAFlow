@@ -15,7 +15,7 @@ def ensure_inbox_schema(conn: sqlite3.Connection) -> None:
             instruction TEXT NOT NULL,
             source_type TEXT NOT NULL DEFAULT 'manual',
             source_id TEXT,
-            idempotency_key TEXT UNIQUE,
+            idempotency_key TEXT,
             priority TEXT NOT NULL DEFAULT 'NORMAL',
             priority_weight INTEGER NOT NULL DEFAULT 2,
             sort_order INTEGER NOT NULL DEFAULT 0,
@@ -55,4 +55,10 @@ def ensure_inbox_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_inbox_workflow_id 
             ON user_inbox_tasks(workflow_id);
+    """)
+
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_inbox_user_idempotency
+            ON user_inbox_tasks(user_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
     """)

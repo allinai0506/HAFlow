@@ -1,6 +1,6 @@
 /* 用户任务收件箱前端控制器与视图 */
 var {
-  showInbox, stopInboxTimer, inspectWorkflow, loadInboxData, showNewInboxTaskModal, showInboxTaskDetail,
+  showInbox, stopInboxTimer, inspectWorkflow, loadInboxData, loadMoreInboxTasks, showNewInboxTaskModal, showInboxTaskDetail,
   showConfirmScopeModal, changeTaskPriority, moveTaskOrder, cancelInboxTask,
   retryInboxTask, setInboxStatusFilter, setInboxProjectFilter, setInboxPriorityFilter,
   triggerInboxSweep, showChangePriorityModal, submitChangePriority,
@@ -14,7 +14,7 @@ var {
 let inboxState = {
   tasks: [], total: 0, stats: null,
   filterStatus: 'ALL', filterProject: 'ALL', filterPriority: 'ALL',
-  autoRefreshTimer: null, activeTaskId: null,
+  autoRefreshTimer: null, activeTaskId: null, pageSize: 50,
 };
 
 function formatTime(ts){
@@ -40,19 +40,20 @@ function statusBadgeHtml(t){
   return `<span class="status-pill">${esc(s)}</span>`;
 }
 
-async function loadInboxData(){
+async function loadInboxData(isAppend){
   try{
-    const qParts = [];
+    const offset = isAppend ? inboxState.tasks.length : 0;
+    const qParts = [`limit=${inboxState.pageSize||50}`, `offset=${offset}`];
     if(inboxState.filterStatus && inboxState.filterStatus !== 'ALL') qParts.push('status=' + encodeURIComponent(inboxState.filterStatus));
     if(inboxState.filterProject && inboxState.filterProject !== 'ALL') qParts.push('project_id=' + encodeURIComponent(inboxState.filterProject));
     if(inboxState.filterPriority && inboxState.filterPriority !== 'ALL') qParts.push('priority=' + encodeURIComponent(inboxState.filterPriority));
 
     const [tasksRes, statsRes] = await Promise.all([
       api('/api/inbox/tasks?' + qParts.join('&')),
-      api('/api/inbox/stats'),
+      isAppend ? Promise.resolve(null) : api('/api/inbox/stats'),
     ]);
     if(tasksRes && tasksRes.ok){
-      inboxState.tasks = tasksRes.tasks || [];
+      inboxState.tasks = isAppend ? inboxState.tasks.concat(tasksRes.tasks || []) : (tasksRes.tasks || []);
       inboxState.total = tasksRes.total || 0;
     }
     if(statsRes && statsRes.ok) inboxState.stats = statsRes;
@@ -62,6 +63,8 @@ async function loadInboxData(){
     console.error('Failed to load inbox data:', e);
   }
 }
+
+function loadMoreInboxTasks(){ loadInboxData(true); }
 
 function updateInboxRailBadge(){
   const dot = document.getElementById('railInboxDot');
@@ -139,6 +142,9 @@ function renderInboxView(){
         `<button class="btn-inbox-op" onclick="showInboxTaskDetail('${esc(t.id)}')">查看详情</button>` +
         `</div></div></div>`;
     });
+    if(inboxState.tasks.length < inboxState.total){
+      html += `<div style="text-align:center;padding:12px 0"><button class="btn" onclick="loadMoreInboxTasks()" style="font-size:12px;padding:5px 16px">加载更多任务 (已展示 ${inboxState.tasks.length} / 共 ${inboxState.total} 条)</button></div>`;
+    }
   }
   html += `</div></div>`;
   container.innerHTML = html;
@@ -195,8 +201,6 @@ function onInboxProjectSelectChange(){
   wsInput.value = opt ? opt.dataset.ws || '' : '';
   if(sel.value){
     inboxState.userSelectedProject = true;
-    const chk = document.getElementById('inboxAutoConfirm');
-    if(chk && wsInput.value) chk.checked = true;
   }
 }
 
@@ -223,8 +227,6 @@ async function onInboxInstructionBlur(){
         if(sel && !inboxState.userSelectedProject){
           sel.value = res.recommended_project_id;
           onInboxProjectSelectChange();
-          const chk = document.getElementById('inboxAutoConfirm');
-          if(chk) chk.checked = true;
         }
       } else {
         banner.innerHTML = `⚠️ <b>推荐置信度不足（${Math.round((res.confidence||0)*100)}%）：</b> ${esc(res.reason||'未达到自动确认门限')}。已保持草稿待确认，请手动选择项目与工作区。`;
@@ -265,7 +267,7 @@ async function submitNewInboxTask(){
         workspace_id:wid||null,
         priority:prio,
         auto_confirm:shouldConfirm,
-        confirmed_by: inboxState.userSelectedProject ? 'user' : 'auto'
+        confirmed_by: shouldConfirm ? 'user' : null
       })
     });
     closeModal();
@@ -451,7 +453,7 @@ function showInbox(){
 }
 
 return {
-  showInbox, stopInboxTimer, inspectWorkflow, loadInboxData, showNewInboxTaskModal, showInboxTaskDetail,
+  showInbox, stopInboxTimer, inspectWorkflow, loadInboxData, loadMoreInboxTasks, showNewInboxTaskModal, showInboxTaskDetail,
   showConfirmScopeModal, changeTaskPriority: showChangePriorityModal, moveTaskOrder, cancelInboxTask,
   retryInboxTask, setInboxStatusFilter, setInboxProjectFilter, setInboxPriorityFilter,
   triggerInboxSweep, showChangePriorityModal, submitChangePriority,

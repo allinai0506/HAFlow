@@ -78,16 +78,17 @@ class InboxStore:
         if p not in VALID_PRIORITIES:
             raise ValueError(f"Invalid priority '{priority}'. Allowed: {sorted(VALID_PRIORITIES)}")
         priority_weight = PRIORITY_WEIGHTS[p]
+        eff_user = user_id or "default"
 
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
 
-            # Check idempotency
+            # Check idempotency scoped per user
             if idempotency_key:
                 cur = conn.execute(
-                    "SELECT * FROM user_inbox_tasks WHERE idempotency_key = ?",
-                    (idempotency_key,),
+                    "SELECT * FROM user_inbox_tasks WHERE user_id = ? AND idempotency_key = ?",
+                    (eff_user, idempotency_key),
                 )
                 existing = cur.fetchone()
                 if existing:
@@ -98,6 +99,20 @@ class InboxStore:
             # Only confirmed project + workspace can be PENDING.
             has_scope = bool(project_id and workspace_id)
             initial_status = "PENDING" if (has_scope and auto_confirm) else "DRAFT"
+
+            # Allocate sort_order at the tail of this priority queue in the workspace
+            next_sort_order = 0
+            if workspace_id:
+                cur_ord = conn.execute(
+                    """
+                    SELECT COALESCE(MAX(sort_order), -10) as max_ord
+                    FROM user_inbox_tasks
+                    WHERE workspace_id = ? AND priority = ?
+                    """,
+                    (workspace_id, p),
+                ).fetchone()
+                if cur_ord and cur_ord["max_ord"] is not None:
+                    next_sort_order = max(0, int(cur_ord["max_ord"]) + 10)
 
             now = time.time()
             task_id = f"inbox_{uuid.uuid4().hex[:12]}"
@@ -110,11 +125,11 @@ class InboxStore:
                     source_type, source_id, idempotency_key, priority, priority_weight,
                     sort_order, status, template_name, agent_override, context_json,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
-                    user_id or "default",
+                    eff_user,
                     project_id,
                     workspace_id,
                     title,
@@ -124,6 +139,7 @@ class InboxStore:
                     idempotency_key,
                     p,
                     priority_weight,
+                    next_sort_order,
                     initial_status,
                     template_name or "software-development-v1",
                     agent_override or "auto",
@@ -453,15 +469,28 @@ class InboxStore:
                 raise InvalidInboxTransitionError(f"Only FAILED tasks can be retried, current is '{row['status']}'")
 
             now = time.time()
+            ctx = json.loads(row["context_json"] or "{}")
+            history = ctx.get("execution_history", [])
+            history.append({
+                "attempt": row["attempt_count"],
+                "workflow_id": row["workflow_id"],
+                "started_at": row["started_at"],
+                "completed_at": row["completed_at"],
+                "error": row["error"],
+                "retried_at": now,
+            })
+            ctx["execution_history"] = history
+            new_ctx_json = json.dumps(ctx, ensure_ascii=False)
+
             conn.execute(
                 """
                 UPDATE user_inbox_tasks
                    SET status = 'PENDING', error = NULL, attempt_count = 0,
                        workflow_id = NULL, worker_id = NULL, started_at = NULL,
-                       completed_at = NULL, updated_at = ?
+                       completed_at = NULL, context_json = ?, updated_at = ?
                  WHERE id = ?
                 """,
-                (now, task_id),
+                (new_ctx_json, now, task_id),
             )
             conn.execute("COMMIT")
             return self.get_task(task_id)  # type: ignore
@@ -487,21 +516,21 @@ class InboxStore:
             for row in cur.fetchall():
                 counts[row["status"]] = row["cnt"]
 
-            # Busy workspaces
+            # Busy workspaces (sanitized across user boundaries)
             busy_cur = conn.execute(
                 """
-                SELECT workspace_id, id, title, status FROM user_inbox_tasks
+                SELECT workspace_id, id, title, status, user_id FROM user_inbox_tasks
                 WHERE status IN ('CLAIMED', 'RUNNING') AND workspace_id IS NOT NULL
                 """
             )
-            busy_workspaces = {
-                r["workspace_id"]: {
-                    "task_id": r["id"],
-                    "title": r["title"],
+            busy_workspaces = {}
+            for r in busy_cur.fetchall():
+                is_owner = (user_id is None) or (r["user_id"] == user_id)
+                busy_workspaces[r["workspace_id"]] = {
+                    "task_id": r["id"] if is_owner else None,
+                    "title": r["title"] if is_owner else "任务执行中 (其他用户)",
                     "status": r["status"],
                 }
-                for r in busy_cur.fetchall()
-            }
 
             return {
                 "total": sum(counts.values()),

@@ -31,7 +31,6 @@ ACTIVE_WORKFLOW_STATUSES = frozenset({
     "running",
     "pending",
     "in_progress",
-    "paused",
     "closing",
 })
 
@@ -72,12 +71,12 @@ class InboxDispatcher:
         if not workspace_id:
             return True, "Invalid empty workspace_id"
 
-        # 1. Check Inbox tasks holding workspace (CLAIMED, RUNNING, or WAITING)
+        # 1. Check Inbox tasks holding workspace (CLAIMED or RUNNING)
         active_inbox_task = self.store.get_workspace_active_task(workspace_id)
         if active_inbox_task:
             return (
                 True,
-                f"Inbox task '{active_inbox_task['id']}' ({active_inbox_task['title']}) is {active_inbox_task['status']}",
+                f"Inbox task '{active_inbox_task['id']}' is {active_inbox_task['status']}",
             )
 
         # 2. Check existing workflows table in SQLite (strictly ACTIVE statuses only)
@@ -87,7 +86,7 @@ class InboxDispatcher:
                 """
                 SELECT workflow_id, title, status, metadata_json, config_json
                 FROM workflows
-                WHERE status IN ('running', 'pending', 'in_progress', 'paused', 'closing')
+                WHERE status IN ('running', 'pending', 'in_progress', 'closing')
                 """
             ).fetchall()
             for r in rows:
@@ -146,11 +145,11 @@ class InboxDispatcher:
         try:
             conn.execute("BEGIN IMMEDIATE")
 
-            # Check 1: Inbox tasks holding workspace (CLAIMED, RUNNING, WAITING)
+            # Check 1: Inbox tasks holding workspace (CLAIMED, RUNNING only - WAITING releases workspace)
             holding_cur = conn.execute(
                 """
                 SELECT id FROM user_inbox_tasks
-                WHERE workspace_id = ? AND status IN ('CLAIMED', 'RUNNING', 'WAITING')
+                WHERE workspace_id = ? AND status IN ('CLAIMED', 'RUNNING')
                 LIMIT 1
                 """,
                 (workspace_id,),
@@ -163,7 +162,7 @@ class InboxDispatcher:
             active_wf_cur = conn.execute(
                 """
                 SELECT workflow_id, metadata_json, config_json FROM workflows
-                WHERE status IN ('running', 'pending', 'in_progress', 'paused', 'closing')
+                WHERE status IN ('running', 'pending', 'in_progress', 'closing')
                 """,
             )
             for wf_row in active_wf_cur.fetchall():
@@ -262,6 +261,23 @@ class InboxDispatcher:
         task_id = task["id"]
         fencing_token = task.get("worker_id") or self.worker_id
 
+        # Pre-assign and persist workflow_id before launch to eliminate crash-window duplicate runs (P1-02)
+        target_workflow_id = task.get("workflow_id") or f"wf_ibx_{uuid.uuid4().hex[:8]}"
+        task["workflow_id"] = target_workflow_id
+        conn_pre = self._conn()
+        try:
+            conn_pre.execute(
+                """
+                UPDATE user_inbox_tasks
+                   SET workflow_id = ?, updated_at = ?
+                 WHERE id = ? AND (workflow_id IS NULL OR workflow_id = ?)
+                """,
+                (target_workflow_id, time.time(), task_id, target_workflow_id),
+            )
+            conn_pre.commit()
+        finally:
+            conn_pre.close()
+
         def _execute():
             stop_hb = threading.Event()
 
@@ -300,6 +316,7 @@ class InboxDispatcher:
                     raise RuntimeError(f"Cannot resolve project root for project_id '{t.get('project_id')}'")
 
                 from console.workflow_api import run_workflow
+                wid_arg = t.get("workflow_id")
                 output = run_workflow(
                     root=p_record["project_root"],
                     req=t["instruction"],
@@ -307,11 +324,14 @@ class InboxDispatcher:
                     template=t.get("template_name") or "software-development-v1",
                     title=t["title"],
                     context=t.get("context"),
+                    workflow_id=wid_arg,
                 )
                 import re
                 m = re.search(r"WORKFLOW_ID=([^\s]+)", output or "")
                 if m:
                     return m.group(1).strip()
+                if wid_arg:
+                    return wid_arg
                 from herdr.state_db import list_workflows
                 wfs = list_workflows()
                 if wfs:
@@ -321,7 +341,7 @@ class InboxDispatcher:
             exec_runner = runner_fn or _default_runner
 
             try:
-                workflow_id = exec_runner(task)
+                workflow_id = exec_runner(task) or target_workflow_id
                 stop_hb.set()
 
                 # CAS update with fencing token verification
@@ -413,6 +433,7 @@ class InboxDispatcher:
 
         Reconciles completed or failed workflows, freeing the workspace for auto-continuation.
         Also tracks human resumption (WAITING -> RUNNING) and human signoff pause (RUNNING -> WAITING).
+        Handles lost workflows after a 60s grace period by marking them FAILED.
         """
         reconciled = []
         tasks_to_reconcile = []
@@ -425,16 +446,35 @@ class InboxDispatcher:
         now = time.time()
         for t in tasks_to_reconcile:
             wid = t.get("workflow_id")
+            cur_status = t["status"]
             if not wid:
+                last_seen = t.get("updated_at") or t.get("started_at") or t.get("created_at") or now
+                if (now - last_seen) > 60.0:
+                    updated = self.store.update_task_status(
+                        task_id=t["id"],
+                        new_status="FAILED",
+                        expected_status=cur_status,
+                        error="Task in active state without assigned workflow_id after grace period",
+                    )
+                    reconciled.append(updated)
                 continue
 
             wf = get_workflow(wid, db_path=self.db_path)
             if not wf:
+                # P2-05: Check grace period (60s) before marking lost workflow as FAILED
+                last_seen = t.get("updated_at") or t.get("started_at") or t.get("created_at") or now
+                if (now - last_seen) > 60.0:
+                    updated = self.store.update_task_status(
+                        task_id=t["id"],
+                        new_status="FAILED",
+                        expected_status=cur_status,
+                        error=f"Underlying workflow '{wid}' could not be found after grace period (lost workflow)",
+                    )
+                    reconciled.append(updated)
                 continue
 
             wf_status = wf.get("status")
             wf_outcome = str(wf.get("outcome") or "").lower()
-            cur_status = t["status"]
 
             if wf_status == "completed":
                 if wf_outcome in ("startup_failed", "failed", "failure", "abandoned", "error", "interrupted"):
@@ -463,15 +503,22 @@ class InboxDispatcher:
                 )
                 reconciled.append(updated)
             elif (wf_status in ("running", "in_progress")) and cur_status == "WAITING":
-                # Workflow resumed by human -> transition back to RUNNING
-                updated = self.store.update_task_status(
-                    task_id=t["id"],
-                    new_status="RUNNING",
-                    expected_status="WAITING",
-                )
-                reconciled.append(updated)
+                # Workflow resumed by human -> verify workspace is not busy before transitioning back to RUNNING
+                ws = t.get("workspace_id")
+                active_ws_task = self.store.get_workspace_active_task(ws) if ws else None
+                if active_ws_task and active_ws_task["id"] != t["id"]:
+                    logger.warning(
+                        f"Resumed workflow '{wid}' for task '{t['id']}' waiting for workspace '{ws}' occupied by '{active_ws_task['id']}'"
+                    )
+                else:
+                    updated = self.store.update_task_status(
+                        task_id=t["id"],
+                        new_status="RUNNING",
+                        expected_status="WAITING",
+                    )
+                    reconciled.append(updated)
             elif (wf_status == "paused" or wf.get("current_stage") == "awaiting_verdict") and cur_status == "RUNNING":
-                # Needs human intervention -> transition to WAITING
+                # Needs human intervention -> transition to WAITING (releases workspace mutex)
                 updated = self.store.update_task_status(
                     task_id=t["id"],
                     new_status="WAITING",
@@ -497,9 +544,14 @@ class InboxDispatcher:
         return reconciled
 
     def recover_stale_tasks(self) -> List[Dict[str, Any]]:
-        """Recover tasks that were CLAIMED but where worker died or lease expired without RUNNING."""
+        """Recover tasks that were CLAIMED but where worker died or lease expired without RUNNING.
+
+        If a workflow was already created for the task, recovers tracking of the existing
+        workflow rather than resetting to PENDING and causing duplicate runs (P1-02).
+        """
         recovered = []
         now = time.time()
+        from herdr.state_db import get_workflow
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -515,13 +567,63 @@ class InboxDispatcher:
                 tid = r["id"]
                 attempts = r.get("attempt_count", 1)
                 max_att = r.get("max_attempts", 3)
+                wid = r.get("workflow_id")
+
+                wf = get_workflow(wid, db_path=self.db_path) if wid else None
+                if wf:
+                    wf_st = str(wf.get("status") or "").lower()
+                    wf_out = str(wf.get("outcome") or "").lower()
+                    if wf_st in ("running", "in_progress", "pending"):
+                        conn.execute(
+                            """
+                            UPDATE user_inbox_tasks
+                               SET status = 'RUNNING',
+                                   lease_expires_at = ?,
+                                   heartbeat_at = ?,
+                                   updated_at = ?
+                             WHERE id = ? AND status = 'CLAIMED'
+                            """,
+                            (now + 180.0, now, now, tid),
+                        )
+                        recovered.append(self.store.get_task(tid))
+                        continue
+                    elif wf_st == "paused":
+                        conn.execute(
+                            """
+                            UPDATE user_inbox_tasks
+                               SET status = 'WAITING',
+                                   updated_at = ?
+                             WHERE id = ? AND status = 'CLAIMED'
+                            """,
+                            (now, tid),
+                        )
+                        recovered.append(self.store.get_task(tid))
+                        continue
+                    elif wf_st in TERMINAL_WORKFLOW_STATUSES:
+                        new_st = "FAILED" if (wf_st in ("failed", "cancelled", "halted", "abandoned") or wf_out in ("startup_failed", "failed", "failure", "abandoned", "error")) else "COMPLETED"
+                        err = f"Workflow '{wid}' ended with status '{wf_st}'" if new_st == "FAILED" else None
+                        conn.execute(
+                            """
+                            UPDATE user_inbox_tasks
+                               SET status = ?,
+                                   error = ?,
+                                   completed_at = ?,
+                                   updated_at = ?
+                             WHERE id = ? AND status = 'CLAIMED'
+                            """,
+                            (new_st, err, now, now, tid),
+                        )
+                        recovered.append(self.store.get_task(tid))
+                        continue
+
+                # Workflow not created yet in DB: worker crashed before launching
                 if attempts >= max_att:
                     conn.execute(
                         """
                         UPDATE user_inbox_tasks
                            SET status = 'FAILED', error = 'Claim lease expired after maximum retries',
                                updated_at = ?, completed_at = ?
-                         WHERE id = ?
+                         WHERE id = ? AND status = 'CLAIMED'
                         """,
                         (now, now, tid),
                     )
@@ -531,11 +633,11 @@ class InboxDispatcher:
                         UPDATE user_inbox_tasks
                            SET status = 'PENDING', error = 'Claim lease expired; returned to queue',
                                worker_id = NULL, lease_expires_at = NULL, updated_at = ?
-                         WHERE id = ?
+                         WHERE id = ? AND status = 'CLAIMED'
                         """,
                         (now, tid),
                     )
-                recovered.append(r)
+                recovered.append(self.store.get_task(tid))
             conn.execute("COMMIT")
         except Exception:
             if conn.in_transaction:
@@ -544,7 +646,7 @@ class InboxDispatcher:
         finally:
             conn.close()
 
-        return recovered
+        return [t for t in recovered if t is not None]
 
     def dispatch_sweep(
         self,

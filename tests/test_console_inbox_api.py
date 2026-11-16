@@ -115,7 +115,8 @@ def test_api_inbox_workflow():
         assert stats_res["counts"]["CANCELLED"] == 1
 
 
-def test_auto_confirm_source_validation_and_user_isolation(monkeypatch):
+def test_auto_confirm_source_validation_and_user_isolation(monkeypatch, setup_inbox_test_db):
+    store = setup_inbox_test_db
     with patch("herdr.inbox.detector.load_projects", return_value=MOCK_PROJECTS):
         # 1. Automated confirm with low confidence must be forced to DRAFT
         low_res = api_inbox_create_task({
@@ -157,3 +158,41 @@ def test_auto_confirm_source_validation_and_user_isolation(monkeypatch):
         bob_ids = [t["id"] for t in bob_tasks["tasks"]]
         assert bob_task["task_id"] in bob_ids
         assert alice_task["task_id"] not in bob_ids
+
+        # P2-01: Non-admin caller passing user_id='all' or user_id='alice' CANNOT bypass isolation
+        bob_all = api_inbox_tasks({"user_id": "all"})
+        bob_all_ids = [t["id"] for t in bob_all["tasks"]]
+        assert alice_task["task_id"] not in bob_all_ids
+
+        bob_spoof = api_inbox_tasks({"user_id": "alice"})
+        bob_spoof_ids = [t["id"] for t in bob_spoof["tasks"]]
+        assert alice_task["task_id"] not in bob_spoof_ids
+
+        # P2-01: Busy workspace notice masking across user boundaries
+        store.update_task_status(alice_task["task_id"], "CLAIMED")
+        store.update_task_status(alice_task["task_id"], "RUNNING", workflow_id="wf_secret_alice")
+
+        bob_stats = api_inbox_stats()
+        assert bob_stats["ok"] is True
+        busy_w1 = bob_stats["busy_workspaces"].get("w1K")
+        assert busy_w1 is not None
+        assert busy_w1["status"] == "RUNNING"
+        # Must be sanitized! No task_id or sensitive title leaked
+        assert busy_w1["task_id"] is None
+        assert busy_w1["title"] == "任务执行中 (其他用户)"
+
+
+def test_high_confidence_auto_detection_cannot_bypass_user_confirmation(monkeypatch):
+    """P1-01: Even if detection has 100% confidence, confirmation_source != 'user' MUST NOT set status to PENDING."""
+    with patch("herdr.inbox.detector.load_projects", return_value=MOCK_PROJECTS):
+        res = api_inbox_create_task({
+            "title": "Fix HAFlow UI layout",
+            "instruction": "Fix layout in /Users/user/HAFlow project",
+            "project_id": "haflow-1de29d2d",
+            "workspace_id": "w1K",
+            "auto_confirm": True,
+            "confirmation_source": "auto",  # automated detector
+        })
+        assert res["ok"] is True
+        assert res["status"] == "DRAFT"  # Forced to DRAFT!
+        assert res["task"]["status"] == "DRAFT"

@@ -5,8 +5,10 @@ from herdr.kernel import state_db_path
 from herdr import controller_actions as herdr_controller_actions
 from console import common, inventory, read_api
 
-def run_workflow(root,req,agent='auto',template='software-development-v1',title='',context=None):
+def run_workflow(root,req,agent='auto',template='software-development-v1',title='',context=None,workflow_id=None):
     cmd=[str(common.HERDR_ROOT/'bin'/'herdr-factory'),'run','--project',root,'--agent',agent or 'auto','--template',template or 'software-development-v1']
+    if workflow_id:
+        cmd+=['--workflow-id',workflow_id]
     if title:
         cmd+=['--title',title]
     for key, value in (context or {}).items():
