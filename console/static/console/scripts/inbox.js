@@ -413,12 +413,12 @@ async function retryInboxTask(taskId){
 function inspectWorkflow(wid){
   if(!wid) return;
   stopInboxTimer();
-  if(typeof openWorkflowTab === 'function'){
+  if(typeof(openWorkflowTab)==='function'){
     openWorkflowTab(wid);
   } else {
     state.workflowId = wid;
-    if(typeof showShellView === 'function') showShellView('workbench');
-    if(typeof loadWorkflow === 'function') loadWorkflow(wid);
+    if(typeof(showShellView)==='function') showShellView('workbench');
+    if(typeof(loadWorkflow)==='function') loadWorkflow(wid);
   }
 }
 
