@@ -536,3 +536,198 @@ def test_lost_workflow_handled_after_grace_period(tmp_path: Path):
             assert reconciled[0]["status"] == "FAILED"
             assert "lost workflow" in reconciled[0]["error"]
             assert store.get_task(t["id"])["status"] == "FAILED"
+
+
+def test_default_git_template_retry_does_not_pollute_context_binding(tmp_path: Path):
+    """P1-01: Retrying a task with default Git template software-development-v1 must not pass context."""
+    db_file = tmp_path / "dispatcher_retry_git.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    p_root = tmp_path / "proj_root"
+    p_root.mkdir()
+    mock_projects = {
+        "projects": {
+            str(p_root): {
+                "project_id": "proj-git-1",
+                "project_name": "Proj Git",
+                "project_root": str(p_root),
+                "workspace_id": "ws-git-1",
+            }
+        }
+    }
+
+    t = store.create_task(
+        title="Git Task",
+        instruction="Do work",
+        project_id="proj-git-1",
+        workspace_id="ws-git-1",
+        template_name="software-development-v1",
+        auto_confirm=True,
+    )
+    store.update_task_status(t["id"], "CLAIMED")
+    store.update_task_status(t["id"], "RUNNING", workflow_id="wf_first_fail")
+    store.update_task_status(t["id"], "FAILED", error="Crash on attempt 1")
+
+    # Retry task
+    retried = store.retry_task(t["id"])
+    assert retried["status"] == "PENDING"
+    assert len(retried.get("execution_history", [])) == 1
+    assert "execution_history" not in retried.get("context", {})
+
+    # Launch task with Dispatcher default runner
+    captured_kwargs = {}
+    def mock_run_workflow(**kwargs):
+        captured_kwargs.update(kwargs)
+        return "WORKFLOW_ID=wf_second_success"
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value=mock_projects), \
+         patch("console.workflow_api.run_workflow", side_effect=mock_run_workflow):
+        claimed = dispatcher.claim_next_task("ws-git-1")
+        assert claimed is not None
+        launched = dispatcher.launch_task(claimed)
+        assert launched["status"] == "RUNNING"
+        assert launched["workflow_id"] == "wf_second_success"
+        # Context must be None so no --context CLI flag is passed to Git template!
+        assert captured_kwargs.get("context") is None
+
+
+def test_waiting_task_allows_subsequent_dispatch_without_factory_rejection(tmp_path: Path):
+    """P1-02: A WAITING task in Inbox releases workspace; Factory allows next workflow to launch."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    factory_path = Path("bin/herdr-factory").resolve()
+    spec = importlib.util.spec_from_loader("herdr_factory", SourceFileLoader("herdr_factory", str(factory_path)))
+    factory_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(factory_mod)
+
+    db_file = tmp_path / "factory_waiting.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    p_root = tmp_path / "p_root"
+    p_root.mkdir()
+    project_rec = {
+        "project_id": "proj-fac-1",
+        "project_name": "Factory Proj",
+        "project_root": str(p_root),
+        "workspace_id": "ws-fac-1",
+        "coordinator_pane_id": "pane-fac-1",
+    }
+    mock_projects = {
+        "projects": {
+            str(p_root): project_rec
+        }
+    }
+
+    # Step 1: wf-1 is registered and paused (e.g. human intervention / verdict)
+    save_workflow({
+        "workflow_id": "wf-fac-1",
+        "project_id": "proj-fac-1",
+        "workspace_id": "ws-fac-1",
+        "title": "Task 1",
+        "status": "paused",
+    }, db_path=db_file)
+
+    # In Inbox: Task 1 is WAITING
+    t1 = store.create_task(
+        title="Task 1",
+        instruction="Do 1",
+        project_id="proj-fac-1",
+        workspace_id="ws-fac-1",
+        auto_confirm=True,
+    )
+    store.update_task_status(t1["id"], "CLAIMED")
+    store.update_task_status(t1["id"], "RUNNING", workflow_id="wf-fac-1")
+    store.update_task_status(t1["id"], "WAITING")
+
+    # Task 2 is PENDING
+    t2 = store.create_task(
+        title="Task 2",
+        instruction="Do 2",
+        project_id="proj-fac-1",
+        workspace_id="ws-fac-1",
+        auto_confirm=True,
+    )
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value=mock_projects), \
+         patch("herdr.projects._get_store") as mock_proj_store, \
+         patch.object(factory_mod, "active_workflows_for_project") as mock_active_wf:
+
+        # Mock projects workflow store list_workflows
+        mock_proj_store.return_value.list_workflows.return_value = [
+            {"workflow_id": "wf-fac-1", "project_id": "proj-fac-1", "status": "paused"}
+        ]
+        mock_active_wf.return_value = [
+            {"workflow_id": "wf-fac-1", "project_id": "proj-fac-1", "status": "paused"}
+        ]
+
+        # Verify Factory _reject_if_active_workflow does NOT exit because wf-fac-1 is paused
+        factory_mod._reject_if_active_workflow(project_rec)  # should not raise SystemExit!
+
+        # Verify Dispatcher claims and launches Task 2
+        is_busy, _ = dispatcher.is_workspace_busy("ws-fac-1")
+        assert is_busy is False
+
+        claimed = dispatcher.claim_next_task("ws-fac-1")
+        assert claimed is not None
+        assert claimed["id"] == t2["id"]
+
+
+def test_workflow_resume_reacquires_workspace_and_blocks_if_occupied(tmp_path: Path):
+    """P1-02: Resuming a paused workflow requires workspace; blocks if occupied by another workflow."""
+    from herdr.kernel import resume_workflow
+    from herdr.state_store import SQLiteStateStore
+
+    db_file = tmp_path / "resume_workspace.db"
+    store = InboxStore(db_file)
+    s_store = SQLiteStateStore(db_file)
+
+    p_root = tmp_path / "p_resume_root"
+    p_root.mkdir()
+    project_rec = {
+        "project_id": "proj-res-1",
+        "project_name": "Resume Proj",
+        "project_root": str(p_root),
+        "workspace_id": "ws-res-1",
+        "coordinator_pane_id": "pane-res-1",
+    }
+
+    # Save wf-1 as paused and wf-2 as running in the same project
+    save_workflow({
+        "workflow_id": "wf-res-1",
+        "project_id": "proj-res-1",
+        "workspace_id": "ws-res-1",
+        "title": "Paused Task",
+        "status": "paused",
+    }, db_path=db_file)
+
+    save_workflow({
+        "workflow_id": "wf-res-2",
+        "project_id": "proj-res-1",
+        "workspace_id": "ws-res-1",
+        "title": "Running Task",
+        "status": "running",
+    }, db_path=db_file)
+
+    with patch("herdr.projects._get_store", return_value=s_store):
+        # 1. Attempt to resume wf-res-1 while wf-res-2 is running -> MUST raise RuntimeError
+        with pytest.raises(RuntimeError) as exc_info:
+            resume_workflow("wf-res-1", store=s_store)
+        assert "occupied by active workflow 'wf-res-2'" in str(exc_info.value)
+
+        # 2. Complete wf-res-2
+        save_workflow({
+            "workflow_id": "wf-res-2",
+            "project_id": "proj-res-1",
+            "workspace_id": "ws-res-1",
+            "status": "completed",
+        }, db_path=db_file)
+
+        # 3. Now resume wf-res-1 -> succeeds!
+        res = resume_workflow("wf-res-1", store=s_store)
+        assert res["ok"] is True
+        assert res["status"] == "running"
+
+        wf1 = s_store.get_workflow("wf-res-1")
+        assert wf1["status"] == "running"

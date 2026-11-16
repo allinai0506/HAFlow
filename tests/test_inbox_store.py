@@ -246,7 +246,7 @@ def test_new_task_appended_to_tail_after_reorder(tmp_path: Path):
 
 
 def test_retry_preserves_execution_history(tmp_path: Path):
-    """Execution history must be preserved in context_json when a task is retried."""
+    """Execution history must be preserved independently without polluting workflow context."""
     db_file = tmp_path / "inbox_retry_history.db"
     store = InboxStore(db_file)
 
@@ -261,9 +261,37 @@ def test_retry_preserves_execution_history(tmp_path: Path):
     assert retried["workflow_id"] is None
     assert retried["error"] is None
 
-    # Check preserved history
-    ctx = retried.get("context", {})
-    history = ctx.get("execution_history", [])
+    # Check preserved history is in execution_history and NOT in context
+    history = retried.get("execution_history", [])
     assert len(history) == 1
     assert history[0]["workflow_id"] == "wf_101"
     assert history[0]["error"] == "Simulated test crash"
+    assert "execution_history" not in retried.get("context", {})
+
+
+def test_confirm_draft_appends_to_queue_tail_no_jumping(tmp_path: Path):
+    """P2-02 regression test: DRAFT task confirming scope must append to queue tail, no jumping."""
+    db_file = tmp_path / "inbox_draft_tail.db"
+    store = InboxStore(db_file)
+
+    ta = store.create_task(title="A", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    tb = store.create_task(title="B", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    tc = store.create_task(title="C", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+
+    tasks_before, _ = store.list_tasks(workspace_id="w1", status="PENDING")
+    assert [t["title"] for t in tasks_before] == ["A", "B", "C"]
+
+    # Create task D as DRAFT without scope
+    td = store.create_task(title="D", instruction=".", auto_confirm=False)
+    assert td["status"] == "DRAFT"
+    assert td["workspace_id"] is None
+
+    # Confirm D's scope to w1
+    td_confirmed = store.confirm_task_scope(td["id"], project_id="p1", workspace_id="w1")
+    assert td_confirmed["status"] == "PENDING"
+    assert td_confirmed["workspace_id"] == "w1"
+
+    # Queue must be [A, B, C, D], D cannot jump in front of A, B, or C
+    tasks_after, _ = store.list_tasks(workspace_id="w1", status="PENDING")
+    assert [t["title"] for t in tasks_after] == ["A", "B", "C", "D"]
+    assert td_confirmed["sort_order"] > tc["sort_order"]

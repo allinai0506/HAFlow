@@ -8,6 +8,19 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-16] fix | User Task Inbox V1 — 执行历史隔离、Factory工作流门禁对齐与权限收敛 (PR #420 第二轮独立审查修复)
+
+- 背景：PR #420 第二轮独立审查指出 3 项 P1 与 5 项 P2 缺陷：失败任务重试时执行历史写入 Context 导致 Git 模板启动崩溃；WAITING 释放工作区与 Factory `_reject_if_active_workflow()` 判断不一致导致后续任务启动被拒；自动确认接口默认回退 user 身份导致自动化事件可绕过确认；Sweep 接口跨用户泄露任务指令；DRAFT 确认归属时队列插队；URL 冷启动不支持 `?view=inbox`；旧版数据库存在全局唯一键残留约束。
+- 变更：
+  1. `herdr/inbox/schema.py` 与 `herdr/inbox/store.py`：新增独立 `execution_history_json` 字段，执行历史与业务 Context 彻底解耦；`dispatcher.py` 调度时严格按模板契约过滤 Context 参数，Git 模式绝不注入 `--context` 选项；
+  2. `bin/herdr-factory` 与 `herdr/kernel.py`：统一工作区互斥语义。Factory 仅对真正执行中（`running`/`pending`/`in_progress`/`closing`）的工作流拦截，允许 `paused` 暂停态共存排队；`resume_workflow` 增加工作区重占门禁，当同项目存在运行中工作流时禁止恢复；
+  3. `console/inbox_api.py`：修复身份信任兜底，移除默认 `"user"` 回退，自动化来源（webhook/timer/cron 等）与无明确用户确认的操作统一强制落入 `DRAFT`；
+  4. `console/inbox_api.py`：`api_inbox_sweep` 对非管理员用户严格过滤任务明细，并对 `busy_workspaces` 进行原因脱敏，防止指令泄露；
+  5. `herdr/inbox/store.py`：`confirm_task_scope` 在同一 `BEGIN IMMEDIATE` 事务内为草稿重新计算目标工作区尾部 `sort_order`，彻底消除插队风险；
+  6. `console/static/console/scripts/bootstrap.js`：补齐 `?view=inbox` 冷启动路由及页签状态绑定；
+  7. `herdr/inbox/schema.py`：提供原生 SQLite 表重建迁移机制，安全擦除旧版本残留的 `idempotency_key TEXT UNIQUE` 全局约束并保留历史数据；
+  8. `console/static/console/scripts/inbox.js`：澄清弹窗必填文案，防止指令失焦重识别覆盖用户主动选择的项目。
+
 ## [2026-11-16] fix | User Task Inbox V1 — 崩溃恢复幂等性、等待状态空间互斥释放与用户隔离加固 (PR #420 评审修复)
 
 - 背景：PR #420 第三轮深度审查发现启动崩溃窗口下租约过期重试可能启动两个工作流、WAITING 任务与 paused 工作流永久阻断后续任务无法继续、幂等键全局唯一碰撞、非管理员越权查询及缺少分页机制。

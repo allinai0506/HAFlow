@@ -140,15 +140,17 @@ def api_inbox_create_task(b: Dict[str, Any]) -> Dict[str, Any]:
     user_id = _resolve_current_user(b.get("user_id"))
     priority = str(b.get("priority") or "NORMAL").strip().upper()
     auto_confirm = bool(b.get("auto_confirm", False))
-    confirmation_source = str(b.get("confirmation_source") or b.get("confirmed_by") or "user").strip().lower()
-    source_type = str(b.get("source_type") or "manual").strip()
+    raw_source = b.get("confirmation_source") or b.get("confirmed_by")
+    confirmation_source = str(raw_source).strip().lower() if raw_source else ""
+    source_type = str(b.get("source_type") or "manual").strip().lower()
     source_id = str(b.get("source_id") or "").strip() or None
     idempotency_key = str(b.get("idempotency_key") or "").strip() or None
 
-    # Strict scope and user confirmation enforcement (P1-01)
+    # Strict scope and user confirmation enforcement (P1-03)
     if auto_confirm:
-        # Automated detector/recommendation can NEVER confirm to PENDING without explicit user confirmation
-        if confirmation_source != "user":
+        # Automated sources (webhook, timer, detector, system) can NEVER auto-confirm to PENDING
+        # Even manual sources must explicitly provide confirmation_source="user" or confirmed_by="user"
+        if source_type != "manual" or confirmation_source != "user":
             auto_confirm = False
         else:
             if not project_id or not workspace_id:
@@ -286,4 +288,32 @@ def api_inbox_stats(q: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 def api_inbox_sweep() -> Dict[str, Any]:
     """POST /api/inbox/sweep"""
     res = get_inbox_dispatcher().dispatch_sweep()
-    return {"ok": True, "sweep": res}
+    server_user = _resolve_current_user()
+    is_admin = server_user in ("root", "admin")
+    if is_admin:
+        return {"ok": True, "sweep": res}
+
+    # P2-01: Non-admin users cannot inspect other users' task instructions or titles
+    def _filter_user_tasks(task_list):
+        return [
+            t for t in (task_list or [])
+            if isinstance(t, dict) and t.get("user_id") == server_user
+        ]
+
+    sanitized_busy = []
+    for bw in (res.get("busy_workspaces") or []):
+        if isinstance(bw, dict):
+            sanitized_busy.append({
+                "workspace_id": bw.get("workspace_id"),
+                "reason": "Workspace is currently busy",
+            })
+
+    return {
+        "ok": True,
+        "sweep": {
+            "recovered": _filter_user_tasks(res.get("recovered")),
+            "reconciled": _filter_user_tasks(res.get("reconciled")),
+            "launched": _filter_user_tasks(res.get("launched")),
+            "busy_workspaces": sanitized_busy,
+        },
+    }

@@ -178,8 +178,8 @@ async function showNewInboxTaskModal(){
       <label for="inboxInstruction">任务需求指令<span class="danger-text">*</span></label>
       <textarea id="inboxInstruction" rows="4" placeholder="请详细描述任务需求。支持直接输入代码路径，系统将自动识别推荐所属项目…" onblur="onInboxInstructionBlur()" style="margin-bottom:10px"></textarea>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px">
-        <div><label for="inboxProject">归属项目<span class="danger-text">*</span></label><select id="inboxProject" onchange="onInboxProjectSelectChange()"><option value="">-- 选择项目 --</option>${projOptions}</select></div>
-        <div><label for="inboxWorkspace">归属工作区 (自动联动)<span class="danger-text">*</span></label><input id="inboxWorkspace" placeholder="选择项目后自动确定" disabled></div>
+        <div><label for="inboxProject">归属项目 <span class="muted" style="font-size:12px;font-weight:normal">(立即排队时必填)</span></label><select id="inboxProject" onchange="onInboxProjectSelectChange(true)"><option value="">-- 选择项目 --</option>${projOptions}</select></div>
+        <div><label for="inboxWorkspace">归属工作区 (自动联动) <span class="muted" style="font-size:12px;font-weight:normal">(立即排队时必填)</span></label><input id="inboxWorkspace" placeholder="选择项目后自动确定" disabled></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div><label for="inboxPriority">优先级</label><select id="inboxPriority"><option value="NORMAL" selected>常规 (NORMAL)</option><option value="URGENT">紧急 (URGENT)</option><option value="HIGH">高优 (HIGH)</option><option value="LOW">低优 (LOW)</option></select></div>
@@ -193,14 +193,14 @@ async function showNewInboxTaskModal(){
   inboxState.userSelectedProject = false;
 }
 
-function onInboxProjectSelectChange(){
+function onInboxProjectSelectChange(isManual = false){
   const sel = document.getElementById('inboxProject');
   const wsInput = document.getElementById('inboxWorkspace');
   if(!sel || !wsInput) return;
   const opt = sel.selectedOptions[0];
   wsInput.value = opt ? opt.dataset.ws || '' : '';
-  if(sel.value){
-    inboxState.userSelectedProject = true;
+  if(isManual){
+    inboxState.userSelectedProject = Boolean(sel.value);
   }
 }
 
@@ -226,7 +226,7 @@ async function onInboxInstructionBlur(){
         const sel = document.getElementById('inboxProject');
         if(sel && !inboxState.userSelectedProject){
           sel.value = res.recommended_project_id;
-          onInboxProjectSelectChange();
+          onInboxProjectSelectChange(false);
         }
       } else {
         banner.innerHTML = `⚠️ <b>推荐置信度不足（${Math.round((res.confidence||0)*100)}%）：</b> ${esc(res.reason||'未达到自动确认门限')}。已保持草稿待确认，请手动选择项目与工作区。`;

@@ -204,7 +204,7 @@ def save_workflows(data):
     sync_workflows_projection(store=store)
 
 
-TERMINAL_WORKFLOW_STATUSES = {"completed"}
+TERMINAL_WORKFLOW_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned", "halted"})
 
 
 def active_workflows_for_project(project_id):

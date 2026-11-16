@@ -316,14 +316,31 @@ class InboxDispatcher:
                     raise RuntimeError(f"Cannot resolve project root for project_id '{t.get('project_id')}'")
 
                 from console.workflow_api import run_workflow
+                from herdr.workflow import load_template, execution_mode, context_contract_ids
+
                 wid_arg = t.get("workflow_id")
+                tmpl_name = t.get("template_name") or "software-development-v1"
+
+                # Filter context bindings so internal audit state or undeclared keys are never passed to Workflow CLI
+                wf_context = None
+                try:
+                    tmpl = load_template(tmpl_name)
+                    mode = execution_mode(tmpl)
+                    if mode == "context":
+                        req_ids, opt_ids = context_contract_ids(tmpl)
+                        declared = set(req_ids) | set(opt_ids)
+                        raw_ctx = t.get("context") or {}
+                        wf_context = {k: v for k, v in raw_ctx.items() if k in declared}
+                except Exception:
+                    wf_context = None
+
                 output = run_workflow(
                     root=p_record["project_root"],
                     req=t["instruction"],
                     agent=t.get("agent_override") or "auto",
-                    template=t.get("template_name") or "software-development-v1",
+                    template=tmpl_name,
                     title=t["title"],
-                    context=t.get("context"),
+                    context=wf_context,
                     workflow_id=wid_arg,
                 )
                 import re

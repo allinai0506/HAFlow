@@ -481,14 +481,23 @@ def run_workflow_preflight(project, workflow_id, agent=None):
 
 
 def _reject_if_active_workflow(project, force=False):
-    """同一项目工作流共享协调者 Pane 与阶段拓扑，并行注册只会产生幽灵竞争。"""
-    active = active_workflows_for_project(project["project_id"])
-    if not active or force:
+    """同一项目工作流共享协调者 Pane 与阶段拓扑，并行注册只会产生幽灵竞争。
+
+    暂停（paused）的工作流已释放执行拓扑与协调者 Pane，不阻断后续工作流排队启动；
+    仅正在执行（running/pending/in_progress/closing）的工作流会触发拦截。
+    """
+    if force:
         return
-    lines = [f"项目 {project['project_name']} 已有活跃 Workflow，拒绝重复创建："]
+    active = [
+        w for w in active_workflows_for_project(project["project_id"])
+        if w.get("status") in {"running", "pending", "in_progress", "closing"}
+    ]
+    if not active:
+        return
+    lines = [f"项目 {project['project_name']} 已有正在运行的 Workflow，拒绝重复创建："]
     for entry in active:
         subject = entry.get("requirement_subject") or "（无主题）"
-        lines.append(f"  - {entry['workflow_id']}  主题: {subject}")
+        lines.append(f"  - {entry['workflow_id']}  主题: {subject} (状态: {entry.get('status')})")
     lines.append(
         "同一项目共享协调者 Pane，不支持并行工作流。"
         "请在控制台查看进度，或运行 herdr-task close-workflow <workflow_id> 清理后重试；"

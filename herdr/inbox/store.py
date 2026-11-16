@@ -30,6 +30,18 @@ def _decode_row(row: sqlite3.Row) -> Dict[str, Any]:
             task["context"] = {}
     else:
         task["context"] = {}
+
+    hist_raw = task.get("execution_history_json")
+    if hist_raw:
+        try:
+            task["execution_history"] = json.loads(hist_raw)
+        except Exception:
+            task["execution_history"] = []
+    else:
+        if isinstance(task.get("context"), dict) and "execution_history" in task["context"]:
+            task["execution_history"] = task["context"].get("execution_history") or []
+        else:
+            task["execution_history"] = []
     return task
 
 
@@ -124,8 +136,8 @@ class InboxStore:
                     id, user_id, project_id, workspace_id, title, instruction,
                     source_type, source_id, idempotency_key, priority, priority_weight,
                     sort_order, status, template_name, agent_override, context_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    execution_history_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -144,6 +156,7 @@ class InboxStore:
                     template_name or "software-development-v1",
                     agent_override or "auto",
                     context_json,
+                    "[]",
                     now,
                     now,
                 ),
@@ -326,28 +339,43 @@ class InboxStore:
         project_id: str,
         workspace_id: str,
     ) -> Dict[str, Any]:
-        """Confirm project and workspace for a DRAFT task and move it to PENDING."""
+        """Confirm project and workspace for a DRAFT task and move it to PENDING.
+
+        Reallocates sort_order to the tail of the target workspace priority queue
+        inside the atomic transaction to prevent accidental queue jumping.
+        """
         if not project_id or not workspace_id:
             raise ValueError("project_id and workspace_id are required to confirm task")
 
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            cur = conn.execute("SELECT status FROM user_inbox_tasks WHERE id = ?", (task_id,))
+            cur = conn.execute("SELECT status, priority FROM user_inbox_tasks WHERE id = ?", (task_id,))
             row = cur.fetchone()
             if not row:
                 raise KeyError(f"Inbox task not found: {task_id}")
             if row["status"] != "DRAFT":
                 raise InvalidInboxTransitionError(f"Only DRAFT tasks can be confirmed, current is '{row['status']}'")
 
+            # Allocate sort_order at the tail of this priority queue in the workspace
+            cur_ord = conn.execute(
+                """
+                SELECT COALESCE(MAX(sort_order), -10) as max_ord
+                FROM user_inbox_tasks
+                WHERE workspace_id = ? AND priority = ?
+                """,
+                (workspace_id, row["priority"]),
+            ).fetchone()
+            next_sort_order = max(0, int(cur_ord["max_ord"]) + 10) if (cur_ord and cur_ord["max_ord"] is not None) else 0
+
             now = time.time()
             conn.execute(
                 """
                 UPDATE user_inbox_tasks
-                   SET project_id = ?, workspace_id = ?, status = 'PENDING', updated_at = ?
+                   SET project_id = ?, workspace_id = ?, sort_order = ?, status = 'PENDING', updated_at = ?
                  WHERE id = ?
                 """,
-                (project_id, workspace_id, now, task_id),
+                (project_id, workspace_id, next_sort_order, now, task_id),
             )
             conn.execute("COMMIT")
             return self.get_task(task_id)  # type: ignore
@@ -457,7 +485,7 @@ class InboxStore:
         )
 
     def retry_task(self, task_id: str) -> Dict[str, Any]:
-        """Retry a failed task by returning it to PENDING."""
+        """Retry a failed task by returning it to PENDING without polluting workflow context."""
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -469,8 +497,22 @@ class InboxStore:
                 raise InvalidInboxTransitionError(f"Only FAILED tasks can be retried, current is '{row['status']}'")
 
             now = time.time()
-            ctx = json.loads(row["context_json"] or "{}")
-            history = ctx.get("execution_history", [])
+            # Execution history is stored independently in execution_history_json
+            raw_hist = row["execution_history_json"] if "execution_history_json" in row.keys() else None
+            history = []
+            if raw_hist:
+                try:
+                    history = json.loads(raw_hist)
+                except Exception:
+                    history = []
+            elif row["context_json"]:
+                try:
+                    old_ctx = json.loads(row["context_json"])
+                    if isinstance(old_ctx, dict) and "execution_history" in old_ctx:
+                        history = list(old_ctx["execution_history"])
+                except Exception:
+                    pass
+
             history.append({
                 "attempt": row["attempt_count"],
                 "workflow_id": row["workflow_id"],
@@ -479,18 +521,23 @@ class InboxStore:
                 "error": row["error"],
                 "retried_at": now,
             })
-            ctx["execution_history"] = history
-            new_ctx_json = json.dumps(ctx, ensure_ascii=False)
+            new_hist_json = json.dumps(history, ensure_ascii=False)
+
+            # Strip execution_history from context_json if legacy contamination occurred
+            ctx = json.loads(row["context_json"] or "{}") if row["context_json"] else {}
+            if isinstance(ctx, dict) and "execution_history" in ctx:
+                ctx.pop("execution_history", None)
+            clean_ctx_json = json.dumps(ctx, ensure_ascii=False)
 
             conn.execute(
                 """
                 UPDATE user_inbox_tasks
                    SET status = 'PENDING', error = NULL, attempt_count = 0,
                        workflow_id = NULL, worker_id = NULL, started_at = NULL,
-                       completed_at = NULL, context_json = ?, updated_at = ?
+                       completed_at = NULL, context_json = ?, execution_history_json = ?, updated_at = ?
                  WHERE id = ?
                 """,
-                (new_ctx_json, now, task_id),
+                (clean_ctx_json, new_hist_json, now, task_id),
             )
             conn.execute("COMMIT")
             return self.get_task(task_id)  # type: ignore

@@ -47,13 +47,19 @@ async function initFromUrlOrState(){
     state.dashMode=false;
     state.shellView='templates';
     state.workflowId='__templates__';
-  }else if(qView&&['alerts','agents','slots','workflows','workbench','experience'].includes(qView)){
+  }else if(qView==='inbox'){
+    state.opsMode=false;
+    state.dashMode=false;
+    state.shellView='inbox';
+    state.workflowId='__inbox__';
+  }else if(qView&&['alerts','agents','slots','workflows','workbench','experience','inbox'].includes(qView)){
     state.opsMode=false;
     state.dashMode=false;
     state.shellView=qView;
     if(state.workflowId==='__templates__')state.workflowId=null;
+    if(qView==='inbox')state.workflowId='__inbox__';
   }
-  if(qWf&&!state.dashMode&&state.workflowId!=='__templates__'){
+  if(qWf&&!state.dashMode&&state.workflowId!=='__templates__'&&state.workflowId!=='__inbox__'){
     state.opsMode=false;
     state.dashWorkflowId=null;
     state.workflowId=qWf;
@@ -73,6 +79,10 @@ async function initFromUrlOrState(){
   }else if(state.shellView==='templates'){
     // 冷启动直开:先渲染,再水合项目/空间并按有效模板重绘(否则 effectiveTemplateId 回落默认模板)
     await showTemplateLibrary();
+    refreshAll();
+  }else if(state.shellView==='inbox'){
+    if(typeof showInbox==='function') showInbox();
+    else if(typeof showShellView==='function') showShellView('inbox');
     refreshAll();
   }else if(state.shellView&&state.shellView!=='workbench'){
     showShellView(state.shellView);
