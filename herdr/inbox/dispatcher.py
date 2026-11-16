@@ -244,6 +244,82 @@ class InboxDispatcher:
         finally:
             conn.close()
 
+    def _safely_stop_fenced_workflow(
+        self,
+        workflow_id: Optional[str],
+        reason: str = "launcher lost ownership (fencing mismatch)",
+    ) -> None:
+        """Safely stop execution of an orphaned/fenced workflow without erasing its identity (P1).
+
+        Invariants:
+        - All running/active tasks associated with the workflow are halted/interrupted before teardown.
+        - Preserves project_id, workspace_id, title, config, and metadata via canonical transition_workflow.
+        - Releases occupancy only after execution is stopped.
+        """
+        if not workflow_id:
+            return
+        try:
+            from herdr.state_db import get_workflow, list_tasks, transition_task, transition_workflow
+            wf = get_workflow(workflow_id, db_path=self.db_path)
+            if not wf:
+                return
+
+            # 1. Safely stop execution of any active tasks first
+            try:
+                active_tasks = list_tasks(workflow_id=workflow_id, db_path=self.db_path)
+                for t in active_tasks:
+                    st = str(t.get("status") or "").lower()
+                    if st in ("working", "agent_done", "rework", "paused", "blocked", "dispatched", "pending"):
+                        tid = t.get("task_id")
+                        if not tid:
+                            continue
+                        halted = False
+                        try:
+                            from herdr.steering import halt_task
+                            res = halt_task(tid, reason=reason, operator="system", execute_kill=True)
+                            if isinstance(res, dict) and res.get("ok"):
+                                halted = True
+                        except Exception:
+                            pass
+                        if not halted:
+                            try:
+                                transition_task(
+                                    task_id=tid,
+                                    to_status="failed",
+                                    reason=reason,
+                                    source="inbox_dispatcher",
+                                    db_path=self.db_path,
+                                )
+                            except Exception:
+                                pass
+                        pane_id = t.get("pane_id")
+                        if pane_id:
+                            try:
+                                from herdr.pane_pool import close_pane
+                                close_pane(pane_id)
+                            except Exception:
+                                pass
+            except Exception as task_err:
+                logger.warning(f"Error halting tasks for fenced workflow {workflow_id}: {task_err}")
+
+            # 2. Transition workflow to completed (outcome=abandoned) via canonical transition gate
+            cur_status = str(wf.get("status") or "").lower()
+            if cur_status not in TERMINAL_WORKFLOW_STATUSES:
+                try:
+                    transition_workflow(
+                        workflow_id=workflow_id,
+                        to_status="completed",
+                        reason=reason,
+                        source="inbox_dispatcher",
+                        metadata={"outcome": "abandoned"},
+                        force=True,
+                        db_path=self.db_path,
+                    )
+                except Exception as tr_err:
+                    logger.error(f"Failed to transition fenced workflow {workflow_id}: {tr_err}")
+        except Exception as exc:
+            logger.error(f"Unexpected error in _safely_stop_fenced_workflow for {workflow_id}: {exc}")
+
     def launch_task(
         self,
         task: Dict[str, Any],
@@ -384,14 +460,10 @@ class InboxDispatcher:
                         logger.error(
                             f"Fencing token mismatch for task {task_id}; lost ownership. Halting workflow {workflow_id}."
                         )
-                        try:
-                            from herdr.state_db import save_workflow
-                            save_workflow(
-                                {"workflow_id": workflow_id, "status": "cancelled", "outcome": "abandoned"},
-                                db_path=self.db_path,
-                            )
-                        except Exception:
-                            pass
+                        self._safely_stop_fenced_workflow(
+                            workflow_id,
+                            reason=f"Fencing token mismatch for task {task_id}; launcher lost ownership",
+                        )
                         return None
                 finally:
                     conn.close()
@@ -405,6 +477,77 @@ class InboxDispatcher:
                 conn = self._conn()
                 now = time.time()
                 try:
+                    # Check if workflow was registered in DB before/during launch (P2)
+                    from herdr.state_db import get_workflow
+                    wf = get_workflow(target_workflow_id, db_path=self.db_path) if target_workflow_id else None
+                    if wf:
+                        wf_st = str(wf.get("status") or "").lower()
+                        wf_out = str(wf.get("outcome") or "").lower()
+                        if wf_st in ("running", "in_progress", "pending"):
+                            cur = conn.execute(
+                                """
+                                UPDATE user_inbox_tasks
+                                   SET status = 'RUNNING',
+                                       workflow_id = ?,
+                                       error = NULL,
+                                       updated_at = ?,
+                                       started_at = COALESCE(started_at, ?),
+                                       lease_expires_at = ?,
+                                       heartbeat_at = ?
+                                 WHERE id = ? AND status = 'CLAIMED' AND worker_id = ?
+                                """,
+                                (target_workflow_id, now, now, now + 180.0, now, task_id, fencing_token),
+                            )
+                            conn.commit()
+                            if cur.rowcount == 0:
+                                self._safely_stop_fenced_workflow(
+                                    target_workflow_id,
+                                    reason=f"Fencing mismatch on recovery for task {task_id}",
+                                )
+                                return None
+                            return self.store.get_task(task_id)
+                        elif wf_st == "paused":
+                            cur = conn.execute(
+                                """
+                                UPDATE user_inbox_tasks
+                                   SET status = 'WAITING',
+                                       workflow_id = ?,
+                                       updated_at = ?
+                                 WHERE id = ? AND status = 'CLAIMED' AND worker_id = ?
+                                """,
+                                (target_workflow_id, now, task_id, fencing_token),
+                            )
+                            conn.commit()
+                            if cur.rowcount == 0:
+                                self._safely_stop_fenced_workflow(
+                                    target_workflow_id,
+                                    reason=f"Fencing mismatch on recovery for task {task_id}",
+                                )
+                                return None
+                            return self.store.get_task(task_id)
+                        elif wf_st in TERMINAL_WORKFLOW_STATUSES:
+                            is_failed = (
+                                wf_st in ("failed", "cancelled", "halted", "abandoned")
+                                or wf_out in ("startup_failed", "failed", "failure", "abandoned", "error")
+                            )
+                            new_st = "FAILED" if is_failed else "COMPLETED"
+                            err = f"Workflow '{target_workflow_id}' ended with status '{wf_st}'" if is_failed else None
+                            cur = conn.execute(
+                                """
+                                UPDATE user_inbox_tasks
+                                   SET status = ?,
+                                       workflow_id = ?,
+                                       error = ?,
+                                       completed_at = ?,
+                                       updated_at = ?
+                                 WHERE id = ? AND status = 'CLAIMED' AND worker_id = ?
+                                """,
+                                (new_st, target_workflow_id, err, now, now, task_id, fencing_token),
+                            )
+                            conn.commit()
+                            return self.store.get_task(task_id)
+
+                    # Workflow was never registered in DB: true startup failure, requeue or fail
                     if current_attempts >= max_attempts:
                         conn.execute(
                             """

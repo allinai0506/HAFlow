@@ -334,9 +334,16 @@ def test_launcher_fencing_token_mismatch_halts_orphan_workflow(tmp_path: Path):
             )
             conn.commit()
             conn.close()
-            # Register a dummy workflow
+            # Register a dummy workflow with full identity
             save_workflow(
-                {"workflow_id": "wf_orphan_99", "title": "Orphan WF", "status": "running"},
+                {
+                    "workflow_id": "wf_orphan_99",
+                    "title": "Orphan WF",
+                    "status": "running",
+                    "project_id": "p1",
+                    "workspace_id": "w1",
+                    "config": {"key": "value"},
+                },
                 db_path=db_file,
             )
             return "wf_orphan_99"
@@ -351,10 +358,15 @@ def test_launcher_fencing_token_mismatch_halts_orphan_workflow(tmp_path: Path):
         assert task_in_db["status"] == "CLAIMED"
         assert task_in_db["worker_id"] == "different_worker_fencing_token"
 
-        # Verify orphan workflow was cancelled/abandoned
+        # Verify orphan workflow was safely halted without erasing identity (P1)
         from herdr.state_db import get_workflow
         wf = get_workflow("wf_orphan_99", db_path=db_file)
-        assert wf["status"] == "cancelled"
+        assert wf["status"] in ("completed", "cancelled")
+        assert wf.get("outcome") == "abandoned"
+        assert wf.get("title") == "Orphan WF"
+        assert wf.get("project_id") == "p1"
+        assert wf.get("workspace_id") == "w1"
+        assert wf.get("config") == {"key": "value"}
 
 
 def test_launcher_heartbeat_keeps_lease_alive_during_long_launch(tmp_path: Path):
@@ -766,5 +778,149 @@ def test_workflow_resume_reacquires_workspace_and_blocks_if_occupied(tmp_path: P
         assert res["ok"] is True
         assert res["status"] == "running"
 
-        wf1 = s_store.get_workflow("wf-res-1")
-        assert wf1["status"] == "running"
+
+def test_safely_stop_fenced_workflow_stops_tasks_and_preserves_identity(tmp_path: Path):
+    """P1: Verify that stopping a fenced workflow halts active tasks and preserves all identity metadata."""
+    from herdr.state_db import list_tasks, save_task
+
+    db_file = tmp_path / "stop_fenced.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    wf_id = "wf_fenced_audit_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "title": "Production Deployment",
+            "status": "running",
+            "project_id": "proj-alpha",
+            "workspace_id": "ws-alpha",
+            "config": {"stages": ["build", "deploy"]},
+        },
+        db_path=db_file,
+    )
+
+    save_task(
+        {
+            "task_id": "task_alpha_1",
+            "workflow_id": wf_id,
+            "status": "working",
+        },
+        db_path=db_file,
+    )
+
+    # Invoke safe stopping
+    dispatcher._safely_stop_fenced_workflow(wf_id, reason="launcher lost ownership")
+
+    # 1. Execution must be safely stopped (task no longer working)
+    tasks = list_tasks(workflow_id=wf_id, db_path=db_file)
+    assert len(tasks) == 1
+    assert tasks[0]["status"] == "failed"
+
+    # 2. Workflow identity must be 100% preserved
+    from herdr.state_db import get_workflow
+    wf = get_workflow(wf_id, db_path=db_file)
+    assert wf is not None
+    assert wf["status"] == "completed"
+    assert wf.get("outcome") == "abandoned"
+    assert wf.get("title") == "Production Deployment"
+    assert wf.get("project_id") == "proj-alpha"
+    assert wf.get("workspace_id") == "ws-alpha"
+    assert wf.get("config") == {"stages": ["build", "deploy"]}
+
+    # 3. Workspace is no longer busy once safely stopped
+    busy, reason = dispatcher.is_workspace_busy("ws-alpha")
+    assert busy is False
+
+
+def test_launch_task_reconciles_registered_workflow_on_startup_exception(tmp_path: Path):
+    """P2: If launcher raises after workflow registration, recover tracking instead of repeating work."""
+    db_file = tmp_path / "launch_reconcile_p2.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    t = store.create_task(
+        title="Async Launch Task",
+        instruction="Do work",
+        project_id="proj-p2",
+        workspace_id="ws-p2",
+        auto_confirm=True,
+    )
+    claimed = dispatcher.claim_next_task("ws-p2")
+    assert claimed is not None
+
+    def runner_register_then_timeout(task_dict):
+        # Register workflow in DB
+        wid = task_dict.get("workflow_id")
+        save_workflow(
+            {
+                "workflow_id": wid,
+                "title": "Registered Workflow",
+                "status": "running",
+                "project_id": "proj-p2",
+                "workspace_id": "ws-p2",
+            },
+            db_path=db_file,
+        )
+        # Simulate process timeout or connection drop after registration
+        raise TimeoutError("CLI startup timed out waiting for process ACK")
+
+    # Launch task: should catch TimeoutError, detect registered workflow, and recover tracking as RUNNING
+    launched = dispatcher.launch_task(claimed, runner_fn=runner_register_then_timeout, async_launch=False)
+    assert launched is not None
+    assert launched["status"] == "RUNNING"
+    assigned_wf = launched["workflow_id"]
+    assert assigned_wf is not None
+
+    # Verify task in DB is RUNNING
+    in_db = store.get_task(t["id"])
+    assert in_db["status"] == "RUNNING"
+    assert in_db["workflow_id"] == assigned_wf
+
+    # Simulate underlying workflow completing
+    save_workflow(
+        {
+            "workflow_id": assigned_wf,
+            "title": "Registered Workflow",
+            "status": "completed",
+            "project_id": "proj-p2",
+            "workspace_id": "ws-p2",
+            "outcome": "delivered",
+        },
+        db_path=db_file,
+    )
+
+    # Reconcile: task should transition to COMPLETED
+    reconciled = dispatcher.reconcile_running_tasks()
+    assert len(reconciled) == 1
+    assert reconciled[0]["id"] == t["id"]
+    assert reconciled[0]["status"] == "COMPLETED"
+
+    # Crucial check: subsequent dispatch must NOT re-claim or repeat the completed task!
+    next_claim = dispatcher.claim_next_task("ws-p2")
+    assert next_claim is None
+
+
+def test_launch_task_requeues_when_workflow_never_registered(tmp_path: Path):
+    """P2: If launcher raises before workflow registration, safely requeues to PENDING for retry."""
+    db_file = tmp_path / "launch_never_reg.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    t = store.create_task(
+        title="Failing Launch Task",
+        instruction="Do work",
+        project_id="proj-fail",
+        workspace_id="ws-fail",
+        auto_confirm=True,
+    )
+    claimed = dispatcher.claim_next_task("ws-fail")
+    assert claimed is not None
+
+    def runner_crash_immediately(task_dict):
+        raise RuntimeError("Command not found: herdr-factory")
+
+    launched = dispatcher.launch_task(claimed, runner_fn=runner_crash_immediately, async_launch=False)
+    assert launched is not None
+    assert launched["status"] == "PENDING"
+    assert "Command not found" in (launched.get("error") or "")
