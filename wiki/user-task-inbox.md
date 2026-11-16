@@ -58,24 +58,30 @@ Inbox 任务具备严格受控的 8 状态转换模型（`herdr/inbox/transition
 - **主键**: `id` (`TEXT PRIMARY KEY`, 形如 `inbox_xxxxxxxxxxxx`)
 - **关联字段**: `project_id`, `workspace_id`, `workflow_id`, `worker_id`
 - **核心数据**: `title`, `instruction`, `priority`, `status`, `source_type`, `source_id`
-- **并发与恢复**: `idempotency_key` (唯一索引防重提交), `lease_expires_at`, `heartbeat_at`, `attempt_count`
+- **并发与恢复**: `(user_id, idempotency_key)` 用户范围唯一防重索引, `lease_expires_at`, `heartbeat_at`, `attempt_count`, 预挂载 `workflow_id` 防奔溃重跑
 - **审计时标**: `created_at`, `updated_at`, `started_at`, `completed_at`
 - **索引体系**: 
   - `idx_inbox_dispatch`: `(status, priority, created_at)`
   - `idx_inbox_workspace`: `(workspace_id, status)`
   - `idx_inbox_project`: `(project_id, status)`
+  - `uq_inbox_user_idempotency`: `(user_id, idempotency_key)`
 
 ---
 
 ## 4. 调度与收敛机制 (`InboxDispatcher`)
 
 - **工作区繁忙检测 (`is_workspace_busy`)**：
-  - 检查收件箱内是否存在处于 `CLAIMED`、`RUNNING` 或 `WAITING` 状态的任务。
-  - 交叉核对当前项目是否存在运行中的 Workflow。
+  - 检查收件箱内是否存在处于 `CLAIMED` 或 `RUNNING` 状态的任务（`WAITING` 状态释放工作区锁，不阻断后续排队任务）。
+  - 交叉核对当前项目是否存在运行中的 Workflow（`paused` 状态的工作流不占用工作区）。
 - **原子领取任务 (`claim_next_task`)**：
   - 在 SQLite `EXCLUSIVE` 事务保护下，基于条件原子执行 CAS 跃迁，彻底杜绝多 Worker 重复领取。
+- **预先绑定与崩溃自愈 (`launch_task` / `recover_stale_tasks`)**：
+  - 启动前在 DB 中原子预分配并持久化目标 `workflow_id`。
+  - 进程崩溃后，超时自愈逻辑检查底层工作流是否已创建。若已存在活跃工作流，恢复追踪，绝不重复生成新工作流。
+  - 缺失或游离工作流经 60 秒宽限期后自动置为 `FAILED`，避免永久占用工作区。
 - **真实终态收敛 (`reconcile_running_tasks`)**：
   - 严格依据底层真实的 Workflow 状态进行收敛。底层 Workflow `completed` 才将收件箱任务置为 `COMPLETED`，底层 `failed` 则收敛为 `FAILED`，绝不凭借自述伪造成功。
+  - `WAITING` 任务恢复为 `RUNNING` 时重新校验工作区是否空闲，避免并发冲突。
 - **调度轮询集成**：
   - 集成在 `services/controller/registry.py` 控制器主循环中，并在每次任务提交、确认、重试、完成时触发即时扫描。
 

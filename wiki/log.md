@@ -8,6 +8,16 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-16] fix | User Task Inbox V1 — 崩溃恢复幂等性、等待状态空间互斥释放与用户隔离加固 (PR #420 评审修复)
+
+- 背景：PR #420 第三轮深度审查发现启动崩溃窗口下租约过期重试可能启动两个工作流、WAITING 任务与 paused 工作流永久阻断后续任务无法继续、幂等键全局唯一碰撞、非管理员越权查询及缺少分页机制。
+- 变更：
+  1. `herdr/inbox/dispatcher.py`：启动前持久化预分配 `workflow_id`，崩溃自愈优先绑定已创建工作流，杜绝重复执行；
+  2. `herdr/inbox/dispatcher.py` 与 `herdr/inbox/transitions.py`：`WAITING` 状态与 `paused` 工作流释放工作区互斥锁，允许后续待执行任务并发调度；恢复 `RUNNING` 时强校验空间可用性；
+  3. `herdr/inbox/schema.py` 与 `herdr/inbox/store.py`：幂等键重构为 `(user_id, idempotency_key)` 用户范围唯一索引；队列重排后新任务严格追加到队列末尾；
+  4. `console/inbox_api.py`：强制显式用户确认（`confirmed_by == 'user'`），杜绝自动推荐静默排队；强化多用户查询隔离并脱敏跨用户工作区占用标题；
+  5. `console/static/console/scripts/inbox.js`：取消自动勾选确认框，新增「加载更多」分页机制，严格控制文件行数（468 行）。
+
 ## [2026-11-16] feat | User Task Inbox V1 — 用户统一任务收件箱与自动调度
 
 - 背景：用户派发多个任务时必须等待当前任务执行完毕才能手动派发下一条指令，任务接入与任务执行紧耦合，且缺少任务排队缓冲机制。
