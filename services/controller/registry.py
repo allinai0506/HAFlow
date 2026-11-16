@@ -33,7 +33,7 @@ def check_all_workflows_stage_advance(ports):
         print(f"[COCKPIT SCHEDULE ERROR] {type(exc).__name__}")
     try:
         from herdr.inbox.dispatcher import InboxDispatcher
-        InboxDispatcher(db_path=ports._get_store().db_path).dispatch_sweep()
+        InboxDispatcher(db_path=ports._get_store().db_path).dispatch_sweep(async_launch=True)
     except Exception as exc:
         pass
 

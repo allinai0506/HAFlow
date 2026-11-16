@@ -1,18 +1,30 @@
-"""Console HTTP API handlers for User Task Inbox."""
+"""REST API handlers for User Task Inbox endpoints."""
 
+import concurrent.futures
+import json
+import logging
+import os
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from herdr.inbox.detector import (
+    CONFIDENCE_THRESHOLD,
     detect_project_and_workspace,
     validate_project_and_workspace,
 )
 from herdr.inbox.dispatcher import InboxDispatcher
 from herdr.inbox.store import InboxStore
-from herdr.inbox.transitions import InvalidInboxTransitionError
+
+logger = logging.getLogger(__name__)
 
 _store_instance: Optional[InboxStore] = None
 _dispatcher_instance: Optional[InboxDispatcher] = None
+
+# P2-03: Bounded single-worker sweep executor to prevent unbounded thread explosion
+_SWEEP_LOCK = threading.Lock()
+_SWEEP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="inbox_api_sweep"
+)
 
 
 def get_inbox_store() -> InboxStore:
@@ -31,12 +43,26 @@ def get_inbox_dispatcher() -> InboxDispatcher:
 
 def _trigger_background_sweep():
     def _run():
+        if not _SWEEP_LOCK.acquire(blocking=False):
+            # A sweep is already actively running; coalesce
+            return
         try:
-            get_inbox_dispatcher().dispatch_sweep()
-        except Exception:
-            pass
+            get_inbox_dispatcher().dispatch_sweep(async_launch=True)
+        except Exception as e:
+            logger.debug(f"Background sweep error: {e}")
+        finally:
+            _SWEEP_LOCK.release()
 
-    threading.Thread(target=_run, daemon=True).start()
+    try:
+        _SWEEP_EXECUTOR.submit(_run)
+    except Exception:
+        pass
+
+
+def _resolve_user_id(val: Optional[str] = None) -> str:
+    if val and str(val).strip():
+        return str(val).strip()
+    return os.environ.get("USER", "default")
 
 
 def api_inbox_tasks(q: Dict[str, Any]) -> Dict[str, Any]:
@@ -45,6 +71,7 @@ def api_inbox_tasks(q: Dict[str, Any]) -> Dict[str, Any]:
     project_id = q.get("project_id", [None])[0] if isinstance(q.get("project_id"), list) else q.get("project_id")
     workspace_id = q.get("workspace_id", [None])[0] if isinstance(q.get("workspace_id"), list) else q.get("workspace_id")
     priority = q.get("priority", [None])[0] if isinstance(q.get("priority"), list) else q.get("priority")
+    user_id_param = q.get("user_id", [None])[0] if isinstance(q.get("user_id"), list) else q.get("user_id")
     limit_str = q.get("limit", [100])[0] if isinstance(q.get("limit"), list) else q.get("limit", 100)
     offset_str = q.get("offset", [0])[0] if isinstance(q.get("offset"), list) else q.get("offset", 0)
 
@@ -62,6 +89,7 @@ def api_inbox_tasks(q: Dict[str, Any]) -> Dict[str, Any]:
         project_id=project_id or None,
         workspace_id=workspace_id or None,
         priority=priority or None,
+        user_id=user_id_param or None,
         limit=limit,
         offset=offset,
     )
@@ -83,12 +111,14 @@ def api_inbox_create_task(b: Dict[str, Any]) -> Dict[str, Any]:
     instruction = str(b.get("instruction") or "").strip()
     project_id = str(b.get("project_id") or "").strip() or None
     workspace_id = str(b.get("workspace_id") or "").strip() or None
+    user_id = _resolve_user_id(b.get("user_id"))
     priority = str(b.get("priority") or "NORMAL").strip().upper()
     auto_confirm = bool(b.get("auto_confirm", False))
     source_type = str(b.get("source_type") or "manual").strip()
     source_id = str(b.get("source_id") or "").strip() or None
     idempotency_key = str(b.get("idempotency_key") or "").strip() or None
 
+    # Strict P1-01 scope enforcement
     if auto_confirm:
         if not project_id or not workspace_id:
             raise ValueError("project_id and workspace_id must be provided when auto_confirm is enabled")
@@ -101,6 +131,7 @@ def api_inbox_create_task(b: Dict[str, Any]) -> Dict[str, Any]:
         instruction=instruction,
         project_id=project_id,
         workspace_id=workspace_id,
+        user_id=user_id,
         priority=priority,
         auto_confirm=auto_confirm,
         source_type=source_type,

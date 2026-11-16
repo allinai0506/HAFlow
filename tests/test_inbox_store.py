@@ -173,3 +173,28 @@ def test_inbox_priority_and_cancel(tmp_path: Path):
     stats = store.get_inbox_stats()
     assert stats["counts"]["CANCELLED"] == 1
     assert stats["total"] == 1
+
+
+def test_reorder_dense_normalization_four_tasks(tmp_path: Path):
+    """P2-02: Verify that moving C up in [A, B, C, D] results in strictly [A, C, B, D]."""
+    db_file = tmp_path / "inbox_reorder.db"
+    store = InboxStore(db_file)
+
+    ta = store.create_task(title="A", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    tb = store.create_task(title="B", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    tc = store.create_task(title="C", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+    td = store.create_task(title="D", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
+
+    # Initial order: A, B, C, D
+    tasks, _ = store.list_tasks(workspace_id="w1", status="PENDING")
+    assert [t["title"] for t in tasks] == ["A", "B", "C", "D"]
+
+    # Move C up
+    store.reorder_pending_task(tc["id"], direction="up")
+    tasks_after, _ = store.list_tasks(workspace_id="w1", status="PENDING")
+    assert [t["title"] for t in tasks_after] == ["A", "C", "B", "D"]
+
+    # Move B down
+    store.reorder_pending_task(tb["id"], direction="down")
+    tasks_after2, _ = store.list_tasks(workspace_id="w1", status="PENDING")
+    assert [t["title"] for t in tasks_after2] == ["A", "C", "D", "B"]

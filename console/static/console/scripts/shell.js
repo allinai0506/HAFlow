@@ -91,6 +91,8 @@ async function showShellView(view){
   if(view==='dashboard'){state.shellView='dashboard';return showDashboard();}
   if(view==='ops'){state.shellView='ops';return showOpsCenter();}
   if(view==='templates'){return showTemplateLibrary();}
+  if(view==='inbox'){return showInbox();}
+  if(state.shellView==='inbox'&&view!=='inbox'&&typeof stopInboxTimer==='function')stopInboxTimer();
   const leaving=!!(state.opsMode||state.dashMode);
   state.opsMode=false;state.dashMode=false;stopDashTimer();
   state.shellView=view||'workbench';
@@ -124,6 +126,7 @@ async function showShellView(view){
 }
 function paintShellPage(view){
   if(view==='templates'){showTemplateLibrary();return;}
+  if(view==='inbox'){if(typeof showInbox==='function')showInbox();return;}
   setWorkspaceMode('aux');
   paintCrumb();
   if(['alerts','agents','slots','workflows'].includes(view)&&!state.overview){

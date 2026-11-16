@@ -177,7 +177,7 @@ async function showNewInboxTaskModal(){
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div><label for="inboxPriority">优先级</label><select id="inboxPriority"><option value="NORMAL" selected>常规 (NORMAL)</option><option value="URGENT">紧急 (URGENT)</option><option value="HIGH">高优 (HIGH)</option><option value="LOW">低优 (LOW)</option></select></div>
-        <div style="display:flex;align-items:flex-end"><label class="inbox-scope-checkbox-label"><input type="checkbox" id="inboxAutoConfirm" checked><span>确认归属，立即排队等待执行</span></label></div>
+        <div style="display:flex;align-items:flex-end"><label class="inbox-scope-checkbox-label"><input type="checkbox" id="inboxAutoConfirm"><span>确认归属，立即排队等待执行</span></label></div>
       </div>
       <div class="muted" style="font-size:12px;margin-bottom:14px">提示：若未勾选确认归属，任务将保存为【草稿 (DRAFT)】，绝不会进入可执行队列。</div>
       <div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="submitNewInboxTask()">提交到收件箱</button></div>
@@ -186,7 +186,12 @@ async function showNewInboxTaskModal(){
 
   if(state.projectId){
     const sel = document.getElementById('inboxProject');
-    if(sel){ sel.value = state.projectId; onInboxProjectSelectChange(); }
+    if(sel){
+      sel.value = state.projectId;
+      onInboxProjectSelectChange();
+      const chk = document.getElementById('inboxAutoConfirm');
+      if(chk) chk.checked = true;
+    }
   }
 }
 
@@ -196,6 +201,8 @@ function onInboxProjectSelectChange(){
   if(!sel || !wsInput) return;
   const opt = sel.selectedOptions[0];
   wsInput.value = opt ? opt.dataset.ws || '' : '';
+  const chk = document.getElementById('inboxAutoConfirm');
+  if(chk && sel.value && wsInput.value) chk.checked = true;
 }
 
 async function onInboxInstructionBlur(){
@@ -211,12 +218,25 @@ async function onInboxInstructionBlur(){
   try{
     const res = await api('/api/inbox/detect', {method:'POST', body:JSON.stringify({instruction:ins, title:ti?.value||''})});
     const banner = document.getElementById('inboxDetectBanner');
-    if(res && res.recommended_project_id && banner){
+    if(res && banner){
       banner.style.display = 'flex';
-      banner.className = 'inbox-detect-banner ' + (res.confidence >= 0.85 ? '' : 'low-conf');
-      banner.innerHTML = `🎯 <b>智能推荐：</b> 项目【${esc(res.project_name||res.recommended_project_id)}】 · 空间【${esc(res.recommended_workspace_id)}】（置信度 ${Math.round(res.confidence*100)}% - ${esc(res.reason)}）`;
-      const sel = document.getElementById('inboxProject');
-      if(sel && !sel.value){ sel.value = res.recommended_project_id; onInboxProjectSelectChange(); }
+      const isConfident = Boolean(res.is_confident);
+      banner.className = 'inbox-detect-banner ' + (isConfident ? '' : 'low-conf');
+      if(isConfident && res.recommended_project_id){
+        banner.innerHTML = `🎯 <b>智能推荐：</b> 项目【${esc(res.project_name||res.recommended_project_id)}】 · 空间【${esc(res.recommended_workspace_id)}】（置信度 ${Math.round(res.confidence*100)}% - ${esc(res.reason)}）`;
+        const sel = document.getElementById('inboxProject');
+        if(sel && !sel.value){
+          sel.value = res.recommended_project_id;
+          onInboxProjectSelectChange();
+        }
+      } else {
+        banner.innerHTML = `⚠️ <b>推荐置信度不足（${Math.round((res.confidence||0)*100)}%）：</b> ${esc(res.reason||'未达到自动确认门限')}。已保持草稿待确认，请手动选择项目与工作区。`;
+        const sel = document.getElementById('inboxProject');
+        if(sel && !sel.value){
+          const chk = document.getElementById('inboxAutoConfirm');
+          if(chk) chk.checked = false;
+        }
+      }
     }
   }catch(e){
     console.error('Scope detect error:', e);
@@ -389,22 +409,36 @@ function inspectWorkflow(wid){
   if(typeof showShellView === 'function') showShellView('workbench');
 }
 
+function stopInboxTimer(){
+  if(inboxState.autoRefreshTimer){
+    clearInterval(inboxState.autoRefreshTimer);
+    inboxState.autoRefreshTimer = null;
+  }
+}
+
 function showInbox(){
+  state.shellView = 'inbox';
+  state.opsMode = false;
+  state.dashMode = false;
+  if(typeof stopDashTimer === 'function') stopDashTimer();
   setWorkspaceMode('inbox');
   paintCrumb();
+  saveViewState();
+  syncOpsUi();
+
   if(!state.openWorkflowTabIds) state.openWorkflowTabIds = [];
   if(!state.openWorkflowTabIds.includes('__inbox__')) state.openWorkflowTabIds.push('__inbox__');
   state.workflowId = '__inbox__';
   if(typeof renderWorkflowTabs === 'function') renderWorkflowTabs();
   loadInboxData();
-  if(inboxState.autoRefreshTimer) clearInterval(inboxState.autoRefreshTimer);
+  stopInboxTimer();
   inboxState.autoRefreshTimer = setInterval(() => {
     if(state.shellView === 'inbox' && !document.hidden) loadInboxData();
   }, 5000);
 }
 
 return {
-  showInbox, loadInboxData, showNewInboxTaskModal, showInboxTaskDetail,
+  showInbox, stopInboxTimer, loadInboxData, showNewInboxTaskModal, showInboxTaskDetail,
   showConfirmScopeModal, changeTaskPriority: showChangePriorityModal, moveTaskOrder, cancelInboxTask,
   retryInboxTask, setInboxStatusFilter, setInboxProjectFilter, setInboxPriorityFilter,
   triggerInboxSweep, showChangePriorityModal, submitChangePriority,

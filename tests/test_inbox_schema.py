@@ -48,7 +48,9 @@ def test_inbox_schema_creation_and_idempotence(tmp_path: Path):
 
 
 def test_inbox_schema_integration_with_state_db(tmp_path: Path):
+    from herdr.inbox.store import InboxStore
     db_file = tmp_path / "app_state.db"
+    store = InboxStore(db_file)
     conn = get_db_connection(db_file)
     try:
         row = conn.execute(

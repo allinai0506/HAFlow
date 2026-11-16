@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from herdr.inbox.schema import ensure_inbox_schema
 from herdr.inbox.transitions import (
     ALL_INBOX_STATUSES,
     PRIORITY_DEFAULT,
@@ -37,6 +38,14 @@ class InboxStore:
 
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        conn = get_db_connection(self.db_path)
+        try:
+            ensure_inbox_schema(conn)
+        finally:
+            conn.close()
 
     def _conn(self) -> sqlite3.Connection:
         return get_db_connection(self.db_path)
@@ -404,25 +413,15 @@ class InboxStore:
             idx = ids.index(task_id)
             swap_idx = idx - 1 if direction == "up" else idx + 1
             if 0 <= swap_idx < len(ids):
-                # Normalize sort_orders if needed, then swap
-                other_id = ids[swap_idx]
-                t_order = task["sort_order"]
-                o_order = next(r["sort_order"] for r in rows if r["id"] == other_id)
-                if t_order == o_order:
-                    # Give distinct order
-                    t_order, o_order = (swap_idx, idx)
-                else:
-                    t_order, o_order = (o_order, t_order)
-
+                # Swap target with neighbor in the python list
+                ids[idx], ids[swap_idx] = ids[swap_idx], ids[idx]
+                # Re-assign dense sequence 10, 20, 30, 40... to ALL pending tasks in this workspace
                 now = time.time()
-                conn.execute(
-                    "UPDATE user_inbox_tasks SET sort_order = ?, updated_at = ? WHERE id = ?",
-                    (t_order, now, task_id),
-                )
-                conn.execute(
-                    "UPDATE user_inbox_tasks SET sort_order = ?, updated_at = ? WHERE id = ?",
-                    (o_order, now, other_id),
-                )
+                for rank, tid in enumerate(ids):
+                    conn.execute(
+                        "UPDATE user_inbox_tasks SET sort_order = ?, updated_at = ? WHERE id = ?",
+                        (rank * 10, now, tid),
+                    )
 
             conn.execute("COMMIT")
             return self.get_task(task_id)  # type: ignore

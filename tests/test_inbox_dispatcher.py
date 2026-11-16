@@ -203,3 +203,82 @@ def test_auto_continuation_pipeline(tmp_path: Path):
         # Verify all three tasks are now COMPLETED
         final_tasks, total = store.list_tasks(status="COMPLETED")
         assert total == 3
+
+
+def test_failed_and_cancelled_workflows_release_workspace(tmp_path: Path):
+    """P1-03: Workflows in failed, cancelled, or abandoned statuses do NOT block the workspace."""
+    db_file = tmp_path / "dispatcher_terminal.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
+        # 1. Failed workflow in database
+        save_workflow(
+            {"workflow_id": "wf_failed_1", "title": "Failed Run", "status": "failed", "config": {"workspace_id": "w_test"}},
+            db_path=db_file,
+        )
+        is_busy, reason = dispatcher.is_workspace_busy("w_test")
+        assert is_busy is False, f"Failed workflow must not block workspace, but got reason: {reason}"
+
+        # 2. Cancelled workflow in database
+        save_workflow(
+            {"workflow_id": "wf_cancel_1", "title": "Cancelled Run", "status": "cancelled", "config": {"workspace_id": "w_test"}},
+            db_path=db_file,
+        )
+        is_busy, reason = dispatcher.is_workspace_busy("w_test")
+        assert is_busy is False, f"Cancelled workflow must not block workspace, but got reason: {reason}"
+
+        # 3. Abandoned workflow in database
+        save_workflow(
+            {"workflow_id": "wf_aban_1", "title": "Abandoned Run", "status": "abandoned", "config": {"workspace_id": "w_test"}},
+            db_path=db_file,
+        )
+        is_busy, reason = dispatcher.is_workspace_busy("w_test")
+        assert is_busy is False, f"Abandoned workflow must not block workspace, but got reason: {reason}"
+
+        # 4. Running workflow DOES block workspace
+        save_workflow(
+            {"workflow_id": "wf_run_1", "title": "Active Run", "status": "running", "config": {"workspace_id": "w_test"}},
+            db_path=db_file,
+        )
+        is_busy, reason = dispatcher.is_workspace_busy("w_test")
+        assert is_busy is True
+        assert "Active Run" in reason
+
+
+def test_reconcile_waiting_tasks(tmp_path: Path):
+    """P2-01: Verify WAITING tasks participate in reconciliation and transition cleanly."""
+    db_file = tmp_path / "dispatcher_waiting.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    # 1. Create a task that enters WAITING
+    t = store.create_task(
+        title="Waiting Task", instruction="Needs human signoff", project_id="p1",
+        workspace_id="w1", auto_confirm=True,
+    )
+    store.update_task_status(t["id"], "CLAIMED")
+    store.update_task_status(t["id"], "RUNNING", workflow_id="wf_human_1")
+    store.update_task_status(t["id"], "WAITING")
+
+    # Workflow is paused -> remains WAITING
+    save_workflow({"workflow_id": "wf_human_1", "title": "Human WF", "status": "paused"}, db_path=db_file)
+    reconciled = dispatcher.reconcile_running_tasks()
+    assert len(reconciled) == 0
+    assert store.get_task(t["id"])["status"] == "WAITING"
+
+    # Human provides signoff, workflow resumes to 'running' -> inbox task reconciles back to RUNNING!
+    save_workflow({"workflow_id": "wf_human_1", "title": "Human WF", "status": "running"}, db_path=db_file)
+    reconciled = dispatcher.reconcile_running_tasks()
+    assert len(reconciled) == 1
+    assert reconciled[0]["id"] == t["id"]
+    assert reconciled[0]["status"] == "RUNNING"
+    assert store.get_task(t["id"])["status"] == "RUNNING"
+
+    # Workflow eventually completes -> inbox task reconciles to COMPLETED!
+    save_workflow({"workflow_id": "wf_human_1", "title": "Human WF", "status": "completed"}, db_path=db_file)
+    reconciled2 = dispatcher.reconcile_running_tasks()
+    assert len(reconciled2) == 1
+    assert reconciled2[0]["id"] == t["id"]
+    assert reconciled2[0]["status"] == "COMPLETED"
+    assert store.get_task(t["id"])["status"] == "COMPLETED"

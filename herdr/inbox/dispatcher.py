@@ -1,25 +1,49 @@
-"""Workspace task dispatcher, mutex enforcement and auto-continuation."""
+"""Inbox task dispatcher: atomic claiming, single-task workspace mutex, and auto-continuation."""
 
+import concurrent.futures
 import json
+import logging
 import os
 import sqlite3
-import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from herdr.inbox.store import InboxStore
+from herdr.inbox.store import InboxStore, _decode_row
 from herdr.inbox.transitions import (
+    ACTIVE_INBOX_STATUSES,
     WORKSPACE_HOLDING_STATUSES,
-    InvalidInboxTransitionError,
 )
 from herdr.projects import active_workflows_for_project, load_projects
 from herdr.state.connection import get_db_connection
 
+logger = logging.getLogger(__name__)
+
+# Bounded launcher executor to avoid blocking the Controller main loop (Invariant 10)
+_LAUNCH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="inbox_launcher"
+)
+
+ACTIVE_WORKFLOW_STATUSES = frozenset({
+    "running",
+    "pending",
+    "in_progress",
+    "paused",
+    "closing",
+})
+
+TERMINAL_WORKFLOW_STATUSES = frozenset({
+    "completed",
+    "failed",
+    "cancelled",
+    "abandoned",
+    "halted",
+})
+
 
 class InboxDispatcher:
-    """Manages workspace single-task execution, priority scheduling, and auto-continuation."""
+    """Manages workspace single-task execution mutex and auto-dispatching."""
 
     def __init__(
         self,
@@ -37,13 +61,16 @@ class InboxDispatcher:
     def is_workspace_busy(self, workspace_id: str) -> Tuple[bool, Optional[str]]:
         """Check if workspace_id currently has an active task or running workflow.
 
+        Workflows in terminal states (completed, failed, cancelled, abandoned, halted)
+        do NOT occupy the workspace.
+
         Returns:
             (is_busy: bool, reason: Optional[str])
         """
         if not workspace_id:
             return True, "Invalid empty workspace_id"
 
-        # 1. Check Inbox tasks holding workspace (CLAIMED or RUNNING)
+        # 1. Check Inbox tasks holding workspace (CLAIMED, RUNNING, or WAITING)
         active_inbox_task = self.store.get_workspace_active_task(workspace_id)
         if active_inbox_task:
             return (
@@ -51,15 +78,14 @@ class InboxDispatcher:
                 f"Inbox task '{active_inbox_task['id']}' ({active_inbox_task['title']}) is {active_inbox_task['status']}",
             )
 
-        # 2. Check existing workflows table in SQLite
+        # 2. Check existing workflows table in SQLite (strictly ACTIVE statuses only)
         conn = self._conn()
         try:
-            # Query workflows that match workspace_id and are not in terminal status
             rows = conn.execute(
                 """
-                SELECT workflow_id, title, status, metadata_json
+                SELECT workflow_id, title, status, metadata_json, config_json
                 FROM workflows
-                WHERE status NOT IN ('completed')
+                WHERE status IN ('running', 'pending', 'in_progress', 'paused', 'closing')
                 """
             ).fetchall()
             for r in rows:
@@ -69,7 +95,13 @@ class InboxDispatcher:
                         meta = json.loads(r["metadata_json"])
                     except Exception:
                         pass
-                ws = meta.get("workspace_id")
+                config = {}
+                if r["config_json"]:
+                    try:
+                        config = json.loads(r["config_json"])
+                    except Exception:
+                        pass
+                ws = meta.get("workspace_id") or config.get("workspace_id")
                 if ws == workspace_id:
                     return (
                         True,
@@ -82,7 +114,10 @@ class InboxDispatcher:
         projects_data = load_projects().get("projects", {})
         for p in projects_data.values():
             if p.get("workspace_id") == workspace_id:
-                active_wfs = active_workflows_for_project(p.get("project_id"))
+                active_wfs = [
+                    w for w in active_workflows_for_project(p.get("project_id"))
+                    if w.get("status") in ACTIVE_WORKFLOW_STATUSES
+                ]
                 if active_wfs:
                     wf = active_wfs[0]
                     return (
@@ -97,7 +132,11 @@ class InboxDispatcher:
         workspace_id: str,
         lease_duration_seconds: float = 180.0,
     ) -> Optional[Dict[str, Any]]:
-        """Atomically claim the next highest priority PENDING task for workspace_id."""
+        """Atomically verify workspace availability and claim the next highest priority PENDING task.
+
+        Executes active task verification, active workflow verification, and CAS claim
+        within the same BEGIN IMMEDIATE transaction to eliminate race conditions.
+        """
         if not workspace_id:
             return None
 
@@ -105,11 +144,11 @@ class InboxDispatcher:
         try:
             conn.execute("BEGIN IMMEDIATE")
 
-            # Check if workspace is already busy in this transaction
+            # Check 1: Inbox tasks holding workspace (CLAIMED, RUNNING, WAITING)
             holding_cur = conn.execute(
                 """
                 SELECT id FROM user_inbox_tasks
-                WHERE workspace_id = ? AND status IN ('CLAIMED', 'RUNNING')
+                WHERE workspace_id = ? AND status IN ('CLAIMED', 'RUNNING', 'WAITING')
                 LIMIT 1
                 """,
                 (workspace_id,),
@@ -117,6 +156,43 @@ class InboxDispatcher:
             if holding_cur.fetchone():
                 conn.execute("COMMIT")
                 return None
+
+            # Check 2: Active workflows in database holding workspace
+            active_wf_cur = conn.execute(
+                """
+                SELECT workflow_id, metadata_json, config_json FROM workflows
+                WHERE status IN ('running', 'pending', 'in_progress', 'paused', 'closing')
+                """,
+            )
+            for wf_row in active_wf_cur.fetchall():
+                meta = {}
+                if wf_row["metadata_json"]:
+                    try:
+                        meta = json.loads(wf_row["metadata_json"])
+                    except Exception:
+                        pass
+                config = {}
+                if wf_row["config_json"]:
+                    try:
+                        config = json.loads(wf_row["config_json"])
+                    except Exception:
+                        pass
+                ws = meta.get("workspace_id") or config.get("workspace_id")
+                if ws == workspace_id:
+                    conn.execute("COMMIT")
+                    return None
+
+            # Check 3: Active workflows for project
+            projects_data = load_projects().get("projects", {})
+            for p in projects_data.values():
+                if p.get("workspace_id") == workspace_id:
+                    active_wfs = [
+                        w for w in active_workflows_for_project(p.get("project_id"))
+                        if w.get("status") in ACTIVE_WORKFLOW_STATUSES
+                    ]
+                    if active_wfs:
+                        conn.execute("COMMIT")
+                        return None
 
             # Find candidate task: highest priority weight, then sort order, then FIFO
             cur = conn.execute(
@@ -137,7 +213,7 @@ class InboxDispatcher:
             now = time.time()
             lease_exp = now + lease_duration_seconds
 
-            # CAS update
+            # CAS update to CLAIMED
             update_cur = conn.execute(
                 """
                 UPDATE user_inbox_tasks
@@ -167,92 +243,101 @@ class InboxDispatcher:
 
     def launch_task(
         self,
-        task_id: str,
+        task: Dict[str, Any],
         runner_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
+        async_launch: bool = False,
     ) -> Dict[str, Any]:
-        """Launch execution for a CLAIMED task and transition it to RUNNING."""
-        task = self.store.get_task(task_id)
-        if not task:
-            raise KeyError(f"Task not found: {task_id}")
-        if task["status"] != "CLAIMED":
-            raise InvalidInboxTransitionError(f"Task {task_id} must be CLAIMED to launch, got '{task['status']}'")
+        """Launch the underlying Workflow for a CLAIMED task.
 
-        def _default_runner(t: Dict[str, Any]) -> str:
-            # Look up project root from load_projects
-            projects = load_projects().get("projects", {})
-            p_record = next(
-                (p for p in projects.values() if p.get("project_id") == t.get("project_id")),
-                None,
-            )
-            if not p_record or not p_record.get("project_root"):
-                raise RuntimeError(f"Cannot resolve project root for project_id '{t.get('project_id')}'")
+        If async_launch is True, offloads workflow start to a bounded background worker
+        so the calling loop (e.g. Controller) is never blocked.
+        """
+        task_id = task["id"]
 
-            from console.workflow_api import run_workflow
-            output = run_workflow(
-                root=p_record["project_root"],
-                req=t["instruction"],
-                agent=t.get("agent_override") or "auto",
-                template=t.get("template_name") or "software-development-v1",
-                title=t["title"],
-                context=t.get("context"),
-            )
-            # Parse WORKFLOW_ID from output
-            import re
-            m = re.search(r"WORKFLOW_ID=([^\s]+)", output or "")
-            if m:
-                return m.group(1).strip()
-            # If not formatted with WORKFLOW_ID=..., find newest workflow
-            from herdr.state_db import list_workflows
-            wfs = list_workflows()
-            if wfs:
-                return wfs[0]["workflow_id"]
-            raise RuntimeError("Workflow launched but workflow_id could not be resolved from output")
+        def _execute():
+            def _default_runner(t: Dict[str, Any]) -> str:
+                projects = load_projects().get("projects", {})
+                p_record = next(
+                    (p for p in projects.values() if p.get("project_id") == t.get("project_id")),
+                    None,
+                )
+                if not p_record or not p_record.get("project_root"):
+                    raise RuntimeError(f"Cannot resolve project root for project_id '{t.get('project_id')}'")
 
-        exec_runner = runner_fn or _default_runner
+                from console.workflow_api import run_workflow
+                output = run_workflow(
+                    root=p_record["project_root"],
+                    req=t["instruction"],
+                    agent=t.get("agent_override") or "auto",
+                    template=t.get("template_name") or "software-development-v1",
+                    title=t["title"],
+                    context=t.get("context"),
+                )
+                import re
+                m = re.search(r"WORKFLOW_ID=([^\s]+)", output or "")
+                if m:
+                    return m.group(1).strip()
+                from herdr.state_db import list_workflows
+                wfs = list_workflows()
+                if wfs:
+                    return wfs[0]["workflow_id"]
+                raise RuntimeError("Workflow launched but workflow_id could not be resolved from output")
 
-        try:
-            workflow_id = exec_runner(task)
-            # Successfully launched -> move to RUNNING
-            return self.store.update_task_status(
-                task_id=task_id,
-                new_status="RUNNING",
-                expected_status="CLAIMED",
-                workflow_id=workflow_id,
-                worker_id=self.worker_id,
-            )
-        except Exception as exc:
-            err_msg = str(exc)
-            # Check attempts
-            current_attempts = task.get("attempt_count", 1)
-            max_attempts = task.get("max_attempts", 3)
-            if current_attempts >= max_attempts:
-                # Exceeded max retry -> FAILED
+            exec_runner = runner_fn or _default_runner
+
+            try:
+                workflow_id = exec_runner(task)
+                # Successfully launched -> move to RUNNING
                 return self.store.update_task_status(
                     task_id=task_id,
-                    new_status="FAILED",
+                    new_status="RUNNING",
                     expected_status="CLAIMED",
-                    error=f"Launch failed permanently ({current_attempts}/{max_attempts}): {err_msg}",
+                    workflow_id=workflow_id,
+                    worker_id=self.worker_id,
                 )
-            else:
-                # Reset to PENDING for retry
-                return self.store.update_task_status(
-                    task_id=task_id,
-                    new_status="PENDING",
-                    expected_status="CLAIMED",
-                    error=f"Launch failed ({current_attempts}/{max_attempts}): {err_msg}",
-                )
+            except Exception as exc:
+                err_msg = str(exc)
+                current_attempts = task.get("attempt_count", 1)
+                max_attempts = task.get("max_attempts", 3)
+                if current_attempts >= max_attempts:
+                    return self.store.update_task_status(
+                        task_id=task_id,
+                        new_status="FAILED",
+                        expected_status="CLAIMED",
+                        error=f"Launch failed permanently ({current_attempts}/{max_attempts}): {err_msg}",
+                    )
+                else:
+                    return self.store.update_task_status(
+                        task_id=task_id,
+                        new_status="PENDING",
+                        expected_status="CLAIMED",
+                        error=f"Launch failed ({current_attempts}/{max_attempts}): {err_msg}",
+                    )
+
+        if async_launch:
+            _LAUNCH_EXECUTOR.submit(_execute)
+            # Return task record immediately; status remains CLAIMED until launcher marks RUNNING
+            return self.store.get_task(task_id) or task
+        else:
+            _execute()
+            return self.store.get_task(task_id) or task
 
     def reconcile_running_tasks(self) -> List[Dict[str, Any]]:
-        """Check all RUNNING tasks against underlying Workflow engine state.
+        """Check all RUNNING and WAITING tasks against underlying Workflow engine state.
 
         Reconciles completed or failed workflows, freeing the workspace for auto-continuation.
+        Also tracks human resumption (WAITING -> RUNNING) and human signoff pause (RUNNING -> WAITING).
         """
         reconciled = []
-        running_tasks, _ = self.store.list_tasks(status="RUNNING", limit=500)
+        tasks_to_reconcile = []
+        for st in ("RUNNING", "WAITING"):
+            t_list, _ = self.store.list_tasks(status=st, limit=500)
+            tasks_to_reconcile.extend(t_list)
+
         from herdr.state_db import get_workflow
 
         now = time.time()
-        for t in running_tasks:
+        for t in tasks_to_reconcile:
             wid = t.get("workflow_id")
             if not wid:
                 continue
@@ -262,24 +347,34 @@ class InboxDispatcher:
                 continue
 
             wf_status = wf.get("status")
+            cur_status = t["status"]
+
             if wf_status == "completed":
                 # Workflow verified complete -> update inbox task to COMPLETED
                 updated = self.store.update_task_status(
                     task_id=t["id"],
                     new_status="COMPLETED",
-                    expected_status="RUNNING",
+                    expected_status=cur_status,
                 )
                 reconciled.append(updated)
-            elif wf_status in ("failed", "cancelled", "halted"):
+            elif wf_status in ("failed", "cancelled", "halted", "abandoned"):
                 updated = self.store.update_task_status(
                     task_id=t["id"],
                     new_status="FAILED",
-                    expected_status="RUNNING",
+                    expected_status=cur_status,
                     error=f"Underlying workflow '{wid}' ended with status '{wf_status}'",
                 )
                 reconciled.append(updated)
-            elif wf_status == "paused" or wf.get("current_stage") == "awaiting_verdict":
-                # Needs intervention
+            elif (wf_status in ("running", "in_progress")) and cur_status == "WAITING":
+                # Workflow resumed by human -> transition back to RUNNING
+                updated = self.store.update_task_status(
+                    task_id=t["id"],
+                    new_status="RUNNING",
+                    expected_status="WAITING",
+                )
+                reconciled.append(updated)
+            elif (wf_status == "paused" or wf.get("current_stage") == "awaiting_verdict") and cur_status == "RUNNING":
+                # Needs human intervention -> transition to WAITING
                 updated = self.store.update_task_status(
                     task_id=t["id"],
                     new_status="WAITING",
@@ -288,18 +383,19 @@ class InboxDispatcher:
                 reconciled.append(updated)
             else:
                 # Still running: extend heartbeat and lease
-                conn = self._conn()
-                try:
-                    conn.execute(
-                        """
-                        UPDATE user_inbox_tasks
-                           SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
-                         WHERE id = ? AND status = 'RUNNING'
-                        """,
-                        (now, now + 180.0, now, t["id"]),
-                    )
-                finally:
-                    conn.close()
+                if cur_status == "RUNNING":
+                    conn = self._conn()
+                    try:
+                        conn.execute(
+                            """
+                            UPDATE user_inbox_tasks
+                               SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
+                             WHERE id = ? AND status = 'RUNNING'
+                            """,
+                            (now, now + 180.0, now, t["id"]),
+                        )
+                    finally:
+                        conn.close()
 
         return reconciled
 
@@ -356,47 +452,55 @@ class InboxDispatcher:
     def dispatch_sweep(
         self,
         runner_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
+        async_launch: bool = False,
     ) -> Dict[str, Any]:
         """Perform one complete dispatch sweep:
 
-        1. Reconcile running tasks (frees completed workspaces).
-        2. Recover stale claims.
-        3. Identify idle workspaces with pending tasks.
-        4. Claim and launch the next task for each idle workspace.
+        1. Recover stale tasks with expired claim leases.
+        2. Reconcile running and waiting tasks against underlying workflow engine.
+        3. Discover all registered projects and their workspaces.
+        4. For each available workspace, claim and launch the next pending task.
         """
-        reconciled = self.reconcile_running_tasks()
-        recovered = self.recover_stale_tasks()
+        report: Dict[str, Any] = {
+            "recovered": [],
+            "reconciled": [],
+            "launched": [],
+            "busy_workspaces": [],
+        }
 
-        # Find all workspaces that have PENDING tasks
-        conn = self._conn()
-        try:
-            cur = conn.execute(
-                """
-                SELECT DISTINCT workspace_id FROM user_inbox_tasks
-                WHERE status = 'PENDING' AND workspace_id IS NOT NULL AND workspace_id != ''
-                """
-            )
-            workspaces = [row["workspace_id"] for row in cur.fetchall()]
-        finally:
-            conn.close()
+        # 1. Recover stale claimed tasks
+        report["recovered"] = self.recover_stale_tasks()
 
-        launched = []
-        busy_workspaces = []
+        # 2. Reconcile running and waiting tasks
+        report["reconciled"] = self.reconcile_running_tasks()
 
-        for ws in workspaces:
+        # 3. Discover workspaces
+        projects_data = load_projects().get("projects", {})
+        workspaces: Set[str] = set()
+        for p in projects_data.values():
+            ws = p.get("workspace_id")
+            if ws:
+                workspaces.add(ws)
+
+        # Also inspect workspace_id in pending tasks
+        pending_tasks, _ = self.store.list_tasks(status="PENDING", limit=200)
+        for t in pending_tasks:
+            ws = t.get("workspace_id")
+            if ws:
+                workspaces.add(ws)
+
+        # 4. Dispatch for each workspace
+        for ws in sorted(workspaces):
             is_busy, reason = self.is_workspace_busy(ws)
             if is_busy:
-                busy_workspaces.append({"workspace_id": ws, "reason": reason})
+                report["busy_workspaces"].append({"workspace_id": ws, "reason": reason})
                 continue
 
-            claimed_task = self.claim_next_task(ws)
-            if claimed_task:
-                launched_task = self.launch_task(claimed_task["id"], runner_fn=runner_fn)
-                launched.append(launched_task)
+            claimed = self.claim_next_task(ws)
+            if not claimed:
+                continue
 
-        return {
-            "reconciled": reconciled,
-            "recovered": recovered,
-            "launched": launched,
-            "busy_workspaces": busy_workspaces,
-        }
+            launched_task = self.launch_task(claimed, runner_fn=runner_fn, async_launch=async_launch)
+            report["launched"].append(launched_task)
+
+        return report

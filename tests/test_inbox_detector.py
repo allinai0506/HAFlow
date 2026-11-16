@@ -5,6 +5,7 @@ from unittest.mock import patch
 from herdr.inbox.detector import (
     validate_project_and_workspace,
     detect_project_and_workspace,
+    CONFIDENCE_THRESHOLD,
 )
 
 MOCK_PROJECTS = {
@@ -47,7 +48,7 @@ def test_validate_project_and_workspace():
 
 def test_detect_project_and_workspace():
     with patch("herdr.inbox.detector.load_projects", return_value=MOCK_PROJECTS):
-        # 1. Mentioning HAFlow by name
+        # 1. Mentioning HAFlow by name -> high confidence
         res = detect_project_and_workspace(
             instruction="Please fix the issue in HAFlow console UI",
             title="UI Fix",
@@ -55,18 +56,51 @@ def test_detect_project_and_workspace():
         assert res["recommended_project_id"] == "haflow-1de29d2d"
         assert res["recommended_workspace_id"] == "w1K"
         assert res["confidence"] >= 0.90
+        assert res["is_confident"] is True
 
-        # 2. Mentioning path /Users/user/nexusarchive
+        # 2. Mentioning path /Users/user/nexusarchive -> 1.0 confidence
         res2 = detect_project_and_workspace(
-            instruction="Refactor /Users/user/nexusarchive storage model",
+            instruction="Check tests in /Users/user/nexusarchive/tests",
         )
         assert res2["recommended_project_id"] == "nexusarchive-54433229"
-        assert res2["recommended_workspace_id"] == "w17"
         assert res2["confidence"] == 1.0
+        assert res2["is_confident"] is True
 
-        # 3. Irrelevant text with no project clues
-        res3 = detect_project_and_workspace(
-            instruction="What is the weather in Shanghai today?",
-        )
+        # 3. Unrelated text -> 0.0 confidence, is_confident=False
+        res3 = detect_project_and_workspace(instruction="Cook some pasta today")
         assert res3["recommended_project_id"] is None
         assert res3["confidence"] == 0.0
+        assert res3["is_confident"] is False
+
+
+def test_ambiguous_equal_matches_never_guess():
+    """P1-01: When multiple projects match with equal score, do NOT pick arbitrarily."""
+    tied_projects = {
+        "version": 1,
+        "projects": {
+            "p1": {"project_id": "proj-a", "project_name": "SharedName", "workspace_id": "wA"},
+            "p2": {"project_id": "proj-b", "project_name": "SharedName", "workspace_id": "wB"},
+        },
+    }
+    with patch("herdr.inbox.detector.load_projects", return_value=tied_projects):
+        res = detect_project_and_workspace(instruction="Work on SharedName module")
+        assert res["recommended_project_id"] is None
+        assert res["is_confident"] is False
+        assert "多个匹配度相同" in res["reason"]
+
+
+def test_single_project_fallback_marked_not_confident():
+    """P1-01: Single project fallback must be marked is_confident=False with < 0.80 score."""
+    single_project = {
+        "version": 1,
+        "projects": {
+            "p1": {"project_id": "haflow-1de29d2d", "project_name": "HAFlow", "workspace_id": "w1K"},
+        },
+    }
+    with patch("herdr.inbox.detector.load_projects", return_value=single_project):
+        res = detect_project_and_workspace(instruction="Some generic task without keywords")
+        assert res["recommended_project_id"] == "haflow-1de29d2d"
+        assert res["confidence"] == 0.50
+        assert res["confidence"] < CONFIDENCE_THRESHOLD
+        assert res["is_confident"] is False
+        assert "严禁自动执行" in res["reason"]
