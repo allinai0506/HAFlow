@@ -470,3 +470,170 @@ def test_inbox_js_user_selected_project_protection():
     assert out["pass2"] is True
     assert out["pass3"] is True
     assert out["pass4"] is True
+
+
+def test_inbox_pagination_refresh_preserves_loaded_count():
+    import shutil
+    import subprocess
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js runtime not found")
+
+    inbox_js_path = Path(__file__).resolve().parent.parent / "console/static/console/scripts/inbox.js"
+    inbox_code = inbox_js_path.read_text()
+
+    script = f"""
+    const mockElements = {{
+      'railInboxDot': {{ style: {{ display: 'none' }}, textContent: '' }},
+      'inboxTabView': {{ innerHTML: '' }}
+    }};
+    const document = {{
+      getElementById: (id) => mockElements[id] || null,
+      hidden: false
+    }};
+    const state = {{ shellView: 'inbox', overview: {{ projects: [] }} }};
+    function esc(s) {{ return s || ''; }}
+    function badge(t, s) {{ return ''; }}
+    function formatElapsed(ts) {{ return ''; }}
+    function showConfirmModal() {{}}
+    function openModal() {{}}
+    let requestedUrls = [];
+    function api(url, opts) {{
+      requestedUrls.push(url);
+      if (url.startsWith('/api/inbox/tasks')) {{
+        const params = new URLSearchParams(url.split('?')[1] || '');
+        const limit = parseInt(params.get('limit') || '50', 10);
+        const offset = parseInt(params.get('offset') || '0', 10);
+        const tasks = [];
+        for (let i = 0; i < limit; i++) {{
+          tasks.push({{ id: 'task_' + (offset + i), title: 'Task ' + (offset + i), status: 'PENDING' }});
+        }}
+        return Promise.resolve({{ ok: true, tasks, total: 300 }});
+      }}
+      if (url.startsWith('/api/inbox/stats')) {{
+        return Promise.resolve({{ ok: true, total: 300, counts: {{ PENDING: 300 }} }});
+      }}
+      return Promise.resolve({{ ok: true }});
+    }}
+    function toast() {{}}
+    function closeModal() {{}}
+    function setWorkspaceMode() {{}}
+    function paintCrumb() {{}}
+    function saveViewState() {{}}
+    function syncOpsUi() {{}}
+
+    {inbox_code}
+
+    (async () => {{
+      // 1. Initial load (50 items)
+      await loadInboxData(false, true);
+      const initialReq = requestedUrls[0];
+
+      // 2. Load more tasks (append 50 items -> 100 items)
+      await loadMoreInboxTasks();
+      const loadMoreReq = requestedUrls[requestedUrls.length - 1];
+
+      // 3. Auto-refresh / manual refresh without reset: must request limit=100 so all 100 loaded tasks are refreshed!
+      await loadInboxData();
+      const refreshReq = requestedUrls.slice(-2).find(u => u.includes('/api/inbox/tasks'));
+
+      // 4. Filter change: resets to page 1 (limit=50, offset=0)
+      await setInboxStatusFilter('PENDING');
+      const filterReq = requestedUrls.slice(-2).find(u => u.includes('/api/inbox/tasks'));
+
+      console.log(JSON.stringify({{
+        initialReq,
+        loadMoreReq,
+        refreshReq,
+        filterReq,
+        allUrls: requestedUrls
+      }}));
+      process.exit(0);
+    }})();
+    """
+    res = subprocess.run([node_bin, "-e", script], capture_output=True, text=True, timeout=5)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip())
+    assert "limit=50&offset=0" in out["initialReq"]
+    assert "limit=50&offset=50" in out["loadMoreReq"]
+    assert "limit=100&offset=0" in out["refreshReq"]
+    assert "limit=50&offset=0" in out["filterReq"]
+
+
+def test_bootstrap_url_precedence_over_cached_inbox_state():
+    import shutil
+    import subprocess
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("Node.js runtime not found")
+
+    bootstrap_js_path = Path(__file__).resolve().parent.parent / "console/static/console/scripts/bootstrap.js"
+    bootstrap_code = bootstrap_js_path.read_text()
+
+    script = f"""
+    let loadedWorkflowId = null;
+    let shownInbox = false;
+    let savedState = {{ opsMode: false, dashMode: false, spaceId: null, workflowId: '__inbox__', shellView: 'inbox' }};
+
+    function loadViewState() {{ return savedState; }}
+    function saveViewState() {{}}
+    function toast() {{}}
+    function api(url) {{
+      if (url.includes('/api/workflow')) {{
+        return Promise.resolve({{ project: {{ project_id: 'p1', workspace_id: 'w1' }} }});
+      }}
+      return Promise.resolve({{ ok: true }});
+    }}
+    function loadProject() {{ return Promise.resolve(); }}
+    function loadWorkflow(wfId) {{ loadedWorkflowId = wfId; return Promise.resolve(); }}
+    function showInbox() {{ shownInbox = true; }}
+    function showShellView(v) {{ if (v === 'inbox') shownInbox = true; }}
+    function showDashboard() {{}}
+    function showOpsCenter() {{}}
+    function showTemplateLibrary() {{}}
+    function refreshAll() {{ return Promise.resolve(); }}
+    function openTaskDrawer() {{ return Promise.resolve(); }}
+    function showPane() {{ return Promise.resolve(); }}
+
+    let window = {{
+      location: {{ search: '?workflow_id=wf-explicit-456' }},
+      addEventListener: () => {{}}
+    }};
+    let document = {{
+      hidden: false,
+      addEventListener: () => {{}},
+      querySelector: () => null
+    }};
+
+    const state = {{}};
+
+    {bootstrap_code}
+
+    (async () => {{
+      // Scenario 1: User previously on Inbox (__inbox__), but URL has ?workflow_id=wf-explicit-456
+      // Explicit workflow URL MUST override historical __inbox__ state!
+      await initFromUrlOrState();
+      const test1_wf = loadedWorkflowId;
+      const test1_inbox = shownInbox;
+      const test1_shell = state.shellView;
+
+      // Scenario 2: User explicitly opens ?view=inbox, even if workflow_id was passed
+      window.location.search = '?view=inbox&workflow_id=wf-explicit-456';
+      loadedWorkflowId = null;
+      shownInbox = false;
+      await initFromUrlOrState();
+      const test2_inbox = shownInbox;
+      const test2_wf = loadedWorkflowId;
+
+      console.log(JSON.stringify({{ test1_wf, test1_inbox, test1_shell, test2_inbox, test2_wf }}));
+      process.exit(0);
+    }})();
+    """
+    res = subprocess.run([node_bin, "-e", script], capture_output=True, text=True, timeout=5)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip())
+    assert out["test1_wf"] == "wf-explicit-456"
+    assert out["test1_inbox"] is False
+    assert out["test1_shell"] == "workbench"
+    assert out["test2_inbox"] is True
+    assert out["test2_wf"] is None

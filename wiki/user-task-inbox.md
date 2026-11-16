@@ -90,6 +90,25 @@ Inbox 任务具备严格受控的 8 状态转换模型（`herdr/inbox/transition
 - **调度轮询集成**：
   - 集成在 `services/controller/registry.py` 控制器主循环中，并在每次任务提交、确认、重试、完成时触发即时扫描。
 
+### 4.1 架构裁决：WAITING 状态下的工作区互斥与资源释放演进 (ADR-INBOX-001)
+
+- **问题背景**：
+  - 需求期望用户任务进入 `WAITING`（等待人工审批/回复）时不长期阻塞同工作区的后续排队任务。
+- **现状与底层技术约束**：
+  - 在 HAFlow 当前底层架构中，工作区（Workspace / Worktree）与协调者终端（Coordinator Pane / tmux session）强绑定。
+  - 处于 `paused` / `WAITING` 状态的工作流，其协调者终端内常驻有未提交的分支改动、未退出的进程和 Agent 上下文。
+  - 若在尚未实现现场快照挂起（Checkpoint & State Suspension）前释放工作区并派发任务 B，任务 B 将被绑定至同一协调者 Pane，导致 terminal 污染、git working tree 脏写、甚至双写冲突。因此，**严禁简单放宽 Factory 门禁或绕过 `paused` 繁忙检查**。
+- **V1 裁决方案 (V1 Safety Contract)**：
+  - **安全底线优先**：V1 坚持以工作区互斥（Workspace Exclusivity）为第一不变律。
+  - WAITING 任务持有工作区互斥锁，同工作区任务 B 在队列保持 `PENDING` 排队；不同工作区的任务（如空间 C、D）并行执行，不受任何阻塞。
+  - 控制台明确展示工作区忙碌提示（`（工作区当前执行中：...）`），用户可随时调整优先级或取消。
+- **V2 演进路径 (Workspace Checkpoint & Pane Suspension Roadmap)**：
+  - 在 V2 中引入协调者挂起与现场快照协议（Suspend-to-Disk Checkpoint）：
+    1. 工作流进入 `WAITING` 时，触发完整 Checkpoint 导出（Git stash/分支隔离 + Agent memory snapshot）。
+    2. 优雅停机并回收 Coordinator Pane，释放 Workspace Mutex。
+    3. 允许排队任务 B 接入并创建全新干净的 Coordinator Pane。
+    4. 当 A 收到用户批示/唤醒时，重新进入工作区请求排队；待工作区空闲时，重新分配 Coordinator Pane 并从 Checkpoint 反序列化恢复执行。
+
 ---
 
 ## 5. 控制台前端集成

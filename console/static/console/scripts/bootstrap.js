@@ -56,8 +56,13 @@ async function initFromUrlOrState(){
     state.opsMode=false;
     state.dashMode=false;
     state.shellView=qView;
-    if(state.workflowId==='__templates__')state.workflowId=null;
+    if(state.workflowId==='__templates__'||state.workflowId==='__inbox__')state.workflowId=null;
     if(qView==='inbox')state.workflowId='__inbox__';
+  }else if(qWf){
+    state.opsMode=false;
+    state.dashMode=false;
+    state.shellView='workbench';
+    state.workflowId=qWf;
   }
   if(qWf&&!state.dashMode&&state.workflowId!=='__templates__'&&state.workflowId!=='__inbox__'){
     state.opsMode=false;

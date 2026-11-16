@@ -8,6 +8,15 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-17] fix | User Task Inbox V1 — 数据库迁移原子事务、前端分页刷新与 URL 显式优先级 (PR #420 第四轮复审修复)
+
+- 背景：PR #420 第四轮独立复审指出 1 项阻断级 P1（旧数据库迁移非原子操作，未显式事务包裹存在任务数据丢失风险）、2 项前端 P2（自动刷新重置已加载分页、显式 workflow_id 可能被旧 __inbox__ 状态覆盖），并要求对 WAITING 状态的工作区互斥与资源生命周期做出明确架构裁决。
+- 变更：
+  1. `herdr/inbox/schema.py`：在 `_migrate_legacy_schema` 引入 `BEGIN IMMEDIATE ... COMMIT` 原子事务与 `ROLLBACK` 异常回滚机制，所有表重建、数据搬迁、历史剥离、旧表删除、重命名与索引创建全部收拢在单一事务中；清除潜在残留临时表，并在 `tests/test_inbox_schema.py` 补充故障注入与回滚恢复测试；
+  2. `console/static/console/scripts/inbox.js`：重构分页刷新机制，自动刷新与手动刷新按已展示任务总量（`Math.max(pageSize, tasks.length)`）获取数据，杜绝 5 秒轮询重置已加载分页；筛选条件变更时显式重置第一页；
+  3. `console/static/console/scripts/bootstrap.js`：确立 URL 参数最高优先级，显式 `workflow_id` 自动覆写 localStorage 缓存的 `__inbox__` 状态并正确切回 workbench，显式 `?view=inbox` 保持最高优先级直开收件箱；
+  4. `wiki/user-task-inbox.md`：记录 ADR-INBOX-001 架构裁决，确立 V1 严守工作区互斥底线（WAITING 持续持有锁保护协调者 Pane 与未提交 Git 现场），规划 V2 引入 Checkpoint 挂起与 Coordinator Pane 优雅脱钩/恢复体系。
+
 ## [2026-11-16] fix | User Task Inbox V1 — 执行历史隔离、Factory工作流门禁对齐与权限收敛 (PR #420 第二轮独立审查修复)
 
 - 背景：PR #420 第二轮独立审查指出 3 项 P1 与 5 项 P2 缺陷：失败任务重试时执行历史写入 Context 导致 Git 模板启动崩溃；WAITING 释放工作区与 Factory `_reject_if_active_workflow()` 判断不一致导致后续任务启动被拒；自动确认接口默认回退 user 身份导致自动化事件可绕过确认；Sweep 接口跨用户泄露任务指令；DRAFT 确认归属时队列插队；URL 冷启动不支持 `?view=inbox`；旧版数据库存在全局唯一键残留约束。

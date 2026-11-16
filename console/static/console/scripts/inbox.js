@@ -40,10 +40,12 @@ function statusBadgeHtml(t){
   return `<span class="status-pill">${esc(s)}</span>`;
 }
 
-async function loadInboxData(isAppend){
+async function loadInboxData(isAppend, isReset){
   try{
     const offset = isAppend ? inboxState.tasks.length : 0;
-    const qParts = [`limit=${inboxState.pageSize||50}`, `offset=${offset}`];
+    const currentCount = isReset ? (inboxState.pageSize || 50) : Math.max(inboxState.pageSize || 50, inboxState.tasks.length);
+    const limit = isAppend ? (inboxState.pageSize || 50) : currentCount;
+    const qParts = [`limit=${limit}`, `offset=${offset}`];
     if(inboxState.filterStatus && inboxState.filterStatus !== 'ALL') qParts.push('status=' + encodeURIComponent(inboxState.filterStatus));
     if(inboxState.filterProject && inboxState.filterProject !== 'ALL') qParts.push('project_id=' + encodeURIComponent(inboxState.filterProject));
     if(inboxState.filterPriority && inboxState.filterPriority !== 'ALL') qParts.push('priority=' + encodeURIComponent(inboxState.filterPriority));
@@ -64,7 +66,7 @@ async function loadInboxData(isAppend){
   }
 }
 
-function loadMoreInboxTasks(){ loadInboxData(true); }
+function loadMoreInboxTasks(){ return loadInboxData(true); }
 
 function updateInboxRailBadge(){
   const dot = document.getElementById('railInboxDot');
@@ -150,9 +152,9 @@ function renderInboxView(){
   container.innerHTML = html;
 }
 
-function setInboxStatusFilter(s){ inboxState.filterStatus = s; loadInboxData(); }
-function setInboxProjectFilter(p){ inboxState.filterProject = p; loadInboxData(); }
-function setInboxPriorityFilter(pr){ inboxState.filterPriority = pr; loadInboxData(); }
+function setInboxStatusFilter(s){ inboxState.filterStatus = s; return loadInboxData(false, true); }
+function setInboxProjectFilter(p){ inboxState.filterProject = p; return loadInboxData(false, true); }
+function setInboxPriorityFilter(pr){ inboxState.filterPriority = pr; return loadInboxData(false, true); }
 
 async function triggerInboxSweep(){
   try{
@@ -272,7 +274,7 @@ async function submitNewInboxTask(){
     });
     closeModal();
     toast(shouldConfirm ? '任务已提交并进入执行队列！' : '任务已保存为草稿');
-    await loadInboxData();
+    await loadInboxData(false, true);
   }catch(e){
     toast('提交失败: ' + e.message, true);
   }
@@ -445,7 +447,7 @@ function showInbox(){
   if(!state.openWorkflowTabIds.includes('__inbox__')) state.openWorkflowTabIds.push('__inbox__');
   state.workflowId = '__inbox__';
   if(typeof renderWorkflowTabs === 'function') renderWorkflowTabs();
-  loadInboxData();
+  loadInboxData(false, true);
   stopInboxTimer();
   inboxState.autoRefreshTimer = setInterval(() => {
     if(state.shellView === 'inbox' && !document.hidden) loadInboxData();
