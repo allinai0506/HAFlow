@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 _LAUNCH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="inbox_launcher"
 )
+_LAUNCH_SEMAPHORE = threading.Semaphore(2)
 
 ACTIVE_WORKFLOW_STATUSES = frozenset({
     "running",
@@ -212,8 +214,9 @@ class InboxDispatcher:
             task_id = row["id"]
             now = time.time()
             lease_exp = now + lease_duration_seconds
+            fencing_token = f"{self.worker_id}:{uuid.uuid4().hex[:8]}"
 
-            # CAS update to CLAIMED
+            # CAS update to CLAIMED with unique launcher fencing token
             update_cur = conn.execute(
                 """
                 UPDATE user_inbox_tasks
@@ -225,7 +228,7 @@ class InboxDispatcher:
                        updated_at = ?
                  WHERE id = ? AND status = 'PENDING'
                 """,
-                (self.worker_id, lease_exp, now, now, task_id),
+                (fencing_token, lease_exp, now, now, task_id),
             )
 
             if update_cur.rowcount == 1:
@@ -246,15 +249,47 @@ class InboxDispatcher:
         task: Dict[str, Any],
         runner_fn: Optional[Callable[[Dict[str, Any]], str]] = None,
         async_launch: bool = False,
-    ) -> Dict[str, Any]:
+        release_sem_on_finish: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Launch the underlying Workflow for a CLAIMED task.
 
-        If async_launch is True, offloads workflow start to a bounded background worker
-        so the calling loop (e.g. Controller) is never blocked.
+        Guarantees:
+        - Heartbeat loop maintains lease_expires_at while runner is active.
+        - Fencing token verification on transition to RUNNING.
+        - If fencing token check fails, launcher aborts and halts orphan workflow.
+        - Bounded concurrency with optional semaphore release upon completion.
         """
         task_id = task["id"]
+        fencing_token = task.get("worker_id") or self.worker_id
 
         def _execute():
+            stop_hb = threading.Event()
+
+            def _heartbeat_loop():
+                while not stop_hb.wait(25.0):
+                    try:
+                        conn_hb = self._conn()
+                        hb_now = time.time()
+                        conn_hb.execute(
+                            """
+                            UPDATE user_inbox_tasks
+                               SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
+                             WHERE id = ? AND status = 'CLAIMED' AND worker_id = ?
+                            """,
+                            (hb_now, hb_now + 180.0, hb_now, task_id, fencing_token),
+                        )
+                        conn_hb.commit()
+                        conn_hb.close()
+                    except Exception:
+                        pass
+
+            hb_thread = threading.Thread(
+                target=_heartbeat_loop,
+                daemon=True,
+                name=f"inbox_hb_{task_id[:8]}",
+            )
+            hb_thread.start()
+
             def _default_runner(t: Dict[str, Any]) -> str:
                 projects = load_projects().get("projects", {})
                 p_record = next(
@@ -287,40 +322,91 @@ class InboxDispatcher:
 
             try:
                 workflow_id = exec_runner(task)
-                # Successfully launched -> move to RUNNING
-                return self.store.update_task_status(
-                    task_id=task_id,
-                    new_status="RUNNING",
-                    expected_status="CLAIMED",
-                    workflow_id=workflow_id,
-                    worker_id=self.worker_id,
-                )
+                stop_hb.set()
+
+                # CAS update with fencing token verification
+                conn = self._conn()
+                now = time.time()
+                try:
+                    cur = conn.execute(
+                        """
+                        UPDATE user_inbox_tasks
+                           SET status = 'RUNNING',
+                               workflow_id = ?,
+                               updated_at = ?,
+                               started_at = COALESCE(started_at, ?),
+                               lease_expires_at = ?,
+                               heartbeat_at = ?
+                         WHERE id = ? AND status = 'CLAIMED' AND worker_id = ?
+                        """,
+                        (workflow_id, now, now, now + 180.0, now, task_id, fencing_token),
+                    )
+                    conn.commit()
+                    if cur.rowcount == 0:
+                        logger.error(
+                            f"Fencing token mismatch for task {task_id}; lost ownership. Halting workflow {workflow_id}."
+                        )
+                        try:
+                            from herdr.state_db import save_workflow
+                            save_workflow(
+                                {"workflow_id": workflow_id, "status": "cancelled", "outcome": "abandoned"},
+                                db_path=self.db_path,
+                            )
+                        except Exception:
+                            pass
+                        return None
+                finally:
+                    conn.close()
+
+                return self.store.get_task(task_id)
             except Exception as exc:
+                stop_hb.set()
                 err_msg = str(exc)
                 current_attempts = task.get("attempt_count", 1)
                 max_attempts = task.get("max_attempts", 3)
-                if current_attempts >= max_attempts:
-                    return self.store.update_task_status(
-                        task_id=task_id,
-                        new_status="FAILED",
-                        expected_status="CLAIMED",
-                        error=f"Launch failed permanently ({current_attempts}/{max_attempts}): {err_msg}",
-                    )
-                else:
-                    return self.store.update_task_status(
-                        task_id=task_id,
-                        new_status="PENDING",
-                        expected_status="CLAIMED",
-                        error=f"Launch failed ({current_attempts}/{max_attempts}): {err_msg}",
-                    )
+                conn = self._conn()
+                now = time.time()
+                try:
+                    if current_attempts >= max_attempts:
+                        conn.execute(
+                            """
+                            UPDATE user_inbox_tasks
+                               SET status = 'FAILED',
+                                   error = ?,
+                                   updated_at = ?,
+                                   completed_at = ?
+                             WHERE id = ? AND status = 'CLAIMED' AND worker_id = ?
+                            """,
+                            (f"Launch failed permanently ({current_attempts}/{max_attempts}): {err_msg}", now, now, task_id, fencing_token),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE user_inbox_tasks
+                               SET status = 'PENDING',
+                                   error = ?,
+                                   worker_id = NULL,
+                                   lease_expires_at = NULL,
+                                   updated_at = ?
+                             WHERE id = ? AND status = 'CLAIMED' AND worker_id = ?
+                            """,
+                            (f"Launch failed ({current_attempts}/{max_attempts}): {err_msg}", now, task_id, fencing_token),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
+                return self.store.get_task(task_id)
+            finally:
+                stop_hb.set()
+                if release_sem_on_finish:
+                    _LAUNCH_SEMAPHORE.release()
 
         if async_launch:
             _LAUNCH_EXECUTOR.submit(_execute)
             # Return task record immediately; status remains CLAIMED until launcher marks RUNNING
             return self.store.get_task(task_id) or task
         else:
-            _execute()
-            return self.store.get_task(task_id) or task
+            return _execute()
 
     def reconcile_running_tasks(self) -> List[Dict[str, Any]]:
         """Check all RUNNING and WAITING tasks against underlying Workflow engine state.
@@ -347,22 +433,33 @@ class InboxDispatcher:
                 continue
 
             wf_status = wf.get("status")
+            wf_outcome = str(wf.get("outcome") or "").lower()
             cur_status = t["status"]
 
             if wf_status == "completed":
-                # Workflow verified complete -> update inbox task to COMPLETED
-                updated = self.store.update_task_status(
-                    task_id=t["id"],
-                    new_status="COMPLETED",
-                    expected_status=cur_status,
-                )
-                reconciled.append(updated)
+                if wf_outcome in ("startup_failed", "failed", "failure", "abandoned", "error", "interrupted"):
+                    # Workflow lifecycle completed, but outcome was a failure!
+                    updated = self.store.update_task_status(
+                        task_id=t["id"],
+                        new_status="FAILED",
+                        expected_status=cur_status,
+                        error=f"Underlying workflow '{wid}' finished with failed outcome '{wf_outcome}'",
+                    )
+                    reconciled.append(updated)
+                else:
+                    # Workflow verified complete and successful -> update inbox task to COMPLETED
+                    updated = self.store.update_task_status(
+                        task_id=t["id"],
+                        new_status="COMPLETED",
+                        expected_status=cur_status,
+                    )
+                    reconciled.append(updated)
             elif wf_status in ("failed", "cancelled", "halted", "abandoned"):
                 updated = self.store.update_task_status(
                     task_id=t["id"],
                     new_status="FAILED",
                     expected_status=cur_status,
-                    error=f"Underlying workflow '{wid}' ended with status '{wf_status}'",
+                    error=f"Underlying workflow '{wid}' ended with status '{wf_status}'" + (f" (outcome: {wf_outcome})" if wf_outcome else ""),
                 )
                 reconciled.append(updated)
             elif (wf_status in ("running", "in_progress")) and cur_status == "WAITING":
@@ -496,11 +593,26 @@ class InboxDispatcher:
                 report["busy_workspaces"].append({"workspace_id": ws, "reason": reason})
                 continue
 
+            if async_launch:
+                if not _LAUNCH_SEMAPHORE.acquire(blocking=False):
+                    report["busy_workspaces"].append({
+                        "workspace_id": ws,
+                        "reason": "Launcher worker pool is at capacity (max 2 concurrent launches)",
+                    })
+                    break
+
             claimed = self.claim_next_task(ws)
             if not claimed:
+                if async_launch:
+                    _LAUNCH_SEMAPHORE.release()
                 continue
 
-            launched_task = self.launch_task(claimed, runner_fn=runner_fn, async_launch=async_launch)
+            launched_task = self.launch_task(
+                claimed,
+                runner_fn=runner_fn,
+                async_launch=async_launch,
+                release_sem_on_finish=async_launch,
+            )
             report["launched"].append(launched_task)
 
         return report

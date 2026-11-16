@@ -1,6 +1,7 @@
 """Unit tests for InboxDispatcher: single-task execution, priority dispatching, and auto-continuation."""
 
 import pytest
+import sqlite3
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -282,3 +283,121 @@ def test_reconcile_waiting_tasks(tmp_path: Path):
     assert reconciled2[0]["id"] == t["id"]
     assert reconciled2[0]["status"] == "COMPLETED"
     assert store.get_task(t["id"])["status"] == "COMPLETED"
+
+
+def test_reconcile_workflow_startup_failed_outcome_marks_failed(tmp_path: Path):
+    """P2: If workflow status is 'completed' but outcome is 'startup_failed', inbox task must be marked FAILED."""
+    db_file = tmp_path / "dispatcher_outcome.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    t = store.create_task(
+        title="Failing Task", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
+    )
+    store.update_task_status(t["id"], "CLAIMED")
+    store.update_task_status(t["id"], "RUNNING", workflow_id="wf_bad_1")
+
+    # Workflow lifecycle is completed, but outcome is startup_failed!
+    save_workflow(
+        {"workflow_id": "wf_bad_1", "title": "Bad Startup", "status": "completed", "outcome": "startup_failed"},
+        db_path=db_file,
+    )
+    reconciled = dispatcher.reconcile_running_tasks()
+    assert len(reconciled) == 1
+    assert reconciled[0]["id"] == t["id"]
+    assert reconciled[0]["status"] == "FAILED"
+    assert "startup_failed" in reconciled[0]["error"]
+    assert store.get_task(t["id"])["status"] == "FAILED"
+
+
+def test_launcher_fencing_token_mismatch_halts_orphan_workflow(tmp_path: Path):
+    """P1: When launcher fencing token mismatch occurs, it halts the orphan workflow and refuses to mark RUNNING."""
+    db_file = tmp_path / "dispatcher_fencing.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
+        t = store.create_task(
+            title="Stolen Task", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
+        )
+        claimed = dispatcher.claim_next_task("w1")
+        assert claimed is not None
+        assert claimed["status"] == "CLAIMED"
+        original_token = claimed["worker_id"]
+
+        def runner_with_stolen_token(task_dict):
+            # Simulate another worker or admin taking over the task while this runner is executing
+            conn = sqlite3.connect(str(db_file))
+            conn.execute(
+                "UPDATE user_inbox_tasks SET worker_id = 'different_worker_fencing_token' WHERE id = ?",
+                (task_dict["id"],),
+            )
+            conn.commit()
+            conn.close()
+            # Register a dummy workflow
+            save_workflow(
+                {"workflow_id": "wf_orphan_99", "title": "Orphan WF", "status": "running"},
+                db_path=db_file,
+            )
+            return "wf_orphan_99"
+
+        # Execute launch with stolen token
+        res = dispatcher.launch_task(claimed, runner_fn=runner_with_stolen_token, async_launch=False)
+        assert res is None  # Launcher must reject and return None
+
+        # Verify task is NOT RUNNING with the old workflow
+        task_in_db = store.get_task(t["id"])
+        assert task_in_db["workflow_id"] is None
+        assert task_in_db["status"] == "CLAIMED"
+        assert task_in_db["worker_id"] == "different_worker_fencing_token"
+
+        # Verify orphan workflow was cancelled/abandoned
+        from herdr.state_db import get_workflow
+        wf = get_workflow("wf_orphan_99", db_path=db_file)
+        assert wf["status"] == "cancelled"
+
+
+def test_launcher_heartbeat_keeps_lease_alive_during_long_launch(tmp_path: Path):
+    """P1: Verify that a long-running launcher heartbeat extends lease and prevents stale recovery."""
+    db_file = tmp_path / "dispatcher_long_launch.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
+        t = store.create_task(
+            title="Long Launch Task", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
+        )
+        claimed = dispatcher.claim_next_task("w1", lease_duration_seconds=180.0)
+        assert claimed is not None
+        original_lease = claimed["lease_expires_at"]
+
+        # 1. Simulate active launcher heartbeat extending lease
+        conn = sqlite3.connect(str(db_file))
+        now = time.time()
+        # Simulate that 200 seconds elapsed from initial claim, but heartbeat kept it fresh
+        future_now = now + 200.0
+        conn.execute(
+            """
+            UPDATE user_inbox_tasks
+               SET heartbeat_at = ?, lease_expires_at = ?
+             WHERE id = ? AND worker_id = ?
+            """,
+            (future_now, future_now + 180.0, t["id"], claimed["worker_id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        # 2. Run stale task recovery at future_now + 50s (250s after initial claim)
+        # Since heartbeat extended lease to future_now + 180s (380s total), task is NOT stale!
+        with patch("time.time", return_value=future_now + 50.0):
+            recovered = dispatcher.recover_stale_tasks()
+            assert len(recovered) == 0  # Not recovered!
+            assert store.get_task(t["id"])["status"] == "CLAIMED"
+
+        # 3. If worker actually dies (no further heartbeat) and clock passes extended lease
+        with patch("time.time", return_value=future_now + 200.0):
+            recovered2 = dispatcher.recover_stale_tasks()
+            assert len(recovered2) == 1
+            assert recovered2[0]["id"] == t["id"]
+            # Returned to PENDING queue because worker died
+            assert store.get_task(t["id"])["status"] == "PENDING"

@@ -104,3 +104,54 @@ def test_single_project_fallback_marked_not_confident():
         assert res["confidence"] < CONFIDENCE_THRESHOLD
         assert res["is_confident"] is False
         assert "严禁自动执行" in res["reason"]
+
+
+def test_detect_chinese_natural_language_and_mixed_tokens():
+    """Verify Chinese natural language matching and boundary safety without false substrings."""
+    mixed_projects = {
+        "version": 1,
+        "projects": {
+            "p1": {
+                "project_id": "haflow-1de29d2d",
+                "project_name": "HAFlow",
+                "project_root": "/Users/user/HAFlow",
+                "workspace_id": "w1K",
+            },
+            "p2": {
+                "project_id": "bx-100",
+                "project_name": "标讯中心",
+                "project_root": "/Users/user/bx",
+                "workspace_id": "wBX",
+            },
+            "p3": {
+                "project_id": "ha",
+                "project_name": "ha",
+                "project_root": "/Users/user/ha",
+                "workspace_id": "wHA",
+            },
+        },
+    }
+    with patch("herdr.inbox.detector.load_projects", return_value=mixed_projects):
+        # 1. English project name embedded directly into Chinese sentence
+        res1 = detect_project_and_workspace(instruction="请修复HAFlow中的收件箱问题")
+        assert res1["recommended_project_id"] == "haflow-1de29d2d"
+        assert res1["confidence"] >= 0.90
+        assert res1["is_confident"] is True
+
+        # 2. Pure Chinese project name
+        res2 = detect_project_and_workspace(instruction="帮我优化标讯中心的接口性能")
+        assert res2["recommended_project_id"] == "bx-100"
+        assert res2["confidence"] >= 0.90
+        assert res2["is_confident"] is True
+
+        # 3. Project ID exact boundary match
+        res3 = detect_project_and_workspace(instruction="更新bx-100的相关服务")
+        assert res3["recommended_project_id"] == "bx-100"
+        assert res3["confidence"] >= 0.98
+        assert res3["is_confident"] is True
+
+        # 4. English substring in word like 'shadow' should NOT match 'ha'
+        res4 = detect_project_and_workspace(instruction="we need to fix shadow rendering in webview")
+        # 'ha' inside 'shadow' must not trigger high confidence
+        assert res4["recommended_project_id"] is None or res4["confidence"] < 0.80
+        assert res4["is_confident"] is False

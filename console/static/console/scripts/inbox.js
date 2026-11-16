@@ -1,6 +1,6 @@
 /* 用户任务收件箱前端控制器与视图 */
 var {
-  showInbox, loadInboxData, showNewInboxTaskModal, showInboxTaskDetail,
+  showInbox, stopInboxTimer, inspectWorkflow, loadInboxData, showNewInboxTaskModal, showInboxTaskDetail,
   showConfirmScopeModal, changeTaskPriority, moveTaskOrder, cancelInboxTask,
   retryInboxTask, setInboxStatusFilter, setInboxProjectFilter, setInboxPriorityFilter,
   triggerInboxSweep, showChangePriorityModal, submitChangePriority,
@@ -184,15 +184,7 @@ async function showNewInboxTaskModal(){
     </div>
   `);
 
-  if(state.projectId){
-    const sel = document.getElementById('inboxProject');
-    if(sel){
-      sel.value = state.projectId;
-      onInboxProjectSelectChange();
-      const chk = document.getElementById('inboxAutoConfirm');
-      if(chk) chk.checked = true;
-    }
-  }
+  inboxState.userSelectedProject = false;
 }
 
 function onInboxProjectSelectChange(){
@@ -201,8 +193,11 @@ function onInboxProjectSelectChange(){
   if(!sel || !wsInput) return;
   const opt = sel.selectedOptions[0];
   wsInput.value = opt ? opt.dataset.ws || '' : '';
-  const chk = document.getElementById('inboxAutoConfirm');
-  if(chk && sel.value && wsInput.value) chk.checked = true;
+  if(sel.value){
+    inboxState.userSelectedProject = true;
+    const chk = document.getElementById('inboxAutoConfirm');
+    if(chk && wsInput.value) chk.checked = true;
+  }
 }
 
 async function onInboxInstructionBlur(){
@@ -225,17 +220,22 @@ async function onInboxInstructionBlur(){
       if(isConfident && res.recommended_project_id){
         banner.innerHTML = `🎯 <b>智能推荐：</b> 项目【${esc(res.project_name||res.recommended_project_id)}】 · 空间【${esc(res.recommended_workspace_id)}】（置信度 ${Math.round(res.confidence*100)}% - ${esc(res.reason)}）`;
         const sel = document.getElementById('inboxProject');
-        if(sel && !sel.value){
+        if(sel && !inboxState.userSelectedProject){
           sel.value = res.recommended_project_id;
           onInboxProjectSelectChange();
+          const chk = document.getElementById('inboxAutoConfirm');
+          if(chk) chk.checked = true;
         }
       } else {
         banner.innerHTML = `⚠️ <b>推荐置信度不足（${Math.round((res.confidence||0)*100)}%）：</b> ${esc(res.reason||'未达到自动确认门限')}。已保持草稿待确认，请手动选择项目与工作区。`;
         const sel = document.getElementById('inboxProject');
-        if(sel && !sel.value){
-          const chk = document.getElementById('inboxAutoConfirm');
-          if(chk) chk.checked = false;
+        const wsInput = document.getElementById('inboxWorkspace');
+        if(!inboxState.userSelectedProject){
+          if(sel) sel.value = '';
+          if(wsInput) wsInput.value = '';
         }
+        const chk = document.getElementById('inboxAutoConfirm');
+        if(chk) chk.checked = false;
       }
     }
   }catch(e){
@@ -259,7 +259,14 @@ async function submitNewInboxTask(){
     toast('正在提交任务到收件箱…');
     await api('/api/inbox/tasks', {
       method: 'POST',
-      body: JSON.stringify({title, instruction:ins, project_id:pid||null, workspace_id:wid||null, priority:prio, auto_confirm:shouldConfirm})
+      body: JSON.stringify({
+        title, instruction:ins,
+        project_id:pid||null,
+        workspace_id:wid||null,
+        priority:prio,
+        auto_confirm:shouldConfirm,
+        confirmed_by: inboxState.userSelectedProject ? 'user' : 'auto'
+      })
     });
     closeModal();
     toast(shouldConfirm ? '任务已提交并进入执行队列！' : '任务已保存为草稿');
@@ -404,9 +411,15 @@ async function retryInboxTask(taskId){
 }
 
 function inspectWorkflow(wid){
-  state.workflowId = wid;
-  if(typeof renderWorkflowTabs === 'function') renderWorkflowTabs();
-  if(typeof showShellView === 'function') showShellView('workbench');
+  if(!wid) return;
+  stopInboxTimer();
+  if(typeof openWorkflowTab === 'function'){
+    openWorkflowTab(wid);
+  } else {
+    state.workflowId = wid;
+    if(typeof showShellView === 'function') showShellView('workbench');
+    if(typeof loadWorkflow === 'function') loadWorkflow(wid);
+  }
 }
 
 function stopInboxTimer(){
@@ -438,7 +451,7 @@ function showInbox(){
 }
 
 return {
-  showInbox, stopInboxTimer, loadInboxData, showNewInboxTaskModal, showInboxTaskDetail,
+  showInbox, stopInboxTimer, inspectWorkflow, loadInboxData, showNewInboxTaskModal, showInboxTaskDetail,
   showConfirmScopeModal, changeTaskPriority: showChangePriorityModal, moveTaskOrder, cancelInboxTask,
   retryInboxTask, setInboxStatusFilter, setInboxProjectFilter, setInboxPriorityFilter,
   triggerInboxSweep, showChangePriorityModal, submitChangePriority,

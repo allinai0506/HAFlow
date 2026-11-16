@@ -50,6 +50,21 @@ def validate_project_and_workspace(
     return True, None, record
 
 
+def _match_token(token: str, text: str) -> bool:
+    """Boundary-safe token match supporting ASCII, CJK, and mixed alphanumeric tokens.
+
+    Prevents substring false positives (e.g. 'ha' in 'shadow') while correctly
+    matching alphanumeric tokens inside Chinese text without spaces
+    (e.g. 'HAFlow' in '请修复HAFlow中的收件箱问题').
+    """
+    if not token or not text:
+        return False
+    lead = r"(?<![a-zA-Z0-9_])" if re.match(r"^[a-zA-Z0-9_]", token) else ""
+    trail = r"(?![a-zA-Z0-9_])" if re.search(r"[a-zA-Z0-9_]$", token) else ""
+    pattern = re.compile(rf"{lead}{re.escape(token)}{trail}", re.IGNORECASE)
+    return bool(pattern.search(text))
+
+
 def detect_project_and_workspace(
     instruction: str,
     title: str = "",
@@ -97,19 +112,17 @@ def detect_project_and_workspace(
         if root and root in text:
             score = 1.0
             reason = f"命中完整项目路径: {root}"
-        # 2. Exact project_id match in text
-        elif p_id and p_id in text:
+        # 2. Exact project_id match in text (boundary safe)
+        elif p_id and _match_token(p_id, text):
             score = 0.98
             reason = f"命中项目 ID: {p_id}"
-        # 3. Exact project_name token match (boundary safe)
-        elif p_name:
-            pattern = re.compile(rf"\b{re.escape(p_name)}\b", re.IGNORECASE)
-            if pattern.search(text):
-                score = 0.90
-                reason = f"命中项目名称: {p_name}"
-            elif p_name.lower() in text.lower():
-                score = 0.60
-                reason = f"包含项目名称模糊子串: {p_name}"
+        # 3. Exact project_name token match (boundary safe, CJK friendly)
+        elif p_name and _match_token(p_name, text):
+            score = 0.90
+            reason = f"命中项目名称: {p_name}"
+        elif p_name and p_name.lower() in text.lower():
+            score = 0.60
+            reason = f"包含项目名称模糊子串: {p_name}"
 
         if score > 0:
             scored_projects.append((score, p, reason))

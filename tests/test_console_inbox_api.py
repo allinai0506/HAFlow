@@ -113,3 +113,47 @@ def test_api_inbox_workflow():
         assert stats_res["total"] == 2
         assert stats_res["counts"]["PENDING"] == 1
         assert stats_res["counts"]["CANCELLED"] == 1
+
+
+def test_auto_confirm_source_validation_and_user_isolation(monkeypatch):
+    with patch("herdr.inbox.detector.load_projects", return_value=MOCK_PROJECTS):
+        # 1. Automated confirm with low confidence must be forced to DRAFT
+        low_res = api_inbox_create_task({
+            "title": "Random pasta task",
+            "instruction": "Cook pasta without any project references",
+            "project_id": "haflow-1de29d2d",
+            "workspace_id": "w1K",
+            "auto_confirm": True,
+            "confirmation_source": "auto",  # automated source!
+        })
+        assert low_res["ok"] is True
+        assert low_res["status"] == "DRAFT"  # Forced to DRAFT!
+
+        # 2. User identity scoping
+        monkeypatch.setenv("HAFLOW_USER", "alice")
+        alice_task = api_inbox_create_task({
+            "title": "Alice task",
+            "instruction": "For HAFlow project",
+            "project_id": "haflow-1de29d2d",
+            "workspace_id": "w1K",
+            "auto_confirm": True,
+            "confirmation_source": "user",
+        })
+        assert alice_task["task"]["user_id"] == "alice"
+
+        monkeypatch.setenv("HAFLOW_USER", "bob")
+        bob_task = api_inbox_create_task({
+            "title": "Bob task",
+            "instruction": "For HAFlow project",
+            "project_id": "haflow-1de29d2d",
+            "workspace_id": "w1K",
+            "auto_confirm": True,
+            "confirmation_source": "user",
+        })
+        assert bob_task["task"]["user_id"] == "bob"
+
+        # Bob default listing only sees Bob's tasks
+        bob_tasks = api_inbox_tasks({})
+        bob_ids = [t["id"] for t in bob_tasks["tasks"]]
+        assert bob_task["task_id"] in bob_ids
+        assert alice_task["task_id"] not in bob_ids

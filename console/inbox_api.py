@@ -59,10 +59,26 @@ def _trigger_background_sweep():
         pass
 
 
-def _resolve_user_id(val: Optional[str] = None) -> str:
-    if val and str(val).strip():
-        return str(val).strip()
-    return os.environ.get("USER", "default")
+def _resolve_current_user(requested_user: Optional[str] = None) -> str:
+    """Resolve trusted server-side user identity.
+
+    Ensures server-side identity isolation so tasks are scoped to the actual
+    operator rather than arbitrary client-spoofed identities.
+    """
+    server_user = os.environ.get("HAFLOW_USER") or os.environ.get("USER") or "default"
+    if requested_user and str(requested_user).strip():
+        req = str(requested_user).strip()
+        if req == server_user or server_user in ("root", "admin", "default"):
+            return req
+    return server_user
+
+
+def _check_task_ownership(task: Optional[Dict[str, Any]], current_user: str) -> None:
+    if not task:
+        return
+    t_user = task.get("user_id")
+    if t_user and t_user != current_user and current_user not in ("root", "admin"):
+        raise PermissionError(f"Task '{task.get('id')}' belongs to user '{t_user}'; access denied for '{current_user}'")
 
 
 def api_inbox_tasks(q: Dict[str, Any]) -> Dict[str, Any]:
@@ -84,12 +100,19 @@ def api_inbox_tasks(q: Dict[str, Any]) -> Dict[str, Any]:
     except (ValueError, TypeError):
         offset = 0
 
+    if user_id_param == "all":
+        effective_user = None
+    elif user_id_param:
+        effective_user = _resolve_current_user(user_id_param)
+    else:
+        effective_user = _resolve_current_user()
+
     tasks, total = get_inbox_store().list_tasks(
         status=status or None,
         project_id=project_id or None,
         workspace_id=workspace_id or None,
         priority=priority or None,
-        user_id=user_id_param or None,
+        user_id=effective_user,
         limit=limit,
         offset=offset,
     )
@@ -101,6 +124,7 @@ def api_inbox_task(task_id: str) -> Dict[str, Any]:
     task = get_inbox_store().get_task(task_id)
     if not task:
         return {"ok": False, "error": "not_found", "status_code": 404}
+    _check_task_ownership(task, _resolve_current_user())
     return {"ok": True, "task": task}
 
 
@@ -111,20 +135,26 @@ def api_inbox_create_task(b: Dict[str, Any]) -> Dict[str, Any]:
     instruction = str(b.get("instruction") or "").strip()
     project_id = str(b.get("project_id") or "").strip() or None
     workspace_id = str(b.get("workspace_id") or "").strip() or None
-    user_id = _resolve_user_id(b.get("user_id"))
+    user_id = _resolve_current_user(b.get("user_id"))
     priority = str(b.get("priority") or "NORMAL").strip().upper()
     auto_confirm = bool(b.get("auto_confirm", False))
+    confirmation_source = str(b.get("confirmation_source") or b.get("confirmed_by") or "user").strip().lower()
     source_type = str(b.get("source_type") or "manual").strip()
     source_id = str(b.get("source_id") or "").strip() or None
     idempotency_key = str(b.get("idempotency_key") or "").strip() or None
 
-    # Strict P1-01 scope enforcement
+    # Strict scope and confirmation source enforcement
     if auto_confirm:
         if not project_id or not workspace_id:
             raise ValueError("project_id and workspace_id must be provided when auto_confirm is enabled")
         ok, err, _ = validate_project_and_workspace(project_id, workspace_id)
         if not ok:
             raise ValueError(f"Project and workspace validation failed: {err}")
+        if confirmation_source in ("auto", "detector"):
+            # Automated confirmation requires verified high confidence
+            det = detect_project_and_workspace(instruction=instruction, title=title)
+            if not det.get("is_confident") or det.get("recommended_project_id") != project_id:
+                auto_confirm = False
 
     task = get_inbox_store().create_task(
         title=title,
@@ -152,6 +182,11 @@ def api_inbox_confirm_task(b: Dict[str, Any]) -> Dict[str, Any]:
     project_id = str(b.get("project_id") or "").strip()
     workspace_id = str(b.get("workspace_id") or "").strip()
 
+    existing = get_inbox_store().get_task(task_id)
+    if not existing:
+        return {"ok": False, "error": "not_found", "status_code": 404}
+    _check_task_ownership(existing, _resolve_current_user())
+
     ok, err, _ = validate_project_and_workspace(project_id, workspace_id)
     if not ok:
         raise ValueError(f"Invalid scope: {err}")
@@ -170,6 +205,11 @@ def api_inbox_set_priority(b: Dict[str, Any]) -> Dict[str, Any]:
     b = b or {}
     task_id = str(b.get("task_id") or "").strip()
     priority = str(b.get("priority") or "").strip().upper()
+    existing = get_inbox_store().get_task(task_id)
+    if not existing:
+        return {"ok": False, "error": "not_found", "status_code": 404}
+    _check_task_ownership(existing, _resolve_current_user())
+
     task = get_inbox_store().set_task_priority(task_id, priority)
     _trigger_background_sweep()
     return {"ok": True, "task": task}
@@ -180,6 +220,11 @@ def api_inbox_reorder_task(b: Dict[str, Any]) -> Dict[str, Any]:
     b = b or {}
     task_id = str(b.get("task_id") or "").strip()
     direction = str(b.get("direction") or "").strip().lower()
+    existing = get_inbox_store().get_task(task_id)
+    if not existing:
+        return {"ok": False, "error": "not_found", "status_code": 404}
+    _check_task_ownership(existing, _resolve_current_user())
+
     task = get_inbox_store().reorder_pending_task(task_id, direction)
     return {"ok": True, "task": task}
 
@@ -189,6 +234,11 @@ def api_inbox_cancel_task(b: Dict[str, Any]) -> Dict[str, Any]:
     b = b or {}
     task_id = str(b.get("task_id") or "").strip()
     reason = str(b.get("reason") or "Cancelled by user").strip()
+    existing = get_inbox_store().get_task(task_id)
+    if not existing:
+        return {"ok": False, "error": "not_found", "status_code": 404}
+    _check_task_ownership(existing, _resolve_current_user())
+
     task = get_inbox_store().cancel_task(task_id, reason=reason)
     return {"ok": True, "task": task}
 
@@ -197,6 +247,11 @@ def api_inbox_retry_task(b: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/inbox/task/retry"""
     b = b or {}
     task_id = str(b.get("task_id") or "").strip()
+    existing = get_inbox_store().get_task(task_id)
+    if not existing:
+        return {"ok": False, "error": "not_found", "status_code": 404}
+    _check_task_ownership(existing, _resolve_current_user())
+
     task = get_inbox_store().retry_task(task_id)
     _trigger_background_sweep()
     return {"ok": True, "task": task}
@@ -214,7 +269,14 @@ def api_inbox_detect(b: Dict[str, Any]) -> Dict[str, Any]:
 def api_inbox_stats(q: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """GET /api/inbox/stats"""
     user_id = q.get("user_id", [None])[0] if q and isinstance(q.get("user_id"), list) else (q.get("user_id") if q else None)
-    stats = get_inbox_store().get_inbox_stats(user_id=user_id)
+    if user_id == "all":
+        effective_user = None
+    elif user_id:
+        effective_user = _resolve_current_user(user_id)
+    else:
+        effective_user = _resolve_current_user()
+
+    stats = get_inbox_store().get_inbox_stats(user_id=effective_user)
     return {"ok": True, **stats}
 
 
