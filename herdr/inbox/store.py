@@ -596,7 +596,7 @@ class InboxStore:
             cur = conn.execute(
                 """
                 SELECT * FROM user_inbox_tasks
-                WHERE workspace_id = ? AND status IN ('CLAIMED', 'RUNNING')
+                WHERE workspace_id = ? AND status IN ('CLAIMED', 'RUNNING', 'WAITING')
                 LIMIT 1
                 """,
                 (workspace_id,),

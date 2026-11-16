@@ -31,6 +31,7 @@ ACTIVE_WORKFLOW_STATUSES = frozenset({
     "running",
     "pending",
     "in_progress",
+    "paused",
     "closing",
 })
 
@@ -71,7 +72,7 @@ class InboxDispatcher:
         if not workspace_id:
             return True, "Invalid empty workspace_id"
 
-        # 1. Check Inbox tasks holding workspace (CLAIMED or RUNNING)
+        # 1. Check Inbox tasks holding workspace (CLAIMED, RUNNING, or WAITING)
         active_inbox_task = self.store.get_workspace_active_task(workspace_id)
         if active_inbox_task:
             return (
@@ -86,7 +87,7 @@ class InboxDispatcher:
                 """
                 SELECT workflow_id, title, status, metadata_json, config_json
                 FROM workflows
-                WHERE status IN ('running', 'pending', 'in_progress', 'closing')
+                WHERE status IN ('running', 'pending', 'in_progress', 'paused', 'closing')
                 """
             ).fetchall()
             for r in rows:
@@ -145,11 +146,11 @@ class InboxDispatcher:
         try:
             conn.execute("BEGIN IMMEDIATE")
 
-            # Check 1: Inbox tasks holding workspace (CLAIMED, RUNNING only - WAITING releases workspace)
+            # Check 1: Inbox tasks holding workspace (CLAIMED, RUNNING, or WAITING)
             holding_cur = conn.execute(
                 """
                 SELECT id FROM user_inbox_tasks
-                WHERE workspace_id = ? AND status IN ('CLAIMED', 'RUNNING')
+                WHERE workspace_id = ? AND status IN ('CLAIMED', 'RUNNING', 'WAITING')
                 LIMIT 1
                 """,
                 (workspace_id,),
@@ -162,7 +163,7 @@ class InboxDispatcher:
             active_wf_cur = conn.execute(
                 """
                 SELECT workflow_id, metadata_json, config_json FROM workflows
-                WHERE status IN ('running', 'pending', 'in_progress', 'closing')
+                WHERE status IN ('running', 'pending', 'in_progress', 'paused', 'closing')
                 """,
             )
             for wf_row in active_wf_cur.fetchall():
@@ -520,22 +521,15 @@ class InboxDispatcher:
                 )
                 reconciled.append(updated)
             elif (wf_status in ("running", "in_progress")) and cur_status == "WAITING":
-                # Workflow resumed by human -> verify workspace is not busy before transitioning back to RUNNING
-                ws = t.get("workspace_id")
-                active_ws_task = self.store.get_workspace_active_task(ws) if ws else None
-                if active_ws_task and active_ws_task["id"] != t["id"]:
-                    logger.warning(
-                        f"Resumed workflow '{wid}' for task '{t['id']}' waiting for workspace '{ws}' occupied by '{active_ws_task['id']}'"
-                    )
-                else:
-                    updated = self.store.update_task_status(
-                        task_id=t["id"],
-                        new_status="RUNNING",
-                        expected_status="WAITING",
-                    )
-                    reconciled.append(updated)
+                # Workflow resumed by human -> transition back to RUNNING
+                updated = self.store.update_task_status(
+                    task_id=t["id"],
+                    new_status="RUNNING",
+                    expected_status="WAITING",
+                )
+                reconciled.append(updated)
             elif (wf_status == "paused" or wf.get("current_stage") == "awaiting_verdict") and cur_status == "RUNNING":
-                # Needs human intervention -> transition to WAITING (releases workspace mutex)
+                # Needs human intervention -> transition to WAITING (holds workspace mutex)
                 updated = self.store.update_task_status(
                     task_id=t["id"],
                     new_status="WAITING",

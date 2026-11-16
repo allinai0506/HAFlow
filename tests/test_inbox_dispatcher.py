@@ -442,8 +442,11 @@ def test_crash_recovery_preserves_running_workflow_without_duplicate(tmp_path: P
             assert rec_task["workflow_id"] == pre_wid
 
 
-def test_waiting_task_releases_workspace_for_next_pending_task(tmp_path: Path):
-    """P1-03: When a task enters WAITING (e.g. human approval), subsequent queued tasks can execute in the workspace."""
+def test_waiting_task_holds_workspace_mutex_and_blocks_subsequent_dispatch(tmp_path: Path):
+    """P1-02: When a task enters WAITING (e.g. human approval), it holds the workspace mutex.
+    Subsequent tasks in the same workspace wait in queue; tasks in other workspaces execute in parallel.
+    When the WAITING task completes, the workspace is released and the queued task executes.
+    """
     db_file = tmp_path / "dispatcher_waiting_mutex.db"
     store = InboxStore(db_file)
     dispatcher = InboxDispatcher(store=store, db_path=db_file)
@@ -453,10 +456,13 @@ def test_waiting_task_releases_workspace_for_next_pending_task(tmp_path: Path):
             title="Task 1 Human Gate", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
         )
         t2 = store.create_task(
-            title="Task 2 Queued", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
+            title="Task 2 Queued in w1", instruction="...", project_id="p1", workspace_id="w1", auto_confirm=True
+        )
+        t3 = store.create_task(
+            title="Task 3 Independent in w2", instruction="...", project_id="p2", workspace_id="w2", auto_confirm=True
         )
 
-        # Claim and run Task 1
+        # Claim and run Task 1 in w1
         c1 = dispatcher.claim_next_task("w1")
         assert c1["id"] == t1["id"]
         store.update_task_status(t1["id"], "RUNNING", workflow_id="wf_gate_1")
@@ -466,48 +472,36 @@ def test_waiting_task_releases_workspace_for_next_pending_task(tmp_path: Path):
         dispatcher.reconcile_running_tasks()
         assert store.get_task(t1["id"])["status"] == "WAITING"
 
-        # Workspace w1 is now FREE for other tasks!
-        is_busy, _ = dispatcher.is_workspace_busy("w1")
-        assert is_busy is False
+        # Workspace w1 is BUSY holding the paused Task 1!
+        is_busy_w1, reason_w1 = dispatcher.is_workspace_busy("w1")
+        assert is_busy_w1 is True
+        assert "WAITING" in reason_w1
+
+        # Task 2 in w1 cannot be claimed yet; must wait in queue
+        c2 = dispatcher.claim_next_task("w1")
+        assert c2 is None
+        assert store.get_task(t2["id"])["status"] == "PENDING"
+
+        # Independent workspace w2 is FREE and can run Task 3 concurrently
+        is_busy_w2, _ = dispatcher.is_workspace_busy("w2")
+        assert is_busy_w2 is False
+        c3 = dispatcher.claim_next_task("w2")
+        assert c3 is not None
+        assert c3["id"] == t3["id"]
+
+        # Human signs off on Task 1 -> workflow completes
+        save_workflow({"workflow_id": "wf_gate_1", "status": "completed", "outcome": "success"}, db_path=db_file)
+        dispatcher.reconcile_running_tasks()
+        assert store.get_task(t1["id"])["status"] == "COMPLETED"
+
+        # Workspace w1 is now FREE!
+        is_busy_w1_after, _ = dispatcher.is_workspace_busy("w1")
+        assert is_busy_w1_after is False
 
         # Task 2 can now be claimed and executed!
-        c2 = dispatcher.claim_next_task("w1")
-        assert c2 is not None
-        assert c2["id"] == t2["id"]
-
-
-def test_resumed_waiting_task_waits_for_busy_workspace(tmp_path: Path):
-    """P1-03: When a WAITING task's workflow is resumed, it waits until the running task finishes before entering RUNNING."""
-    db_file = tmp_path / "dispatcher_resumed_wait.db"
-    store = InboxStore(db_file)
-    dispatcher = InboxDispatcher(store=store, db_path=db_file)
-
-    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
-        t1 = store.create_task(title="Task 1", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
-        t2 = store.create_task(title="Task 2", instruction=".", project_id="p1", workspace_id="w1", auto_confirm=True)
-
-        store.update_task_status(t1["id"], "CLAIMED")
-        store.update_task_status(t1["id"], "RUNNING", workflow_id="wf_resumable_1")
-        store.update_task_status(t1["id"], "WAITING")
-
-        store.update_task_status(t2["id"], "CLAIMED")
-        store.update_task_status(t2["id"], "RUNNING", workflow_id="wf_occupying_2")
-
-        save_workflow({"workflow_id": "wf_resumable_1", "status": "running"}, db_path=db_file)
-        save_workflow({"workflow_id": "wf_occupying_2", "status": "running"}, db_path=db_file)
-
-        # Reconcile while Task 2 is still running: Task 1 cannot jump to RUNNING yet!
-        dispatcher.reconcile_running_tasks()
-        assert store.get_task(t1["id"])["status"] == "WAITING"
-
-        # Now Task 2 finishes
-        save_workflow({"workflow_id": "wf_occupying_2", "status": "completed", "outcome": "success"}, db_path=db_file)
-        dispatcher.reconcile_running_tasks()
-        assert store.get_task(t2["id"])["status"] == "COMPLETED"
-
-        # Next reconcile: Task 1 can now safely transition to RUNNING!
-        dispatcher.reconcile_running_tasks()
-        assert store.get_task(t1["id"])["status"] == "RUNNING"
+        c2_after = dispatcher.claim_next_task("w1")
+        assert c2_after is not None
+        assert c2_after["id"] == t2["id"]
 
 
 def test_lost_workflow_handled_after_grace_period(tmp_path: Path):
@@ -592,10 +586,14 @@ def test_default_git_template_retry_does_not_pollute_context_binding(tmp_path: P
         assert captured_kwargs.get("context") is None
 
 
-def test_waiting_task_allows_subsequent_dispatch_without_factory_rejection(tmp_path: Path):
-    """P1-02: A WAITING task in Inbox releases workspace; Factory allows next workflow to launch."""
+def test_factory_and_dispatcher_gate_alignment_on_active_workflows(tmp_path: Path):
+    """P1-02: Factory and Dispatcher gates are strictly aligned.
+    When a workflow is paused/active, Factory rejects concurrent creation and Dispatcher blocks claiming.
+    When the workflow completes, both gates open cleanly.
+    """
     import importlib.util
     from importlib.machinery import SourceFileLoader
+    import pytest
     factory_path = Path("bin/herdr-factory").resolve()
     spec = importlib.util.spec_from_loader("herdr_factory", SourceFileLoader("herdr_factory", str(factory_path)))
     factory_mod = importlib.util.module_from_spec(spec)
@@ -662,16 +660,43 @@ def test_waiting_task_allows_subsequent_dispatch_without_factory_rejection(tmp_p
             {"workflow_id": "wf-fac-1", "project_id": "proj-fac-1", "status": "paused"}
         ]
 
-        # Verify Factory _reject_if_active_workflow does NOT exit because wf-fac-1 is paused
-        factory_mod._reject_if_active_workflow(project_rec)  # should not raise SystemExit!
+        # 1. Factory blocks concurrent creation because wf-fac-1 is active (paused)
+        with pytest.raises(SystemExit) as exc:
+            factory_mod._reject_if_active_workflow(project_rec)
+        assert exc.value.code == 2
 
-        # Verify Dispatcher claims and launches Task 2
+        # 2. Dispatcher gate agrees: workspace is busy, so Dispatcher will NOT claim Task 2
         is_busy, _ = dispatcher.is_workspace_busy("ws-fac-1")
-        assert is_busy is False
+        assert is_busy is True
 
         claimed = dispatcher.claim_next_task("ws-fac-1")
-        assert claimed is not None
-        assert claimed["id"] == t2["id"]
+        assert claimed is None
+        assert store.get_task(t2["id"])["status"] == "PENDING"
+
+        # 3. Now wf-fac-1 finishes
+        mock_proj_store.return_value.list_workflows.return_value = [
+            {"workflow_id": "wf-fac-1", "project_id": "proj-fac-1", "status": "completed"}
+        ]
+        mock_active_wf.return_value = []
+        save_workflow({
+            "workflow_id": "wf-fac-1",
+            "project_id": "proj-fac-1",
+            "workspace_id": "ws-fac-1",
+            "status": "completed",
+            "outcome": "success",
+        }, db_path=db_file)
+        dispatcher.reconcile_running_tasks()
+        assert store.get_task(t1["id"])["status"] == "COMPLETED"
+
+        # 4. Both gates open: Factory allows creation and Dispatcher claims Task 2
+        factory_mod._reject_if_active_workflow(project_rec)  # should NOT raise
+
+        is_busy_after, _ = dispatcher.is_workspace_busy("ws-fac-1")
+        assert is_busy_after is False
+
+        claimed_after = dispatcher.claim_next_task("ws-fac-1")
+        assert claimed_after is not None
+        assert claimed_after["id"] == t2["id"]
 
 
 def test_workflow_resume_reacquires_workspace_and_blocks_if_occupied(tmp_path: Path):

@@ -19,6 +19,7 @@ User Task Inbox V1 是 HAFlow 的用户级任务接入、排队缓冲与自动�
    - 每条任务必须具备合法且经后端校验的 `project_id` 与 `workspace_id`。未确认归属的任务保留为 `DRAFT` 状态，严禁进入可执行队列，绝不自动执行。
 3. **工作区单任务互斥与跨空间并行**：
    - 同一工作区同一时刻严格只允许执行一个任务，保障代码基线与分支状态不发生碰撞。
+   - 当任务进入 `WAITING` 状态（底层工作流暂停等待用户输入/审批）时，该任务继续持有当前工作区互斥锁，后续排队任务保持 `PENDING`，绝不发生协调者 Pane 抢占与代码分支双写。
    - 不同工作区互不阻塞，独立并行调度。
 4. **优先级与自动接续**：
    - 待执行队列按优先级（`URGENT` > `HIGH` > `NORMAL` > `LOW`）结合提交时间 FIFO 排序。
@@ -72,9 +73,9 @@ Inbox 任务具备严格受控的 8 状态转换模型（`herdr/inbox/transition
 ## 4. 调度与收敛机制 (`InboxDispatcher`)
 
 - **工作区繁忙检测 (`is_workspace_busy`)**：
-  - 检查收件箱内是否存在处于 `CLAIMED` 或 `RUNNING` 状态的任务（`WAITING` 状态释放工作区锁，不阻断后续排队任务）。
-  - 交叉核对当前项目是否存在运行中的 Workflow（`paused` 状态的工作流不占用工作区）。
-  - 底层 `bin/herdr-factory` 与 `herdr/kernel.py` 严格对齐互斥语义：Factory 仅对正在执行（`running`/`pending`/`in_progress`/`closing`）的工作流拦截，允许 `paused` 任务共存等待；`resume_workflow` 恢复时校验工作区占用，防止双写。
+  - 检查收件箱内是否存在处于 `CLAIMED`、`RUNNING` 或 `WAITING` 状态的任务（`WAITING` 状态持续持有工作区锁保护执行现场与协调者 Pane）。
+  - 交叉核对当前项目是否存在活跃 Workflow（`running`/`pending`/`in_progress`/`paused`/`closing` 状态均占用工作区）。
+  - 底层 `bin/herdr-factory` 与 `herdr/inbox/dispatcher` 严格对齐互斥语义：Factory 拒绝在存在活跃（含 `paused`）工作流时重复创建；Dispatcher 识别工作区占用并保持后续任务在队列排队等待，从根源杜绝协调者 Pane 抢占、代码分支冲突与重复启动失败。
 - **原子领取任务 (`claim_next_task`)**：
   - 在 SQLite `EXCLUSIVE` 事务保护下，基于条件原子执行 CAS 跃迁，彻底杜绝多 Worker 重复领取。
   - 草稿确认归属（`confirm_task_scope`）在原子事务内计算目标队列末尾 `sort_order`，绝不发生插队。

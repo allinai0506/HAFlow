@@ -4310,3 +4310,28 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   3. `shell-navigation.css` 与 `polish-shell.css` 为 `.wf-tab`、`.tab-title` 与 `.tab-status` 设置严谨的单行排版约束（`white-space: nowrap !important`、`overflow: hidden`、`text-overflow: ellipsis`、`flex-shrink: 0`）与精致微标胶囊样式，严格遵守 4px 间距栅格；
   4. 新增单测 `test_workflow_tabs_single_line_and_status_badge` 锁定单行展示与长提示剥离保障，更新基线哈希签名。
 - 验证：`tests/test_console_standard_layout_tabs.py` 与全部 517 项控制台测试全部 PASS。
+
+## [2026-11-16] Fix | User Task Inbox V1 全面自检与深度架构闭环 (PR #420 复审对齐)
+- 现场：PR #420 第二轮复审指出 8 项关键缺陷（含 3 项 P1 与 5 项 P2），特别是关于 WAITING 状态下释放工作区与 Factory/Coordinator Pane 物理资源冲突的深层架构悖论。
+- 根因分析：
+  1. **P1-01 (Context 污染)**：`retry_task` 将执行历史写回 `context_json`，而软件开发 Git 模式模板不接受 `--context` 参数，导致重试必然失败。执行历史属于审计事实，不属于工作流输入绑定。
+  2. **P1-02 (WAITING 与工作区互斥)**：前期试图让 WAITING 释放工作区以支持后续任务执行，但同一项目共享唯一的 Git 工作区、Coordinator Pane (`wX:p1`) 与阶段 Tab 拓扑，底层不支持工作流级挂起/还原（Suspend/Restore）。若放行下一任务启动，新工作流将抢占 Coordinator Pane 并污染代码现场，待前序工作流恢复时现场已遭破坏；若 Factory 拦截，则导致新任务启动重试并最终雪崩 FAILED。
+  3. **P1-03 (自动确认默认值绕过)**：接口默认 fallback 至 `"user"`，调用方只需传入 `auto_confirm: true` 即可绕过用户确认门禁进入 PENDING。
+  4. **P2-01 (多用户扫描数据泄露)**：`/api/inbox/sweep` 全局调度扫描结果原样返回全量任务与包含任务指令的 busy 原因，普通用户可探测其他用户私有任务。
+  5. **P2-02 (草稿确认插队)**：草稿创建时无工作区（`sort_order=0`），确认归属时未重算目标队列尾部位置，导致确认草稿意外插入队列首部。
+  6. **P2-03 (URL 冷启动恢复)**：`bootstrap.js` 支持列表未包含 `'inbox'`，导致带 `?view=inbox` 打开控制台时无法恢复收件箱视图。
+  7. **P2-04 (SQLite Schema 兼容迁移)**：旧表使用行级 `idempotency_key TEXT UNIQUE`，单纯改用 `CREATE TABLE IF NOT EXISTS` 无法消除旧约束，导致跨用户同名幂等键仍被拒绝。
+  8. **P2-05 (前端交互)**：表单缺少选择即时排队时的必填提示，自动探测覆盖了用户手动选定的项目。
+- 修复与闭环：
+  1. **执行历史独立存储**：在 Schema 中新增 `execution_history_json` 字段，`retry_task` 独立记录审计历史并彻底清理 `context_json`；`dispatcher` 按模板契约严格过滤上下文，Git 模式绝不注入 `--context`。
+  2. **严格工作区互斥与门禁统一**：明确 HAFlow 物理架构约束——同一项目/工作区同一时刻严格只允许一个活跃任务/工作流。WAITING 状态持续持有当前工作区互斥锁保护现场与 Coordinator Pane，后续任务在当前工作区安全排队；不同工作区独立并行调度。`herdr-factory` 与 `dispatcher` 门禁完全对齐（活跃工作流含 `paused` 一致判定占用），消除并发冲突与假性释放。
+  3. **接口强类型确认约束**：移除默认 `"user"` fallback，自动化来源（webhook/timer/detector）一律强制进入 `DRAFT`；仅当 `source_type="manual"` 且显式传入 `confirmation_source="user"` 时方允许自动排队。
+  4. **多用户数据隔离与脱敏**：`api_inbox_sweep` 按当前用户过滤任务，并对 `busy_workspaces` 进行脱敏处理，防止跨用户任务信息泄露。
+  5. **事务内原子计算队列尾部**：`confirm_task_scope` 在 `BEGIN IMMEDIATE` 事务内查询目标工作区和优先级的最大 `sort_order`，分配末尾位置（`+10`），杜绝插队。
+  6. **补全 URL 路由**：`bootstrap.js` 将 `'inbox'` 纳入受支持视图，冷启动直接路由水合。
+  7. **无损表重建迁移**：`ensure_inbox_schema` 引入自动检测机制，若存在旧全局唯一索引，则在事务内重建表并迁移数据至复合唯一索引 `(user_id, idempotency_key)`。
+  8. **前端交互保护**：明确表单提示，记录 `userSelectedProject` 状态，防止自动探测覆盖用户主动选择。
+- 验证：
+  - `tests/test_inbox_*.py`、`tests/test_console_inbox_api.py` 45 项专项全绿。
+  - 核心工作流测试 `tests/test_workflow_*.py` 83 项全绿。
+  - `python3 -m compileall -q herdr services bin tests` 零错误；`git diff --check` 零违规。
