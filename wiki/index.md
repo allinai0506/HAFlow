@@ -26,6 +26,7 @@
 9. **[[common-change-paths]] (高频开发与代码修改指南)**: 针对常见业务与工程需求（如添加新 Agent、修改状态机、重载服务），指导您需要同时关注哪些文件与测试。
 10. **[[ops-center]] (Agent 运维驾驶舱)**: 了解 Dashboard V2 的老板视角、Workflow 卡片、Agent Fleet、异常中心与下钻数据契约。
 11. **[[flow-workbench]] (Flow Workbench 运行态 DAG 工作台)**: 掌握 Console 如何用 Graph Projection + Dagre + AntV X6 准确表达 Workflow 的并行与汇聚，以及离线依赖与容器归属约束。
+12. **[[user-task-inbox]] (用户统一任务收件箱与自动调度)**: 掌握用户级任务排队与缓冲池、项目与工作区归属确认、优先级排序、单工作区互斥与任务完成自动接续调度。
 
 ---
 
@@ -60,6 +61,7 @@
 | **Agent 终端等待输入与人工交互闭环 (Interaction Loop)** | [[task-lifecycle]] | `herdr/interaction_loop.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
 | **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |
+| **提交多个任务、排队调度与自动接续** | [[user-task-inbox]] | `herdr/inbox/`, `console/inbox_api.py`, `console/static/console/scripts/inbox.js` |
 | **状态流转网关、嵌入式状态引擎、统一事件流、检查点快照 (State Transition Gateway, StateStore, WorkflowEvent & Checkpoint Store)** | [[task-lifecycle]], [[domain-model]] | `herdr/transitions.py`, `herdr/kernel.py`, `herdr/state_store.py`, `herdr/state_db.py`, `bin/herdr-task` |
 | **跨节点文档/证据共享与 stale 治理 (Workflow Shared Docs)** | [[task-lifecycle]] §5 | `herdr/workflow_docs.py`, `bin/herdr-task:note-add/note-list` |
 | **代码审查基准评测与上下文对照实验 (ReviewBench)** | [[review-benchmark]] | `herdr/review_benchmark.py`, `bin/herdr-review-bench` |

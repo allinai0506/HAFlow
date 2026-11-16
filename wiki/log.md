@@ -8,6 +8,16 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-16] feat | User Task Inbox V1 — 用户统一任务收件箱与自动调度
+
+- 背景：用户派发多个任务时必须等待当前任务执行完毕才能手动派发下一条指令，任务接入与任务执行紧耦合，且缺少任务排队缓冲机制。
+- 变更：
+  1. 新增 [[user-task-inbox]]；
+  2. 新增 `user_inbox_tasks` 表与 DDL 注册，建立 8 状态机（`DRAFT`、`PENDING`、`CLAIMED`、`RUNNING`、`WAITING`、`COMPLETED`、`FAILED`、`CANCELLED`）；
+  3. 实现 `herdr/inbox/store.py`、`herdr/inbox/detector.py` 与 `herdr/inbox/dispatcher.py`：单工作区单任务互斥、跨空间并行调度、优先级与 FIFO 排序、自动连续派发接续、草稿范围隔离与崩溃恢复；
+  4. 实现控制台后端 REST API（`console/inbox_api.py`）与前端完整交互界面（`console/static/console/scripts/inbox.js`、`inbox.css`、`console.html`）；
+  5. 编写全量单元测试与 10 任务自动接续端到端流水线测试（`tests/test_inbox_e2e_pipeline.py`）。
+
 ## [2026-11-13] fix | 仪表板回复工位所有权校验、暂停任务恢复与草稿保持 (PR #415 评审修复)
 
 - 背景：PR #415 审查提出四项缺陷：紧急插话未校验易失工位归属（违背 AGENTS.md Invariant 11）、paused/interrupted 任务 steer 后未重开导致后续事件被 Controller 忽略、stuck 异常卡片将 blocked 错标为 failed resume、仪表板 10 秒轮询刷新冲刷用户正在输入的草稿与光标。

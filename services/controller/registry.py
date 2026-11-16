@@ -31,6 +31,11 @@ def check_all_workflows_stage_advance(ports):
         schedule_automatic_controller_actions(ports._get_store(), workflow_ids)
     except Exception as exc:
         print(f"[COCKPIT SCHEDULE ERROR] {type(exc).__name__}")
+    try:
+        from herdr.inbox.dispatcher import InboxDispatcher
+        InboxDispatcher(db_path=ports._get_store().db_path).dispatch_sweep()
+    except Exception as exc:
+        pass
 
 def sync_awake_guard(ports, active_workflows):
     """有活跃 workflow 时持有 caffeinate,避免机器休眠冻结整条流水线。

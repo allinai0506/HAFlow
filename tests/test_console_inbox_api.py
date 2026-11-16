@@ -1,0 +1,115 @@
+"""Integration tests for Console Inbox APIs."""
+
+import pytest
+from pathlib import Path
+from unittest.mock import patch
+
+from console.inbox_api import (
+    api_inbox_cancel_task,
+    api_inbox_confirm_task,
+    api_inbox_create_task,
+    api_inbox_detect,
+    api_inbox_reorder_task,
+    api_inbox_retry_task,
+    api_inbox_set_priority,
+    api_inbox_stats,
+    api_inbox_task,
+    api_inbox_tasks,
+    get_inbox_store,
+)
+from herdr.inbox.store import InboxStore
+
+MOCK_PROJECTS = {
+    "version": 1,
+    "projects": {
+        "/Users/user/HAFlow": {
+            "project_id": "haflow-1de29d2d",
+            "project_name": "HAFlow",
+            "project_root": "/Users/user/HAFlow",
+            "workspace_id": "w1K",
+        },
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def setup_inbox_test_db(tmp_path: Path):
+    db_file = tmp_path / "test_api_inbox.db"
+    store = InboxStore(db_file)
+    with patch("console.inbox_api.get_inbox_store", return_value=store):
+        yield store
+
+
+def test_api_inbox_workflow():
+    with patch("herdr.inbox.detector.load_projects", return_value=MOCK_PROJECTS):
+        # 1. Detect scope
+        detect_res = api_inbox_detect({
+            "title": "Bug in HAFlow UI",
+            "instruction": "Fix layout bug",
+        })
+        assert detect_res["ok"] is True
+        assert detect_res["recommended_project_id"] == "haflow-1de29d2d"
+        assert detect_res["recommended_workspace_id"] == "w1K"
+
+        # 2. Create as draft
+        draft_res = api_inbox_create_task({
+            "title": "Draft task",
+            "instruction": "Need review first",
+            "priority": "LOW",
+        })
+        assert draft_res["ok"] is True
+        assert draft_res["status"] == "DRAFT"
+        task_id = draft_res["task_id"]
+
+        # 3. Confirm scope
+        confirm_res = api_inbox_confirm_task({
+            "task_id": task_id,
+            "project_id": "haflow-1de29d2d",
+            "workspace_id": "w1K",
+        })
+        assert confirm_res["ok"] is True
+        assert confirm_res["task"]["status"] == "PENDING"
+
+        # 4. Set priority
+        prio_res = api_inbox_set_priority({
+            "task_id": task_id,
+            "priority": "HIGH",
+        })
+        assert prio_res["ok"] is True
+        assert prio_res["task"]["priority"] == "HIGH"
+
+        # 5. Create another task directly to PENDING with auto_confirm
+        auto_res = api_inbox_create_task({
+            "title": "Urgent Hotfix",
+            "instruction": "Fix critical bug",
+            "project_id": "haflow-1de29d2d",
+            "workspace_id": "w1K",
+            "priority": "URGENT",
+            "auto_confirm": True,
+        })
+        assert auto_res["status"] == "PENDING"
+
+        # 6. List tasks
+        list_res = api_inbox_tasks({"status": "PENDING", "workspace_id": "w1K"})
+        assert list_res["ok"] is True
+        assert list_res["total"] == 2
+        # Urgent Hotfix should be #1, Draft task (now HIGH) should be #2
+        assert list_res["tasks"][0]["title"] == "Urgent Hotfix"
+        assert list_res["tasks"][0]["queue_position"] == 1
+        assert list_res["tasks"][1]["title"] == "Draft task"
+        assert list_res["tasks"][1]["queue_position"] == 2
+
+        # 7. Cancel a task
+        cancel_res = api_inbox_cancel_task({
+            "task_id": auto_res["task_id"],
+            "reason": "Test cancel",
+        })
+        assert cancel_res["ok"] is True
+        assert cancel_res["task"]["status"] == "CANCELLED"
+
+        # 8. Stats
+        stats_res = api_inbox_stats()
+        assert stats_res["ok"] is True
+        assert stats_res["total"] == 2
+        assert stats_res["counts"]["PENDING"] == 1
+        assert stats_res["counts"]["CANCELLED"] == 1

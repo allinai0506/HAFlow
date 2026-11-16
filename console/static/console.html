@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><link rel="stylesheet" href="/static/console-tokens.css"><style><!-- console:include console/styles/foundation.css --><!-- console:include console/styles/sidebar.css --><!-- console:include console/styles/controls.css --><!-- console:include console/styles/progress.css --><!-- console:include console/styles/workflow-selector.css --><!-- console:include console/styles/task-list.css --><!-- console:include console/styles/dialogs.css --><!-- console:include console/styles/task-drawer.css --><!-- console:include console/styles/operations.css --><!-- console:include console/styles/controller-cockpit.css --><!-- console:include console/styles/shell-layout.css --><!-- console:include console/styles/shell-navigation.css --><!-- console:include console/styles/shell-workspace.css --><!-- console:include console/styles/shell-inspector.css --></style><style><!-- console:include console/styles/polish-shell.css --><!-- console:include console/styles/polish-details.css --><!-- console:include console/styles/template-library.css --><!-- console:include console/styles/template-graph.css --><!-- console:include console/styles/experience-overview.css --><!-- console:include console/styles/experience-content.css -->
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><link rel="stylesheet" href="/static/console-tokens.css"><style><!-- console:include console/styles/foundation.css --><!-- console:include console/styles/sidebar.css --><!-- console:include console/styles/controls.css --><!-- console:include console/styles/progress.css --><!-- console:include console/styles/workflow-selector.css --><!-- console:include console/styles/task-list.css --><!-- console:include console/styles/dialogs.css --><!-- console:include console/styles/task-drawer.css --><!-- console:include console/styles/operations.css --><!-- console:include console/styles/controller-cockpit.css --><!-- console:include console/styles/shell-layout.css --><!-- console:include console/styles/shell-navigation.css --><!-- console:include console/styles/shell-workspace.css --><!-- console:include console/styles/shell-inspector.css --></style><style><!-- console:include console/styles/polish-shell.css --><!-- console:include console/styles/polish-details.css --><!-- console:include console/styles/template-library.css --><!-- console:include console/styles/template-graph.css --><!-- console:include console/styles/experience-overview.css --><!-- console:include console/styles/experience-content.css --><!-- console:include console/styles/inbox.css -->
 </style>
 </head><body>
 <div class="shell" data-view="workbench" data-workspace="flow">
@@ -9,6 +9,10 @@
     <nav class="rail-nav" aria-label="系统一级导航">
       <button type="button" class="rail-item active" id="railNavWorkbench" data-rail-nav="workbench" data-nav="workbench" onclick="showShellView('workbench')" title="流程工作台 (Workbench)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      </button>
+      <button type="button" class="rail-item" id="railNavInbox" data-rail-nav="inbox" data-nav="inbox" onclick="showShellView('inbox')" title="任务收件箱 (Inbox)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+        <span class="rail-badge-dot" id="railInboxDot" style="display:none"></span>
       </button>
       <button type="button" class="rail-item" id="railNavDashboard" data-rail-nav="dashboard" data-nav="dashboard" onclick="showShellView('dashboard')" title="全局仪表板 (Dashboard)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
@@ -242,6 +246,7 @@
         <div id="templatesTabView" class="controller-panel" hidden></div>
         <div id="archiveTabView" class="controller-panel" hidden></div>
         <div id="logsTabView" class="controller-panel" hidden></div>
+        <div id="inboxTabView" class="controller-panel" hidden></div>
       </section>
     </div>
     <div id="resourceStore" hidden>
@@ -416,6 +421,7 @@ const VIEW_KEY='herdrConsoleView';
 <!-- console:include console/scripts/task-detail.js -->
 <!-- console:include console/scripts/logs.js -->
 <!-- console:include console/scripts/archive.js -->
+<!-- console:include console/scripts/inbox.js -->
 <!-- console:include console/scripts/bootstrap.js -->
 </script>
 <script><!-- console:include console/scripts/shell-enhancements.js --></script>

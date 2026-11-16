@@ -7,6 +7,7 @@ from pathlib import Path
 from console import (
     common,
     control_api,
+    inbox_api,
     inventory,
     read_api,
     runtime,
@@ -264,6 +265,11 @@ class Handler(BaseHTTPRequestHandler):
                 from herdr.state_db import get_user_token
                 tok = get_user_token(uid, 'experience_hub')
                 return self.send_json(200, {'ok': True, 'has_token': bool(tok)})
+            if p=='/api/inbox/tasks':return self.send_json(200,inbox_api.api_inbox_tasks(self.query()))
+            if p=='/api/inbox/task':
+                res=inbox_api.api_inbox_task(self.query().get('id',[''])[0])
+                return self.send_json(res.get('status_code',200),res)
+            if p=='/api/inbox/stats':return self.send_json(200,inbox_api.api_inbox_stats(self.query()))
             return self.send_json(404,error='Not Found')
         except herdr_deliverables.DeliverableError as e:
             return self.send_json(e.status,error=e.message)
@@ -369,6 +375,14 @@ class Handler(BaseHTTPRequestHandler):
                 from herdr.state_db import save_user_token
                 save_user_token(uid, 'experience_hub', tok)
                 return self.send_json(200, {'ok': True, 'saved': bool(tok)})
+            if p=='/api/inbox/tasks':return self.send_json(201,inbox_api.api_inbox_create_task(b))
+            if p=='/api/inbox/task/confirm':return self.send_json(200,inbox_api.api_inbox_confirm_task(b))
+            if p=='/api/inbox/task/priority':return self.send_json(200,inbox_api.api_inbox_set_priority(b))
+            if p=='/api/inbox/task/reorder':return self.send_json(200,inbox_api.api_inbox_reorder_task(b))
+            if p=='/api/inbox/task/cancel':return self.send_json(200,inbox_api.api_inbox_cancel_task(b))
+            if p=='/api/inbox/task/retry':return self.send_json(200,inbox_api.api_inbox_retry_task(b))
+            if p=='/api/inbox/detect':return self.send_json(200,inbox_api.api_inbox_detect(b))
+            if p=='/api/inbox/sweep':return self.send_json(200,inbox_api.api_inbox_sweep())
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('POST %s failed: %s', self.path, e)

@@ -8,6 +8,7 @@ from .constants import _INITIALIZED_DBS
 from .schema_ddl_helpers import _ensure_eval_replay_columns, _ensure_rollout_schema
 from .schema_ddl_txn import _ensure_schema_ddl_transaction
 from .schema_v1 import _bootstrap_v1
+from herdr.inbox.schema import ensure_inbox_schema
 
 
 @contextmanager
@@ -430,5 +431,6 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_replay ON replay_specs(replay_run_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_specs_workflow ON replay_specs(workflow_id);")
     _ensure_rollout_schema(conn)
+    ensure_inbox_schema(conn)
 
     _bootstrap_v1(conn, path_key)
