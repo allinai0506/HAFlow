@@ -8,6 +8,25 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-17] fix | User Task Inbox V1 — 原子执行权 CAS 续租、心跳失联即时熔断与底层停止证据门禁 (PR #420 第七轮复审 P1-01 / P1-02 闭环)
+
+- 背景：PR #420 第七轮独立复审指出 2 项阻断级 P1 缺陷：
+  1. P1-01（启动前竞态与心跳失联）：仅用 SELECT 检查执行权存在 TOCTOU 窗口，检查与启动间进程暂停可能发生双启动；心跳更新未校验 `rowcount`，失去所有权后未主动终止；缺乏进程启动幂等性；
+  2. P1-02（取消任务假装停止）：`_safely_stop_fenced_workflow` 无论底层 task halt 或 close pane 是否成功均被捕获吞掉，`cancel_task` 最终无条件将任务标为 `CANCELLED` 并释放工作区，违反“不能仅凭数据库状态变化认定 Agent 进程已停止”的铁律。
+- 变更：
+  1. `herdr/inbox/dispatcher.py`：
+     - 在 runner 执行前以原子 CAS UPDATE（校验 `status='CLAIMED'`、`worker_id` 及 `lease_expires_at >= now`）原子校验并续租 180 秒，`rowcount == 0` 时立即熔断；
+     - 心跳循环增加 `rowcount == 1` 断言，一旦失权立即触发 `lost_ownership` 事件退出循环；
+     - 包装 runner 执行网关，`lost_ownership` 置位时坚决禁止启动 Agent；执行异常时失权 Worker 不得重置任务状态；
+     - 在 Factory 启动入口增加已注册工作流幂等复用，杜绝外部进程重复创建；
+     - `_safely_stop_fenced_workflow` 引入严格停止结果契约（`STOPPED` / `ALREADY_TERMINAL` / `STOP_FAILED`），包含对活跃 Pane 的关闭与停止证据检查，无法证明停止时返回 `STOP_FAILED` 并拒绝将工作流置为终态；
+  2. `herdr/inbox/store.py`：
+     - `cancel_task` 严守终止证据门禁，仅当返回 `STOPPED` 或 `ALREADY_TERMINAL` 时才允许将收件箱任务更新为 `CANCELLED`；返回 `STOP_FAILED` 时抛出异常、严格保留原任务状态且不释放工作区；
+  3. `console/inbox_api.py`：
+     - `api_inbox_cancel_task` 捕获终止失败并返回 409 状态码与明确错误说明；
+  4. `tests/test_inbox_dispatcher.py`：
+     - 补充 3 项针对性回归与故障注入测试：租约过期前置原子 CAS 拦截、心跳失联即时熔断且不脏写 DB、halt/close_pane 双失败故障注入（验证状态保持 RUNNING 且工作区持续占用）。
+
 ## [2026-11-17] fix | User Task Inbox V1 — 启动器 CAS 前置防重、取消任务停止底层工作流与对账全量分页 (PR #420 复审 Thread 24-26 闭环)
 
 - 背景：PR #420 审查线程指出 3 项并发与资源生命周期缺陷：
@@ -4356,3 +4375,19 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `tests/test_inbox_*.py`、`tests/test_console_inbox_api.py` 45 项专项全绿。
   - 核心工作流测试 `tests/test_workflow_*.py` 83 项全绿。
   - `python3 -m compileall -q herdr services bin tests` 零错误；`git diff --check` 零违规。
+
+## [2026-11-17] Fix | PR #420 第八轮复审闭环：停止验证保全工作区、原子执行权保护、避免误杀恢复工作流及 Semaphore 泄漏治理
+- 现场：PR #420 第八轮复审指出 3 项 P1 与 1 项 P2 调度安全与生命周期管理缺陷：
+  1. **P1-01 (停止 Agent 失败仍释放工作区)**：`_safely_stop_fenced_workflow` 在 `halt_task` 失败后降级修改数据库任务状态为 `failed`，随后即使无法确认 Agent 停止仍将 Workflow 标为 `completed`，导致工作区被误释放而造成两代 Agent 并发操作冲突；
+  2. **P1-02 (启动前检查非原子执行权保护)**：启动前 SELECT 与 runner 之间存在时间窗口，租约在窗口内失效可能引发 TOCTOU 竞态；
+  3. **P1-03 (旧 Launcher 误杀已恢复工作流)**：Launcher 启动 Workflow 后执行 CAS 更新 `WHERE status = 'CLAIMED'`，若任务已被恢复 Dispatcher 标记为 `RUNNING`，影响行数为 0，原代码将该行数判定为失去执行权并盲目停止该 Workflow；
+  4. **P2-01 (Semaphore 提前返回导致资源泄漏)**：执行权检查失败与提前退出路径未纳入同一清理作用域，导致容量为 2 的 `_LAUNCH_SEMAPHORE` 发生凭证永久泄露。
+- 根因分析与架构修复：
+  1. **可验证物理停止门禁**：`_safely_stop_fenced_workflow` 引入明确三态契约（`STOPPED` / `ALREADY_TERMINAL` / `STOP_FAILED`）。若 `halt_task` 与 `close_pane` 均失败，坚决拒绝修改任务与 Workflow 为终态，返回 `STOP_FAILED`；`cancel_task` 捕获该失败后在任务错误记录中持久化异常并抛出异常（API 返回 409），严格保持工作区忙碌互斥；
+  2. **原子 CAS 续租与执行权栅栏**：在 runner 启动前执行原子 `UPDATE` 校验租约有效性并延长租期（`rowcount == 1`），失去执行权立即中止启动；并在 runner 执行边界与 `_default_runner` 内部落实多重幂等重用与执行权防线；
+  3. **细分后验冲突语义（防误杀已恢复工作流）**：新增 `_handle_post_runner_fencing_mismatch`，当 CAS 更新影响 0 行时先核查当前任务状态。若任务已由恢复协程接管且绑定同一 `workflow_id`，保留该合法工作流的执行，仅在确认为无主孤儿工作流时才执行安全清理；
+  4. **生命周期全覆盖 Try-Finally 资源保障**：将整个 `_execute` 执行生命周期完全包进 `try ... finally`，保证无论启动校验失败、Agent 异常、还是正常执行退出，均 100% 触发 Semaphore 释放与心跳注销。
+- 验证：
+  - 新增 4 项专项测试覆盖停止失败工作区保全、Pane 关闭物理生效、交错恢复防误杀、CAS 失败 Semaphore 零泄漏；
+  - `tests/test_inbox_*.py` 与 `tests/test_console_inbox_api.py` 全部 64 项测试 100% PASS；
+  - `python3 -m compileall -q herdr services bin tests console` 与 `git diff --check` 均零违规。

@@ -242,8 +242,11 @@ def api_inbox_cancel_task(b: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "not_found", "status_code": 404}
     _check_task_ownership(existing, _resolve_current_user())
 
-    task = get_inbox_store().cancel_task(task_id, reason=reason)
-    return {"ok": True, "task": task}
+    try:
+        task = get_inbox_store().cancel_task(task_id, reason=reason)
+        return {"ok": True, "task": task}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "status_code": 409}
 
 
 def api_inbox_retry_task(b: Dict[str, Any]) -> Dict[str, Any]:

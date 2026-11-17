@@ -1092,3 +1092,405 @@ def test_reconcile_active_tasks_paginates_beyond_500_tasks(tmp_path: Path):
     # Oldest task is now COMPLETED
     t_old_updated = store.get_task(t_old["id"])
     assert t_old_updated["status"] == "COMPLETED"
+
+
+def test_launcher_atomic_cas_renewal_aborts_when_lease_expired_after_preflight(tmp_path: Path):
+    """P1-01: Atomic CAS renewal prevents TOCTOU race when lease expires between claim and runner execution."""
+    db_file = tmp_path / "cas_renewal_expire.db"
+    store = InboxStore(db_file)
+    dispatcher_a = InboxDispatcher(store=store, worker_id="worker-A", db_path=db_file)
+
+    t = store.create_task(
+        title="TOCTOU Expire Task",
+        instruction="Do work",
+        project_id="p-exp",
+        workspace_id="ws-exp",
+        auto_confirm=True,
+    )
+    claimed_by_a = dispatcher_a.claim_next_task("ws-exp")
+    assert claimed_by_a is not None
+    assert claimed_by_a["worker_id"].startswith("worker-A")
+
+    # Simulate: Worker A started launch_task and pre-assigned workflow_id,
+    # but then process was paused/delayed and its lease expired in the database
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        """
+        UPDATE user_inbox_tasks
+           SET workflow_id = 'wf_pre_assigned_1',
+               lease_expires_at = ?
+         WHERE id = ?
+        """,
+        (time.time() - 10.0, claimed_by_a["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    runner_executed = False
+
+    def test_runner(task_dict):
+        nonlocal runner_executed
+        runner_executed = True
+        return "wf_pre_assigned_1"
+
+    # Worker A resumes and attempts launch_task: atomic CAS renewal fails because lease_expires_at < now!
+    res = dispatcher_a.launch_task(claimed_by_a, runner_fn=test_runner, async_launch=False)
+    assert res is None
+    assert runner_executed is False, "Runner MUST NOT execute when atomic CAS renewal fails due to expired lease"
+
+
+def test_launcher_heartbeat_loss_aborts_and_halts_workflow(tmp_path: Path):
+    """P1-01: Heartbeat update rowcount==0 immediately marks lost ownership, halts orphan workflow, and preserves DB task."""
+    from herdr.state_db import save_workflow, get_workflow
+
+    db_file = tmp_path / "hb_loss.db"
+    store = InboxStore(db_file)
+    dispatcher_a = InboxDispatcher(store=store, worker_id="worker-A", db_path=db_file)
+
+    t = store.create_task(
+        title="Heartbeat Loss Task",
+        instruction="Do something long",
+        project_id="p-hb",
+        workspace_id="ws-hb",
+        auto_confirm=True,
+    )
+    claimed_by_a = dispatcher_a.claim_next_task("ws-hb")
+    assert claimed_by_a is not None
+
+    wf_id = "wf_hb_stolen_1"
+
+    def slow_runner(task_dict):
+        # Simulate: while runner is preparing, Worker B steals the task in the database
+        conn = sqlite3.connect(str(db_file))
+        conn.execute(
+            "UPDATE user_inbox_tasks SET worker_id = 'worker-B', lease_expires_at = ? WHERE id = ?",
+            (time.time() + 600.0, claimed_by_a["id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        # Save workflow to DB so we can verify if it gets halted upon fencing mismatch
+        save_workflow(
+            {
+                "workflow_id": wf_id,
+                "project_id": "p-hb",
+                "workspace_id": "ws-hb",
+                "title": "Stolen WF",
+                "status": "running",
+            },
+            db_path=db_file,
+        )
+        # Give heartbeat loop a moment to run and detect rowcount == 0
+        time.sleep(0.05)
+        return wf_id
+
+    # Launch task with slow_runner
+    res = dispatcher_a.launch_task(claimed_by_a, runner_fn=slow_runner, async_launch=False)
+    assert res is None
+
+    # Underlying orphan workflow must have been safely stopped (transitioned to completed/abandoned)
+    wf_after = get_workflow(wf_id, db_path=db_file)
+    assert wf_after is not None
+    assert wf_after["status"] == "completed"
+
+    # Task in DB must NOT have been overwritten or changed to PENDING/FAILED by Worker A
+    t_after = store.get_task(claimed_by_a["id"])
+    assert t_after["worker_id"] == "worker-B"
+    assert t_after["status"] == "CLAIMED"
+
+
+def test_cancel_task_fault_injection_halt_and_close_pane_both_fail(tmp_path: Path, monkeypatch):
+    """P1-02: Cancelling fails and preserves original status when underlying execution cannot be confirmed stopped."""
+    from herdr.state_db import save_workflow, get_workflow, save_task
+
+    db_file = tmp_path / "cancel_fault.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    wf_id = "wf_fault_cancel_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "project_id": "p-fault",
+            "workspace_id": "ws-fault",
+            "title": "Faulty Cancel WF",
+            "status": "running",
+            "config": {"workspace_id": "ws-fault", "project_id": "p-fault"},
+        },
+        db_path=db_file,
+    )
+    # Task has an active process running in a pane
+    save_task(
+        {
+            "task_id": "task_active_1",
+            "workflow_id": wf_id,
+            "status": "working",
+            "pane_id": "%99",
+        },
+        db_path=db_file,
+    )
+
+    t = store.create_task(
+        title="Fault Cancel Task",
+        instruction="Running task that resists stopping",
+        project_id="p-fault",
+        workspace_id="ws-fault",
+        auto_confirm=True,
+    )
+    store.update_task_status(t["id"], new_status="CLAIMED")
+    store.update_task_status(t["id"], new_status="RUNNING", workflow_id=wf_id)
+
+    # Inject faults: halt_task fails AND close_pane fails
+    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_unresponsive"})
+    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: False)
+
+    # Attempting to cancel must RAISE RuntimeError and refuse to mark CANCELLED
+    with pytest.raises(RuntimeError, match="failed to stop underlying workflow"):
+        store.cancel_task(t["id"], reason="Kill this task")
+
+    # Invariants verification:
+    # 1. Task in DB remains RUNNING (NOT CANCELLED!)
+    t_db = store.get_task(t["id"])
+    assert t_db["status"] == "RUNNING"
+
+    # 2. Workflow in DB remains running (NOT completed!)
+    wf_db = get_workflow(wf_id, db_path=db_file)
+    assert wf_db["status"] == "running"
+
+    # 3. Workspace remains busy and does not leak occupancy
+    busy, reason = dispatcher.is_workspace_busy("ws-fault")
+    assert busy is True
+    assert "RUNNING" in (reason or "")
+
+    # Now simulate recovery: close_pane succeeds
+    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: True)
+
+    cancelled = store.cancel_task(t["id"], reason="Kill this task retry")
+    assert cancelled["status"] == "CANCELLED"
+
+    # Workflow is now completed
+    wf_db_after = get_workflow(wf_id, db_path=db_file)
+    assert wf_db_after["status"] == "completed"
+
+    # Workspace is now free
+    busy_after, _ = dispatcher.is_workspace_busy("ws-fault")
+    assert busy_after is False
+
+
+def test_safely_stop_workflow_halt_task_fails_and_close_pane_fails_returns_stop_failed(tmp_path: Path, monkeypatch):
+    """P1-01: When both halt_task and close_pane fail, workflow and task remain active; workspace busy."""
+    from herdr.state_db import save_workflow, get_workflow, save_task, get_task
+
+    db_file = tmp_path / "stop_failed_both.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    wf_id = "wf_stop_failed_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "project_id": "proj-stop",
+            "workspace_id": "ws-stop",
+            "title": "Stop Failed WF",
+            "status": "running",
+            "config": {"workspace_id": "ws-stop", "project_id": "proj-stop"},
+        },
+        db_path=db_file,
+    )
+    save_task(
+        {
+            "task_id": "task_active_p1",
+            "workflow_id": wf_id,
+            "status": "working",
+            "pane_id": "%42",
+        },
+        db_path=db_file,
+    )
+
+    # Injected faults: halt_task fails AND close_pane fails
+    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_busy"})
+    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: False)
+
+    res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="testing stop failure")
+    assert res == "STOP_FAILED"
+
+    # Task status MUST NOT transition to failed (agent process still alive!)
+    t = get_task("task_active_p1", db_path=db_file)
+    assert t["status"] == "working"
+
+    # Workflow MUST NOT transition to completed
+    wf = get_workflow(wf_id, db_path=db_file)
+    assert wf["status"] == "running"
+
+    # Workspace remains busy
+    busy, reason = dispatcher.is_workspace_busy("ws-stop")
+    assert busy is True
+
+
+def test_safely_stop_workflow_halt_task_fails_but_close_pane_succeeds_returns_stopped(tmp_path: Path, monkeypatch):
+    """P1-01: When halt_task fails but close_pane terminates the pane, workflow stops and workspace is freed."""
+    from herdr.state_db import save_workflow, get_workflow, save_task, get_task
+
+    db_file = tmp_path / "stop_succeeds_close_pane.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    wf_id = "wf_stop_pane_killed_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "project_id": "proj-pane-kill",
+            "workspace_id": "ws-pane-kill",
+            "title": "Pane Killed WF",
+            "status": "running",
+            "config": {"workspace_id": "ws-pane-kill", "project_id": "proj-pane-kill"},
+        },
+        db_path=db_file,
+    )
+    save_task(
+        {
+            "task_id": "task_active_p2",
+            "workflow_id": wf_id,
+            "status": "working",
+            "pane_id": "%43",
+        },
+        db_path=db_file,
+    )
+
+    # halt_task fails (e.g. agent unsupported), but close_pane physically succeeds
+    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_unsupported"})
+    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: True)
+
+    res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="pane kill test")
+    assert res == "STOPPED"
+
+    # Task status transitioned to failed
+    t = get_task("task_active_p2", db_path=db_file)
+    assert t["status"] == "failed"
+
+    # Workflow transitioned to completed / abandoned
+    wf = get_workflow(wf_id, db_path=db_file)
+    assert wf["status"] == "completed"
+    assert wf.get("outcome") == "abandoned"
+
+    # Workspace is now freed
+    busy, _ = dispatcher.is_workspace_busy("ws-pane-kill")
+    assert busy is False
+
+
+def test_launcher_interleaved_with_recovering_dispatcher_does_not_kill_workflow(tmp_path: Path):
+    """P1-03: When another Dispatcher concurrently recovers the workflow to RUNNING, original Launcher does not kill it."""
+    from herdr.state_db import save_workflow, get_workflow
+
+    db_file = tmp_path / "interleaved_recovery.db"
+    store = InboxStore(db_file)
+    dispatcher_a = InboxDispatcher(store=store, worker_id="worker-A", db_path=db_file)
+    dispatcher_b = InboxDispatcher(store=store, worker_id="worker-B", db_path=db_file)
+
+    t = store.create_task(
+        title="Interleaved Recovery Task",
+        instruction="Long startup task",
+        project_id="proj-inter",
+        workspace_id="ws-inter",
+        auto_confirm=True,
+    )
+    claimed_by_a = dispatcher_a.claim_next_task("ws-inter")
+    assert claimed_by_a is not None
+    tid = claimed_by_a["id"]
+    wf_id = claimed_by_a.get("workflow_id") or "wf_inter_42"
+
+    def slow_runner(task_dict):
+        # 1. Register workflow in DB as running
+        save_workflow(
+            {
+                "workflow_id": wf_id,
+                "project_id": "proj-inter",
+                "workspace_id": "ws-inter",
+                "title": "Recovered Workflow",
+                "status": "running",
+                "config": {"workspace_id": "ws-inter", "project_id": "proj-inter"},
+            },
+            db_path=db_file,
+        )
+        # 2. Simulate Dispatcher B discovering the running workflow and recovering the task to RUNNING
+        conn = sqlite3.connect(str(db_file))
+        now = time.time()
+        conn.execute(
+            """
+            UPDATE user_inbox_tasks
+               SET status = 'RUNNING',
+                   workflow_id = ?,
+                   lease_expires_at = ?,
+                   heartbeat_at = ?,
+                   updated_at = ?
+             WHERE id = ? AND status = 'CLAIMED'
+            """,
+            (wf_id, now + 180.0, now, now, tid),
+        )
+        conn.commit()
+        conn.close()
+        return wf_id
+
+    # Dispatcher A runs launch_task: its UPDATE status='RUNNING' WHERE status='CLAIMED' affects 0 rows!
+    res = dispatcher_a.launch_task(claimed_by_a, runner_fn=slow_runner, async_launch=False)
+
+    # Dispatcher A must NOT have killed the recovered workflow!
+    wf_after = get_workflow(wf_id, db_path=db_file)
+    assert wf_after is not None
+    assert wf_after["status"] == "running", "Concurrently recovered workflow MUST NOT be killed by original launcher"
+
+    # Task must still be RUNNING
+    assert res is not None
+    assert res["status"] == "RUNNING"
+    assert res["workflow_id"] == wf_id
+
+
+def test_semaphore_released_on_fencing_cas_failures_allowing_subsequent_launches(tmp_path: Path):
+    """P2-01: Verify Semaphore is released on all early exits (CAS failure), preventing thread pool starvation."""
+    from herdr.inbox.dispatcher import _LAUNCH_SEMAPHORE
+
+    db_file = tmp_path / "sem_release.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, worker_id="worker-sem", db_path=db_file)
+
+    # Create 3 tasks in 3 distinct workspaces
+    t1 = store.create_task(title="Task 1", instruction="Do 1", project_id="p1", workspace_id="ws-s1", auto_confirm=True)
+    t2 = store.create_task(title="Task 2", instruction="Do 2", project_id="p2", workspace_id="ws-s2", auto_confirm=True)
+    t3 = store.create_task(title="Task 3", instruction="Do 3", project_id="p3", workspace_id="ws-s3", auto_confirm=True)
+
+    # Claim task 1 and task 2
+    c1 = dispatcher.claim_next_task("ws-s1")
+    c2 = dispatcher.claim_next_task("ws-s2")
+    c3 = dispatcher.claim_next_task("ws-s3")
+    assert c1 and c2 and c3
+
+    # Force CAS renewal failure for c1 and c2 by setting lease_expires_at in the past
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "UPDATE user_inbox_tasks SET lease_expires_at = ? WHERE id IN (?, ?)",
+        (time.time() - 100.0, c1["id"], c2["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    # Pre-acquire one permit to test that semaphore pool has exactly 2 capacity
+    # Launch c1 with semaphore release requested (simulating async launch dispatch)
+    # Both c1 and c2 fail CAS renewal
+    # If semaphore is leaked, 2 permits are permanently lost, pool becomes empty (0 permits)
+    _LAUNCH_SEMAPHORE.acquire()  # Permit 1 acquired
+    _LAUNCH_SEMAPHORE.release()  # Release to ensure baseline is clean
+
+    # Acquire permits as dispatch_all_workspaces does:
+    assert _LAUNCH_SEMAPHORE.acquire(blocking=False)
+    res1 = dispatcher.launch_task(c1, runner_fn=lambda t: "wf1", async_launch=False, release_sem_on_finish=True)
+    assert res1 is None
+
+    assert _LAUNCH_SEMAPHORE.acquire(blocking=False)
+    res2 = dispatcher.launch_task(c2, runner_fn=lambda t: "wf2", async_launch=False, release_sem_on_finish=True)
+    assert res2 is None
+
+    # Now launch task 3: if c1 and c2 leaked permits, acquire would fail!
+    assert _LAUNCH_SEMAPHORE.acquire(blocking=False), "Semaphore MUST have available permits; leak detected!"
+    res3 = dispatcher.launch_task(c3, runner_fn=lambda t: "wf3", async_launch=False, release_sem_on_finish=True)
+    assert res3 is not None
+    assert res3["status"] == "RUNNING"

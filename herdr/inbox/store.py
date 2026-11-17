@@ -489,15 +489,29 @@ class InboxStore:
         wid = task.get("workflow_id")
         cur_status = str(task.get("status") or "").upper()
         if wid and cur_status in ("WAITING", "RUNNING", "CLAIMED"):
-            try:
-                from herdr.inbox.dispatcher import InboxDispatcher
-                InboxDispatcher(db_path=self.db_path)._safely_stop_fenced_workflow(
-                    workflow_id=wid,
-                    reason=reason or "Inbox task cancelled by user",
+            from herdr.inbox.dispatcher import InboxDispatcher
+            stop_res = InboxDispatcher(db_path=self.db_path)._safely_stop_fenced_workflow(
+                workflow_id=wid,
+                reason=reason or "Inbox task cancelled by user",
+            )
+            if stop_res not in ("STOPPED", "ALREADY_TERMINAL"):
+                # Record error so state is traceable, but preserve status and workspace occupancy!
+                conn = self._conn()
+                try:
+                    conn.execute(
+                        "UPDATE user_inbox_tasks SET error = ?, updated_at = ? WHERE id = ?",
+                        (
+                            f"Cancel failed: could not confirm agent stop for workflow {wid} ({stop_res})",
+                            time.time(),
+                            task_id,
+                        ),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                raise RuntimeError(
+                    f"Cannot cancel task {task_id}: failed to stop underlying workflow {wid} (stop_result={stop_res})"
                 )
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning("Failed to safely stop workflow %s on task cancellation: %s", wid, e)
 
         return self.update_task_status(
             task_id=task_id,
