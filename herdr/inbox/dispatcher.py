@@ -343,14 +343,24 @@ class InboxDispatcher:
         task["workflow_id"] = target_workflow_id
         conn_pre = self._conn()
         try:
-            conn_pre.execute(
+            now_pre = time.time()
+            cur_pre = conn_pre.execute(
                 """
                 UPDATE user_inbox_tasks
                    SET workflow_id = ?, updated_at = ?
-                 WHERE id = ? AND (workflow_id IS NULL OR workflow_id = ?)
+                 WHERE id = ? AND status = 'CLAIMED' AND worker_id = ? AND (workflow_id IS NULL OR workflow_id = ?)
                 """,
-                (target_workflow_id, time.time(), task_id, target_workflow_id),
+                (target_workflow_id, now_pre, task_id, fencing_token, target_workflow_id),
             )
+            if cur_pre.rowcount == 0:
+                logger.warning(
+                    "Launcher ownership check failed before starting workflow for task %s (worker=%s)",
+                    task_id,
+                    fencing_token,
+                )
+                if release_sem_on_finish:
+                    _LAUNCH_SEMAPHORE.release()
+                return None
             conn_pre.commit()
         finally:
             conn_pre.close()
@@ -433,6 +443,29 @@ class InboxDispatcher:
                 raise RuntimeError("Workflow launched but workflow_id could not be resolved from output")
 
             exec_runner = runner_fn or _default_runner
+
+            # Pre-runner CAS check: verify launcher still owns task and lease is valid before executing runner (P1)
+            conn_cas = self._conn()
+            try:
+                cur_cas = conn_cas.execute(
+                    """
+                    SELECT status, worker_id, lease_expires_at
+                      FROM user_inbox_tasks
+                     WHERE id = ?
+                    """,
+                    (task_id,),
+                )
+                r_cas = cur_cas.fetchone()
+                now_check = time.time()
+                if not r_cas or r_cas[0] != "CLAIMED" or r_cas[1] != fencing_token or (r_cas[2] and r_cas[2] < now_check):
+                    logger.warning(
+                        "Launcher fencing token CAS check failed before runner execution for task %s (expected worker %s, found %s, lease=%s, now=%s)",
+                        task_id, fencing_token, r_cas[1] if r_cas else None, r_cas[2] if r_cas else None, now_check
+                    )
+                    stop_hb.set()
+                    return None
+            finally:
+                conn_cas.close()
 
             try:
                 workflow_id = exec_runner(task) or target_workflow_id
@@ -599,8 +632,16 @@ class InboxDispatcher:
         reconciled = []
         tasks_to_reconcile = []
         for st in ("RUNNING", "WAITING"):
-            t_list, _ = self.store.list_tasks(status=st, limit=500)
-            tasks_to_reconcile.extend(t_list)
+            offset = 0
+            batch_size = 500
+            while True:
+                t_list, total = self.store.list_tasks(status=st, limit=batch_size, offset=offset)
+                if not t_list:
+                    break
+                tasks_to_reconcile.extend(t_list)
+                offset += len(t_list)
+                if offset >= total:
+                    break
 
         from herdr.state_db import get_workflow
 

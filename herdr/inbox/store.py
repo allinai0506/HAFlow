@@ -477,7 +477,28 @@ class InboxStore:
             conn.close()
 
     def cancel_task(self, task_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
-        """Cancel a task if not already completed/failed."""
+        """Cancel a task if not already completed/failed.
+
+        If the task is associated with an active workflow (WAITING, RUNNING, CLAIMED),
+        safely stop the underlying workflow and halt tasks to release workspace occupancy.
+        """
+        task = self.get_task(task_id)
+        if not task:
+            raise KeyError(f"Inbox task not found: {task_id}")
+
+        wid = task.get("workflow_id")
+        cur_status = str(task.get("status") or "").upper()
+        if wid and cur_status in ("WAITING", "RUNNING", "CLAIMED"):
+            try:
+                from herdr.inbox.dispatcher import InboxDispatcher
+                InboxDispatcher(db_path=self.db_path)._safely_stop_fenced_workflow(
+                    workflow_id=wid,
+                    reason=reason or "Inbox task cancelled by user",
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Failed to safely stop workflow %s on task cancellation: %s", wid, e)
+
         return self.update_task_status(
             task_id=task_id,
             new_status="CANCELLED",

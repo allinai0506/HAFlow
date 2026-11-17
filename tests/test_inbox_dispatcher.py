@@ -924,3 +924,171 @@ def test_launch_task_requeues_when_workflow_never_registered(tmp_path: Path):
     assert launched is not None
     assert launched["status"] == "PENDING"
     assert "Command not found" in (launched.get("error") or "")
+
+
+def test_launcher_ownership_cas_check_aborts_when_ownership_lost(tmp_path: Path):
+    """P1 (Thread 24): Launcher aborts before calling runner if task ownership or lease was lost."""
+    db_file = tmp_path / "fencing_cas.db"
+    store = InboxStore(db_file)
+    dispatcher_a = InboxDispatcher(store=store, worker_id="worker-A", db_path=db_file)
+    dispatcher_b = InboxDispatcher(store=store, worker_id="worker-B", db_path=db_file)
+
+    t = store.create_task(
+        title="Fenced Runner Task",
+        instruction="Do something",
+        project_id="proj-cas",
+        workspace_id="ws-cas",
+        auto_confirm=True,
+    )
+    claimed_by_a = dispatcher_a.claim_next_task("ws-cas")
+    assert claimed_by_a is not None
+    assert claimed_by_a["worker_id"].startswith("worker-A")
+
+    # Simulate: while A is delayed, its lease expires, and worker B steals/recovers the task
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "UPDATE user_inbox_tasks SET worker_id = 'worker-B', lease_expires_at = ? WHERE id = ?",
+        (time.time() + 300, claimed_by_a["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    runner_called = False
+
+    def test_runner(task_dict):
+        nonlocal runner_called
+        runner_called = True
+        return "wf_from_a"
+
+    # Now A runs launch_task: ownership CAS must fail and abort WITHOUT invoking test_runner!
+    result = dispatcher_a.launch_task(claimed_by_a, runner_fn=test_runner, async_launch=False)
+    assert result is None
+    assert runner_called is False
+
+
+def test_cancel_waiting_task_stops_workflow_and_releases_workspace(tmp_path: Path):
+    """P2 (Thread 25): Cancelling a WAITING task safely stops the underlying workflow and frees workspace."""
+    from herdr.state_db import save_workflow, get_workflow
+
+    db_file = tmp_path / "cancel_waiting.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    wf_id = "wf_to_cancel_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "project_id": "proj-w",
+            "workspace_id": "ws-w",
+            "title": "Active WF",
+            "status": "paused",
+            "config": {"workspace_id": "ws-w", "project_id": "proj-w"},
+        },
+        db_path=db_file,
+    )
+
+    t = store.create_task(
+        title="Waiting Task",
+        instruction="Wait for input",
+        project_id="proj-w",
+        workspace_id="ws-w",
+        auto_confirm=True,
+    )
+    # Transition to WAITING associated with wf_id
+    store.update_task_status(t["id"], new_status="CLAIMED")
+    store.update_task_status(t["id"], new_status="RUNNING", workflow_id=wf_id)
+    store.update_task_status(t["id"], new_status="WAITING")
+
+    # Workspace is busy initially
+    busy, reason = dispatcher.is_workspace_busy("ws-w")
+    assert busy is True
+
+    # Next task in queue is blocked
+    t2 = store.create_task(
+        title="Queued Task 2",
+        instruction="Should run after cancel",
+        project_id="proj-w",
+        workspace_id="ws-w",
+        auto_confirm=True,
+    )
+    assert dispatcher.claim_next_task("ws-w") is None
+
+    # Cancel the waiting task
+    cancelled = store.cancel_task(t["id"], reason="User cancelled waiting task")
+    assert cancelled["status"] == "CANCELLED"
+
+    # Underlying workflow must now be stopped (completed/abandoned)
+    wf_after = get_workflow(wf_id, db_path=db_file)
+    assert wf_after is not None
+    assert wf_after["status"] == "completed"
+
+    # Workspace is now free!
+    busy_after, _ = dispatcher.is_workspace_busy("ws-w")
+    assert busy_after is False
+
+    # Next task can be claimed immediately!
+    claimed_2 = dispatcher.claim_next_task("ws-w")
+    assert claimed_2 is not None
+    assert claimed_2["id"] == t2["id"]
+
+
+def test_reconcile_active_tasks_paginates_beyond_500_tasks(tmp_path: Path):
+    """P2 (Thread 26): Reconciliation paginates beyond the first 500 tasks, avoiding starvation."""
+    from herdr.state_db import save_workflow
+
+    db_file = tmp_path / "paginate_reconcile.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    # 1. Create task-oldest with a completed workflow
+    wf_oldest = "wf_oldest"
+    save_workflow(
+        {
+            "workflow_id": wf_oldest,
+            "project_id": "p-old",
+            "workspace_id": "ws-old",
+            "title": "Oldest Completed",
+            "status": "completed",
+            "config": {"workspace_id": "ws-old", "project_id": "p-old"},
+        },
+        db_path=db_file,
+    )
+    t_old = store.create_task(
+        title="Oldest Task",
+        instruction="Do oldest",
+        project_id="p-old",
+        workspace_id="ws-old",
+        auto_confirm=True,
+    )
+    store.update_task_status(t_old["id"], new_status="CLAIMED")
+    store.update_task_status(t_old["id"], new_status="RUNNING", workflow_id=wf_oldest)
+
+    # 2. Insert 505 newer tasks in WAITING status (to exceed 500 limit)
+    conn = sqlite3.connect(str(db_file))
+    now = time.time()
+    for i in range(505):
+        tid = f"task-newer-{i:04d}"
+        conn.execute(
+            """
+            INSERT INTO user_inbox_tasks (
+                id, user_id, title, instruction, status, priority, priority_weight,
+                sort_order, created_at, updated_at
+            ) VALUES (?, 'default', ?, 'Instruction', 'WAITING', 'NORMAL', 2, ?, ?, ?)
+            """,
+            (tid, f"Newer Task {i}", i, now + i + 1, now + i + 1),
+        )
+    conn.commit()
+    conn.close()
+
+    # Verify total waiting tasks is 505, running is 1
+    _, waiting_total = store.list_tasks(status="WAITING")
+    assert waiting_total == 505
+
+    # 3. Reconcile: must paginate and reach the oldest running task!
+    reconciled = dispatcher.reconcile_running_tasks()
+    reconciled_ids = {r["id"] for r in reconciled}
+    assert t_old["id"] in reconciled_ids
+
+    # Oldest task is now COMPLETED
+    t_old_updated = store.get_task(t_old["id"])
+    assert t_old_updated["status"] == "COMPLETED"

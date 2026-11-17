@@ -8,6 +8,18 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-17] fix | User Task Inbox V1 — 启动器 CAS 前置防重、取消任务停止底层工作流与对账全量分页 (PR #420 复审 Thread 24-26 闭环)
+
+- 背景：PR #420 审查线程指出 3 项并发与资源生命周期缺陷：
+  1. 启动器执行前未对任务所有权与租约做 CAS 校验，若挂起后被其他节点抢占可能发生重复执行 (Thread 24)；
+  2. 取消 WAITING 任务时未终止底层暂停工作流，导致工作区被无主工作流永久阻塞 (Thread 25)；
+  3. 控制器对账固定只取前 500 个任务，全局任务超限时导致老任务饥饿无法收敛 (Thread 26)。
+- 变更：
+  1. `herdr/inbox/dispatcher.py`：在 `launch_task` 更新 workflow_id 以及在执行 runner 前均增加严格 CAS 校验（检查 `status='CLAIMED'`、`worker_id` 及租约有效性），一旦失去所有权立即终止，杜绝侧效应重复执行；
+  2. `herdr/inbox/store.py`：在 `cancel_task` 中对处于 WAITING/RUNNING 状态的任务先通过 `_safely_stop_fenced_workflow` 优雅终止底层工作流与 Pane，释放工作区互斥锁后再标记 CANCELLED；
+  3. `herdr/inbox/dispatcher.py`：在 `reconcile_running_tasks` 中引入分页循环遍历，完整对账所有活跃任务，彻底消除 500 条限制导致的任务饥饿；
+  4. `tests/test_inbox_dispatcher.py`：新增 3 项回归测试，验证抢占终止、取消释放空间与超出 500 条全量对账。
+
 ## [2026-11-17] fix | User Task Inbox V1 — 数据库迁移原子事务、前端分页刷新与 URL 显式优先级 (PR #420 第四轮复审修复)
 
 - 背景：PR #420 第四轮独立复审指出 1 项阻断级 P1（旧数据库迁移非原子操作，未显式事务包裹存在任务数据丢失风险）、2 项前端 P2（自动刷新重置已加载分页、显式 workflow_id 可能被旧 __inbox__ 状态覆盖），并要求对 WAITING 状态的工作区互斥与资源生命周期做出明确架构裁决。
