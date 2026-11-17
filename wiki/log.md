@@ -4443,3 +4443,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 18 项 CI 失败用例（含 `test_console_templates.py`、`test_critical_reads_fail_closed.py`、`test_console_controller_cockpit_*.py` 等）100% 全部通过。
   - `tests/test_inbox_*.py`、`tests/test_workflow_shutdown.py`、`tests/test_steering_mesh.py` 等 119 项核心专项全绿。
   - `python3 -m compileall -q herdr services bin tests console` 零错误；`git diff --check` 零违规。
+
+## [2026-11-18] Fix | Workflow Shutdown 核对进程退出与启动资源
+- 第十五轮复审修正了上一轮的停止判定。关闭流程按启动意图盘点资源，核对 Pane 归属，并在终端会话和已观测子进程退出后记录 `PROCESS_STOPPED`。证据不足时保持 `closing` 和工作区占用。
+- Evidence
+  - `herdr/workflow_shutdown.py#shutdown_workflow`
+  - `herdr/task_resources.py#workflow_launch_lock`
+  - `tests/test_workflow_shutdown.py#test_scenario_3_interrupt_ack_keeps_occupancy_until_process_stops`

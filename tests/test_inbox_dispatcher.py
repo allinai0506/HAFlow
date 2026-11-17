@@ -1240,9 +1240,7 @@ def test_cancel_task_fault_injection_halt_and_close_pane_both_fail(tmp_path: Pat
     store.update_task_status(t["id"], new_status="CLAIMED")
     store.update_task_status(t["id"], new_status="RUNNING", workflow_id=wf_id)
 
-    # Inject faults: halt_task fails AND close_pane fails
-    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_unresponsive"})
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: False)
+    monkeypatch.setattr("herdr.workflow_shutdown._stop_runtime", lambda *a, **k: False)
 
     # Attempting to cancel must RAISE RuntimeError and refuse to mark CANCELLED
     with pytest.raises(RuntimeError, match="failed to stop underlying workflow"):
@@ -1263,9 +1261,7 @@ def test_cancel_task_fault_injection_halt_and_close_pane_both_fail(tmp_path: Pat
     assert busy is True
     assert "RUNNING" in (reason or "")
 
-    # Now simulate recovery: runtime ownership verified and close_pane succeeds
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (True, "identity_match"))
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: True)
+    monkeypatch.setattr("herdr.workflow_shutdown._stop_runtime", lambda *a, **k: True)
 
     cancelled = store.cancel_task(t["id"], reason="Kill this task retry")
     assert cancelled["status"] == "CANCELLED"
@@ -1309,9 +1305,7 @@ def test_safely_stop_workflow_halt_task_fails_and_close_pane_fails_returns_stop_
         db_path=db_file,
     )
 
-    # Injected faults: halt_task fails AND close_pane fails
-    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_busy"})
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: False)
+    monkeypatch.setattr("herdr.workflow_shutdown._stop_runtime", lambda *a, **k: False)
 
     res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="testing stop failure")
     assert res == "STOP_FAILED"
@@ -1360,10 +1354,7 @@ def test_safely_stop_workflow_halt_task_fails_but_close_pane_succeeds_returns_st
         db_path=db_file,
     )
 
-    # halt_task fails (e.g. agent unsupported), but runtime ownership is verified and close_pane physically succeeds
-    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_unsupported"})
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (True, "identity_match"))
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: True)
+    monkeypatch.setattr("herdr.workflow_shutdown._stop_runtime", lambda *a, **k: True)
 
     res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="pane kill test")
     assert res == "STOPPED"
@@ -1530,9 +1521,8 @@ def test_safely_stop_workflow_halt_task_fails_and_ownership_unproven_refuses_to_
         db_path=db_file,
     )
 
-    # Injected faults: halt_task fails, runtime ownership check returns session_mismatch
-    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_busy"})
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (False, "session_mismatch"))
+    monkeypatch.setattr("herdr.workflow_shutdown._pane", lambda _: {"terminal_id": "foreign"})
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda _: (False, "session_mismatch"))
 
     close_pane_called = False
 
@@ -1540,8 +1530,7 @@ def test_safely_stop_workflow_halt_task_fails_and_ownership_unproven_refuses_to_
         nonlocal close_pane_called
         close_pane_called = True
         return True
-
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", mock_close_pane)
+    monkeypatch.setattr("herdr.workflow_shutdown.close_pane", mock_close_pane)
 
     res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="testing unproven ownership")
     assert res == "STOP_FAILED", "Must return STOP_FAILED when runtime ownership is unproven"
@@ -1561,8 +1550,8 @@ def test_safely_stop_workflow_halt_task_fails_and_ownership_unproven_refuses_to_
     assert busy is True
 
 
-def test_safely_stop_workflow_halt_task_fails_pane_missing_stops_and_releases(tmp_path: Path, monkeypatch):
-    """P1-02 / Invariant 11: When halt_task fails and pane is confirmed missing, task is stopped and workspace freed."""
+def test_safely_stop_workflow_pane_missing_without_process_evidence_preserves_occupancy(tmp_path: Path, monkeypatch):
+    """A vanished pane does not establish process exit without a process receipt."""
     from herdr.state_db import save_workflow, get_workflow, save_task, get_task
 
     db_file = tmp_path / "stop_missing_pane.db"
@@ -1591,26 +1580,11 @@ def test_safely_stop_workflow_halt_task_fails_pane_missing_stops_and_releases(tm
         db_path=db_file,
     )
 
-    # Injected faults: halt_task fails, runtime ownership check confirms pane is already missing
-    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_unsupported"})
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (False, "pane_missing"))
-
-    res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="testing missing pane")
-    assert res == "STOPPED"
-
-    # Task status transitioned to failed
-    t = get_task("task_missing_1", db_path=db_file)
-    assert t["status"] == "failed"
-
-    # Workflow transitioned to completed (abandoned)
-    wf = get_workflow(wf_id, db_path=db_file)
-    assert wf["status"] == "completed"
-    assert wf.get("outcome") == "abandoned"
-
-    # Workspace is now freed
-    busy, _ = dispatcher.is_workspace_busy("ws-missing")
-    assert busy is False
-
+    # A missing pane without process evidence is an unknown stop.
+    monkeypatch.setattr("herdr.workflow_shutdown._pane", lambda _: None)
+    assert dispatcher._safely_stop_fenced_workflow(wf_id) == "STOP_FAILED"
+    assert get_workflow(wf_id, db_path=db_file)["status"] == "closing"
+    assert dispatcher.is_workspace_busy("ws-missing")[0]
 
 def test_full_execution_fencing_lifecycle(tmp_path: Path):
     """Comprehensive test of full execution fencing lifecycle:
@@ -1802,20 +1776,20 @@ def test_pane_reused_by_other_agent_cancel_refuses_to_interrupt_new_agent(tmp_pa
     halt_called = False
     close_called = False
 
-    def spy_halt_task(tid, *a, **k):
+    monkeypatch.setattr("herdr.workflow_shutdown._pane", lambda _: {"terminal_id": "foreign"})
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda _: (False, "session_mismatch"))
+    def unexpected_adapter(agent):
         nonlocal halt_called
         halt_called = True
-        return {"ok": True}
+        pytest.fail("refused runtime must never resolve a signaling adapter")
+
+    monkeypatch.setattr("herdr.workflow_shutdown.get_agent_adapter", unexpected_adapter)
 
     def spy_close_pane(pid):
         nonlocal close_called
         close_called = True
         return True
-
-    monkeypatch.setattr("herdr.steering.halt_task", spy_halt_task)
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", spy_close_pane)
-    # Runtime ownership check confirms %88 belongs to another session (session_mismatch)
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (False, "session_mismatch"))
+    monkeypatch.setattr("herdr.workflow_shutdown.close_pane", spy_close_pane)
 
     # Cancellation must fail because execution cannot be safely confirmed stopped
     with pytest.raises(RuntimeError, match="failed to stop underlying workflow"):
@@ -1926,9 +1900,9 @@ def test_claimed_task_cancellation_both_inbox_and_workflow_reach_terminal_state(
     # Attach workflow_id to the claimed task in store
     store.update_task_status(claimed["id"], new_status="CLAIMED", workflow_id=wf_id)
 
-    # Pane %44 is owned and gracefully halts
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (True, "identity_match"))
-    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr("herdr.workflow_shutdown._stop_runtime", lambda *a, **k: True)
+
+
 
     # Cancel the CLAIMED task
     cancelled = store.cancel_task(claimed["id"], reason="User cancels CLAIMED task")

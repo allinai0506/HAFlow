@@ -89,10 +89,9 @@ def workflow_launch_lock(db_path, workflow_id, timeout=10):
                 if time.monotonic() >= deadline:
                     raise NodeLaunchBusy('workflow launch in progress; retry after it registers')
                 time.sleep(0.05)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+        # Closing the last descriptor releases the flock. An allocating
+        # worker can inherit it and keep the fence held if the launcher exits.
+        yield lock.fileno()
 
 
 def owned_live_pane(task, probe=None):

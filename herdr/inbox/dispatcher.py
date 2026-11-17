@@ -44,7 +44,7 @@ TERMINAL_WORKFLOW_STATUSES = frozenset({
 })
 
 
-from herdr.workflow_shutdown import close_pane, shutdown_workflow
+from herdr.workflow_shutdown import shutdown_workflow
 
 
 class InboxDispatcher:

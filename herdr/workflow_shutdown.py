@@ -1,304 +1,335 @@
-"""Universal Workflow Shutdown Protocol (P1 - ADR-0007 / OEP-0002).
-
-Invariants:
-1. Atomically sets workflow status to CLOSING before attempting teardown side effects.
-2. In CLOSING state, node_dispatch.active returns False, rejecting new task dispatches.
-3. Coordinates with in-flight launches via workflow_launch_lock and launch intent draining.
-4. Refreshes active tasks snapshot to catch any task registered right before or during closing.
-5. Safely halts/kills only verified owned live panes/agents; refuses to signal unproven panes.
-6. Re-verifies zero active execution instances before terminal transition.
-7. Atomically transitions workflow to terminal state (completed / abandoned).
-8. Guarantees workspace occupancy is released only after all agents are confirmed stopped.
-"""
+"""Fence new launches and verify local execution has stopped before release."""
 from __future__ import annotations
 
 import json
 import logging
-import sqlite3
+import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
 
+from herdr import task_resources
+from herdr.agent_adapter import get_agent_adapter
 from herdr.kernel import state_db_path
-from herdr.state_db import get_workflow, list_tasks, transition_task, transition_workflow
-from herdr.task_resources import owned_live_pane, workflow_launch_lock
+from herdr.node_capacity import CONCURRENT_STATUSES, pane_reference
+from herdr.observer.live import _get_pane, _run_herdr
+from herdr.state_db import get_workflow, transition_task, transition_workflow
+from herdr.state_store import SQLiteStateStore
 from herdr.transitions import TERMINAL_WORKFLOW_STATUSES
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_TASK_STATUSES: Set[str] = {
-    "working", "agent_done", "rework", "paused", "blocked", "dispatched", "pending"
-}
+
+def close_pane(pane_id: str) -> None:
+    # The caller checks the same native backend before and after this request.
+    _run_herdr(["herdr", "pane", "close", pane_id], 5)
 
 
-def close_pane(pane_id: str) -> bool:
-    """Safely close a tmux/herdr pane and return True if successful or already closed."""
-    if not pane_id:
+def _pane(pane_id):
+    outcome, pane = _get_pane(_run_herdr, pane_id, 2)
+    if outcome == "failed":
+        raise RuntimeError("pane probe failed")
+    return pane
+
+
+def _terminal_processes(session_id, previous=()):
+    """Track the terminal session and observed descendants, even after reparenting."""
+    result = subprocess.run(
+        ["ps", "-axo", "uid=,pid=,ppid=,stat="], capture_output=True,
+        text=True, timeout=2, check=True,
+    )
+    processes = {}
+    members = set(previous)
+    for line in result.stdout.splitlines():
+        uid, pid, parent, status = line.split()
+        pid = int(pid)
+        if status.startswith("Z"):
+            continue
+        processes[pid] = int(parent)
+        if int(uid) == os.getuid() and pid not in members:
+            try:
+                if os.getsid(pid) == session_id:
+                    members.add(pid)
+            except ProcessLookupError:
+                continue
+    if not result.stdout.strip():
+        raise RuntimeError("empty process inventory")
+    frontier = members
+    while frontier:
+        children = {pid for pid, parent in processes.items() if parent in frontier} - members
+        members |= children
+        frontier = children
+    return members.intersection(processes)
+
+
+def _stop_runtime(store, target, *, reason, deadline, intent=None):
+    pane_id = pane_reference(target)
+    task_id = target["task_id"] if intent is None else intent["key"]
+    workflow_id = target["workflow_id"]
+    identity = {
+        "pane_id": pane_id, "run_id": target.get("run_id"),
+        "intent_id": intent["intent_id"] if intent else None,
+    }
+    events = store.list_events(
+        workflow_id=workflow_id, task_id=task_id, event_type="shutdown_process",
+        source="workflow_shutdown", limit=1, desc=True,
+    )
+    receipt = events[0]["payload"] if events else None
+    if receipt and receipt["identity"] != identity:
+        if receipt["phase"] != "PROCESS_STOPPED":
+            return False
+        receipt = None
+
+    def record(phase, terminal_id, shell, pids):
+        store.record_event(
+            "shutdown_process", {"identity": identity, "phase": phase,
+                                 "terminal_id": terminal_id, "shell": shell, "pids": sorted(pids)},
+            workflow_id=workflow_id, task_id=task_id, source="workflow_shutdown",
+        )
+
+    def owned(pane):
+        if not pane or not pane.get("terminal_id"):
+            return False
+        workspace = target.get("workspace_id") or (target.get("runtime") or {}).get("workspace_id")
+        if workspace and pane.get("workspace_id") != workspace:
+            return False
+        if target.get("terminal_id") and pane["terminal_id"] != target["terminal_id"]:
+            return False
+        if (intent and target.get("phase") in {"workspace_created", "pane_allocated"}
+                and target.get("pane_source") == "dynamic" and target.get("terminal_id")):
+            return (bool(pane.get("cwd")) and
+                    Path(pane["cwd"]).resolve() == Path(target["planned_clone_path"]).resolve())
+        return task_resources.owned_live_pane(target)[0]
+
+    pane = _pane(pane_id)
+    if receipt and receipt["phase"] == "PROCESS_STOPPED":
+        # A surviving/new pane with this terminal identity contradicts the receipt.
+        return pane is None or pane.get("terminal_id") != receipt["terminal_id"]
+    if pane is None:
+        if not receipt or _terminal_processes(receipt["shell"], receipt["pids"]):
+            return False
+        record("PROCESS_STOPPED", receipt["terminal_id"], receipt["shell"], receipt["pids"])
         return True
-    try:
-        res = subprocess.run(["herdr", "pane", "close", str(pane_id)], capture_output=True, timeout=5)
-        if res.returncode == 0:
-            return True
-    except Exception:
-        pass
-    try:
-        res = subprocess.run(["tmux", "kill-pane", "-t", str(pane_id)], capture_output=True, timeout=5)
-        err = (res.stderr or b"").decode("utf-8", errors="replace").lower()
-        if res.returncode == 0 or "can't find pane" in err or "no pane" in err:
-            return True
-        logger.warning("Failed to close pane %s: returncode=%s, stderr=%s", pane_id, res.returncode, err.strip())
-        return False
-    except Exception as exc:
-        logger.warning("Exception closing pane %s: %s", pane_id, exc)
+    if not owned(pane):
         return False
 
+    terminal_id = pane["terminal_id"]
+    code, stdout, _ = _run_herdr(["herdr", "pane", "process-info", "--pane", pane_id], 2)
+    if code:
+        return False
+    info = json.loads(stdout)["result"]["process_info"]
+    shell = info["shell_pid"]
+    if (info["pane_id"] != pane_id or type(shell) is not int or shell <= 1
+            or os.getsid(shell) != shell):
+        return False
+    current = _pane(pane_id)
+    if not current or current.get("terminal_id") != terminal_id or not owned(current):
+        return False
+    if receipt and (receipt["terminal_id"] != terminal_id or receipt["shell"] != shell):
+        return False
+    pids = _terminal_processes(shell, receipt["pids"] if receipt else ())
+    if shell not in pids or not info.get("foreground_processes"):
+        return False
+    record("STOP_PENDING", terminal_id, shell, pids)
 
-def drain_unsettled_launch_intents(
-    workflow_id: str,
-    db_path: Optional[str | Path] = None,
-    reason: str = "workflow shutdown",
-) -> None:
-    """Abort any allocating or unsettled launch intents for the workflow (P1)."""
+    runtime = target.get("runtime") or {}
+    adapter = get_agent_adapter(target.get("agent") or runtime.get("agent"))
+    if adapter.supports_interrupt and adapter.interrupt(pane_id, reason=reason):
+        logger.info("INTERRUPT_SENT for %s", task_id)
+        grace = min(deadline, time.monotonic() + 0.5)
+        while time.monotonic() < grace:
+            live = _terminal_processes(shell, pids)
+            pids |= live
+            if not live - {shell}:
+                break
+            time.sleep(0.05)
+
+    current = _pane(pane_id)
+    if current is not None:
+        if current.get("terminal_id") != terminal_id or not owned(current):
+            # The Agent can disappear after a successful interrupt. The
+            # unchanged terminal and an empty execution session still allow
+            # closing the original shell.
+            if (current.get("terminal_id") != terminal_id
+                    or task_resources.owned_live_pane(target)[1] != "agent_not_found"
+                    or _terminal_processes(shell, pids) != {shell}):
+                return False
+    pids |= _terminal_processes(shell, pids)
+    record("STOP_PENDING", terminal_id, shell, pids)
+    if current is not None:
+        latest = _pane(pane_id)
+        if latest is not None:
+            if latest["terminal_id"] != terminal_id or time.monotonic() >= deadline:
+                return False
+            close_pane(pane_id)
+
+    settle_until = min(deadline, time.monotonic() + 1.0)
+    while True:
+        if _pane(pane_id) is None and not _terminal_processes(shell, pids):
+            record("PROCESS_STOPPED", terminal_id, shell, pids)
+            return True
+        if time.monotonic() >= settle_until:
+            return False
+        time.sleep(0.05)
+
+
+def _latest_events(store, workflow_id, event_type, source):
+    from herdr.state_db import get_readonly_db_connection
+
+    conn = get_readonly_db_connection(store.db_path)
     try:
-        from herdr.task_resources import _launch_event
-        from herdr.state_store import SQLiteStateStore
-        resolved_db = Path(db_path).resolve() if db_path else Path(state_db_path()).resolve()
-        if not resolved_db.exists():
-            return
-        conn = sqlite3.connect(str(resolved_db))
-        conn.row_factory = sqlite3.Row
-        try:
-            cur = conn.execute(
-                """
-                SELECT payload_json FROM events
-                WHERE workflow_id = ? AND event_type = 'launch_intent'
-                ORDER BY id DESC
-                """,
-                (workflow_id,),
+        return conn.execute("""
+            SELECT task_id, payload_json
+            FROM (
+                SELECT task_id, payload_json, ROW_NUMBER() OVER (
+                    PARTITION BY task_id ORDER BY timestamp DESC, id DESC
+                ) AS history_rank
+                FROM events
+                WHERE workflow_id = ? AND event_type = ? AND source = ?
             )
-            rows = cur.fetchall()
-            seen_keys = set()
-            store = SQLiteStateStore(str(resolved_db))
-            now = time.time()
-            for r in rows:
-                try:
-                    payload = json.loads(r["payload_json"] or "{}")
-                    key = payload.get("key")
-                    if not key or key in seen_keys:
-                        continue
-                    seen_keys.add(key)
-                    if payload.get("phase") == "allocating":
-                        rolled_back = {**payload, "phase": "resources_absent", "abort_reason": reason}
-                        _launch_event(store, rolled_back, now=now)
-                except Exception as parse_err:
-                    logger.warning("Error parsing launch_intent event: %s", parse_err)
-        finally:
-            conn.close()
-    except Exception as exc:
-        logger.warning("Error draining launch intents for %s: %s", workflow_id, exc)
+            WHERE history_rank = 1
+            """, (workflow_id, event_type, source)).fetchall()
+    finally:
+        conn.close()
+
+
+def _pending_processes_stopped(store, workflow_id):
+    # Other lifecycle callers can clear a Task's pane reference while a
+    # shutdown is pending. Read the process receipts independently of Tasks.
+    for row in _latest_events(store, workflow_id, "shutdown_process", "workflow_shutdown"):
+        receipt = json.loads(row["payload_json"])
+        if receipt["phase"] == "PROCESS_STOPPED":
+            continue
+        if (_pane(receipt["identity"]["pane_id"]) is not None
+                or _terminal_processes(receipt["shell"], receipt["pids"])):
+            return False
+        store.record_event("shutdown_process", {**receipt, "phase": "PROCESS_STOPPED"},
+                           workflow_id=workflow_id, task_id=row["task_id"], source="workflow_shutdown")
+    return True
+
+
+def drain_unsettled_launch_intents(store, workflow_id, *, reason, deadline, check_only=False):
+    """Resolve each latest intent against registered tasks or actual resources."""
+    for row in _latest_events(store, workflow_id, "launch_intent", "launch"):
+        intent = json.loads(row["payload_json"])
+        if intent["workflow_id"] != workflow_id or intent["key"] != row["task_id"]:
+            return False
+        if intent["phase"] in {"resources_absent", "shutdown_stopped"}:
+            continue
+        if intent["phase"] == "registered":
+            if not task_resources.registered_launch_task(store, intent):
+                return False
+            continue
+        if check_only or intent["phase"] != "allocating" or time.monotonic() >= deadline:
+            return False
+        if task_resources.registered_launch_task(store, intent):
+            task_resources.finish_launch_intent(store, intent)
+            continue
+        if store.get_task(intent["task_id"]):
+            return False
+        remaining = max(0.1, deadline - time.monotonic())
+        inventory = task_resources.inventory_launch_resources(intent, timeout=remaining)
+        if inventory["resource_status"] == "foreign":
+            return False
+        resources = intent["resources"]
+        tag = inventory.get("clone_tag") or {}
+        pane_id = resources.get("pane_id") or tag.get("pane_id")
+        if inventory["resource_status"] == "absent" and not pane_id:
+            result = task_resources.reconcile_launch_intent(store, intent, lambda _: "absent")
+            if result["status"] != "resources_absent":
+                return False
+            continue
+        if not pane_id or not resources.get("run_id"):
+            logger.warning("STOP_FAILED for launch %s: %s", intent["key"], inventory["reason"])
+            return False
+        if tag.get("pane_id") not in (None, pane_id):
+            return False
+        target = {**tag, **{key: value for key, value in resources.items() if value is not None},
+                  "pane_id": pane_id, "task_id": intent["task_id"], "workflow_id": workflow_id}
+        if not _stop_runtime(store, target, reason=reason, deadline=deadline, intent=intent):
+            logger.warning("STOP_FAILED for launch %s: execution unverified", intent["key"])
+            return False
+        inventory = task_resources.inventory_launch_resources(intent, timeout=max(0.1, deadline - time.monotonic()))
+        if inventory["resource_status"] not in {"absent", "owned"}:
+            logger.warning("STOP_FAILED for launch %s after close: %s", intent["key"], inventory["reason"])
+            return False
+        # Retain the tagged clone as evidence and keep its allocation reserved.
+        phase = "resources_absent" if inventory["resource_status"] == "absent" else "shutdown_stopped"
+        task_resources._launch_event(store, {**intent, "phase": phase, "abort_reason": reason})
+    return True
 
 
 def shutdown_workflow(
-    workflow_id: Optional[str],
+    workflow_id: str | None,
     *,
     reason: str = "workflow shutdown requested",
     outcome: str = "abandoned",
     source: str = "workflow_shutdown",
-    db_path: Optional[str | Path] = None,
+    db_path: str | Path | None = None,
     timeout: float = 10.0,
 ) -> str:
-    """Execute the canonical 8-step Workflow Shutdown Protocol (P1 - ADR-0007 / OEP-0002).
-
-    Returns:
-    - "STOPPED": All tasks confirmed stopped, workflow transitioned to terminal.
-    - "ALREADY_TERMINAL": Workflow was already in terminal state with no active tasks.
-    - "STOP_FAILED": One or more tasks could not be confirmed stopped, workflow left in closing state.
-    """
+    """Return STOPPED only after confirmed process exit and intent settlement."""
     if not workflow_id:
         return "ALREADY_TERMINAL"
 
     try:
-        resolved_db = Path(db_path).resolve() if db_path else Path(state_db_path()).resolve()
-        wf = get_workflow(workflow_id, db_path=resolved_db)
-        if not wf:
+        resolved_db = Path(db_path or state_db_path()).resolve()
+        store = SQLiteStateStore(str(resolved_db))
+        workflow = get_workflow(workflow_id, db_path=resolved_db)
+        if not workflow:
             return "ALREADY_TERMINAL"
 
-        cur_status = str(wf.get("status") or "").lower()
-
-        # Step 0: Check if already terminal with no active tasks
-        if cur_status in TERMINAL_WORKFLOW_STATUSES:
-            try:
-                all_tasks = list_tasks(workflow_id=workflow_id, db_path=resolved_db)
-                active_tasks = [t for t in all_tasks if str(t.get("status") or "").lower() in ACTIVE_TASK_STATUSES]
-                if not active_tasks:
-                    return "ALREADY_TERMINAL"
-            except Exception as task_err:
-                logger.warning("Error listing tasks for terminal workflow %s: %s", workflow_id, task_err)
-                return "STOP_FAILED"
-
-        # Step 1: Atomically transition workflow to CLOSING before any teardown
-        if cur_status != "closing":
-            try:
-                transition_workflow(
-                    workflow_id=workflow_id,
-                    to_status="closing",
-                    reason=reason,
-                    source=source,
-                    force=True,
-                    db_path=resolved_db,
-                )
-            except Exception as tr_err:
-                logger.error("Failed to transition workflow %s to closing: %s", workflow_id, tr_err)
-                return "STOP_FAILED"
-
-        # Step 2 & 3: Coordinate with in-flight launch operations under workflow_launch_lock
-        with workflow_launch_lock(resolved_db, workflow_id, timeout=timeout):
-            drain_unsettled_launch_intents(workflow_id, db_path=resolved_db, reason=reason)
-
-            # Step 4: Fresh snapshot of all active tasks after holding launch lock
-            try:
-                all_tasks = list_tasks(workflow_id=workflow_id, db_path=resolved_db)
-                active_tasks = [t for t in all_tasks if str(t.get("status") or "").lower() in ACTIVE_TASK_STATUSES]
-            except Exception as task_err:
-                logger.warning("Error listing tasks for closing workflow %s: %s", workflow_id, task_err)
-                return "STOP_FAILED"
-
-            # Step 5: Safely stop execution of all active tasks
-            import sys
-            from herdr import task_resources, steering
-            disp_mod = sys.modules.get("herdr.inbox.dispatcher")
-            close_fn = getattr(disp_mod, "close_pane", close_pane)
-
-            for t in active_tasks:
-                tid = t.get("task_id")
-                if not tid:
-                    continue
-                pane_id = t.get("pane_id")
-                task_stopped = False
-
-                if pane_id:
-                    try:
-                        owned, probe_reason = task_resources.owned_live_pane(t)
-                        if owned:
-                            # 1. Graceful halt via steering
-                            try:
-                                res = steering.halt_task(tid, reason=reason, operator="system", execute_kill=True)
-                                if isinstance(res, dict) and res.get("ok"):
-                                    task_stopped = True
-                                    try:
-                                        from herdr.state_db import get_task
-                                        cur_t = get_task(tid, db_path=resolved_db)
-                                        if cur_t and str(cur_t.get("status") or "").lower() in ACTIVE_TASK_STATUSES:
-                                            transition_task(
-                                                task_id=tid,
-                                                to_status="failed",
-                                                reason=reason,
-                                                source=source,
-                                                db_path=resolved_db,
-                                                force=True,
-                                            )
-                                    except Exception as tr_err:
-                                        logger.warning("Error transitioning halted task %s: %s", tid, tr_err)
-                            except Exception as halt_err:
-                                logger.warning("Error halting task %s: %s", tid, halt_err)
-
-                            # 2. If halt failed, close the verified owned pane
-                            if not task_stopped:
-                                if close_fn(pane_id):
-                                    task_stopped = True
-                                    try:
-                                        transition_task(
-                                            task_id=tid,
-                                            to_status="failed",
-                                            reason=reason,
-                                            source=source,
-                                            db_path=resolved_db,
-                                            force=True,
-                                        )
-                                    except Exception as tr_err:
-                                        logger.warning("Error transitioning closed task %s: %s", tid, tr_err)
-                                else:
-                                    logger.warning("Failed to close owned pane %s for task %s", pane_id, tid)
-                        elif probe_reason == "pane_missing":
-                            task_stopped = True
-                            try:
-                                transition_task(
-                                    task_id=tid,
-                                    to_status="failed",
-                                    reason=reason,
-                                    source=source,
-                                    db_path=resolved_db,
-                                    force=True,
-                                )
-                            except Exception as tr_err:
-                                logger.warning("Error transitioning missing pane task %s: %s", tid, tr_err)
-                        else:
-                            # Runtime ownership not proven (e.g. session_mismatch) -> Invariant 11: REFUSE to signal
-                            logger.warning(
-                                "Runtime ownership for task %s pane %s not proven (%s); "
-                                "refusing to send halt signal or close pane to protect other agents",
-                                tid,
-                                pane_id,
-                                probe_reason,
-                            )
-                    except Exception as pane_err:
-                        logger.warning("Error verifying/stopping pane %s for task %s: %s", pane_id, tid, pane_err)
-                else:
-                    # No physical pane was attached
-                    try:
-                        transition_task(
-                            task_id=tid,
-                            to_status="failed",
-                            reason=reason,
-                            source=source,
-                            db_path=resolved_db,
-                            force=True,
-                        )
-                        task_stopped = True
-                    except Exception as tr_err:
-                        logger.warning("Error transitioning unassigned task %s: %s", tid, tr_err)
-
-                if not task_stopped:
-                    logger.error(
-                        "Cannot confirm task %s (pane=%s) was stopped; refusing to mark workflow stopped",
-                        tid,
-                        pane_id,
-                    )
-                    return "STOP_FAILED"
-
-            # Step 6: Re-verify zero active execution instances remain
-            try:
-                verify_tasks = list_tasks(workflow_id=workflow_id, db_path=resolved_db)
-                still_active = [t for t in verify_tasks if str(t.get("status") or "").lower() in ACTIVE_TASK_STATUSES]
-                if still_active:
-                    logger.error(
-                        "Active tasks still remain for workflow %s: %s",
-                        workflow_id,
-                        [t.get("task_id") for t in still_active],
-                    )
-                    return "STOP_FAILED"
-            except Exception as task_err:
-                logger.warning("Error re-verifying tasks for workflow %s: %s", workflow_id, task_err)
-                return "STOP_FAILED"
-
-        # Step 7: Atomically transition workflow to terminal state
-        try:
+        def transition(status, **kwargs):
             transition_workflow(
-                workflow_id=workflow_id,
-                to_status="completed",
-                reason=reason,
-                source=source,
-                metadata={"outcome": outcome},
-                force=True,
-                db_path=resolved_db,
+                workflow_id=workflow_id, to_status=status, reason=reason,
+                source=source, force=True, db_path=resolved_db, **kwargs,
             )
-        except Exception as tr_err:
-            logger.error("Failed to transition closing workflow %s to completed: %s", workflow_id, tr_err)
-            return "STOP_FAILED"
 
-        return "STOPPED"
+        status = workflow["status"]
+        if status not in TERMINAL_WORKFLOW_STATUSES and status != "closing":
+            transition("closing", expected_status=status)
+        with task_resources.workflow_launch_lock(resolved_db, workflow_id, timeout=timeout):
+            current = get_workflow(workflow_id, db_path=resolved_db)
+            tasks = store.list_tasks(workflow_id=workflow_id)
+            deadline = time.monotonic() + timeout
+            if current["status"] in TERMINAL_WORKFLOW_STATUSES:
+                if (not any(t["status"] in CONCURRENT_STATUSES or pane_reference(t) for t in tasks)
+                        and drain_unsettled_launch_intents(store, workflow_id, reason=reason,
+                                                          deadline=deadline, check_only=True)
+                        and _pending_processes_stopped(store, workflow_id)):
+                    return "ALREADY_TERMINAL"
+                transition("closing", expected_status=current["status"])
+            if not drain_unsettled_launch_intents(store, workflow_id, reason=reason, deadline=deadline):
+                return "STOP_FAILED"
 
-    except Exception as exc:
-        logger.error("Unexpected error in shutdown_workflow for %s: %s", workflow_id, exc)
+            # Launcher registration and all shutdown side effects share this lock.
+            for task in store.list_tasks(workflow_id=workflow_id):
+                pane_id = pane_reference(task)
+                metadata = {}
+                if pane_id:
+                    if (time.monotonic() >= deadline
+                            or not _stop_runtime(store, task, reason=reason, deadline=deadline)):
+                        logger.warning("STOP_FAILED for task %s", task["task_id"])
+                        return "STOP_FAILED"
+                    runtime = {**(task.get("runtime") or {}), "pane_id": None, "status": "unavailable"}
+                    metadata = {"pane_id": None, "runtime": runtime, "pane_lifecycle": "released",
+                                "released_pane_id": pane_id, "pane_retained": False}
+                active = task["status"] in CONCURRENT_STATUSES
+                if active or metadata:
+                    result = transition_task(
+                        task_id=task["task_id"], to_status="failed" if active else task["status"],
+                        reason=reason, source=source, db_path=resolved_db, force=True,
+                        expected_version=task["version"], metadata=metadata,
+                    )
+                    if not result["ok"]:
+                        return "STOP_FAILED"
+            if any(t["status"] in CONCURRENT_STATUSES or pane_reference(t)
+                   for t in store.list_tasks(workflow_id=workflow_id)):
+                return "STOP_FAILED"
+            if not _pending_processes_stopped(store, workflow_id):
+                return "STOP_FAILED"
+            transition("completed", expected_status="closing", metadata={"outcome": outcome})
+            return "STOPPED"
+    except Exception:
+        logger.exception("STOP_FAILED for workflow %s", workflow_id)
         return "STOP_FAILED"

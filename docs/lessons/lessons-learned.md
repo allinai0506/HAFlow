@@ -9944,8 +9944,8 @@ PR #420 第十四轮复审指出一项阻断合并的 P1 架构级并发风险�
 | 问题 | 教训 | 规范 |
 |------|------|------|
 | 取消过程维持 RUNNING 诱发并发派发 | 任何关闭/取消操作必须首先从状态机层面掐断新派发入口 | 工作流关闭协议第一步必须原子流转至 `closing`，`active(workflow)` 立即对新派发关门 |
-| 在途启动脱离生命周期管控 | 仅读已有任务快照无法拦截正在启动的进程 | 通过 `workflow_launch_lock` 强制在途启动排空或因 `closing` 状态校验失败自动回滚，并在持锁期重新获取任务全量快照 |
-| 停止证据不足即宣告终态 | 底层进程未确证停止前绝不可流转终态或释放资源 | 遍历停止后必须二次强校验活跃任务数为 0，任何失败坚决返回 `STOP_FAILED` 并保持 `closing`，决不释放工作区 |
+| 在途启动脱离生命周期管控 | 仅读已有任务快照无法拦截正在启动的进程 | 通过 `workflow_launch_lock` 协调启动与关闭。Worker 继承该锁，Launcher 退出后仍可保留互斥。持锁核对最新启动意图和 Task |
+| 停止证据不足即宣告终态 | 底层进程未确证停止前绝不可流转终态或释放资源 | 关闭前持久化已核对归属的终端进程身份。关闭后确认终端会话及已观测到的子进程均已退出。无法确认时返回 `STOP_FAILED` 并保持 `closing` |
 | 防御参数缺失降低执行权防线 | 关键安全标识在后端不能依赖调用方自觉传递 | 当提供 `inbox_task_id` 时，Factory 必须强制要求 `fencing_token` 与 `launch_attempt_id`，缺失直接抛出异常 fail-closed |
 
 ### 操作规范（已固化到 `herdr/workflow_shutdown.py` 与 `bin/herdr-factory`）
@@ -9953,10 +9953,10 @@ PR #420 第十四轮复审指出一项阻断合并的 P1 架构级并发风险�
 1. **统一工作流关闭协议 (`herdr/workflow_shutdown.py`)**：
    - **Step 1 原子前置 CLOSING**：在任何停止副作用发生前，通过 `transition_workflow` 原子将状态置为 `closing`。
    - **Step 2 派发与启动双向拦截**：`node_dispatch.active` 针对 `closing` 返回 False；`validate_unbound_launch` 与 `task_resources.begin_launch_intent` 显式拒绝 `closing` 工作流。
-   - **Step 3 锁协调与意向排空**：在 `workflow_launch_lock` 保护下排空/回滚处于 `allocating` 状态的在途 `launch_intent`。
+   - **Step 3 锁协调与意向排空**：在 `workflow_launch_lock` 保护下核对 `allocating` 意图。资源盘点确认空置后才写入 `resources_absent`。已核实归属的未注册 Pane 停止后，原克隆可作为证据保留。
    - **Step 4 刷新活跃任务快照**：持锁重新拉取 `list_tasks`，捕获所有在关闭窗口边缘完成注册的任务。
-   - **Step 5 安全停止**：严格遵循 Invariant 11 校验 Pane 归属后发起优雅 halt 或 close pane；未证明归属时拒绝误杀。
-   - **Step 6 二次零活跃校验**：再次查询任务列表，确认活跃任务严格为 0。
+   - **Step 5 安全停止**：校验 Pane 和 Agent 归属，记录终端会话及已观测进程的身份后发送 Ctrl-C。必要时重新校验归属并关闭 Pane。
+   - **Step 6 核对退出证据**：通过实时探测确认终端及已观测子进程退出，再核对 Task 状态以及尚待确认的停止回执。
    - **Step 7 终态流转**：通过 `transition_workflow` 流转至 `completed`（`outcome='abandoned'`）。
 2. **Factory 执行权门禁参数强制化 (`bin/herdr-factory`)**：
    - 当 `inbox_task_id` 存在时，强校验 `fencing_token` 与 `launch_attempt_id` 必填，缺失即抛出 `RuntimeError`。
@@ -9981,6 +9981,6 @@ git diff --check
 - `herdr/task_resources.py#begin_launch_intent`
 - `bin/herdr-factory#_verify_and_bind_inbox_task_fencing`
 - `tests/test_workflow_shutdown.py#test_scenario_1_coordinator_dispatch_rejected_when_workflow_closing`
-- `tests/test_workflow_shutdown.py#test_scenario_2_inflight_launch_not_yet_registered_is_safely_coordinated`
-- `tests/test_workflow_shutdown.py#test_scenario_3_agents_must_stop_before_terminal_state_and_workspace_release`
+- `tests/test_workflow_shutdown.py#test_scenario_2_launcher_crash_preserves_unregistered_pane_and_occupancy`
+- `tests/test_workflow_shutdown.py#test_scenario_3_interrupt_ack_keeps_occupancy_until_process_stops`
 - `tests/test_inbox_dispatcher.py#test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate`

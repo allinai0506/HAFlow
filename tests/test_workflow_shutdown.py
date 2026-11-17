@@ -6,7 +6,13 @@ Covers the 3 required acceptance scenarios:
 3. All agents must be confirmed stopped before workflow enters terminal state and releases workspace.
 """
 import json
+import os
+import signal
 import sqlite3
+import shutil
+import tempfile
+import subprocess
+import sys
 import time
 from pathlib import Path
 import pytest
@@ -14,7 +20,7 @@ import pytest
 from herdr.inbox.store import InboxStore
 from herdr.inbox.dispatcher import InboxDispatcher
 from herdr.workflow_shutdown import shutdown_workflow
-from herdr.state_db import save_workflow, get_workflow, save_task, get_task, list_tasks
+from herdr.state_db import save_workflow, get_workflow, save_task, get_task
 from herdr import node_dispatch as core
 from herdr import node_dispatch_store as nds
 from herdr import task_resources
@@ -134,184 +140,253 @@ def test_scenario_1_coordinator_dispatch_rejected_when_workflow_closing(test_env
         )
 
 
-def test_scenario_2_inflight_launch_not_yet_registered_is_safely_coordinated(test_env, monkeypatch):
-    """Scenario 2: Node B has entered launch process but has not yet registered.
+@pytest.fixture
+def native_pane(tmp_path, monkeypatch):
+    if not shutil.which("herdr"):
+        pytest.skip("Herdr CLI required for the isolated native pane test")
+    monkeypatch.delenv("HERDR_SESSION", raising=False)
+    runtime = tempfile.TemporaryDirectory(dir="/tmp", prefix="hfstop-")
+    monkeypatch.setenv("HERDR_HOME", runtime.name)
+    monkeypatch.setenv("HERDR_SOCKET_PATH", runtime.name + "/herdr.sock")
+    monkeypatch.setenv("HERDR_CLIENT_SOCKET_PATH", runtime.name + "/client.sock")
+    server = subprocess.Popen(["herdr", "server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        def cli(*args):
+            result = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=3, check=True)
+            return json.loads(result.stdout)["result"] if result.stdout.strip() else None
 
-    Shutdown coordinates via workflow_launch_lock:
-    - B's registration into CLOSING workflow is rejected by validate_task_registration.
-    - If B managed to register right before lock acquisition, shutdown's fresh snapshot
-      catches B and stops it.
-    - No orphan tasks or unstopped agents survive.
-    """
-    db_file = test_env["db_file"]
-    wf_id = "wf_scene_2"
-    ws_id = "ws_scene_2"
-
-    config = {
-        "workflow_template": "software-development-v1",
-        "nodes": [{"id": "node_A", "node_type": "agent", "roles": ["worker"]}],
-    }
-
-    save_workflow(
-        {
-            "workflow_id": wf_id,
-            "project_id": "proj_2",
-            "workspace_id": ws_id,
-            "title": "Inflight Test WF",
-            "status": "running",
-            "execution_id": "exec_2",
-            "config": config,
-        },
-        db_path=db_file,
-    )
-
-    # 2A. Simulate B having created a launch intent (allocating phase) before registration
-    from herdr.state_store import SQLiteStateStore
-    store = SQLiteStateStore(str(db_file))
-    now = time.time()
-
-    store.record_event(
-        "launch_intent",
-        {
-            "key": f"{wf_id}:node_B:worker:1:exec_2",
-            "intent_id": "intent_b_1",
-            "workflow_id": wf_id,
-            "node_id": "node_B",
-            "role": "worker",
-            "task_id": "task_B_inflight",
-            "phase": "allocating",
-            "lease_until": now + 120,
-            "resources": {"pane_id": "%22"},
-        },
-        workflow_id=wf_id,
-        task_id=f"{wf_id}:node_B:worker:1:exec_2",
-        source="launch",
-    )
-
-    # Also register task_A as working with pane %21
-    save_task(
-        {
-            "task_id": "task_A",
-            "workflow_id": wf_id,
-            "node": "node_A",
-            "status": "working",
-            "pane_id": "%21",
-        },
-        db_path=db_file,
-    )
-
-    # Mock steering and pane closing to succeed
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (True, "identity_match"))
-    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": True})
-    monkeypatch.setattr("herdr.workflow_shutdown.close_pane", lambda pid: True)
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pid: True)
-
-    # Run shutdown
-    res = shutdown_workflow(wf_id, db_path=db_file, reason="test cancellation")
-    assert res == "STOPPED"
-
-    # Verify task_A was stopped
-    t_a = get_task("task_A", db_path=db_file)
-    assert t_a["status"] == "failed"
-
-    # Verify allocating intent for task_B was cleanly drained/aborted
-    events = store.list_events(workflow_id=wf_id, event_type="launch_intent")
-    aborted_events = [e for e in events if e.get("payload", {}).get("phase") == "resources_absent"]
-    assert len(aborted_events) >= 1, "In-flight allocating intent must be aborted"
-
-    # Verify workflow transitioned to completed / abandoned
-    wf_after = get_workflow(wf_id, db_path=db_file)
-    assert wf_after["status"] == "completed"
-    assert wf_after.get("outcome") == "abandoned"
-
-    # Verify zero active tasks remain
-    all_tasks = list_tasks(workflow_id=wf_id, db_path=db_file)
-    active = [t for t in all_tasks if t.get("status") in ("working", "running", "pending")]
-    assert len(active) == 0
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                cli("pane", "list")
+                break
+            except subprocess.CalledProcessError:
+                if server.poll() is not None or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+        created = cli("workspace", "create", "--cwd", str(tmp_path))
+        pane = created["root_pane"]
+        # Keep a second pane so closing the test pane is permitted by Herdr.
+        cli("pane", "split", pane["pane_id"], "--direction", "right", "--cwd", runtime.name)
+        yield pane, cli
+    finally:
+        server.terminate()
+        server.communicate(timeout=5)
+        runtime.cleanup()
 
 
-def test_scenario_3_agents_must_stop_before_terminal_state_and_workspace_release(test_env, monkeypatch):
-    """Scenario 3: All Agents must be confirmed stopped before Workflow enters terminal state and releases workspace.
-
-    - When an agent cannot be confirmed stopped (halt_task fails and pane unproven/reused):
-      shutdown returns STOP_FAILED, workflow remains in 'closing' (NOT 'completed'),
-      and workspace remains busy.
-    - When all agents are confirmed stopped:
-      shutdown returns STOPPED, workflow transitions to 'completed', and workspace is freed.
-    """
-    db_file = test_env["db_file"]
-    dispatcher = test_env["disp"]
+def _start_workflow(test_env):
+    db = test_env["db_file"]
+    save_workflow({"workflow_id": "wf_stop", "workspace_id": "ws_stop", "project_id": "proj",
+                   "status": "running", "config": {"nodes": [{"id": "node", "node_type": "agent"}]}},
+                  db_path=db)
     store = test_env["store"]
-    wf_id = "wf_scene_3"
-    ws_id = "ws_scene_3"
+    task = store.create_task(title="Stop", instruction="Stop", project_id="proj", workspace_id="ws_stop", auto_confirm=True)
+    store.update_task_status(task["id"], new_status="CLAIMED")
+    store.update_task_status(task["id"], new_status="RUNNING", workflow_id="wf_stop")
+    return task["id"]
 
-    save_workflow(
-        {
-            "workflow_id": wf_id,
-            "project_id": "proj_3",
-            "workspace_id": ws_id,
-            "title": "Gate Stop WF",
-            "status": "running",
-            "config": {"workspace_id": ws_id, "project_id": "proj_3"},
-        },
-        db_path=db_file,
-    )
-    save_task(
-        {
-            "task_id": "task_resisting_1",
-            "workflow_id": wf_id,
-            "status": "working",
-            "pane_id": "%77",
-        },
-        db_path=db_file,
-    )
 
-    t = store.create_task(
-        title="Scene 3 Task",
-        instruction="Instruction",
-        project_id="proj_3",
-        workspace_id=ws_id,
-        auto_confirm=True,
-    )
-    store.update_task_status(t["id"], new_status="CLAIMED")
-    store.update_task_status(t["id"], new_status="RUNNING", workflow_id=wf_id)
+def _start_resistant_process(pane, cli, tmp_path):
+    import shlex
+    ready = tmp_path / "ready"
+    code = ("import os, signal, subprocess, sys, time; from pathlib import Path; "
+            "signal.signal(signal.SIGINT, signal.SIG_IGN); "
+            "desc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+            "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL); "
+            f"Path({str(ready)!r}).write_text(f'{{os.getpid()}} {{desc.pid}}'); "
+            "time.sleep(30)")
+    cli("pane", "run", pane, shlex.join([sys.executable, "-c", code]))
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.03)
+    foreground, descendant = ready.read_text().split()
+    return int(foreground), int(descendant)
 
-    # 1. Fault injection: halt fails AND pane ownership cannot be verified (e.g. foreign agent)
-    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "unresponsive"})
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (False, "session_mismatch"))
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pid: False)
-    monkeypatch.setattr("herdr.workflow_shutdown.close_pane", lambda pid: False)
 
-    # Shutdown MUST return STOP_FAILED
-    res = shutdown_workflow(wf_id, db_path=db_file, reason="attempted stop")
-    assert res == "STOP_FAILED"
+def test_scenario_2_launcher_crash_preserves_unregistered_pane_and_occupancy(test_env, native_pane):
+    from herdr.state_store import SQLiteStateStore
 
-    # Workflow MUST NOT be terminal; it must remain in CLOSING
-    wf_db = get_workflow(wf_id, db_path=db_file)
-    assert wf_db["status"] == "closing"
+    _start_workflow(test_env)
+    db = test_env["db_file"]
+    pane, cli = native_pane
+    clone = test_env["tmp_path"]
+    store = SQLiteStateStore(str(db))
+    with task_resources.workflow_launch_lock(db, "wf_stop"):
+        intent = task_resources.begin_launch_intent(
+            store, workflow_id="wf_stop", node_id="node", task_id="unregistered", run_id="run",
+        )["intent"]
+        intent = task_resources.record_launch_resources(store, intent, {"planned_clone_path": str(clone), "run_id": "run"})
+        # A launcher process starts the pane command and dies without publishing
+        # its runtime identity or registering the Task.
+        launcher = subprocess.run([sys.executable, "-c", """
+import os, subprocess, sys
+subprocess.run(["herdr", "pane", "run", sys.argv[1], "sleep 30"], check=True)
+os._exit(17)
+""", pane["pane_id"]], capture_output=True, timeout=5)
+        assert launcher.returncode == 17
+    assert get_task("unregistered", db_path=db) is None
+    deadline = time.monotonic() + 3
+    while True:
+        processes = cli("pane", "process-info", "--pane", pane["pane_id"])["process_info"]
+        if any(proc["name"] == "sleep" for proc in processes["foreground_processes"]):
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.03)
+    assert shutdown_workflow("wf_stop", db_path=db) == "STOP_FAILED"
+    assert task_resources._latest_intent(store, intent["key"])["phase"] == "allocating"
+    assert cli("pane", "get", pane["pane_id"])["pane"]["terminal_id"] == pane["terminal_id"]
+    assert get_workflow("wf_stop", db_path=db)["status"] == "closing"
+    assert test_env["disp"].is_workspace_busy("ws_stop")[0]
 
-    # Workspace MUST remain busy
-    busy, reason = dispatcher.is_workspace_busy(ws_id)
-    assert busy is True, "Workspace must remain busy when workflow agent could not be stopped"
 
-    # 2. Recovery: runtime ownership verified and stop succeeds
-    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (True, "identity_match"))
-    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pid: True)
-    monkeypatch.setattr("herdr.workflow_shutdown.close_pane", lambda pid: True)
+def test_scenario_3_interrupt_ack_keeps_occupancy_until_process_stops(test_env, native_pane, monkeypatch):
+    task_id = _start_workflow(test_env)
+    db = test_env["db_file"]
+    pane, cli = native_pane
+    pane_id = pane["pane_id"]
+    pid, descendant = _start_resistant_process(pane_id, cli, test_env["tmp_path"])
+    save_task({"task_id": "worker", "workflow_id": "wf_stop", "run_id": "run", "status": "working",
+               "pane_id": pane_id, "agent": "codex"}, db_path=db)
+    monkeypatch.setattr(task_resources, "owned_live_pane", lambda task: (True, "identity_match"))
 
-    res_retry = shutdown_workflow(wf_id, db_path=db_file, reason="retry stop")
-    assert res_retry == "STOPPED"
+    from herdr import workflow_shutdown
+    adapter = workflow_shutdown.get_agent_adapter("codex")
+    real_interrupt = adapter.interrupt
+    close = workflow_shutdown.close_pane
+    sent = []
 
-    # Workflow is now completed / abandoned
-    wf_final = get_workflow(wf_id, db_path=db_file)
-    assert wf_final["status"] == "completed"
-    assert wf_final.get("outcome") == "abandoned"
+    def interrupt(*args, **kwargs):
+        result = real_interrupt(*args, **kwargs)
+        sent.append(result)
+        return result
 
-    # Task is now failed
-    task_final = get_task("task_resisting_1", db_path=db_file)
-    assert task_final["status"] == "failed"
+    monkeypatch.setattr(adapter, "interrupt", interrupt)
+    monkeypatch.setattr(workflow_shutdown, "get_agent_adapter", lambda agent: adapter)
+    try:
+        monkeypatch.setattr(workflow_shutdown, "close_pane", lambda pane_id: True)
+        with pytest.raises(RuntimeError, match="failed to stop"):
+            test_env["store"].cancel_task(task_id)
+        os.kill(pid, 0)
+        assert sent == [True]
+        assert get_workflow("wf_stop", db_path=db)["status"] == "closing"
+        assert get_task("worker", db_path=db)["status"] == "working"
+        assert test_env["disp"].is_workspace_busy("ws_stop")[0]
 
-    # Workspace can now be safely released
-    store.cancel_task(t["id"])
-    busy_after, _ = dispatcher.is_workspace_busy(ws_id)
-    assert busy_after is False, "Workspace must be released once all agents are confirmed stopped"
+        # The real close removes the pane, but the observed detached child survives.
+        monkeypatch.setattr(workflow_shutdown, "close_pane", close)
+        with pytest.raises(RuntimeError, match="failed to stop"):
+            test_env["store"].cancel_task(task_id)
+        assert not any(p["pane_id"] == pane_id for p in cli("pane", "list")["panes"])
+        os.kill(descendant, 0)
+        assert test_env["disp"].is_workspace_busy("ws_stop")[0]
+        # A separate lifecycle caller drops the database's pane reference.
+        # The durable stop receipt still fences cancellation.
+        from herdr.state_db import transition_task
+        transition_task("worker", "failed", reason="test: concurrent lifecycle", db_path=db,
+                        metadata={"pane_id": None}, force=True)
+        with pytest.raises(RuntimeError, match="failed to stop"):
+            test_env["store"].cancel_task(task_id)
+    finally:
+        try:
+            os.kill(descendant, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.monotonic() + 3
+    while workflow_shutdown._terminal_processes(-1, [descendant]):
+        assert time.monotonic() < deadline
+        time.sleep(0.03)
+    assert test_env["store"].cancel_task(task_id)["status"] == "CANCELLED"
+    assert get_task("worker", db_path=db)["status"] == "failed"
+    assert get_workflow("wf_stop", db_path=db)["status"] == "completed"
+    assert not test_env["disp"].is_workspace_busy("ws_stop")[0]
+
+
+def test_allocation_worker_keeps_workflow_fenced_after_launcher_exit(test_env):
+    """The allocating child outlives its launcher and retains the actual flock."""
+    _start_workflow(test_env)
+    db = test_env["db_file"]
+    worker_release = test_env["tmp_path"] / "worker-release"
+    launcher_code = """
+import os, subprocess, sys
+from herdr.task_resources import workflow_launch_lock
+with workflow_launch_lock(sys.argv[1], "wf_stop") as fd:
+    subprocess.Popen([sys.executable, "-c", sys.argv[2], *sys.argv[3:]], pass_fds=(fd,),
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os._exit(17)
+"""
+    worker_code = """
+import sys, time
+from pathlib import Path
+deadline = time.monotonic() + 10
+while not Path(sys.argv[1]).exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+"""
+    result = subprocess.run([sys.executable, "-c", launcher_code, str(db), worker_code,
+                             str(worker_release)], timeout=5)
+    assert result.returncode == 17
+    try:
+        assert shutdown_workflow("wf_stop", db_path=db, timeout=0.1) == "STOP_FAILED"
+        assert get_workflow("wf_stop", db_path=db)["status"] == "closing"
+        assert test_env["disp"].is_workspace_busy("ws_stop")[0]
+    finally:
+        worker_release.touch()
+    assert shutdown_workflow("wf_stop", db_path=db, timeout=3) == "STOPPED"
+
+
+def test_owned_unregistered_pane_is_stopped_and_clone_is_retained(test_env, native_pane):
+    from herdr.state_store import SQLiteStateStore
+
+    task_id = _start_workflow(test_env)
+    db = test_env["db_file"]
+    pane, cli = native_pane
+    pane_id = pane["pane_id"]
+    clone = test_env["tmp_path"]
+    store = SQLiteStateStore(str(db))
+    intent = task_resources.begin_launch_intent(
+        store, workflow_id="wf_stop", node_id="node", task_id="unregistered", run_id="run",
+    )["intent"]
+    intent = task_resources.record_launch_resources(store, intent, {"planned_clone_path": str(clone), "run_id": "run"})
+    task_resources.write_worker_launch_identity(clone, {
+        "intent_id": intent["intent_id"], "task_id": "unregistered", "run_id": "run",
+        "phase": "pane_allocated", "pane_source": "dynamic", "pane_id": pane_id,
+        "terminal_id": pane["terminal_id"],
+    }, initial=True)
+
+    assert test_env["store"].cancel_task(task_id)["status"] == "CANCELLED"
+    assert get_task("unregistered", db_path=db) is None
+    assert task_resources._latest_intent(store, intent["key"])["phase"] == "shutdown_stopped"
+    assert clone.is_dir()
+    assert not any(p["pane_id"] == pane_id for p in cli("pane", "list")["panes"])
+    assert not test_env["disp"].is_workspace_busy("ws_stop")[0]
+    assert shutdown_workflow("wf_stop", db_path=db) == "ALREADY_TERMINAL"
+
+
+def test_unallocated_intent_is_settled_only_after_inventory_succeeds(test_env, native_pane, monkeypatch):
+    from herdr.state_store import SQLiteStateStore
+
+    inbox_id = _start_workflow(test_env)
+    db = test_env["db_file"]
+    store = SQLiteStateStore(str(db))
+    intent = task_resources.begin_launch_intent(
+        store, workflow_id="wf_stop", node_id="node", task_id="unallocated", run_id="run",
+    )["intent"]
+    intent = task_resources.record_launch_resources(store, intent, {
+        "planned_clone_path": str(test_env["tmp_path"] / "not-allocated"), "run_id": "run",
+    })
+    inventory = task_resources.inventory_launch_resources
+
+    def failed_inventory(*args, **kwargs):
+        raise OSError("runtime inventory unavailable")
+
+    monkeypatch.setattr(task_resources, "inventory_launch_resources", failed_inventory)
+    assert shutdown_workflow("wf_stop", db_path=db) == "STOP_FAILED"
+    assert get_workflow("wf_stop", db_path=db)["status"] == "closing"
+    assert task_resources._latest_intent(store, intent["key"])["phase"] == "allocating"
+
+    monkeypatch.setattr(task_resources, "inventory_launch_resources", inventory)
+    assert test_env["store"].cancel_task(inbox_id)["status"] == "CANCELLED"
+    assert task_resources._latest_intent(store, intent["key"])["phase"] == "resources_absent"
+    assert not test_env["disp"].is_workspace_busy("ws_stop")[0]

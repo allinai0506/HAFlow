@@ -213,6 +213,8 @@ class UnknownAgentAdapter(AgentAdapter):
 
 def _send_keys(pane_id: str, key: str) -> bool:
     """Send keystroke (e.g. enter, ctrl-c) to Herdr pane via subprocess."""
+    if key == "ctrl-c":
+        key = "ctrl+c"
     try:
         r = subprocess.run(
             ["herdr", "pane", "send-keys", pane_id, key],
