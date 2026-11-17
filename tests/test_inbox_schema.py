@@ -339,3 +339,121 @@ def test_legacy_database_migration_atomic_rollback_on_copy_failure(tmp_path: Pat
     assert len(rows_recovered) == 2
 
     conn.close()
+
+
+def test_legacy_migration_with_plain_tuple_connection(tmp_path: Path):
+    """Verify migration succeeds even when sqlite connection has default tuple row factory (no sqlite3.Row)."""
+    db_file = tmp_path / "legacy_tuple.db"
+    conn = sqlite3.connect(str(db_file), isolation_level=None)
+    # Note: conn.row_factory is None by default
+
+    conn.execute("""
+        CREATE TABLE user_inbox_tasks (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL DEFAULT 'default',
+            project_id TEXT,
+            workspace_id TEXT,
+            title TEXT NOT NULL,
+            instruction TEXT NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'manual',
+            source_id TEXT,
+            idempotency_key TEXT UNIQUE,
+            priority TEXT NOT NULL DEFAULT 'NORMAL',
+            priority_weight INTEGER NOT NULL DEFAULT 2,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'DRAFT',
+            workflow_id TEXT,
+            template_name TEXT DEFAULT 'software-development-v1',
+            agent_override TEXT DEFAULT 'auto',
+            context_json TEXT DEFAULT '{"execution_history": [{"attempt": 1}]}',
+            worker_id TEXT,
+            lease_expires_at REAL,
+            heartbeat_at REAL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            error TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            started_at REAL,
+            completed_at REAL
+        );
+    """)
+    conn.execute("""
+        INSERT INTO user_inbox_tasks (
+            id, user_id, title, instruction, idempotency_key, created_at, updated_at
+        ) VALUES ('t-tuple-1', 'charlie', 'Tuple Task', 'Verify plain tuple support', 'k-tup', 100.0, 100.0)
+    """)
+
+    ensure_inbox_schema(conn)
+
+    rows = conn.execute("SELECT id, title, execution_history_json FROM user_inbox_tasks").fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "t-tuple-1"
+    assert rows[0][1] == "Tuple Task"
+    assert '[{"attempt": 1}]' in rows[0][2]
+    conn.close()
+
+
+def test_interrupted_migration_orphaned_temp_table_recovery(tmp_path: Path):
+    """Verify that if an older crashed migration left user_inbox_tasks_migrating while user_inbox_tasks was dropped,
+    ensure_inbox_schema rescues the orphaned data by promoting migrating table back to user_inbox_tasks.
+    """
+    db_file = tmp_path / "orphaned_temp.db"
+    conn = sqlite3.connect(str(db_file), isolation_level=None)
+    conn.row_factory = sqlite3.Row
+
+    # Simulate crash state: user_inbox_tasks was dropped, user_inbox_tasks_migrating exists with tasks
+    conn.execute("""
+        CREATE TABLE user_inbox_tasks_migrating (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL DEFAULT 'default',
+            project_id TEXT,
+            workspace_id TEXT,
+            title TEXT NOT NULL,
+            instruction TEXT NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'manual',
+            source_id TEXT,
+            idempotency_key TEXT,
+            priority TEXT NOT NULL DEFAULT 'NORMAL',
+            priority_weight INTEGER NOT NULL DEFAULT 2,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'DRAFT',
+            workflow_id TEXT,
+            template_name TEXT DEFAULT 'software-development-v1',
+            agent_override TEXT DEFAULT 'auto',
+            context_json TEXT DEFAULT '{}',
+            execution_history_json TEXT DEFAULT '[]',
+            worker_id TEXT,
+            lease_expires_at REAL,
+            heartbeat_at REAL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            error TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            started_at REAL,
+            completed_at REAL
+        );
+    """)
+    conn.execute("""
+        INSERT INTO user_inbox_tasks_migrating (
+            id, user_id, title, instruction, created_at, updated_at
+        ) VALUES ('salvaged-1', 'alice', 'Rescued Task', 'Do not lose me', 200.0, 200.0)
+    """)
+
+    # Run ensure_inbox_schema on crashed DB
+    ensure_inbox_schema(conn)
+
+    # Verify user_inbox_tasks was recovered and contains the salvaged task
+    rows = conn.execute("SELECT id, title, instruction FROM user_inbox_tasks").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == "salvaged-1"
+    assert rows[0]["title"] == "Rescued Task"
+
+    # Verify temp table is no longer present
+    temp_row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_inbox_tasks_migrating'"
+    ).fetchone()
+    assert temp_row is None
+
+    conn.close()

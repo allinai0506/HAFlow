@@ -108,9 +108,15 @@ def _migrate_legacy_schema(conn: sqlite3.Connection) -> None:
 
         # 2. Copy existing data; extract any execution_history from context_json into execution_history_json
         cur = conn.execute("SELECT * FROM user_inbox_tasks")
+        col_names = [desc[0] for desc in cur.description] if cur.description else []
         rows = cur.fetchall()
         for row in rows:
-            d = dict(row)
+            if isinstance(row, sqlite3.Row):
+                d = dict(row)
+            elif isinstance(row, dict):
+                d = row
+            else:
+                d = dict(zip(col_names, row))
             ctx = {}
             if d.get("context_json"):
                 try:
@@ -164,6 +170,18 @@ def ensure_inbox_schema(conn: sqlite3.Connection) -> None:
     """Ensure user_inbox_tasks table and indices exist, performing migrations if needed."""
     cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_inbox_tasks'")
     table_exists = bool(cur.fetchone())
+
+    # Check for orphaned migration temp table if main table was dropped before rename in a crashed legacy migration
+    cur_migrating = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_inbox_tasks_migrating'")
+    migrating_exists = bool(cur_migrating.fetchone())
+
+    if not table_exists and migrating_exists:
+        # Recover orphaned table from interrupted rename
+        conn.execute("ALTER TABLE user_inbox_tasks_migrating RENAME TO user_inbox_tasks")
+        table_exists = True
+    elif table_exists and migrating_exists:
+        # Clean up stale temp table from uncommitted aborted migration
+        conn.execute("DROP TABLE IF EXISTS user_inbox_tasks_migrating")
 
     if table_exists:
         if _has_global_idempotency_unique(conn):
