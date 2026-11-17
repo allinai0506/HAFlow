@@ -557,7 +557,10 @@ def record_intent(db_path, intent, now):
 def validate_unbound_launch(conn, workflow_id, node_id):
     if not conn.execute('SELECT 1 FROM workflows WHERE workflow_id=?', (workflow_id,)).fetchone():
         return
-    _, config = rs._workflow_snapshot(conn, workflow_id)
+    workflow, config = rs._workflow_snapshot(conn, workflow_id)
+    cur_status = str((workflow or {}).get('status') or '').lower()
+    if cur_status in {'closing', 'completed', 'failed', 'halted', 'abandoned'}:
+        raise ValueError(f"dispatch launch rejected: workflow '{workflow_id}' is {cur_status}")
     if core.policy_requires_confirmation(config, node_id):
         raise ValueError('dispatch confirmation required: launch must bind a confirmed dispatch operation')
 

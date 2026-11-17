@@ -8,6 +8,28 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-17] fix | Universal Workflow Shutdown Protocol & Factory Fencing Hardening (PR #420 第十四轮复审闭环)
+
+- 背景：PR #420 第十四轮独立复审指出 1 项阻断级 P1 与两项安全/测试建议：
+  1. P1-01（取消期间允许新 Agent 派发）：工作流关闭/取消过程中获取活动任务快照后工作流仍维持 `running` 状态，Coordinator 会并发派发新 Agent，导致产生孤儿 Agent 且工作区被错误释放；在途启动尚未完成注册的任务也存在竞争脱管风险；
+  2. P2-01（Fencing 回归测试需贴近真实恢复）：`test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate` 曾通过手动 SQL 更新模拟接管，需通过真实的 `recover_stale_tasks()` 与 `claim_next_task()` 进行全流程回归验证，保留预分配 workflow_id；
+  3. 防御性加固：Factory 注册入口在提供 `inbox_task_id` 时，必须强制要求同时提供 `fencing_token` 与 `launch_attempt_id`，杜绝缺失降级。
+- 变更：
+  1. `herdr/workflow_shutdown.py`：新增通用可复用工作流关闭协议 `shutdown_workflow`（8 步规范）：
+     - Step 1：原子流转至不可派发的 `closing` 状态；
+     - Step 2：通过 `node_dispatch.active`、`validate_unbound_launch` 与 `begin_launch_intent` 全面拒绝关闭中工作流的任何新派发与启动；
+     - Step 3：在 `workflow_launch_lock` 下协调在途启动并排空/回滚未结算的分配意向；
+     - Step 4：重新获取任务最新全量快照，确保不遗漏关闭边缘完成注册的任务；
+     - Step 5：安全停止所有活动任务（按 Invariant 11 强校验运行期实例所有权）；
+     - Step 6：二次强校验活跃执行实例数严格为 0；
+     - Step 7：原子流转至终态 `completed`（`outcome='abandoned'`）；
+     - Step 8：工作区占用安全解除。
+  2. `herdr/inbox/dispatcher.py`：`_safely_stop_fenced_workflow` 全面委托至通用关闭协议；`recover_stale_tasks` 修复事务未提交即跨连接查询的视图隔离问题；
+  3. `herdr/node_dispatch_store.py` & `herdr/task_resources.py`：在 `validate_unbound_launch` 与 `begin_launch_intent` 增加对 `closing` 工作流的拒绝逻辑；
+  4. `bin/herdr-factory`：`_verify_and_bind_inbox_task_fencing` 强制校验 `fencing_token` 与 `launch_attempt_id` 必填；
+  5. `tests/test_workflow_shutdown.py`：新增专项测试套件，完整覆盖关闭期间 Coordinator 派发被拒、在途启动安全协调不遗漏、未完全停止坚决拒绝终态与释放工作区 3 大验收场景；
+  6. `tests/test_inbox_dispatcher.py`：更新为真实恢复与领取逻辑，并补充必填参数检查测试。
+
 ## [2026-11-17] fix | User Task Inbox V1 — 执行权生命周期完整防线、Pane 实例所有权校验与终态对齐 (PR #420 第十轮复审终局闭环)
 
 - 背景：PR #420 第十轮独立复审指出 4 项遗留问题：

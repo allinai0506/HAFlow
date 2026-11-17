@@ -1253,9 +1253,10 @@ def test_cancel_task_fault_injection_halt_and_close_pane_both_fail(tmp_path: Pat
     t_db = store.get_task(t["id"])
     assert t_db["status"] == "RUNNING"
 
-    # 2. Workflow in DB remains running (NOT completed!)
+    # 2. Workflow in DB is in closing/non-terminal state (NOT completed!)
     wf_db = get_workflow(wf_id, db_path=db_file)
-    assert wf_db["status"] == "running"
+    assert wf_db["status"] in ("closing", "running")
+    assert wf_db["status"] not in ("completed", "abandoned")
 
     # 3. Workspace remains busy and does not leak occupancy
     busy, reason = dispatcher.is_workspace_busy("ws-fault")
@@ -1321,7 +1322,8 @@ def test_safely_stop_workflow_halt_task_fails_and_close_pane_fails_returns_stop_
 
     # Workflow MUST NOT transition to completed
     wf = get_workflow(wf_id, db_path=db_file)
-    assert wf["status"] == "running"
+    assert wf["status"] in ("closing", "running")
+    assert wf["status"] not in ("completed", "abandoned")
 
     # Workspace remains busy
     busy, reason = dispatcher.is_workspace_busy("ws-stop")
@@ -1549,9 +1551,10 @@ def test_safely_stop_workflow_halt_task_fails_and_ownership_unproven_refuses_to_
     t = get_task("task_unproven_1", db_path=db_file)
     assert t["status"] == "working"
 
-    # Workflow remains running
+    # Workflow remains closing / non-terminal
     wf = get_workflow(wf_id, db_path=db_file)
-    assert wf["status"] == "running"
+    assert wf["status"] in ("closing", "running")
+    assert wf["status"] not in ("completed", "abandoned")
 
     # Workspace remains busy
     busy, reason = dispatcher.is_workspace_busy("ws-unproven")
@@ -1822,13 +1825,14 @@ def test_pane_reused_by_other_agent_cancel_refuses_to_interrupt_new_agent(tmp_pa
     assert halt_called is False, "halt_task MUST NOT be called on unproven/reused pane!"
     assert close_called is False, "close_pane MUST NOT be called on unproven/reused pane!"
 
-    # Old task and workflow remain untouched to prevent fact drift
+    # Old task remains working and workflow remains closing / non-terminal
     t_db = store.get_task(t["id"])
     assert t_db["status"] == "RUNNING"
     task_wf = get_task("task_old_1", db_path=db_file)
     assert task_wf["status"] == "working"
     wf_db = get_workflow(wf_id, db_path=db_file)
-    assert wf_db["status"] == "running"
+    assert wf_db["status"] in ("closing", "running")
+    assert wf_db["status"] not in ("completed", "abandoned")
 
 
 def test_pending_task_concurrent_claim_and_cancel_consistent_final_state(tmp_path: Path):
@@ -2153,24 +2157,24 @@ def test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate(tm
     conn.commit()
     conn.close()
 
-    # 4. B takes over task: receives new worker_B and attempt_count 2
-    conn = sqlite3.connect(str(db_file))
-    conn.execute(
-        """
-        UPDATE user_inbox_tasks
-           SET worker_id = 'worker_B',
-               workflow_id = NULL,
-               lease_expires_at = ?,
-               attempt_count = 2,
-               updated_at = ?
-         WHERE id = ?
-        """,
-        (time.time() + 180.0, time.time(), t["id"]),
-    )
-    conn.commit()
-    conn.close()
+    # 4. Real recovery: disp_b recovers the stale task via recover_stale_tasks()
+    disp_b = InboxDispatcher(store=store, db_path=db_file, worker_id="worker_B")
+    recovered = disp_b.recover_stale_tasks()
+    assert len(recovered) == 1
+    assert recovered[0]["id"] == t["id"]
+    assert recovered[0]["status"] == "PENDING"
+    # Crucial: workflow_id was pre-allocated by A and is retained by recover_stale_tasks!
+    assert recovered[0]["workflow_id"] == "wf_A"
 
-    # 5 & 6. A resumes with original wf_A and old token/attempt into Factory registration gate:
+    # 5. Worker B claims the recovered task via claim_next_task()
+    claimed_b = disp_b.claim_next_task("ws-prod")
+    assert claimed_b is not None
+    worker_b = claimed_b["worker_id"]
+    assert claimed_b["attempt_count"] == 2
+    # Pre-allocated workflow_id remains intact in the claimed task record
+    assert claimed_b["workflow_id"] == "wf_A"
+
+    # 6. A resumes with original wf_A and old token/attempt into Factory registration gate:
     # CRITICAL: Factory MUST reject A, even though A originally pre-assigned wf_A!
     with pytest.raises(RuntimeError, match="Inbox task fencing violation: execution lease lost"):
         factory.start_workflow(
@@ -2189,41 +2193,33 @@ def test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate(tm
     assert cur.fetchone() is None, "wf_A MUST NOT be registered by expired Launcher A"
     conn.close()
 
-    # 8. B pre-assigns wf_B in Inbox and successfully registers wf_B
-    conn = sqlite3.connect(str(db_file))
-    conn.execute(
-        "UPDATE user_inbox_tasks SET workflow_id = 'wf_B' WHERE id = ?",
-        (t["id"],),
-    )
-    conn.commit()
-    conn.close()
-
+    # 8. B enters Factory with valid execution authority (worker_b, attempt 2) and registers wf_A
     registered_wid = factory.start_workflow(
         "Run prod fenced task",
-        workflow_id="wf_B",
+        workflow_id="wf_A",
         project_path=str(proj_root),
         inbox_task_id=t["id"],
-        fencing_token="worker_B",
-        launch_attempt_id="worker_B:2",
+        fencing_token=worker_b,
+        launch_attempt_id=f"{worker_b}:2",
         db_path=str(db_file),
     )
-    assert registered_wid == "wf_B"
+    assert registered_wid == "wf_A"
 
-    # Task is now registered and bound to wf_B
+    # Task is now registered and bound to wf_A
     t_after_b = store.get_task(t["id"])
-    assert t_after_b["workflow_id"] == "wf_B"
+    assert t_after_b["workflow_id"] == "wf_A"
 
     # 9. B idempotent re-entry succeeds
     reentry = factory.start_workflow(
         "Run prod fenced task",
-        workflow_id="wf_B",
+        workflow_id="wf_A",
         project_path=str(proj_root),
         inbox_task_id=t["id"],
-        fencing_token="worker_B",
-        launch_attempt_id="worker_B:2",
+        fencing_token=worker_b,
+        launch_attempt_id=f"{worker_b}:2",
         db_path=str(db_file),
     )
-    assert reentry == "wf_B"
+    assert reentry == "wf_A"
 
 
 def test_fencing_gate_fails_closed_when_db_or_table_missing(tmp_path: Path):
@@ -2243,6 +2239,7 @@ def test_fencing_gate_fails_closed_when_db_or_table_missing(tmp_path: Path):
             db_path=str(tmp_path / "nonexistent.db"),
             inbox_task_id="task_fc_01",
             fencing_token="w1",
+            launch_attempt_id="w1:1",
         )
 
     # Missing table
@@ -2257,4 +2254,49 @@ def test_fencing_gate_fails_closed_when_db_or_table_missing(tmp_path: Path):
             db_path=str(empty_db),
             inbox_task_id="task_fc_01",
             fencing_token="w1",
+            launch_attempt_id="w1:1",
+        )
+
+
+def test_enforce_inbox_task_fencing_requires_fencing_token_and_attempt_id(tmp_path: Path):
+    """Factory fencing parameters check: when inbox_task_id is provided, fencing_token and launch_attempt_id are required."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader(
+        "factory_fencing_required_params",
+        str(Path(__file__).resolve().parent.parent / "bin" / "herdr-factory"),
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    factory = importlib.util.module_from_spec(spec)
+    loader.exec_module(factory)
+
+    db_file = tmp_path / "fencing_req.db"
+    store = InboxStore(db_file)
+    t = store.create_task(
+        title="Req params task",
+        instruction="run",
+        project_id="p-1",
+        workspace_id="ws-1",
+        auto_confirm=True,
+    )
+    disp = InboxDispatcher(store=store, db_path=db_file, worker_id="w1")
+    claimed = disp.claim_next_task("ws-1")
+    assert claimed is not None
+    token = claimed["worker_id"]
+
+    # 1. Missing fencing_token raises RuntimeError
+    with pytest.raises(RuntimeError, match="fencing_token is required when inbox_task_id is provided"):
+        factory._verify_and_bind_inbox_task_fencing(
+            db_path=str(db_file),
+            inbox_task_id=t["id"],
+            fencing_token=None,
+            launch_attempt_id=f"{token}:1",
+        )
+
+    # 2. Missing launch_attempt_id raises RuntimeError
+    with pytest.raises(RuntimeError, match="launch_attempt_id is required when inbox_task_id is provided"):
+        factory._verify_and_bind_inbox_task_fencing(
+            db_path=str(db_file),
+            inbox_task_id=t["id"],
+            fencing_token=token,
+            launch_attempt_id=None,
         )

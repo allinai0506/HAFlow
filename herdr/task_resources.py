@@ -291,6 +291,11 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
         require_authorization(conn, workflow_id, node_id, dispatch_operation_id)
     finally:
         conn.close()
+    cur_wf = store.get_workflow(workflow_id) if hasattr(store, 'get_workflow') else None
+    if cur_wf:
+        cur_status = str(cur_wf.get('status') or '').lower()
+        if cur_status in {'closing', 'completed', 'failed', 'halted', 'abandoned'}:
+            raise ValueError(f"Cannot begin launch intent: workflow '{workflow_id}' is {cur_status}")
     now = time.time() if now is None else now
     if not 1 <= lease_seconds <= 600:
         raise ValueError('launch lease must be between 1 and 600 seconds')

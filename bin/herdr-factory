@@ -553,39 +553,48 @@ def _verify_and_bind_inbox_task_fencing(
         db_attempt = row["attempt_count"]
         db_wid = row["workflow_id"]
 
-        # 1. Worker identity check: does launcher still hold execution authority?
-        if fencing_token and db_worker != fencing_token:
+        # 1. Mandatory execution authority params check: when inbox_task_id is provided, both fencing_token and launch_attempt_id are required
+        if not fencing_token:
+            raise RuntimeError(
+                f"Inbox task fencing failure: fencing_token is required when inbox_task_id is provided (task='{inbox_task_id}')"
+            )
+        if launch_attempt_id is None:
+            raise RuntimeError(
+                f"Inbox task fencing failure: launch_attempt_id is required when inbox_task_id is provided (task='{inbox_task_id}')"
+            )
+
+        # 2. Worker identity check: does launcher still hold execution authority?
+        if db_worker != fencing_token:
             raise RuntimeError(
                 f"Inbox task fencing violation: execution lease lost (current worker is '{db_worker}', caller is '{fencing_token}')"
             )
 
-        # 2. Lease expiration check: has launcher's lease expired?
+        # 3. Lease expiration check: has launcher's lease expired?
         if db_lease is not None and db_lease < now:
             raise RuntimeError(
                 f"Inbox task fencing violation: execution lease expired at {db_lease} (now={now})"
             )
 
-        # 3. Launch attempt check: has attempt counter changed (e.g. task reassigned/recovered)?
-        if launch_attempt_id is not None:
-            raw_att = str(launch_attempt_id).strip()
-            if ":" in raw_att:
-                tok_part, att_part = raw_att.rsplit(":", 1)
-                if tok_part != db_worker or (db_attempt is not None and int(att_part) != db_attempt):
+        # 4. Launch attempt check: has attempt counter changed (e.g. task reassigned/recovered)?
+        raw_att = str(launch_attempt_id).strip()
+        if ":" in raw_att:
+            tok_part, att_part = raw_att.rsplit(":", 1)
+            if tok_part != db_worker or (db_attempt is not None and int(att_part) != db_attempt):
+                raise RuntimeError(
+                    f"Inbox task fencing violation: launch attempt mismatch (db={db_worker}:{db_attempt}, caller={raw_att})"
+                )
+        else:
+            try:
+                expected_cnt = int(raw_att)
+                if db_attempt is not None and db_attempt != expected_cnt:
                     raise RuntimeError(
-                        f"Inbox task fencing violation: launch attempt mismatch (db={db_worker}:{db_attempt}, caller={raw_att})"
+                        f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={expected_cnt})"
                     )
-            else:
-                try:
-                    expected_cnt = int(raw_att)
-                    if db_attempt is not None and db_attempt != expected_cnt:
-                        raise RuntimeError(
-                            f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={expected_cnt})"
-                        )
-                except ValueError:
-                    if raw_att != str(db_attempt):
-                        raise RuntimeError(
-                            f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={raw_att})"
-                        )
+            except ValueError:
+                if raw_att != str(db_attempt):
+                    raise RuntimeError(
+                        f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={raw_att})"
+                    )
 
         # 4. Workflow ID association check
         if db_wid and workflow_id and db_wid != workflow_id:

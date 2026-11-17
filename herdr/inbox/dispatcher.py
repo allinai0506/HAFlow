@@ -44,29 +44,7 @@ TERMINAL_WORKFLOW_STATUSES = frozenset({
 })
 
 
-def close_pane(pane_id: str) -> bool:
-    """Safely close a tmux/herdr pane and return True if successful or already closed."""
-    if not pane_id:
-        return True
-    try:
-        import subprocess
-        # Try herdr pane close first if available
-        res = subprocess.run(["herdr", "pane", "close", str(pane_id)], capture_output=True, timeout=5)
-        if res.returncode == 0:
-            return True
-    except Exception:
-        pass
-    try:
-        import subprocess
-        res = subprocess.run(["tmux", "kill-pane", "-t", str(pane_id)], capture_output=True, timeout=5)
-        err = (res.stderr or b"").decode("utf-8", errors="replace").lower()
-        if res.returncode == 0 or "can't find pane" in err or "no pane" in err:
-            return True
-        logger.warning("Failed to close pane %s: returncode=%s, stderr=%s", pane_id, res.returncode, err.strip())
-        return False
-    except Exception as exc:
-        logger.warning("Exception closing pane %s: %s", pane_id, exc)
-        return False
+from herdr.workflow_shutdown import close_pane, shutdown_workflow
 
 
 class InboxDispatcher:
@@ -286,135 +264,13 @@ class InboxDispatcher:
         - "ALREADY_TERMINAL": Workflow was already in a terminal state with no active tasks.
         - "STOP_FAILED": Execution could not be confirmed stopped; workflow status unchanged.
         """
-        if not workflow_id:
-            return "ALREADY_TERMINAL"
-        try:
-            from herdr.state_db import get_workflow, list_tasks, transition_task, transition_workflow
-            wf = get_workflow(workflow_id, db_path=self.db_path)
-            if not wf:
-                return "ALREADY_TERMINAL"
-
-            cur_status = str(wf.get("status") or "").lower()
-            active_statuses = {"working", "agent_done", "rework", "paused", "blocked", "dispatched", "pending"}
-
-            try:
-                all_tasks = list_tasks(workflow_id=workflow_id, db_path=self.db_path)
-                active_tasks = [t for t in all_tasks if str(t.get("status") or "").lower() in active_statuses]
-            except Exception as task_err:
-                logger.warning(f"Error listing tasks for fenced workflow {workflow_id}: {task_err}")
-                return "STOP_FAILED"
-
-            if cur_status in TERMINAL_WORKFLOW_STATUSES and not active_tasks:
-                return "ALREADY_TERMINAL"
-
-            # 1. Safely stop execution of any active tasks first
-            for t in active_tasks:
-                tid = t.get("task_id")
-                if not tid:
-                    continue
-                pane_id = t.get("pane_id")
-                task_stopped = False
-
-                # Runtime identity verification MUST precede any interrupt or kill signal (P1-02 / Invariant 11)
-                if pane_id:
-                    try:
-                        from herdr.task_resources import owned_live_pane
-                        owned, probe_reason = owned_live_pane(t)
-                        if owned:
-                            # 1. Ownership proven: attempt graceful halt via steering
-                            try:
-                                from herdr.steering import halt_task
-                                res = halt_task(tid, reason=reason, operator="system", execute_kill=True)
-                                if isinstance(res, dict) and res.get("ok"):
-                                    task_stopped = True
-                            except Exception as halt_err:
-                                logger.warning(f"Error halting task {tid}: {halt_err}")
-
-                            # 2. If halt failed, close the verified owned pane
-                            if not task_stopped:
-                                if close_pane(pane_id):
-                                    task_stopped = True
-                                    try:
-                                        transition_task(
-                                            task_id=tid,
-                                            to_status="failed",
-                                            reason=reason,
-                                            source="inbox_dispatcher",
-                                            db_path=self.db_path,
-                                            force=True,
-                                        )
-                                    except Exception as tr_err:
-                                        logger.warning(f"Error transitioning closed task {tid}: {tr_err}")
-                                else:
-                                    logger.warning(f"Failed to close owned pane {pane_id} for task {tid}")
-                        elif probe_reason == "pane_missing":
-                            # Positive proof that pane no longer exists; task is physically stopped
-                            task_stopped = True
-                            try:
-                                transition_task(
-                                    task_id=tid,
-                                    to_status="failed",
-                                    reason=reason,
-                                    source="inbox_dispatcher",
-                                    db_path=self.db_path,
-                                    force=True,
-                                )
-                            except Exception as tr_err:
-                                logger.warning(f"Error transitioning missing pane task {tid}: {tr_err}")
-                        else:
-                            # Ownership NOT proven (e.g. session_mismatch, pane reused by another agent).
-                            # Crucial safety gate: refuse to send halt/interrupt signal or close pane!
-                            logger.warning(
-                                "Runtime ownership for task %s pane %s not proven (%s); "
-                                "refusing to send halt signal or close pane to prevent interrupting other agents",
-                                tid,
-                                pane_id,
-                                probe_reason,
-                            )
-                    except Exception as pane_err:
-                        logger.warning(f"Error verifying/stopping pane {pane_id} for task {tid}: {pane_err}")
-                else:
-                    # If no physical pane was ever attached, status-only transition to failed is safe
-                    try:
-                        transition_task(
-                            task_id=tid,
-                            to_status="failed",
-                            reason=reason,
-                            source="inbox_dispatcher",
-                            db_path=self.db_path,
-                            force=True,
-                        )
-                        task_stopped = True
-                    except Exception as tr_err:
-                        logger.warning(f"Error transitioning unassigned task {tid}: {tr_err}")
-
-                # If neither halt nor close_pane succeeded, agent process may still be executing
-                if not task_stopped:
-                    logger.error(
-                        f"Cannot confirm task {tid} (pane={pane_id}) was stopped; refusing to mark workflow stopped"
-                    )
-                    return "STOP_FAILED"
-
-            # 2. Transition workflow to completed (outcome=abandoned) via canonical transition gate
-            if cur_status not in TERMINAL_WORKFLOW_STATUSES:
-                try:
-                    transition_workflow(
-                        workflow_id=workflow_id,
-                        to_status="completed",
-                        reason=reason,
-                        source="inbox_dispatcher",
-                        metadata={"outcome": "abandoned"},
-                        force=True,
-                        db_path=self.db_path,
-                    )
-                except Exception as tr_err:
-                    logger.error(f"Failed to transition fenced workflow {workflow_id}: {tr_err}")
-                    return "STOP_FAILED"
-
-            return "STOPPED"
-        except Exception as exc:
-            logger.error(f"Unexpected error in _safely_stop_fenced_workflow for {workflow_id}: {exc}")
-            return "STOP_FAILED"
+        return shutdown_workflow(
+            workflow_id=workflow_id,
+            reason=reason,
+            outcome="abandoned",
+            source="inbox_dispatcher",
+            db_path=self.db_path,
+        )
 
     def _handle_post_runner_fencing_mismatch(
         self,
@@ -1018,7 +874,7 @@ class InboxDispatcher:
         If a workflow was already created for the task, recovers tracking of the existing
         workflow rather than resetting to PENDING and causing duplicate runs (P1-02).
         """
-        recovered = []
+        recovered_ids = []
         now = time.time()
         from herdr.state_db import get_workflow
         conn = self._conn()
@@ -1054,7 +910,7 @@ class InboxDispatcher:
                             """,
                             (now + 180.0, now, now, tid),
                         )
-                        recovered.append(self.store.get_task(tid))
+                        recovered_ids.append(tid)
                         continue
                     elif wf_st == "paused":
                         conn.execute(
@@ -1066,7 +922,7 @@ class InboxDispatcher:
                             """,
                             (now, tid),
                         )
-                        recovered.append(self.store.get_task(tid))
+                        recovered_ids.append(tid)
                         continue
                     elif wf_st in TERMINAL_WORKFLOW_STATUSES:
                         new_st = "FAILED" if (wf_st in ("failed", "cancelled", "halted", "abandoned") or wf_out in ("startup_failed", "failed", "failure", "abandoned", "error")) else "COMPLETED"
@@ -1082,7 +938,7 @@ class InboxDispatcher:
                             """,
                             (new_st, err, now, now, tid),
                         )
-                        recovered.append(self.store.get_task(tid))
+                        recovered_ids.append(tid)
                         continue
 
                 # Workflow not created yet in DB: worker crashed before launching
@@ -1106,7 +962,7 @@ class InboxDispatcher:
                         """,
                         (now, tid),
                     )
-                recovered.append(self.store.get_task(tid))
+                recovered_ids.append(tid)
             conn.execute("COMMIT")
         except Exception:
             if conn.in_transaction:
@@ -1115,7 +971,12 @@ class InboxDispatcher:
         finally:
             conn.close()
 
-        return [t for t in recovered if t is not None]
+        recovered = []
+        for tid in recovered_ids:
+            t = self.store.get_task(tid)
+            if t:
+                recovered.append(t)
+        return recovered
 
     def dispatch_sweep(
         self,
