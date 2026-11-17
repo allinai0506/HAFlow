@@ -97,7 +97,8 @@ def test_console_api_task_halt(console_steering_env):
     mock_run = MagicMock()
     mock_run.return_value.returncode = 0
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), \
+         patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
         res = c.api_task_halt({
             "task_id": task_id,
             "reason": "Runaway execution detected",

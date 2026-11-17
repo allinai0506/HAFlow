@@ -4431,3 +4431,15 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - 新增 4 项专项测试覆盖停止失败工作区保全、Pane 关闭物理生效、交错恢复防误杀、CAS 失败 Semaphore 零泄漏；
   - `tests/test_inbox_*.py` 与 `tests/test_console_inbox_api.py` 全部 64 项测试 100% PASS；
   - `python3 -m compileall -q herdr services bin tests console` 与 `git diff --check` 均零违规。
+
+## [2026-11-17] Fix | CI 全量回归测试修复：Workflow 关闭状态门禁收敛、签名契约对齐与全量套件全绿
+- 现场：PR #420 远端 CI 全量执行发现 18 项存量测试失败，主要集中在 `validate_unbound_launch` 过度拦截历史已完成工作流、`_run_workflow_job` 位置参数展开破坏既有 mock 契约、`connection.py` AST 偏离以及测试环境下 `owned_live_pane` 缺失打桩。
+- 修复与闭环：
+  1. **收敛未绑定派发状态门禁**：`node_dispatch_store.validate_unbound_launch` 仅严格拦截处于 `closing` 状态的工作流，历史已完成（`completed` / `failed`）的工作流任务记录与状态迁移不再被误伤拦截。
+  2. **保留函数调用签名契约**：`console/workflow_api._run_workflow_job` 将可选扩展参数作为 `**kwargs` 按需解包，确保在无额外参数时原样使用位置参数调用 `run_workflow(root, req, agent, template)`，契合控制台模板测试的 Mock 契约。
+  3. **恢复状态连接 AST 基线一致性**：`herdr/state/connection.py` 恢复原始 AST 定义，消除 `test_state_db_split_source_equivalence` 报警。
+  4. **完善测试打桩环境**：在控制台、Steering API 及 Cockpit 驱动测试中对齐 `owned_live_pane` 的测试隔离打桩，验证任务安全叫停。
+- 验证：
+  - 18 项 CI 失败用例（含 `test_console_templates.py`、`test_critical_reads_fail_closed.py`、`test_console_controller_cockpit_*.py` 等）100% 全部通过。
+  - `tests/test_inbox_*.py`、`tests/test_workflow_shutdown.py`、`tests/test_steering_mesh.py` 等 119 项核心专项全绿。
+  - `python3 -m compileall -q herdr services bin tests console` 零错误；`git diff --check` 零违规。

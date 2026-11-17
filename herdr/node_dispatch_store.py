@@ -559,8 +559,8 @@ def validate_unbound_launch(conn, workflow_id, node_id):
         return
     workflow, config = rs._workflow_snapshot(conn, workflow_id)
     cur_status = str((workflow or {}).get('status') or '').lower()
-    if cur_status in {'closing', 'completed', 'failed', 'halted', 'abandoned'}:
-        raise ValueError(f"dispatch launch rejected: workflow '{workflow_id}' is {cur_status}")
+    if cur_status == 'closing':
+        raise ValueError(f"dispatch launch rejected: workflow '{workflow_id}' is closing")
     if core.policy_requires_confirmation(config, node_id):
         raise ValueError('dispatch confirmation required: launch must bind a confirmed dispatch operation')
 

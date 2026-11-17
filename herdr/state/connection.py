@@ -46,9 +46,9 @@ def get_default_db_path() -> Path:
         return p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
     return _facade().CONTROLLER_DIR / "state.db"
 
-def get_db_connection(db_path: Optional[Path | str] = None) -> sqlite3.Connection:
+def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Create a thread-safe connection to the SQLite state database with WAL mode."""
-    path = Path(db_path) if db_path else _facade().get_default_db_path()
+    path = db_path or _facade().get_default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(

@@ -200,6 +200,7 @@ def cockpit(tmp_path, monkeypatch):
     monkeypatch.setattr(steering, "get_agent_adapter", lambda _: SimpleNamespace(
         supports_soft_steer=True, supports_interrupt=True, protocol_level="tty", name="controlled",
         interrupt=interrupt))
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda *a, **k: (True, "identity_match"))
 
     def transport(argv, timeout=20, check=False):
         # Strictly contain every Console subprocess; unexpected writes fail closed.

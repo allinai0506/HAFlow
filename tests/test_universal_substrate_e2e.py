@@ -13,6 +13,7 @@ import json
 import os
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 
 from herdr import workflow
 from herdr import kernel
@@ -179,7 +180,8 @@ class TestUniversalSubstrateEndToEnd:
         assert "物流折旧政策" in t_data_now["steering_history"][0]["instruction"]
 
         # Phase 2: Emergency Halt
-        halt_res = c.api_task_halt({"task_id": "task-data-002", "reason": "发现爬虫频次预警，人工紧急制动"})
+        with patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
+            halt_res = c.api_task_halt({"task_id": "task-data-002", "reason": "发现爬虫频次预警，人工紧急制动"})
         assert halt_res.get("ok") is True
 
         # Verify status became interrupted

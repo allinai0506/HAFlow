@@ -10,6 +10,7 @@ def cockpit_store(tmp_path, monkeypatch):
     store = SQLiteStateStore(tmp_path / 'state.db')
     monkeypatch.setenv('HERDR_STATE_DB', str(store.db_path))
     monkeypatch.setattr(runtime, 'service_status', lambda: {'com.user.herdr-controller': 'running'})
+    monkeypatch.setattr('herdr.task_resources.owned_live_pane', lambda *a, **k: (True, 'identity_match'))
     for wid in ('wf-1', 'foreign'):
         store.save_workflow({'workflow_id': wid, 'status': 'running', 'execution_id': 'exec-1',
                              'config': {'nodes': [{'id': 'build', 'node_type': 'agent'}]}})

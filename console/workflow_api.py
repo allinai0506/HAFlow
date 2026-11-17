@@ -147,19 +147,22 @@ def save_template(name,content):
 
 def _run_workflow_job(job_id,root,req,agent,template,title='',context=None,workflow_id=None,task_id=None,fencing_token=None,launch_attempt_id=None,db_path=None):
     try:
-        output=run_workflow(
-            root=root,
-            req=req,
-            agent=agent,
-            template=template,
-            title=title,
-            context=context,
-            workflow_id=workflow_id,
-            task_id=task_id,
-            fencing_token=fencing_token,
-            launch_attempt_id=launch_attempt_id,
-            db_path=db_path,
-        )
+        kwargs = {}
+        if title:
+            kwargs['title'] = title
+        if context:
+            kwargs['context'] = context
+        if workflow_id:
+            kwargs['workflow_id'] = workflow_id
+        if task_id:
+            kwargs['task_id'] = task_id
+        if fencing_token:
+            kwargs['fencing_token'] = fencing_token
+        if launch_attempt_id is not None:
+            kwargs['launch_attempt_id'] = launch_attempt_id
+        if db_path:
+            kwargs['db_path'] = db_path
+        output = run_workflow(root, req, agent, template, **kwargs)
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'succeeded','output':output,'finished_at':time.time()})
     except Exception as e:

@@ -112,7 +112,7 @@ def test_scenario_1_coordinator_dispatch_rejected_when_workflow_closing(test_env
     conn.commit()
     conn.close()
 
-    claimed_op = nds.claim(str(db_file), op_id, owner="coordinator_1", now=now)
+    claimed_op = nds.claim(db_file, op_id, owner="coordinator_1", now=now)
     assert claimed_op is None, "Coordinator MUST NOT claim dispatch for a closing workflow"
 
     # 3. Verification: validate_unbound_launch rejects unbound launches on closing workflow
