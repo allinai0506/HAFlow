@@ -8,6 +8,24 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-17] fix | User Task Inbox V1 — 执行权生命周期完整防线、Pane 实例所有权校验与终态对齐 (PR #420 第十轮复审终局闭环)
+
+- 背景：PR #420 第十轮独立复审指出 4 项遗留问题：
+  1. P1-01（启动前竞态）：启动前需要全链路原子 CAS 续租并与已注册工作流实现严格 fencing；
+  2. P1-02（底层进程停止门禁）：`_safely_stop_fenced_workflow` 在 halt 失败且关闭 Pane 前必须遵循 Invariant 11 强校验 Pane 运行期实例归属（`task_resources.owned_live_pane`），未证明归属时坚决不得销毁 Pane，坚决返回 `STOP_FAILED` 且不得释放工作区；
+  3. P1-03（旧 Launcher 误杀已恢复 Workflow）：启动后更新受影响行数为 0 时，若任务已与该工作流保持关联（如被并发 Dispatcher 对账恢复为 RUNNING 或处于终态），严禁误杀正在正常推进的工作流；
+  4. P2-01（Semaphore 资源泄漏防线）：确保任何启动前检查、异常退出或异步提交失败路径均严格释放 `_LAUNCH_SEMAPHORE` 许可，杜绝并发池饥饿。
+- 变更：
+  1. `herdr/inbox/dispatcher.py`：
+     - 在 `launch_task` 预分配与执行器 `_fenced_runner` 前均严格执行原子 CAS 租约续展与归属校验（`lease_expires_at >= now`），失权即熔断；
+     - `_safely_stop_fenced_workflow` 严格按 Invariant 11 在关闭 Pane 前接入 `task_resources.owned_live_pane`：未证明归属（如 session_mismatch、unknown）时拒绝杀死 Pane 并返回 `STOP_FAILED` 保留工作区占用；仅当归属确证或底层 Pane 已物理消失（`pane_missing`）时才允许完成终止；
+     - `_handle_post_runner_fencing_mismatch` 区分真正孤儿工作流与已恢复工作流，当任务仍关联当前 `workflow_id` 且未被用户取消时坚决保留；
+     - 为 `launch_task` 启动全生命周期与 `dispatch_sweep` 声明统一 try-finally，确保 Semaphore 零泄漏；
+  2. `tests/test_inbox_dispatcher.py`：
+     - 新增 `test_safely_stop_workflow_halt_task_fails_and_ownership_unproven_refuses_to_close_pane` 验证 Pane 归属未确证时工作区锁定；
+     - 新增 `test_safely_stop_workflow_halt_task_fails_pane_missing_stops_and_releases` 验证物理消失确认路径；
+     - 新增 `test_full_execution_fencing_lifecycle` 完整验证领取 -> 租约 -> 原子校验 -> 注册 -> 持续续租 -> 并发竞争恢复 -> 终态对账 -> 释放接续全流程。
+
 ## [2026-11-17] fix | User Task Inbox V1 — 原子执行权 CAS 续租、心跳失联即时熔断与底层停止证据门禁 (PR #420 第七轮复审 P1-01 / P1-02 闭环)
 
 - 背景：PR #420 第七轮独立复审指出 2 项阻断级 P1 缺陷：

@@ -324,10 +324,29 @@ class InboxDispatcher:
                 except Exception as halt_err:
                     logger.warning(f"Error halting task {tid}: {halt_err}")
 
-                # If halt failed (or agent unsupported), try direct pane closing
+                # If halt failed (or agent unsupported), verify runtime ownership before closing saved pane (AGENTS.md Invariant 11)
                 if not task_stopped and pane_id:
                     try:
-                        if close_pane(pane_id):
+                        from herdr.task_resources import owned_live_pane
+                        owned, probe_reason = owned_live_pane(t)
+                        if owned:
+                            if close_pane(pane_id):
+                                task_stopped = True
+                                try:
+                                    transition_task(
+                                        task_id=tid,
+                                        to_status="failed",
+                                        reason=reason,
+                                        source="inbox_dispatcher",
+                                        db_path=self.db_path,
+                                        force=True,
+                                    )
+                                except Exception as tr_err:
+                                    logger.warning(f"Error transitioning closed task {tid}: {tr_err}")
+                            else:
+                                logger.warning(f"Failed to close owned pane {pane_id} for task {tid}")
+                        elif probe_reason == "pane_missing":
+                            # Positive proof that pane no longer exists; task is physically stopped
                             task_stopped = True
                             try:
                                 transition_task(
@@ -339,9 +358,16 @@ class InboxDispatcher:
                                     force=True,
                                 )
                             except Exception as tr_err:
-                                logger.warning(f"Error transitioning closed task {tid}: {tr_err}")
+                                logger.warning(f"Error transitioning missing pane task {tid}: {tr_err}")
+                        else:
+                            logger.warning(
+                                "Runtime ownership for task %s pane %s not proven (%s); preserving pane and refusing to mark stopped",
+                                tid,
+                                pane_id,
+                                probe_reason,
+                            )
                     except Exception as pane_err:
-                        logger.warning(f"Error closing pane {pane_id} for task {tid}: {pane_err}")
+                        logger.warning(f"Error verifying/closing pane {pane_id} for task {tid}: {pane_err}")
 
                 # If no physical pane was ever attached, status-only transition to failed is safe
                 if not task_stopped and not pane_id:
@@ -414,19 +440,7 @@ class InboxDispatcher:
 
         if chk_row and chk_row["workflow_id"] == workflow_id:
             chk_st = str(chk_row["status"] or "").upper()
-            if chk_st in ("RUNNING", "WAITING"):
-                logger.info(
-                    "Task %s was already recovered into %s with workflow %s; preserving workflow execution",
-                    task_id, chk_st, workflow_id,
-                )
-                return self.store.get_task(task_id)
-            elif chk_st in ("COMPLETED", "FAILED"):
-                logger.info(
-                    "Task %s already terminal (%s) with workflow %s; preserving state",
-                    task_id, chk_st, workflow_id,
-                )
-                return self.store.get_task(task_id)
-            elif chk_st == "CANCELLED":
+            if chk_st == "CANCELLED":
                 logger.info(
                     "Task %s was cancelled by user; stopping workflow %s",
                     task_id, workflow_id,
@@ -434,6 +448,13 @@ class InboxDispatcher:
                 self._safely_stop_fenced_workflow(
                     workflow_id,
                     reason=f"{reason_prefix}: task {task_id} was cancelled by user",
+                )
+                return self.store.get_task(task_id)
+            else:
+                # RUNNING, WAITING, CLAIMED, COMPLETED, FAILED: task is actively or historically associated with workflow_id
+                logger.info(
+                    "Task %s remains associated with workflow %s (status=%s, worker=%s); preserving workflow execution",
+                    task_id, workflow_id, chk_st, chk_row["worker_id"],
                 )
                 return self.store.get_task(task_id)
 
@@ -480,10 +501,17 @@ class InboxDispatcher:
             cur_pre = conn_pre.execute(
                 """
                 UPDATE user_inbox_tasks
-                   SET workflow_id = ?, updated_at = ?
-                 WHERE id = ? AND status = 'CLAIMED' AND worker_id = ? AND (workflow_id IS NULL OR workflow_id = ?)
+                   SET workflow_id = ?,
+                       lease_expires_at = ?,
+                       heartbeat_at = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                   AND status = 'CLAIMED'
+                   AND worker_id = ?
+                   AND (workflow_id IS NULL OR workflow_id = ?)
+                   AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
                 """,
-                (target_workflow_id, now_pre, task_id, fencing_token, target_workflow_id),
+                (target_workflow_id, now_pre + 180.0, now_pre, now_pre, task_id, fencing_token, target_workflow_id, now_pre),
             )
             if cur_pre.rowcount == 0:
                 logger.warning(
@@ -808,7 +836,12 @@ class InboxDispatcher:
                 _release_sem()
 
         if async_launch:
-            _LAUNCH_EXECUTOR.submit(_execute)
+            try:
+                _LAUNCH_EXECUTOR.submit(_execute)
+            except Exception:
+                if release_sem_on_finish:
+                    _LAUNCH_SEMAPHORE.release()
+                raise
             # Return task record immediately; status remains CLAIMED until launcher marks RUNNING
             return self.store.get_task(task_id) or task
         else:
@@ -1090,7 +1123,13 @@ class InboxDispatcher:
                     })
                     break
 
-            claimed = self.claim_next_task(ws)
+            try:
+                claimed = self.claim_next_task(ws)
+            except Exception:
+                if async_launch:
+                    _LAUNCH_SEMAPHORE.release()
+                raise
+
             if not claimed:
                 if async_launch:
                     _LAUNCH_SEMAPHORE.release()

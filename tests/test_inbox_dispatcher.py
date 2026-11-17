@@ -1262,7 +1262,8 @@ def test_cancel_task_fault_injection_halt_and_close_pane_both_fail(tmp_path: Pat
     assert busy is True
     assert "RUNNING" in (reason or "")
 
-    # Now simulate recovery: close_pane succeeds
+    # Now simulate recovery: runtime ownership verified and close_pane succeeds
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (True, "identity_match"))
     monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: True)
 
     cancelled = store.cancel_task(t["id"], reason="Kill this task retry")
@@ -1357,8 +1358,9 @@ def test_safely_stop_workflow_halt_task_fails_but_close_pane_succeeds_returns_st
         db_path=db_file,
     )
 
-    # halt_task fails (e.g. agent unsupported), but close_pane physically succeeds
+    # halt_task fails (e.g. agent unsupported), but runtime ownership is verified and close_pane physically succeeds
     monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_unsupported"})
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (True, "identity_match"))
     monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", lambda pane_id: True)
 
     res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="pane kill test")
@@ -1494,3 +1496,213 @@ def test_semaphore_released_on_fencing_cas_failures_allowing_subsequent_launches
     res3 = dispatcher.launch_task(c3, runner_fn=lambda t: "wf3", async_launch=False, release_sem_on_finish=True)
     assert res3 is not None
     assert res3["status"] == "RUNNING"
+
+
+def test_safely_stop_workflow_halt_task_fails_and_ownership_unproven_refuses_to_close_pane(tmp_path: Path, monkeypatch):
+    """Codex P1 / Invariant 11: When halt_task fails and runtime ownership is unproven, refuse to kill pane and preserve occupancy."""
+    from herdr.state_db import save_workflow, get_workflow, save_task, get_task
+
+    db_file = tmp_path / "stop_unproven_pane.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    wf_id = "wf_unproven_pane_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "project_id": "proj-unproven",
+            "workspace_id": "ws-unproven",
+            "title": "Unproven Pane WF",
+            "status": "running",
+            "config": {"workspace_id": "ws-unproven", "project_id": "proj-unproven"},
+        },
+        db_path=db_file,
+    )
+    save_task(
+        {
+            "task_id": "task_unproven_1",
+            "workflow_id": wf_id,
+            "status": "working",
+            "pane_id": "%77",
+        },
+        db_path=db_file,
+    )
+
+    # Injected faults: halt_task fails, runtime ownership check returns session_mismatch
+    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_busy"})
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (False, "session_mismatch"))
+
+    close_pane_called = False
+
+    def mock_close_pane(pid):
+        nonlocal close_pane_called
+        close_pane_called = True
+        return True
+
+    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", mock_close_pane)
+
+    res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="testing unproven ownership")
+    assert res == "STOP_FAILED", "Must return STOP_FAILED when runtime ownership is unproven"
+    assert close_pane_called is False, "Must NOT call close_pane when pane runtime ownership is not proven (Invariant 11)"
+
+    # Task status remains working
+    t = get_task("task_unproven_1", db_path=db_file)
+    assert t["status"] == "working"
+
+    # Workflow remains running
+    wf = get_workflow(wf_id, db_path=db_file)
+    assert wf["status"] == "running"
+
+    # Workspace remains busy
+    busy, reason = dispatcher.is_workspace_busy("ws-unproven")
+    assert busy is True
+
+
+def test_safely_stop_workflow_halt_task_fails_pane_missing_stops_and_releases(tmp_path: Path, monkeypatch):
+    """P1-02 / Invariant 11: When halt_task fails and pane is confirmed missing, task is stopped and workspace freed."""
+    from herdr.state_db import save_workflow, get_workflow, save_task, get_task
+
+    db_file = tmp_path / "stop_missing_pane.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    wf_id = "wf_missing_pane_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "project_id": "proj-missing",
+            "workspace_id": "ws-missing",
+            "title": "Missing Pane WF",
+            "status": "running",
+            "config": {"workspace_id": "ws-missing", "project_id": "proj-missing"},
+        },
+        db_path=db_file,
+    )
+    save_task(
+        {
+            "task_id": "task_missing_1",
+            "workflow_id": wf_id,
+            "status": "working",
+            "pane_id": "%88",
+        },
+        db_path=db_file,
+    )
+
+    # Injected faults: halt_task fails, runtime ownership check confirms pane is already missing
+    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": False, "error": "agent_unsupported"})
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (False, "pane_missing"))
+
+    res = dispatcher._safely_stop_fenced_workflow(wf_id, reason="testing missing pane")
+    assert res == "STOPPED"
+
+    # Task status transitioned to failed
+    t = get_task("task_missing_1", db_path=db_file)
+    assert t["status"] == "failed"
+
+    # Workflow transitioned to completed (abandoned)
+    wf = get_workflow(wf_id, db_path=db_file)
+    assert wf["status"] == "completed"
+    assert wf.get("outcome") == "abandoned"
+
+    # Workspace is now freed
+    busy, _ = dispatcher.is_workspace_busy("ws-missing")
+    assert busy is False
+
+
+def test_full_execution_fencing_lifecycle(tmp_path: Path):
+    """Comprehensive test of full execution fencing lifecycle:
+    领取任务 -> 获得执行租约 -> 原子校验执行权 -> 注册 Workflow -> 持续续租 -> 处理恢复与并发竞争 -> 确认执行终态 -> 释放工作区
+    """
+    from herdr.state_db import save_workflow, get_workflow, transition_workflow
+
+    db_file = tmp_path / "lifecycle.db"
+    store = InboxStore(db_file)
+    dispatcher_1 = InboxDispatcher(store=store, worker_id="worker-node-1", db_path=db_file)
+    dispatcher_2 = InboxDispatcher(store=store, worker_id="worker-node-2", db_path=db_file)
+
+    # 1. User submits 2 tasks to same workspace (Task 1 and Task 2)
+    t1 = store.create_task(
+        title="Lifecycle Task 1",
+        instruction="First task in queue",
+        project_id="proj-life",
+        workspace_id="ws-life",
+        auto_confirm=True,
+    )
+    t2 = store.create_task(
+        title="Lifecycle Task 2",
+        instruction="Second task queued behind Task 1",
+        project_id="proj-life",
+        workspace_id="ws-life",
+        auto_confirm=True,
+    )
+
+    # Step 1: 领取任务 + 获得执行租约
+    claimed = dispatcher_1.claim_next_task("ws-life", lease_duration_seconds=180.0)
+    assert claimed is not None
+    assert claimed["id"] == t1["id"]
+    assert claimed["status"] == "CLAIMED"
+    assert claimed["worker_id"].startswith("worker-node-1")
+    assert claimed["lease_expires_at"] > time.time()
+
+    # Workspace is immediately busy; Task 2 cannot jump ahead
+    assert dispatcher_2.claim_next_task("ws-life") is None
+
+    wf_life_id = "wf_life_exec_1"
+
+    # Step 2: 原子校验执行权 + 注册 Workflow
+    def lifecycle_runner(task_dict):
+        # Register workflow in state_db
+        save_workflow(
+            {
+                "workflow_id": wf_life_id,
+                "project_id": "proj-life",
+                "workspace_id": "ws-life",
+                "title": "Lifecycle Execution Workflow",
+                "status": "running",
+                "config": {"workspace_id": "ws-life", "project_id": "proj-life"},
+            },
+            db_path=db_file,
+        )
+        return wf_life_id
+
+    # Step 3: Launch task
+    launched = dispatcher_1.launch_task(claimed, runner_fn=lifecycle_runner, async_launch=False)
+    assert launched is not None
+    assert launched["status"] == "RUNNING"
+    assert launched["workflow_id"] == wf_life_id
+
+    # Step 4: 持续续租 (reconcile extends heartbeat and lease for RUNNING tasks)
+    dispatcher_1.reconcile_running_tasks()
+    t1_running = store.get_task(t1["id"])
+    assert t1_running["status"] == "RUNNING"
+    assert t1_running["lease_expires_at"] > time.time()
+
+    # Step 5: 并发竞争与恢复处理 (simulate node 1 pause/delay, node 2 reconcile recovers and keeps workflow running)
+    dispatcher_2.reconcile_running_tasks()
+    t1_chk = store.get_task(t1["id"])
+    assert t1_chk["status"] == "RUNNING"
+    assert t1_chk["workflow_id"] == wf_life_id
+
+    # Step 6: 确认执行终态 (Workflow engine completes the workflow)
+    transition_workflow(
+        workflow_id=wf_life_id,
+        to_status="completed",
+        reason="all stages successfully finished",
+        db_path=db_file,
+    )
+
+    # Step 7: Reconcile confirms terminal state and marks task COMPLETED
+    reconciled = dispatcher_1.reconcile_running_tasks()
+    assert len(reconciled) >= 1
+    t1_done = store.get_task(t1["id"])
+    assert t1_done["status"] == "COMPLETED"
+
+    # Step 8: 释放工作区 + 自动接续下一个任务
+    busy, reason = dispatcher_1.is_workspace_busy("ws-life")
+    assert busy is False
+
+    # Dispatch sweep automatically claims and launches Task 2!
+    sweep_res = dispatcher_1.dispatch_sweep(runner_fn=lambda t: "wf_life_exec_2", async_launch=False)
+    assert len(sweep_res["launched"]) == 1
+    assert sweep_res["launched"][0]["id"] == t2["id"]
+    assert sweep_res["launched"][0]["status"] == "RUNNING"
