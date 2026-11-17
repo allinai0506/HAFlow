@@ -315,36 +315,38 @@ class InboxDispatcher:
                 pane_id = t.get("pane_id")
                 task_stopped = False
 
-                # Graceful halt via steering
-                try:
-                    from herdr.steering import halt_task
-                    res = halt_task(tid, reason=reason, operator="system", execute_kill=True)
-                    if isinstance(res, dict) and res.get("ok"):
-                        task_stopped = True
-                except Exception as halt_err:
-                    logger.warning(f"Error halting task {tid}: {halt_err}")
-
-                # If halt failed (or agent unsupported), verify runtime ownership before closing saved pane (AGENTS.md Invariant 11)
-                if not task_stopped and pane_id:
+                # Runtime identity verification MUST precede any interrupt or kill signal (P1-02 / Invariant 11)
+                if pane_id:
                     try:
                         from herdr.task_resources import owned_live_pane
                         owned, probe_reason = owned_live_pane(t)
                         if owned:
-                            if close_pane(pane_id):
-                                task_stopped = True
-                                try:
-                                    transition_task(
-                                        task_id=tid,
-                                        to_status="failed",
-                                        reason=reason,
-                                        source="inbox_dispatcher",
-                                        db_path=self.db_path,
-                                        force=True,
-                                    )
-                                except Exception as tr_err:
-                                    logger.warning(f"Error transitioning closed task {tid}: {tr_err}")
-                            else:
-                                logger.warning(f"Failed to close owned pane {pane_id} for task {tid}")
+                            # 1. Ownership proven: attempt graceful halt via steering
+                            try:
+                                from herdr.steering import halt_task
+                                res = halt_task(tid, reason=reason, operator="system", execute_kill=True)
+                                if isinstance(res, dict) and res.get("ok"):
+                                    task_stopped = True
+                            except Exception as halt_err:
+                                logger.warning(f"Error halting task {tid}: {halt_err}")
+
+                            # 2. If halt failed, close the verified owned pane
+                            if not task_stopped:
+                                if close_pane(pane_id):
+                                    task_stopped = True
+                                    try:
+                                        transition_task(
+                                            task_id=tid,
+                                            to_status="failed",
+                                            reason=reason,
+                                            source="inbox_dispatcher",
+                                            db_path=self.db_path,
+                                            force=True,
+                                        )
+                                    except Exception as tr_err:
+                                        logger.warning(f"Error transitioning closed task {tid}: {tr_err}")
+                                else:
+                                    logger.warning(f"Failed to close owned pane {pane_id} for task {tid}")
                         elif probe_reason == "pane_missing":
                             # Positive proof that pane no longer exists; task is physically stopped
                             task_stopped = True
@@ -360,17 +362,19 @@ class InboxDispatcher:
                             except Exception as tr_err:
                                 logger.warning(f"Error transitioning missing pane task {tid}: {tr_err}")
                         else:
+                            # Ownership NOT proven (e.g. session_mismatch, pane reused by another agent).
+                            # Crucial safety gate: refuse to send halt/interrupt signal or close pane!
                             logger.warning(
-                                "Runtime ownership for task %s pane %s not proven (%s); preserving pane and refusing to mark stopped",
+                                "Runtime ownership for task %s pane %s not proven (%s); "
+                                "refusing to send halt signal or close pane to prevent interrupting other agents",
                                 tid,
                                 pane_id,
                                 probe_reason,
                             )
                     except Exception as pane_err:
-                        logger.warning(f"Error verifying/closing pane {pane_id} for task {tid}: {pane_err}")
-
-                # If no physical pane was ever attached, status-only transition to failed is safe
-                if not task_stopped and not pane_id:
+                        logger.warning(f"Error verifying/stopping pane {pane_id} for task {tid}: {pane_err}")
+                else:
+                    # If no physical pane was ever attached, status-only transition to failed is safe
                     try:
                         transition_task(
                             task_id=tid,
@@ -495,6 +499,10 @@ class InboxDispatcher:
         # Pre-assign and persist workflow_id before launch to eliminate crash-window duplicate runs (P1-02)
         target_workflow_id = task.get("workflow_id") or f"wf_ibx_{uuid.uuid4().hex[:8]}"
         task["workflow_id"] = target_workflow_id
+        attempt_count = task.get("attempt_count", 1)
+        launch_attempt_id = f"{fencing_token}:{attempt_count}"
+        task["launch_attempt_id"] = launch_attempt_id
+        task["fencing_token"] = fencing_token
         conn_pre = self._conn()
         try:
             now_pre = time.time()
@@ -541,6 +549,39 @@ class InboxDispatcher:
 
             stop_hb = threading.Event()
             lost_ownership = threading.Event()
+
+            def _verify_execution_fencing() -> None:
+                """Atomically verify launcher still has valid execution ownership in the database (P1-01)."""
+                if lost_ownership.is_set():
+                    raise RuntimeError(f"Launcher lost ownership for task {task_id}")
+                conn_chk = self._conn()
+                try:
+                    now_c = time.time()
+                    cur_chk = conn_chk.execute(
+                        """
+                        SELECT worker_id, status, lease_expires_at
+                        FROM user_inbox_tasks
+                        WHERE id = ?
+                        """,
+                        (task_id,),
+                    )
+                    row_c = cur_chk.fetchone()
+                    if not row_c:
+                        lost_ownership.set()
+                        raise RuntimeError(f"Task {task_id} not found at execution fencing boundary")
+                    if row_c["status"] != "CLAIMED" or row_c["worker_id"] != fencing_token:
+                        lost_ownership.set()
+                        raise RuntimeError(
+                            f"Launcher lost execution ownership for task {task_id}: "
+                            f"expected worker {fencing_token}, found {row_c['worker_id']} (status={row_c['status']})"
+                        )
+                    if row_c["lease_expires_at"] is not None and row_c["lease_expires_at"] < now_c:
+                        lost_ownership.set()
+                        raise RuntimeError(
+                            f"Launcher lease expired for task {task_id} ({row_c['lease_expires_at']} < {now_c})"
+                        )
+                finally:
+                    conn_chk.close()
 
             try:
                 def _heartbeat_loop():
@@ -616,8 +657,7 @@ class InboxDispatcher:
                     except Exception:
                         wf_context = None
 
-                    if lost_ownership.is_set():
-                        raise RuntimeError(f"Cannot run workflow: launcher lost ownership for task {task_id}")
+                    _verify_execution_fencing()
 
                     output = run_workflow(
                         root=p_record["project_root"],
@@ -677,9 +717,14 @@ class InboxDispatcher:
                     return None
 
                 def _fenced_runner(t: Dict[str, Any]) -> str:
-                    if lost_ownership.is_set():
-                        raise RuntimeError(f"Launcher lost ownership before executing runner for task {task_id}")
-                    return exec_runner(t)
+                    _verify_execution_fencing()
+                    res_wf = exec_runner(t)
+                    try:
+                        _verify_execution_fencing()
+                    except Exception as post_err:
+                        logger.warning("Fencing verification failed post-runner for task %s: %s", task_id, post_err)
+                        lost_ownership.set()
+                    return res_wf
 
                 try:
                     workflow_id = _fenced_runner(task) or target_workflow_id

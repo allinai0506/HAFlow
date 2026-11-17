@@ -1706,3 +1706,239 @@ def test_full_execution_fencing_lifecycle(tmp_path: Path):
     assert len(sweep_res["launched"]) == 1
     assert sweep_res["launched"][0]["id"] == t2["id"]
     assert sweep_res["launched"][0]["status"] == "RUNNING"
+
+
+def test_lease_expired_launcher_resumes_refuses_to_launch_workflow(tmp_path: Path):
+    """Review Round 11 / P1-01: Launcher A lease expires, resumes, cannot launch workflow without valid execution fencing."""
+    db_file = tmp_path / "lease_expired_launch.db"
+    store = InboxStore(db_file)
+    disp_a = InboxDispatcher(store=store, db_path=db_file, worker_id="worker_node_a")
+
+    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
+        t = store.create_task(
+            title="Expire Test Task",
+            instruction="Task to test fencing on pause/resume",
+            project_id="p-exp",
+            workspace_id="ws-exp",
+            auto_confirm=True,
+        )
+        claimed_a = disp_a.claim_next_task("ws-exp")
+        assert claimed_a is not None
+        assert claimed_a["status"] == "CLAIMED"
+        assert claimed_a["worker_id"].startswith("worker_node_a")
+
+        # Simulate Launcher A being paused while its lease expires in the database
+        conn = sqlite3.connect(str(db_file))
+        conn.execute(
+            "UPDATE user_inbox_tasks SET lease_expires_at = ? WHERE id = ?",
+            (time.time() - 50.0, t["id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        runner_called = False
+
+        def spy_runner(task_dict):
+            nonlocal runner_called
+            runner_called = True
+            return "wf_should_never_launch"
+
+        # Launcher A resumes and tries to launch
+        res = disp_a.launch_task(claimed_a, runner_fn=spy_runner, async_launch=False)
+
+        # 1. Launcher A must reject launch and return None
+        assert res is None, "Launcher A must abort launch because lease expired"
+        # 2. Invariant 1: Runner was NEVER invoked (no side-effect / workflow creation permitted)
+        assert runner_called is False, "Runner MUST NOT be invoked when lease expired"
+        # 3. Task in DB remains CLAIMED (or uncorrupted)
+        t_db = store.get_task(t["id"])
+        assert t_db["workflow_id"] != "wf_should_never_launch"
+
+
+def test_pane_reused_by_other_agent_cancel_refuses_to_interrupt_new_agent(tmp_path: Path, monkeypatch):
+    """Review Round 11 / P1-02: Cancelling old task when pane is reused by another agent MUST NOT send interrupt or close pane."""
+    from herdr.state_db import save_workflow, get_workflow, save_task, get_task
+
+    db_file = tmp_path / "pane_reused_cancel.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    wf_id = "wf_old_agent_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "project_id": "proj-reused",
+            "workspace_id": "ws-reused",
+            "title": "Old Workflow",
+            "status": "running",
+            "config": {"workspace_id": "ws-reused", "project_id": "proj-reused"},
+        },
+        db_path=db_file,
+    )
+    save_task(
+        {
+            "task_id": "task_old_1",
+            "workflow_id": wf_id,
+            "status": "working",
+            "pane_id": "%88",
+        },
+        db_path=db_file,
+    )
+
+    t = store.create_task(
+        title="Old Task with Reused Pane",
+        instruction="Do work",
+        project_id="proj-reused",
+        workspace_id="ws-reused",
+        auto_confirm=True,
+    )
+    store.update_task_status(t["id"], new_status="CLAIMED")
+    store.update_task_status(t["id"], new_status="RUNNING", workflow_id=wf_id)
+
+    # Injected probe: Pane %88 is now active with another agent session!
+    halt_called = False
+    close_called = False
+
+    def spy_halt_task(tid, *a, **k):
+        nonlocal halt_called
+        halt_called = True
+        return {"ok": True}
+
+    def spy_close_pane(pid):
+        nonlocal close_called
+        close_called = True
+        return True
+
+    monkeypatch.setattr("herdr.steering.halt_task", spy_halt_task)
+    monkeypatch.setattr("herdr.inbox.dispatcher.close_pane", spy_close_pane)
+    # Runtime ownership check confirms %88 belongs to another session (session_mismatch)
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (False, "session_mismatch"))
+
+    # Cancellation must fail because execution cannot be safely confirmed stopped
+    with pytest.raises(RuntimeError, match="failed to stop underlying workflow"):
+        store.cancel_task(t["id"], reason="User cancels old task")
+
+    # Invariant 2: halt_task and close_pane MUST NOT be called on reused pane!
+    assert halt_called is False, "halt_task MUST NOT be called on unproven/reused pane!"
+    assert close_called is False, "close_pane MUST NOT be called on unproven/reused pane!"
+
+    # Old task and workflow remain untouched to prevent fact drift
+    t_db = store.get_task(t["id"])
+    assert t_db["status"] == "RUNNING"
+    task_wf = get_task("task_old_1", db_path=db_file)
+    assert task_wf["status"] == "working"
+    wf_db = get_workflow(wf_id, db_path=db_file)
+    assert wf_db["status"] == "running"
+
+
+def test_pending_task_concurrent_claim_and_cancel_consistent_final_state(tmp_path: Path):
+    """Review Round 11 / P2-01: Concurrent claim and cancel on PENDING task reaches consistent final state."""
+    db_file = tmp_path / "concurrent_claim_cancel.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file, worker_id="worker_race")
+
+    t = store.create_task(
+        title="Concurrent Task",
+        instruction="Instruction",
+        project_id="p-race",
+        workspace_id="ws-race",
+        auto_confirm=True,
+    )
+    assert t["status"] == "PENDING"
+
+    import threading
+
+    def do_cancel():
+        try:
+            store.cancel_task(t["id"], reason="Concurrent cancellation")
+        except Exception:
+            pass
+
+    def do_claim_and_launch():
+        try:
+            claimed = dispatcher.claim_next_task("ws-race")
+            if claimed:
+                dispatcher.launch_task(claimed, runner_fn=lambda t_dict: "wf_concurrent_1", async_launch=False)
+        except Exception:
+            pass
+
+    th1 = threading.Thread(target=do_cancel)
+    th2 = threading.Thread(target=do_claim_and_launch)
+
+    th1.start()
+    th2.start()
+    th1.join(timeout=5.0)
+    th2.join(timeout=5.0)
+
+    final_task = store.get_task(t["id"])
+    # Final state must be CANCELLED (or cleanly completed)
+    assert final_task["status"] in ("CANCELLED", "COMPLETED")
+    if final_task["status"] == "CANCELLED":
+        busy, reason = dispatcher.is_workspace_busy("ws-race")
+        assert busy is False, f"Workspace must not be held when task is CANCELLED: {reason}"
+
+
+def test_claimed_task_cancellation_both_inbox_and_workflow_reach_terminal_state(tmp_path: Path, monkeypatch):
+    """Review Round 11 / P2-02: Cancelling a CLAIMED task safely halts workflow and enters CANCELLED."""
+    from herdr.state_db import save_workflow, get_workflow, save_task, get_task
+
+    db_file = tmp_path / "cancel_claimed.db"
+    store = InboxStore(db_file)
+    dispatcher = InboxDispatcher(store=store, db_path=db_file)
+
+    t = store.create_task(
+        title="Claimed Cancel Task",
+        instruction="Instruction",
+        project_id="p-claim",
+        workspace_id="ws-claim",
+        auto_confirm=True,
+    )
+    claimed = dispatcher.claim_next_task("ws-claim")
+    assert claimed is not None
+    assert claimed["status"] == "CLAIMED"
+
+    wf_id = "wf_claimed_cancel_1"
+    save_workflow(
+        {
+            "workflow_id": wf_id,
+            "project_id": "p-claim",
+            "workspace_id": "ws-claim",
+            "title": "Claimed Cancel WF",
+            "status": "running",
+            "config": {"workspace_id": "ws-claim", "project_id": "p-claim"},
+        },
+        db_path=db_file,
+    )
+    save_task(
+        {
+            "task_id": "task_sub_1",
+            "workflow_id": wf_id,
+            "status": "working",
+            "pane_id": "%44",
+        },
+        db_path=db_file,
+    )
+
+    # Attach workflow_id to the claimed task in store
+    store.update_task_status(claimed["id"], new_status="CLAIMED", workflow_id=wf_id)
+
+    # Pane %44 is owned and gracefully halts
+    monkeypatch.setattr("herdr.task_resources.owned_live_pane", lambda task: (True, "identity_match"))
+    monkeypatch.setattr("herdr.steering.halt_task", lambda *a, **k: {"ok": True})
+
+    # Cancel the CLAIMED task
+    cancelled = store.cancel_task(claimed["id"], reason="User cancels CLAIMED task")
+
+    # 1. Inbox task successfully transitions CLAIMED -> CANCELLED without state machine error
+    assert cancelled["status"] == "CANCELLED"
+    t_after = store.get_task(claimed["id"])
+    assert t_after["status"] == "CANCELLED"
+
+    # 2. Workflow is stopped and transitioned to completed / abandoned
+    wf_after = get_workflow(wf_id, db_path=db_file)
+    assert wf_after["status"] == "completed"
+    assert wf_after.get("outcome") == "abandoned"
+
+    # 3. Workspace is completely freed
+    busy, reason = dispatcher.is_workspace_busy("ws-claim")
+    assert busy is False, f"Workspace must not be busy after cancel: {reason}"

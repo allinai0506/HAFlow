@@ -12,6 +12,7 @@ from herdr.inbox.transitions import (
     ALL_INBOX_STATUSES,
     PRIORITY_DEFAULT,
     PRIORITY_WEIGHTS,
+    TERMINAL_INBOX_STATUSES,
     VALID_PRIORITIES,
     WORKSPACE_HOLDING_STATUSES,
     InvalidInboxTransitionError,
@@ -479,45 +480,125 @@ class InboxStore:
     def cancel_task(self, task_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
         """Cancel a task if not already completed/failed.
 
-        If the task is associated with an active workflow (WAITING, RUNNING, CLAIMED),
-        safely stop the underlying workflow and halt tasks to release workspace occupancy.
+        Protects against concurrency race conditions with Dispatcher launch:
+        - If task is PENDING/DRAFT and has no workflow, transitions to CANCELLED atomically under BEGIN IMMEDIATE.
+        - If task is CLAIMED, RUNNING, or WAITING (or has a workflow_id), safely stops
+          the underlying workflow first to release workspace occupancy, then transitions to CANCELLED.
+        - If stopping fails, preserves task status and workspace occupancy.
         """
-        task = self.get_task(task_id)
-        if not task:
-            raise KeyError(f"Inbox task not found: {task_id}")
+        while True:
+            conn = self._conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.execute("SELECT * FROM user_inbox_tasks WHERE id = ?", (task_id,))
+                row = cur.fetchone()
+                if not row:
+                    raise KeyError(f"Inbox task not found: {task_id}")
+                task = _decode_row(row)
+                cur_status = str(task.get("status") or "").upper()
+                if cur_status in TERMINAL_INBOX_STATUSES:
+                    conn.execute("COMMIT")
+                    return task
 
-        wid = task.get("workflow_id")
-        cur_status = str(task.get("status") or "").upper()
-        if wid and cur_status in ("WAITING", "RUNNING", "CLAIMED"):
-            from herdr.inbox.dispatcher import InboxDispatcher
-            stop_res = InboxDispatcher(db_path=self.db_path)._safely_stop_fenced_workflow(
-                workflow_id=wid,
-                reason=reason or "Inbox task cancelled by user",
-            )
-            if stop_res not in ("STOPPED", "ALREADY_TERMINAL"):
-                # Record error so state is traceable, but preserve status and workspace occupancy!
-                conn = self._conn()
-                try:
-                    conn.execute(
-                        "UPDATE user_inbox_tasks SET error = ?, updated_at = ? WHERE id = ?",
-                        (
-                            f"Cancel failed: could not confirm agent stop for workflow {wid} ({stop_res})",
-                            time.time(),
-                            task_id,
-                        ),
+                wid = task.get("workflow_id")
+                # If PENDING or DRAFT without an underlying workflow, transition to CANCELLED immediately
+                # under exclusive transaction to prevent Dispatcher from claiming it in the race window.
+                if cur_status in ("PENDING", "DRAFT") and not wid:
+                    now = time.time()
+                    cur_up = conn.execute(
+                        """
+                        UPDATE user_inbox_tasks
+                           SET status = 'CANCELLED',
+                               error = ?,
+                               completed_at = COALESCE(completed_at, ?),
+                               updated_at = ?
+                         WHERE id = ? AND status = ?
+                        """,
+                        (reason or "Cancelled by user", now, now, task_id, cur_status),
                     )
-                    conn.commit()
-                finally:
-                    conn.close()
-                raise RuntimeError(
-                    f"Cannot cancel task {task_id}: failed to stop underlying workflow {wid} (stop_result={stop_res})"
-                )
+                    if cur_up.rowcount == 1:
+                        conn.execute("COMMIT")
+                        return self.get_task(task_id)  # type: ignore
+                    else:
+                        conn.execute("ROLLBACK")
+                        continue
+                conn.execute("COMMIT")
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            finally:
+                conn.close()
 
-        return self.update_task_status(
-            task_id=task_id,
-            new_status="CANCELLED",
-            error=reason or "Cancelled by user",
-        )
+            # Task is CLAIMED, RUNNING, or WAITING (or has a workflow_id).
+            # Safely stop underlying workflow outside of inbox DB lock to avoid deadlocks.
+            if wid and cur_status in ("WAITING", "RUNNING", "CLAIMED"):
+                from herdr.inbox.dispatcher import InboxDispatcher
+                stop_res = InboxDispatcher(db_path=self.db_path)._safely_stop_fenced_workflow(
+                    workflow_id=wid,
+                    reason=reason or "Inbox task cancelled by user",
+                )
+                if stop_res not in ("STOPPED", "ALREADY_TERMINAL"):
+                    # Record error so state is traceable, but preserve status and workspace occupancy!
+                    conn = self._conn()
+                    try:
+                        conn.execute(
+                            "UPDATE user_inbox_tasks SET error = ?, updated_at = ? WHERE id = ?",
+                            (
+                                f"Cancel failed: could not confirm agent stop for workflow {wid} ({stop_res})",
+                                time.time(),
+                                task_id,
+                            ),
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    raise RuntimeError(
+                        f"Cannot cancel task {task_id}: failed to stop underlying workflow {wid} (stop_result={stop_res})"
+                    )
+
+            # Atomically verify and transition to CANCELLED
+            conn = self._conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                cur = conn.execute("SELECT * FROM user_inbox_tasks WHERE id = ?", (task_id,))
+                row = cur.fetchone()
+                if not row:
+                    raise KeyError(f"Inbox task not found: {task_id}")
+                latest_task = _decode_row(row)
+                latest_st = str(latest_task.get("status") or "").upper()
+                latest_wid = latest_task.get("workflow_id")
+
+                if latest_st in TERMINAL_INBOX_STATUSES:
+                    conn.execute("COMMIT")
+                    return latest_task
+
+                # If workflow was attached or changed during stop window, loop and stop the new workflow
+                if latest_wid and latest_wid != wid and latest_st in ("WAITING", "RUNNING", "CLAIMED"):
+                    conn.execute("ROLLBACK")
+                    continue
+
+                validate_inbox_transition(latest_st, "CANCELLED")
+                now = time.time()
+                conn.execute(
+                    """
+                    UPDATE user_inbox_tasks
+                       SET status = 'CANCELLED',
+                           error = ?,
+                           completed_at = COALESCE(completed_at, ?),
+                           updated_at = ?
+                     WHERE id = ? AND status = ?
+                    """,
+                    (reason or "Cancelled by user", now, now, task_id, latest_st),
+                )
+                conn.execute("COMMIT")
+                return self.get_task(task_id)  # type: ignore
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            finally:
+                conn.close()
 
     def retry_task(self, task_id: str) -> Dict[str, Any]:
         """Retry a failed task by returning it to PENDING without polluting workflow context."""
