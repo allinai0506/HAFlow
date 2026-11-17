@@ -390,3 +390,149 @@ def test_unallocated_intent_is_settled_only_after_inventory_succeeds(test_env, n
     assert test_env["store"].cancel_task(inbox_id)["status"] == "CANCELLED"
     assert task_resources._latest_intent(store, intent["key"])["phase"] == "resources_absent"
     assert not test_env["disp"].is_workspace_busy("ws_stop")[0]
+
+
+@pytest.mark.parametrize("task_has_pane", [True, False])
+def test_reused_pane_waits_for_original_process_then_releases(test_env, monkeypatch, task_has_pane):
+    from herdr import workflow_shutdown
+    from herdr.state_store import SQLiteStateStore
+
+    inbox_id = _start_workflow(test_env)
+    db = test_env["db_file"]
+    pane_id = "w1:p1"
+    if task_has_pane:
+        save_task({"task_id": "old-task", "workflow_id": "wf_stop", "run_id": "old-run",
+                   "status": "working", "pane_id": pane_id}, db_path=db)
+
+    def unexpected_operation(*args, **kwargs):
+        pytest.fail("shutdown must not operate on the replacement terminal")
+
+    monkeypatch.setattr(workflow_shutdown, "_pane", lambda _: {"terminal_id": "new-terminal"})
+    monkeypatch.setattr(workflow_shutdown, "close_pane", unexpected_operation)
+    monkeypatch.setattr(workflow_shutdown, "get_agent_adapter", unexpected_operation)
+    monkeypatch.setattr(task_resources, "owned_live_pane", unexpected_operation)
+    store = SQLiteStateStore(str(db))
+    with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                          start_new_session=True) as old_process:
+        try:
+            store.record_event("shutdown_process", {
+                "identity": {"pane_id": pane_id, "run_id": "old-run", "intent_id": None},
+                "phase": "STOP_PENDING", "terminal_id": "old-terminal",
+                "shell": old_process.pid, "pids": [old_process.pid],
+            }, workflow_id="wf_stop", task_id="old-task", source="workflow_shutdown")
+
+            with pytest.raises(RuntimeError, match="failed to stop"):
+                test_env["store"].cancel_task(inbox_id)
+            assert get_workflow("wf_stop", db_path=db)["status"] == "closing"
+            assert test_env["disp"].is_workspace_busy("ws_stop")[0]
+        finally:
+            old_process.terminate()
+            old_process.wait(timeout=3)
+
+    # A malformed observation still cannot establish that the original pane is gone.
+    with monkeypatch.context() as probe:
+        probe.setattr(workflow_shutdown, "_pane", lambda _: {})
+        with pytest.raises(RuntimeError, match="failed to stop"):
+            test_env["store"].cancel_task(inbox_id)
+
+    assert test_env["store"].cancel_task(inbox_id)["status"] == "CANCELLED"
+    receipt = store.list_events(workflow_id="wf_stop", task_id="old-task",
+                                event_type="shutdown_process", desc=True, limit=1)[0]["payload"]
+    assert receipt["phase"] == "PROCESS_STOPPED"
+    assert receipt["terminal_id"] == "old-terminal"
+    assert not test_env["disp"].is_workspace_busy("ws_stop")[0]
+
+
+def test_missing_unregistered_pane_without_process_receipt_preserves_occupancy(test_env, native_pane):
+    from herdr.state_store import SQLiteStateStore
+
+    inbox_id = _start_workflow(test_env)
+    db = test_env["db_file"]
+    pane, cli = native_pane
+    pane_id = pane["pane_id"]
+    store = SQLiteStateStore(str(db))
+    intent = task_resources.begin_launch_intent(
+        store, workflow_id="wf_stop", node_id="node", task_id="unregistered", run_id="run",
+    )["intent"]
+    # The launcher persists a real pane identity, then crashes before Task
+    # registration or shutdown can capture the terminal's process identities.
+    launcher = subprocess.run([sys.executable, "-c", """
+import json, os, sys
+from herdr.state_store import SQLiteStateStore
+from herdr.task_resources import record_launch_resources, workflow_launch_lock
+db, intent, resources = sys.argv[1:]
+with workflow_launch_lock(db, "wf_stop"):
+    record_launch_resources(SQLiteStateStore(db), json.loads(intent), json.loads(resources))
+    os._exit(17)
+""", str(db), json.dumps(intent), json.dumps({
+        "planned_clone_path": str(test_env["tmp_path"] / "removed-clone"),
+        "run_id": "run", "pane_id": pane_id, "terminal_id": pane["terminal_id"],
+    })], timeout=5)
+    assert launcher.returncode == 17
+    intent = task_resources._latest_intent(store, intent["key"])
+    _, descendant = _start_resistant_process(pane_id, cli, test_env["tmp_path"])
+    try:
+        cli("pane", "close", pane_id)
+        assert task_resources.inventory_launch_resources(intent)["resource_status"] == "absent"
+        assert get_task("unregistered", db_path=db) is None
+        assert not store.list_events(workflow_id="wf_stop", event_type="shutdown_process")
+        os.kill(descendant, 0)
+
+        with pytest.raises(RuntimeError, match="failed to stop"):
+            test_env["store"].cancel_task(inbox_id)
+        assert get_workflow("wf_stop", db_path=db)["status"] == "closing"
+        assert task_resources._latest_intent(store, intent["key"])["phase"] == "allocating"
+        assert test_env["disp"].is_workspace_busy("ws_stop")[0]
+        assert not store.list_events(workflow_id="wf_stop", event_type="shutdown_process")
+    finally:
+        try:
+            os.kill(descendant, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def test_reused_unregistered_pane_allows_inventory_to_settle_original_intent(test_env, monkeypatch):
+    from herdr import workflow_shutdown
+    from herdr.state_store import SQLiteStateStore
+
+    inbox_id = _start_workflow(test_env)
+    db = test_env["db_file"]
+    store = SQLiteStateStore(str(db))
+    pane_id = "w1:p1"
+    intent = task_resources.begin_launch_intent(
+        store, workflow_id="wf_stop", node_id="node", task_id="unregistered", run_id="old-run",
+    )["intent"]
+    planned = test_env["tmp_path"] / "old-clone"
+    intent = task_resources.record_launch_resources(store, intent, {
+        "planned_clone_path": str(planned), "run_id": "old-run", "pane_id": pane_id,
+    })
+    previous = subprocess.run([sys.executable, "-c", "print(__import__('os').getpid())"],
+                              start_new_session=True, capture_output=True, text=True, check=True)
+    pid = int(previous.stdout)
+    store.record_event("shutdown_process", {
+        "identity": {"pane_id": pane_id, "run_id": "old-run", "intent_id": intent["intent_id"]},
+        "phase": "STOP_PENDING", "terminal_id": "old-terminal", "shell": pid, "pids": [pid],
+    }, workflow_id="wf_stop", task_id=intent["key"], source="workflow_shutdown")
+
+    replacement = {"pane_id": pane_id, "terminal_id": "new-terminal", "cwd": str(planned)}
+    inventory = task_resources.inventory_launch_resources
+
+    def run_inventory(argv, timeout):
+        assert argv == ["herdr", "pane", "list"]
+        return 0, json.dumps({"result": {"panes": [replacement]}}), ""
+
+    monkeypatch.setattr(task_resources, "inventory_launch_resources",
+                        lambda intent, **kw: inventory(intent, runner=run_inventory, **kw))
+    monkeypatch.setattr(workflow_shutdown, "_pane", lambda _: replacement)
+    monkeypatch.setattr(workflow_shutdown, "close_pane",
+                        lambda _: pytest.fail("must not close the replacement terminal"))
+
+    # Even a different terminal blocks settlement while it uses the old clone.
+    with pytest.raises(RuntimeError, match="failed to stop"):
+        test_env["store"].cancel_task(inbox_id)
+    assert task_resources._latest_intent(store, intent["key"])["phase"] == "allocating"
+    assert test_env["disp"].is_workspace_busy("ws_stop")[0]
+
+    replacement["cwd"] = str(test_env["tmp_path"])
+    assert test_env["store"].cancel_task(inbox_id)["status"] == "CANCELLED"
+    assert task_resources._latest_intent(store, intent["key"])["phase"] == "resources_absent"

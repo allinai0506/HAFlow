@@ -533,11 +533,12 @@ def write_worker_launch_identity(clone, identity, *, initial=False):
         Path(temp).unlink(missing_ok=True)
 
 
-def inventory_launch_resources(intent, runner=None, *, timeout=10):
+def inventory_launch_resources(intent, runner=None, *, timeout=10, stopped_terminal_id=None):
     """Bounded read-only inventory; absence requires complete native + file facts.
 
     Native schemas lacking cwd cannot prove an unregistered Pane is absent.
-    No delete/stop/adopt operation is issued for owned, foreign or unknown rows.
+    A process stop receipt allows a replacement terminal to be checked by cwd
+    like any other pane. Other callers treat a known pane ID as unresolved.
     """
     import os
     resources = intent.get('resources') or {}
@@ -584,8 +585,12 @@ def inventory_launch_resources(intent, runner=None, *, timeout=10):
             if not isinstance(pane, dict) or not pane.get('pane_id'):
                 raise ValueError('native inventory incomplete')
             if known_pane and pane['pane_id'] == known_pane:
-                return {'resource_status': 'unknown', 'reason': 'pane_present_needs_instance_reconciliation',
-                        'pane_id': known_pane, 'clone_tag': tag}
+                live_terminal_id = pane.get('terminal_id')
+                replaced = (stopped_terminal_id and isinstance(live_terminal_id, str)
+                            and live_terminal_id and live_terminal_id != stopped_terminal_id)
+                if not replaced:
+                    return {'resource_status': 'unknown', 'reason': 'pane_present_needs_instance_reconciliation',
+                            'pane_id': known_pane, 'clone_tag': tag}
             cwd = pane.get('cwd')
             if not cwd:
                 remaining = deadline - time.monotonic()

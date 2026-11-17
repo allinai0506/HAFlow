@@ -32,6 +32,15 @@ def _pane(pane_id):
     return pane
 
 
+def _original_terminal_gone(pane, terminal_id):
+    if pane is None:
+        return True
+    current_id = pane.get("terminal_id")
+    return (isinstance(current_id, str) and bool(current_id)
+            and isinstance(terminal_id, str) and bool(terminal_id)
+            and current_id != terminal_id)
+
+
 def _terminal_processes(session_id, previous=()):
     """Track the terminal session and observed descendants, even after reparenting."""
     result = subprocess.run(
@@ -62,7 +71,8 @@ def _terminal_processes(session_id, previous=()):
     return members.intersection(processes)
 
 
-def _stop_runtime(store, target, *, reason, deadline, intent=None):
+def _stop_runtime(store, target, *, reason, deadline, intent=None) -> str | None:
+    """Stop the original execution and return its confirmed terminal ID."""
     pane_id = pane_reference(target)
     task_id = target["task_id"] if intent is None else intent["key"]
     workflow_id = target["workflow_id"]
@@ -77,7 +87,7 @@ def _stop_runtime(store, target, *, reason, deadline, intent=None):
     receipt = events[0]["payload"] if events else None
     if receipt and receipt["identity"] != identity:
         if receipt["phase"] != "PROCESS_STOPPED":
-            return False
+            return None
         receipt = None
 
     def record(phase, terminal_id, shell, pids):
@@ -104,32 +114,36 @@ def _stop_runtime(store, target, *, reason, deadline, intent=None):
     pane = _pane(pane_id)
     if receipt and receipt["phase"] == "PROCESS_STOPPED":
         # A surviving/new pane with this terminal identity contradicts the receipt.
-        return pane is None or pane.get("terminal_id") != receipt["terminal_id"]
-    if pane is None:
-        if not receipt or _terminal_processes(receipt["shell"], receipt["pids"]):
-            return False
+        terminal_id = receipt["terminal_id"]
+        return terminal_id if _original_terminal_gone(pane, terminal_id) else None
+    if pane is None and not receipt:
+        logger.warning("STOP_FAILED for %s: pane missing without a process receipt", task_id)
+        return None
+    if receipt and _original_terminal_gone(pane, receipt["terminal_id"]):
+        if _terminal_processes(receipt["shell"], receipt["pids"]):
+            return None
         record("PROCESS_STOPPED", receipt["terminal_id"], receipt["shell"], receipt["pids"])
-        return True
+        return receipt["terminal_id"]
     if not owned(pane):
-        return False
+        return None
 
     terminal_id = pane["terminal_id"]
     code, stdout, _ = _run_herdr(["herdr", "pane", "process-info", "--pane", pane_id], 2)
     if code:
-        return False
+        return None
     info = json.loads(stdout)["result"]["process_info"]
     shell = info["shell_pid"]
     if (info["pane_id"] != pane_id or type(shell) is not int or shell <= 1
             or os.getsid(shell) != shell):
-        return False
+        return None
     current = _pane(pane_id)
     if not current or current.get("terminal_id") != terminal_id or not owned(current):
-        return False
+        return None
     if receipt and (receipt["terminal_id"] != terminal_id or receipt["shell"] != shell):
-        return False
+        return None
     pids = _terminal_processes(shell, receipt["pids"] if receipt else ())
     if shell not in pids or not info.get("foreground_processes"):
-        return False
+        return None
     record("STOP_PENDING", terminal_id, shell, pids)
 
     runtime = target.get("runtime") or {}
@@ -145,7 +159,8 @@ def _stop_runtime(store, target, *, reason, deadline, intent=None):
             time.sleep(0.05)
 
     current = _pane(pane_id)
-    if current is not None:
+    original_present = not _original_terminal_gone(current, terminal_id)
+    if original_present:
         if current.get("terminal_id") != terminal_id or not owned(current):
             # The Agent can disappear after a successful interrupt. The
             # unchanged terminal and an empty execution session still allow
@@ -153,23 +168,24 @@ def _stop_runtime(store, target, *, reason, deadline, intent=None):
             if (current.get("terminal_id") != terminal_id
                     or task_resources.owned_live_pane(target)[1] != "agent_not_found"
                     or _terminal_processes(shell, pids) != {shell}):
-                return False
+                return None
     pids |= _terminal_processes(shell, pids)
     record("STOP_PENDING", terminal_id, shell, pids)
-    if current is not None:
+    if original_present:
         latest = _pane(pane_id)
-        if latest is not None:
-            if latest["terminal_id"] != terminal_id or time.monotonic() >= deadline:
-                return False
+        if not _original_terminal_gone(latest, terminal_id):
+            if latest.get("terminal_id") != terminal_id or time.monotonic() >= deadline:
+                return None
             close_pane(pane_id)
 
     settle_until = min(deadline, time.monotonic() + 1.0)
     while True:
-        if _pane(pane_id) is None and not _terminal_processes(shell, pids):
+        if (_original_terminal_gone(_pane(pane_id), terminal_id)
+                and not _terminal_processes(shell, pids)):
             record("PROCESS_STOPPED", terminal_id, shell, pids)
-            return True
+            return terminal_id
         if time.monotonic() >= settle_until:
-            return False
+            return None
         time.sleep(0.05)
 
 
@@ -200,7 +216,8 @@ def _pending_processes_stopped(store, workflow_id):
         receipt = json.loads(row["payload_json"])
         if receipt["phase"] == "PROCESS_STOPPED":
             continue
-        if (_pane(receipt["identity"]["pane_id"]) is not None
+        pane = _pane(receipt["identity"]["pane_id"])
+        if (not _original_terminal_gone(pane, receipt["terminal_id"])
                 or _terminal_processes(receipt["shell"], receipt["pids"])):
             return False
         store.record_event("shutdown_process", {**receipt, "phase": "PROCESS_STOPPED"},
@@ -234,6 +251,8 @@ def drain_unsettled_launch_intents(store, workflow_id, *, reason, deadline, chec
         resources = intent["resources"]
         tag = inventory.get("clone_tag") or {}
         pane_id = resources.get("pane_id") or tag.get("pane_id")
+        # Inventory covers panes and clone paths. An allocated pane can leave
+        # detached descendants even when both resources are now absent.
         if inventory["resource_status"] == "absent" and not pane_id:
             result = task_resources.reconcile_launch_intent(store, intent, lambda _: "absent")
             if result["status"] != "resources_absent":
@@ -246,10 +265,13 @@ def drain_unsettled_launch_intents(store, workflow_id, *, reason, deadline, chec
             return False
         target = {**tag, **{key: value for key, value in resources.items() if value is not None},
                   "pane_id": pane_id, "task_id": intent["task_id"], "workflow_id": workflow_id}
-        if not _stop_runtime(store, target, reason=reason, deadline=deadline, intent=intent):
+        stopped_terminal_id = _stop_runtime(store, target, reason=reason, deadline=deadline, intent=intent)
+        if not stopped_terminal_id:
             logger.warning("STOP_FAILED for launch %s: execution unverified", intent["key"])
             return False
-        inventory = task_resources.inventory_launch_resources(intent, timeout=max(0.1, deadline - time.monotonic()))
+        inventory = task_resources.inventory_launch_resources(
+            intent, timeout=max(0.1, deadline - time.monotonic()), stopped_terminal_id=stopped_terminal_id,
+        )
         if inventory["resource_status"] not in {"absent", "owned"}:
             logger.warning("STOP_FAILED for launch %s after close: %s", intent["key"], inventory["reason"])
             return False
