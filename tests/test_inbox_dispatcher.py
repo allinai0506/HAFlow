@@ -2069,3 +2069,192 @@ def test_lease_expired_launcher_process_pause_and_resume_rejected_at_workflow_re
         db_path=str(db_file),
     )
     assert reentry == "wf_B"
+
+
+def test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate(tmp_path: Path, monkeypatch):
+    """Review Round 13 / P1 & P2: Real production sequence regression test.
+
+    1. A claims task.
+    2. A pre-assigns wf_A and writes it to Inbox (simulating dispatcher.py pre-write).
+    3. A lease expires while paused.
+    4. B takes over task, receives new Worker Token (worker_B) and attempt_count 2.
+    5. A resumes with original wf_A and old token/attempt into Factory registration gate.
+    6. Factory MUST reject A (must NOT bypass execution authority checks via db_wid == workflow_id).
+    7. Verify wf_A is NOT in workflows table (no second workflow registered).
+    8. B registers wf_B successfully and proceeds.
+    9. B idempotent re-entry succeeds.
+    """
+    import importlib.machinery, importlib.util, json
+    loader = importlib.machinery.SourceFileLoader(
+        "factory_fencing_test_prod",
+        str(Path(__file__).resolve().parent.parent / "bin" / "herdr-factory"),
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    factory = importlib.util.module_from_spec(spec)
+    loader.exec_module(factory)
+
+    db_file = tmp_path / "fenced_prod.db"
+    store = InboxStore(db_file)
+    disp_a = InboxDispatcher(store=store, db_path=db_file, worker_id="worker_A")
+
+    proj_root = tmp_path / "project_prod"
+    proj_root.mkdir()
+    wf_file = proj_root / "workflow.json"
+    wf_file.write_text(json.dumps({"workflow_template": "software-development-v1", "nodes": []}))
+    proj = {
+        "project_id": "p-prod",
+        "project_name": "prod-project",
+        "project_root": str(proj_root),
+        "workspace_id": "ws-prod",
+        "coordinator_pane_id": "pane-coord-prod",
+        "workflow_file": str(wf_file),
+    }
+
+    # 1. A claims task
+    t = store.create_task(
+        title="Prod Fenced Task",
+        instruction="Run prod fenced task",
+        project_id="p-prod",
+        workspace_id="ws-prod",
+        auto_confirm=True,
+    )
+    claimed_a = disp_a.claim_next_task("ws-prod")
+    assert claimed_a is not None
+    worker_a = claimed_a["worker_id"]
+    assert claimed_a["attempt_count"] == 1
+
+    monkeypatch.setattr(factory, "run_workflow_preflight", lambda *a, **k: (["auto"], {}))
+    monkeypatch.setattr(factory, "resolve_project_for_template", lambda *a, **k: proj)
+    monkeypatch.setattr(factory, "active_workflows_for_project", lambda *a, **k: [])
+    monkeypatch.setattr("herdr.projects.active_workflows_for_project", lambda *a, **k: [])
+
+    # 2. A pre-assigns wf_A and writes it to Inbox (exact dispatcher pre-write behavior)
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        """
+        UPDATE user_inbox_tasks
+           SET workflow_id = 'wf_A',
+               lease_expires_at = ?,
+               heartbeat_at = ?,
+               updated_at = ?
+         WHERE id = ? AND worker_id = ?
+        """,
+        (time.time() + 180.0, time.time(), time.time(), t["id"], worker_a),
+    )
+    conn.commit()
+    conn.close()
+
+    # 3. A is paused; its lease expires in database
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "UPDATE user_inbox_tasks SET lease_expires_at = ? WHERE id = ?",
+        (time.time() - 30.0, t["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    # 4. B takes over task: receives new worker_B and attempt_count 2
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        """
+        UPDATE user_inbox_tasks
+           SET worker_id = 'worker_B',
+               workflow_id = NULL,
+               lease_expires_at = ?,
+               attempt_count = 2,
+               updated_at = ?
+         WHERE id = ?
+        """,
+        (time.time() + 180.0, time.time(), t["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    # 5 & 6. A resumes with original wf_A and old token/attempt into Factory registration gate:
+    # CRITICAL: Factory MUST reject A, even though A originally pre-assigned wf_A!
+    with pytest.raises(RuntimeError, match="Inbox task fencing violation: execution lease lost"):
+        factory.start_workflow(
+            "Run prod fenced task",
+            workflow_id="wf_A",
+            project_path=str(proj_root),
+            inbox_task_id=t["id"],
+            fencing_token=worker_a,
+            launch_attempt_id=f"{worker_a}:1",
+            db_path=str(db_file),
+        )
+
+    # 7. Confirm wf_A is NOT in workflows table
+    conn = sqlite3.connect(str(db_file))
+    cur = conn.execute("SELECT workflow_id FROM workflows WHERE workflow_id = 'wf_A'")
+    assert cur.fetchone() is None, "wf_A MUST NOT be registered by expired Launcher A"
+    conn.close()
+
+    # 8. B pre-assigns wf_B in Inbox and successfully registers wf_B
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "UPDATE user_inbox_tasks SET workflow_id = 'wf_B' WHERE id = ?",
+        (t["id"],),
+    )
+    conn.commit()
+    conn.close()
+
+    registered_wid = factory.start_workflow(
+        "Run prod fenced task",
+        workflow_id="wf_B",
+        project_path=str(proj_root),
+        inbox_task_id=t["id"],
+        fencing_token="worker_B",
+        launch_attempt_id="worker_B:2",
+        db_path=str(db_file),
+    )
+    assert registered_wid == "wf_B"
+
+    # Task is now registered and bound to wf_B
+    t_after_b = store.get_task(t["id"])
+    assert t_after_b["workflow_id"] == "wf_B"
+
+    # 9. B idempotent re-entry succeeds
+    reentry = factory.start_workflow(
+        "Run prod fenced task",
+        workflow_id="wf_B",
+        project_path=str(proj_root),
+        inbox_task_id=t["id"],
+        fencing_token="worker_B",
+        launch_attempt_id="worker_B:2",
+        db_path=str(db_file),
+    )
+    assert reentry == "wf_B"
+
+
+def test_fencing_gate_fails_closed_when_db_or_table_missing(tmp_path: Path):
+    """P1 / Fail Closed: When inbox_task_id is provided but DB or table is missing, raise RuntimeError."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader(
+        "factory_fencing_fail_closed",
+        str(Path(__file__).resolve().parent.parent / "bin" / "herdr-factory"),
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    factory = importlib.util.module_from_spec(spec)
+    loader.exec_module(factory)
+
+    # Missing database
+    with pytest.raises(RuntimeError, match="Inbox task fencing failure: database not found"):
+        factory._verify_and_bind_inbox_task_fencing(
+            db_path=str(tmp_path / "nonexistent.db"),
+            inbox_task_id="task_fc_01",
+            fencing_token="w1",
+        )
+
+    # Missing table
+    empty_db = tmp_path / "empty.db"
+    conn = sqlite3.connect(str(empty_db))
+    conn.execute("CREATE TABLE dummy (id TEXT)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="Inbox task fencing failure: user_inbox_tasks table not found"):
+        factory._verify_and_bind_inbox_task_fencing(
+            db_path=str(empty_db),
+            inbox_task_id="task_fc_01",
+            fencing_token="w1",
+        )

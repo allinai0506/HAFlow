@@ -495,6 +495,9 @@ def _verify_and_bind_inbox_task_fencing(
       2. Workflow already registered (idempotent re-entry for the same task attempt and workflow).
       3. Original launcher still holds execution authority (fencing token and lease are valid).
       4. Original launcher lost execution authority (lease expired, task reassigned, cancelled, or attempt mismatch).
+
+    Fail-closed: If an inbox_task_id is specified, the database and user_inbox_tasks table MUST
+    exist and be queryable; otherwise a fencing error is immediately raised.
     """
     import sqlite3
     import time
@@ -505,7 +508,9 @@ def _verify_and_bind_inbox_task_fencing(
         resolved_db = Path(db_path).resolve() if db_path else None
 
     if not resolved_db or not resolved_db.exists():
-        return
+        raise RuntimeError(
+            f"Inbox task fencing failure: database not found for task '{inbox_task_id}' (resolved_db={resolved_db})"
+        )
 
     conn = sqlite3.connect(str(resolved_db))
     conn.row_factory = sqlite3.Row
@@ -514,7 +519,9 @@ def _verify_and_bind_inbox_task_fencing(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='user_inbox_tasks'"
         )
         if not cur.fetchone():
-            return
+            raise RuntimeError(
+                f"Inbox task fencing failure: user_inbox_tasks table not found for task '{inbox_task_id}'"
+            )
 
         cur = conn.execute(
             """
@@ -532,7 +539,13 @@ def _verify_and_bind_inbox_task_fencing(
         if cur_status == "CANCELLED":
             raise RuntimeError(f"Inbox task fencing failure: task '{inbox_task_id}' was cancelled by user")
         if cur_status in ("COMPLETED", "FAILED"):
-            raise RuntimeError(f"Inbox task fencing failure: task '{inbox_task_id}' already in terminal state '{cur_status}'")
+            raise RuntimeError(
+                f"Inbox task fencing failure: task '{inbox_task_id}' already in terminal state '{cur_status}'"
+            )
+        if cur_status != "CLAIMED":
+            raise RuntimeError(
+                f"Inbox task fencing violation: task '{inbox_task_id}' status is '{cur_status}', expected 'CLAIMED'"
+            )
 
         now = time.time()
         db_worker = row["worker_id"]
@@ -540,39 +553,69 @@ def _verify_and_bind_inbox_task_fencing(
         db_attempt = row["attempt_count"]
         db_wid = row["workflow_id"]
 
-        # Check: has workflow already been registered for this task?
-        if db_wid:
-            if workflow_id and db_wid == workflow_id:
-                # Workflow already registered: idempotent re-entry
-                return
-            else:
-                raise RuntimeError(
-                    f"Inbox task fencing violation: task '{inbox_task_id}' is already registered with workflow '{db_wid}' (caller provided '{workflow_id}')"
-                )
-
-        if cur_status != "CLAIMED":
-            raise RuntimeError(
-                f"Inbox task fencing violation: task '{inbox_task_id}' status is '{cur_status}', expected 'CLAIMED'"
-            )
-
-        # Worker identity check: does launcher still hold execution authority?
+        # 1. Worker identity check: does launcher still hold execution authority?
         if fencing_token and db_worker != fencing_token:
             raise RuntimeError(
                 f"Inbox task fencing violation: execution lease lost (current worker is '{db_worker}', caller is '{fencing_token}')"
             )
 
-        # Lease expiration check: has launcher's lease expired?
+        # 2. Lease expiration check: has launcher's lease expired?
         if db_lease is not None and db_lease < now:
             raise RuntimeError(
                 f"Inbox task fencing violation: execution lease expired at {db_lease} (now={now})"
             )
 
-        # Launch attempt check: has attempt counter changed (e.g. task reassigned/recovered)?
-        if launch_attempt_id is not None and db_attempt is not None and db_attempt != launch_attempt_id:
+        # 3. Launch attempt check: has attempt counter changed (e.g. task reassigned/recovered)?
+        if launch_attempt_id is not None:
+            raw_att = str(launch_attempt_id).strip()
+            if ":" in raw_att:
+                tok_part, att_part = raw_att.rsplit(":", 1)
+                if tok_part != db_worker or (db_attempt is not None and int(att_part) != db_attempt):
+                    raise RuntimeError(
+                        f"Inbox task fencing violation: launch attempt mismatch (db={db_worker}:{db_attempt}, caller={raw_att})"
+                    )
+            else:
+                try:
+                    expected_cnt = int(raw_att)
+                    if db_attempt is not None and db_attempt != expected_cnt:
+                        raise RuntimeError(
+                            f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={expected_cnt})"
+                        )
+                except ValueError:
+                    if raw_att != str(db_attempt):
+                        raise RuntimeError(
+                            f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={raw_att})"
+                        )
+
+        # 4. Workflow ID association check
+        if db_wid and workflow_id and db_wid != workflow_id:
             raise RuntimeError(
-                f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={launch_attempt_id})"
+                f"Inbox task fencing violation: task '{inbox_task_id}' is already registered with workflow '{db_wid}' (caller provided '{workflow_id}')"
             )
 
+        # 5. Pre-registration: check if workflow has actually been registered in state_db workflows table
+        if stage == "pre_registration":
+            wf_exists = False
+            cur_wf_tbl = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'"
+            )
+            if cur_wf_tbl.fetchone():
+                cur_chk = conn.execute(
+                    "SELECT workflow_id, status FROM workflows WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                if cur_chk.fetchone():
+                    wf_exists = True
+
+            if wf_exists:
+                # True idempotent re-entry: Workflow was already successfully registered in a prior attempt
+                # by the current valid owner.
+                return True
+            # Workflow is not yet registered in workflows table (it was only reserved in Inbox).
+            # Caller holds valid execution authority: proceed to registration!
+            return False
+
+        # 6. Post-registration: atomically update user_inbox_tasks under valid lease
         if stage == "post_registration" and workflow_id:
             cur_up = conn.execute(
                 """
@@ -584,14 +627,16 @@ def _verify_and_bind_inbox_task_fencing(
                  WHERE id = ?
                    AND status = 'CLAIMED'
                    AND (worker_id = ? OR ? IS NULL)
+                   AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
                 """,
-                (workflow_id, now, now + 180.0, now, inbox_task_id, fencing_token, fencing_token),
+                (workflow_id, now, now + 180.0, now, inbox_task_id, fencing_token, fencing_token, now),
             )
             conn.commit()
             if cur_up.rowcount == 0:
                 raise RuntimeError(
                     f"Inbox task fencing violation: failed to bind workflow '{workflow_id}' to task '{inbox_task_id}' (ownership changed during registration)"
                 )
+            return True
     finally:
         conn.close()
 
@@ -660,7 +705,7 @@ def start_workflow(
         # 收敛在锁退出之后调用，且不在注册事务内跑预检或投影。
         with workflow_creation_lock(project["project_id"]):
             if inbox_task_id:
-                _verify_and_bind_inbox_task_fencing(
+                already_registered = _verify_and_bind_inbox_task_fencing(
                     db_path=db_path,
                     inbox_task_id=inbox_task_id,
                     fencing_token=fencing_token,
@@ -668,6 +713,8 @@ def start_workflow(
                     workflow_id=workflow_id,
                     stage="pre_registration",
                 )
+                if already_registered:
+                    return workflow_id
             _reject_if_active_workflow(project, force=force or e2e)
             register_workflow(
                 workflow_id,
@@ -1140,7 +1187,7 @@ def main():
     run_cmd.add_argument("--force", action="store_true")
     run_cmd.add_argument("--inbox-task-id", default=None, help="关联的 User Inbox 任务 ID，用于注册入口执行权校验")
     run_cmd.add_argument("--fencing-token", default=None, help="派发 Worker 的 Fencing Token")
-    run_cmd.add_argument("--launch-attempt-id", type=int, default=None, help="预期的任务启动尝试序号")
+    run_cmd.add_argument("--launch-attempt-id", default=None, help="预期的任务启动尝试序号或组合标识 (如 1 或 worker_A:1)")
     run_cmd.add_argument("--db-path", default=None, help="自定义数据库路径")
 
     status_cmd = sub.add_parser("status")

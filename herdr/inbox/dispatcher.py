@@ -669,7 +669,7 @@ class InboxDispatcher:
                         workflow_id=wid_arg,
                         task_id=t["id"],
                         fencing_token=fencing_token,
-                        launch_attempt_id=t.get("attempt_count", 1),
+                        launch_attempt_id=t.get("launch_attempt_id") or f"{fencing_token}:{t.get('attempt_count', 1)}",
                         db_path=self.db_path,
                     )
                     import re
