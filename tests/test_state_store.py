@@ -382,7 +382,8 @@ def test_cross_module_single_source_of_truth_anti_skew(store_env):
         assert task_in_sqlite["steering_history"][0]["steer_id"] == steer_id
 
     # 5. Steering halt task: verify SQLite reflects interrupted status
-    with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+    with patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+         patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
         h_res = steering.halt_task(tid, reason="manual pause for audit", operator="lead", execute_kill=True)
         assert h_res["ok"] is True
         task_halted = store.get_task(tid)

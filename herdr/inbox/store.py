@@ -580,17 +580,22 @@ class InboxStore:
 
                 validate_inbox_transition(latest_st, "CANCELLED")
                 now = time.time()
-                conn.execute(
+                cur_cancel = conn.execute(
                     """
                     UPDATE user_inbox_tasks
                        SET status = 'CANCELLED',
                            error = ?,
                            completed_at = COALESCE(completed_at, ?),
                            updated_at = ?
-                     WHERE id = ? AND status = ?
+                     WHERE id = ?
+                       AND status = ?
+                       AND (workflow_id = ? OR (workflow_id IS NULL AND ? IS NULL))
                     """,
-                    (reason or "Cancelled by user", now, now, task_id, latest_st),
+                    (reason or "Cancelled by user", now, now, task_id, latest_st, wid, wid),
                 )
+                if cur_cancel.rowcount == 0:
+                    conn.execute("ROLLBACK")
+                    continue
                 conn.execute("COMMIT")
                 return self.get_task(task_id)  # type: ignore
             except Exception:

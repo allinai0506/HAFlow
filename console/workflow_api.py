@@ -5,12 +5,20 @@ from herdr.kernel import state_db_path
 from herdr import controller_actions as herdr_controller_actions
 from console import common, inventory, read_api
 
-def run_workflow(root,req,agent='auto',template='software-development-v1',title='',context=None,workflow_id=None):
+def run_workflow(root,req,agent='auto',template='software-development-v1',title='',context=None,workflow_id=None,task_id=None,fencing_token=None,launch_attempt_id=None,db_path=None):
     cmd=[str(common.HERDR_ROOT/'bin'/'herdr-factory'),'run','--project',root,'--agent',agent or 'auto','--template',template or 'software-development-v1']
     if workflow_id:
         cmd+=['--workflow-id',workflow_id]
     if title:
         cmd+=['--title',title]
+    if task_id:
+        cmd+=['--inbox-task-id',task_id]
+    if fencing_token:
+        cmd+=['--fencing-token',fencing_token]
+    if launch_attempt_id is not None:
+        cmd+=['--launch-attempt-id',str(launch_attempt_id)]
+    if db_path:
+        cmd+=['--db-path',str(db_path)]
     for key, value in (context or {}).items():
         cmd += ['--context', f'{key}={value}']
     cmd.append(req)
@@ -137,19 +145,28 @@ def save_template(name,content):
     path.write_text(text,encoding='utf-8')
     return {'name':name,'path':str(path),'node_count':len(nodes)}
 
-def _run_workflow_job(job_id,root,req,agent,template,title='',context=None):
+def _run_workflow_job(job_id,root,req,agent,template,title='',context=None,workflow_id=None,task_id=None,fencing_token=None,launch_attempt_id=None,db_path=None):
     try:
-        if context:
-            output=run_workflow(root,req,agent,template,title,context=context)
-        else:
-            output=run_workflow(root,req,agent,template,title) if title else run_workflow(root,req,agent,template)
+        output=run_workflow(
+            root=root,
+            req=req,
+            agent=agent,
+            template=template,
+            title=title,
+            context=context,
+            workflow_id=workflow_id,
+            task_id=task_id,
+            fencing_token=fencing_token,
+            launch_attempt_id=launch_attempt_id,
+            db_path=db_path,
+        )
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'succeeded','output':output,'finished_at':time.time()})
     except Exception as e:
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'failed','error':str(e),'finished_at':time.time()})
 
-def start_workflow_job(root,req,agent='auto',template='software-development-v1',title='',context=None):
+def start_workflow_job(root,req,agent='auto',template='software-development-v1',title='',context=None,workflow_id=None,task_id=None,fencing_token=None,launch_attempt_id=None,db_path=None):
     if not root or not req:
         raise RuntimeError('项目目录和自然语言需求不能为空')
     if context is not None and (not isinstance(context,dict) or any(not isinstance(k,str) or not isinstance(v,str) for k,v in context.items())):
@@ -157,7 +174,7 @@ def start_workflow_job(root,req,agent='auto',template='software-development-v1',
     job_id=uuid.uuid4().hex[:12]
     with RUN_JOBS_LOCK:
         RUN_JOBS[job_id]={'job_id':job_id,'status':'running','started_at':time.time()}
-    threading.Thread(target=_run_workflow_job,args=(job_id,root,req,agent,template,title,context),daemon=True).start()
+    threading.Thread(target=_run_workflow_job,args=(job_id,root,req,agent,template,title,context,workflow_id,task_id,fencing_token,launch_attempt_id,db_path),daemon=True).start()
     return RUN_JOBS[job_id].copy()
 
 def workflow_job_status(job_id):

@@ -667,6 +667,10 @@ class InboxDispatcher:
                         title=t["title"],
                         context=wf_context,
                         workflow_id=wid_arg,
+                        task_id=t["id"],
+                        fencing_token=fencing_token,
+                        launch_attempt_id=t.get("attempt_count", 1),
+                        db_path=self.db_path,
                     )
                     import re
                     m = re.search(r"WORKFLOW_ID=([^\s]+)", output or "")

@@ -1942,3 +1942,130 @@ def test_claimed_task_cancellation_both_inbox_and_workflow_reach_terminal_state(
     # 3. Workspace is completely freed
     busy, reason = dispatcher.is_workspace_busy("ws-claim")
     assert busy is False, f"Workspace must not be busy after cancel: {reason}"
+
+
+def test_lease_expired_launcher_process_pause_and_resume_rejected_at_workflow_registration_gate(tmp_path: Path, monkeypatch):
+    """Review Round 12 / P1-02: Thread/Process pause-resume lease expiry test.
+
+    Verifies that when Worker A is paused during launch, its lease expires, and Worker B takes over:
+    1. Worker B successfully registers workflow wf_B.
+    2. Worker A resumes and enters Workflow registration entrance (bin/herdr-factory).
+    3. Workflow registration gate rejects Worker A with fencing error.
+    4. Task and Workflow remain cleanly bound to Worker B without duplicate workflow creation.
+    """
+    import importlib.machinery, importlib.util, json
+    loader = importlib.machinery.SourceFileLoader(
+        "factory_fencing_test",
+        str(Path(__file__).resolve().parent.parent / "bin" / "herdr-factory"),
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    factory = importlib.util.module_from_spec(spec)
+    loader.exec_module(factory)
+
+    db_file = tmp_path / "fenced_gate.db"
+    store = InboxStore(db_file)
+    disp_a = InboxDispatcher(store=store, db_path=db_file, worker_id="worker_A")
+
+    proj_root = tmp_path / "project"
+    proj_root.mkdir()
+    wf_file = proj_root / "workflow.json"
+    wf_file.write_text(json.dumps({"workflow_template": "software-development-v1", "nodes": []}))
+    proj = {
+        "project_id": "p-fence",
+        "project_name": "fence-project",
+        "project_root": str(proj_root),
+        "workspace_id": "ws-fence",
+        "coordinator_pane_id": "pane-coord-1",
+        "workflow_file": str(wf_file),
+    }
+
+    t = store.create_task(
+        title="Fenced Gate Task",
+        instruction="Run fenced task",
+        project_id="p-fence",
+        workspace_id="ws-fence",
+        auto_confirm=True,
+    )
+    claimed_a = disp_a.claim_next_task("ws-fence")
+    assert claimed_a is not None
+    worker_a = claimed_a["worker_id"]
+
+    monkeypatch.setattr(factory, "run_workflow_preflight", lambda *a, **k: (["auto"], {}))
+    monkeypatch.setattr(factory, "resolve_project_for_template", lambda *a, **k: proj)
+    monkeypatch.setattr(factory, "active_workflows_for_project", lambda *a, **k: [])
+    monkeypatch.setattr("herdr.projects.active_workflows_for_project", lambda *a, **k: [])
+
+    # 1. Simulate Worker A being paused (e.g. process freeze / GC pause / sleep) while lease expires
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "UPDATE user_inbox_tasks SET lease_expires_at = ? WHERE id = ?",
+        (time.time() - 20.0, t["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    # Worker A attempts to enter registration gate with expired lease: REJECTED!
+    with pytest.raises(RuntimeError, match="Inbox task fencing violation: execution lease expired"):
+        factory.start_workflow(
+            "Run fenced task",
+            workflow_id="wf_A",
+            project_path=str(proj_root),
+            inbox_task_id=t["id"],
+            fencing_token=worker_a,
+            launch_attempt_id=1,
+            db_path=str(db_file),
+        )
+
+    # 2. Worker B recovers the task
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        "UPDATE user_inbox_tasks SET worker_id = 'worker_B', lease_expires_at = ?, attempt_count = 2 WHERE id = ?",
+        (time.time() + 180.0, t["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    # Worker B successfully registers workflow wf_B
+    registered_wid = factory.start_workflow(
+        "Run fenced task",
+        workflow_id="wf_B",
+        project_path=str(proj_root),
+        inbox_task_id=t["id"],
+        fencing_token="worker_B",
+        launch_attempt_id=2,
+        db_path=str(db_file),
+    )
+    assert registered_wid == "wf_B"
+
+    # Task is now bound to wf_B
+    t_after_b = store.get_task(t["id"])
+    assert t_after_b["workflow_id"] == "wf_B"
+
+    # 3. Worker A resumes and attempts to enter registration gate: REJECTED!
+    with pytest.raises(RuntimeError, match="Inbox task fencing violation"):
+        factory.start_workflow(
+            "Run fenced task",
+            workflow_id="wf_A",
+            project_path=str(proj_root),
+            inbox_task_id=t["id"],
+            fencing_token=worker_a,
+            launch_attempt_id=1,
+            db_path=str(db_file),
+        )
+
+    # 4. Invariant: Task remains bound to wf_B; wf_A was never created
+    t_final = store.get_task(t["id"])
+    assert t_final["workflow_id"] == "wf_B"
+    assert t_final["status"] == "CLAIMED"
+
+    # 5. Idempotent re-entry by Worker B succeeds
+    reentry = factory.start_workflow(
+        "Run fenced task",
+        workflow_id="wf_B",
+        project_path=str(proj_root),
+        inbox_task_id=t["id"],
+        fencing_token="worker_B",
+        launch_attempt_id=2,
+        db_path=str(db_file),
+    )
+    assert reentry == "wf_B"
