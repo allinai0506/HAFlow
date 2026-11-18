@@ -134,5 +134,9 @@ Inbox 任务具备严格受控的 8 状态转换模型（`herdr/inbox/transition
 - 智能项目探测: `herdr/inbox/detector.py:detect_project_and_workspace`
 - 调度器与真实收敛: `herdr/inbox/dispatcher.py:InboxDispatcher`
 - 控制台 API 路由: `console/inbox_api.py`, `console/http_server.py`
-- 控制台前端控制器: `console/static/console/scripts/inbox.js`, `console/static/console/styles/inbox.css`
+- 控制台前端控制器: `console/static/console/scripts/inbox.js`, `console/static/console/scripts/intake.js`, `console/static/console/styles/inbox.css`
 - 10 任务自动接续端到端验证: `tests/test_inbox_e2e_pipeline.py:test_ten_tasks_continuous_auto_dispatch`
+
+## Active Intake 草稿
+
+已启用的 Active Intake 连接可为当前实例的认证操作员生成草稿。待分配事项从同一个 Inbox 查看。项目和工作区可空，界面允许分配给自己及撤销归属。外部任务的确认只保存回执，持久状态保持 `DRAFT`。普通人工草稿继续通过原确认路径入列。 [配置与验收](../docs/engineering/reviews/active-intake-task-materialization-v1.md)

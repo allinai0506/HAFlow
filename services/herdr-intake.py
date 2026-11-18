@@ -10,6 +10,7 @@ from threading import Event
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from herdr.intake.materializer import local_config
 from herdr.intake.schema import initialize
 from herdr.intake.store import EventStore, Scope
 from herdr.intake.worker import run
@@ -26,7 +27,14 @@ def main():
     stop = Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    run(EventStore(initialize(), scope), stop)
+    config = local_config()
+    policy = None
+    if config and config["tenant_id"] == scope.tenant_id:
+        selected = config["connections"].get(scope.connection_id)
+        if selected is not None:
+            policy = {**selected, "user_id": config["user_id"],
+                      "allowed_connections": tuple(config["connections"])}
+    run(EventStore(initialize(), scope), stop, materialization=policy)
 
 
 if __name__ == "__main__":

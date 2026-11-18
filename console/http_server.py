@@ -265,6 +265,10 @@ class Handler(BaseHTTPRequestHandler):
                 from herdr.state_db import get_user_token
                 tok = get_user_token(uid, 'experience_hub')
                 return self.send_json(200, {'ok': True, 'has_token': bool(tok)})
+            if p == '/api/inbox/intake':
+                res = inbox_api.api_intake_inbox(self.headers.get('X-HAFlow-Intake-Inbox-Token'),
+                                                query=self.query())
+                return self.send_json(res.get('status_code', 200), res, error=res.get('error'))
             if p=='/api/inbox/tasks':return self.send_json(200,inbox_api.api_inbox_tasks(self.query()))
             if p=='/api/inbox/task':
                 res=inbox_api.api_inbox_task(self.query().get('id',[''])[0])
@@ -375,6 +379,9 @@ class Handler(BaseHTTPRequestHandler):
                 from herdr.state_db import save_user_token
                 save_user_token(uid, 'experience_hub', tok)
                 return self.send_json(200, {'ok': True, 'saved': bool(tok)})
+            if p == '/api/inbox/intake':
+                res = inbox_api.api_intake_inbox(self.headers.get('X-HAFlow-Intake-Inbox-Token'), body=b)
+                return self.send_json(res.get('status_code', 200), res, error=res.get('error'))
             if p=='/api/inbox/tasks':return self.send_json(201,inbox_api.api_inbox_create_task(b))
             if p=='/api/inbox/task/confirm':return self.send_json(200,inbox_api.api_inbox_confirm_task(b))
             if p=='/api/inbox/task/priority':return self.send_json(200,inbox_api.api_inbox_set_priority(b))

@@ -17,6 +17,14 @@ let inboxState = {
   autoRefreshTimer: null, activeTaskId: null, pageSize: 50,
 };
 let inboxSubmitting = false;
+const intake = typeof fetchIntakeActiveItems === 'function' ? {
+  fetch: fetchIntakeActiveItems, renderCards: renderIntakeCards, renderPagination: renderIntakePagination,
+  renderEmpty: renderIntakeEmpty, authButtonHtml: getIntakeAuthButtonHtml, bindEvents: bindIntakeEvents,
+  count: getIntakeItemsCount,
+} : {
+  fetch: () => Promise.resolve(), renderCards: () => '', renderPagination: () => '',
+  renderEmpty: () => '', authButtonHtml: () => '', bindEvents: () => {}, count: () => 0,
+};
 const pendingInboxSubmissions = new Map();
 let recommendedScope = null;
 
@@ -49,13 +57,15 @@ async function loadInboxData(isAppend, isReset){
     const currentCount = isReset ? (inboxState.pageSize || 50) : Math.max(inboxState.pageSize || 50, inboxState.tasks.length);
     const limit = isAppend ? (inboxState.pageSize || 50) : currentCount;
     const qParts = [`limit=${limit}`, `offset=${offset}`];
-    if(inboxState.filterStatus && inboxState.filterStatus !== 'ALL') qParts.push('status=' + encodeURIComponent(inboxState.filterStatus));
+    if(inboxState.filterStatus && !['ALL','MINE','PENDING_ASSIGNMENT'].includes(inboxState.filterStatus)) qParts.push('status=' + encodeURIComponent(inboxState.filterStatus));
     if(inboxState.filterProject && inboxState.filterProject !== 'ALL') qParts.push('project_id=' + encodeURIComponent(inboxState.filterProject));
     if(inboxState.filterPriority && inboxState.filterPriority !== 'ALL') qParts.push('priority=' + encodeURIComponent(inboxState.filterPriority));
 
+    const view = inboxState.filterStatus;
     const [tasksRes, statsRes] = await Promise.all([
-      api('/api/inbox/tasks?' + qParts.join('&')),
+      view === 'PENDING_ASSIGNMENT' ? Promise.resolve({ok:true,tasks:[],total:0}) : api('/api/inbox/tasks?' + qParts.join('&')),
       isAppend ? Promise.resolve(null) : api('/api/inbox/stats'),
+      intake.fetch(qParts, view, isReset),
     ]);
     if(tasksRes && tasksRes.ok){
       inboxState.tasks = isAppend ? inboxState.tasks.concat(tasksRes.tasks || []) : (tasksRes.tasks || []);
@@ -101,7 +111,7 @@ function renderInboxView(){
   let html = `<div class="inbox-view"><div class="inbox-metrics">` +
     metrics.map(m => `<div class="inbox-metric-card ${inboxState.filterStatus===m.k?'active':''}" onclick="setInboxStatusFilter('${m.k}')"><span class="inbox-metric-val"${m.c?' style="color:'+m.c+'"':''}>${m.v}</span><span class="inbox-metric-label">${m.l}</span></div>`).join('') +
     `</div><div class="inbox-toolbar"><div class="inbox-filters"><div class="inbox-filter-group">` +
-    ['ALL:全部','PENDING:待执行','RUNNING:执行中','COMPLETED:已完成','FAILED:失败'].map(s => {
+    ['ALL:全部','MINE:我的任务','PENDING_ASSIGNMENT:待分配','DRAFT:草稿','PENDING:待执行','RUNNING:执行中','COMPLETED:已完成','FAILED:失败'].map(s => {
       const [k, l] = s.split(':');
       return `<button class="inbox-tab-btn ${inboxState.filterStatus===k?'active':''}" onclick="setInboxStatusFilter('${k}')">${l}</button>`;
     }).join('') +
@@ -113,12 +123,18 @@ function renderInboxView(){
       return `<option value="${k}"${inboxState.filterPriority===k?' selected':''}>${l}</option>`;
     }).join('') +
     `</select></div><div class="inbox-actions">` +
+    intake.authButtonHtml() +
     `<button class="btn" onclick="triggerInboxSweep()" title="立即触发工作区调度扫描">调度扫描</button>` +
     `<button class="btn" onclick="loadInboxData()" title="刷新任务列表">刷新</button>` +
     `<button class="btn primary" onclick="showNewInboxTaskModal()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>提交新任务</span></button>` +
     `</div></div><div class="inbox-task-list">`;
 
-  if(!inboxState.tasks.length){
+  html += intake.renderCards();
+  html += intake.renderPagination();
+  const intakeCount = intake.count();
+  if(!inboxState.tasks.length && !intakeCount && inboxState.filterStatus === 'PENDING_ASSIGNMENT'){
+    html += intake.renderEmpty(inboxState.filterStatus);
+  } else if(!inboxState.tasks.length && !intakeCount){
     html += `<div class="empty" style="padding:48px 0;background:var(--bg-surface,#fff);border:1px dashed var(--border-default,#e5e7eb);border-radius:8px"><strong>收件箱暂无任务</strong><span class="muted" style="margin-top:6px;font-size:13px">点击右上角【提交新任务】，随时向任何项目下达指令，系统将自动排队与接续调度。</span></div>`;
   } else {
     inboxState.tasks.forEach(t => {
@@ -153,6 +169,7 @@ function renderInboxView(){
   }
   html += `</div></div>`;
   container.innerHTML = html;
+  intake.bindEvents(container, loadInboxData, renderInboxView);
 }
 
 function setInboxStatusFilter(s){ inboxState.filterStatus = s; return loadInboxData(false, true); }
@@ -166,15 +183,12 @@ async function triggerInboxSweep(){
     const sw = res.sweep || {};
     toast(`调度扫描完成：启动 ${(sw.launched||[]).length} 项，收敛 ${(sw.reconciled||[]).length} 项`);
     await loadInboxData();
-  }catch(e){
-    toast('调度扫描异常: ' + e.message, true);
-  }
+  }catch(e){ toast('调度扫描异常: ' + e.message, true); }
 }
 
 async function showNewInboxTaskModal(){
   const projects = (state.overview && state.overview.projects) || [];
   const projOptions = projects.map(p => `<option value="${esc(p.project_id)}" data-ws="${esc(p.workspace_id||'')}">${esc(p.project_name||p.project_id)} (${esc(p.workspace_id||'无空间')})</option>`).join('');
-
   openModal('提交新任务到统一收件箱', `
     <div class="form" style="line-height:1.5">
       <div id="inboxDetectBanner" class="inbox-detect-banner" style="display:none"></div>
@@ -192,9 +206,7 @@ async function showNewInboxTaskModal(){
       </div>
       <div class="muted" style="font-size:12px;margin-bottom:14px">请确认项目与工作区。未勾选立即排队时，任务会保存为草稿。</div>
       <div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button id="inboxSubmit" class="btn primary" onclick="submitNewInboxTask()">确认归属并提交</button></div>
-    </div>
-  `);
-
+    </div>`);
   inboxState.userSelectedProject = false;
   recommendedScope = null;
   if(inboxSubmitting) document.getElementById('inboxSubmit').disabled = true;
@@ -331,17 +343,13 @@ async function showInboxTaskDetail(taskId){
         ${t.workflow_id ? `<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:10px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center"><div><div style="font-weight:600;color:#1e40af">关联 Workflow</div><div style="font-size:12px;color:#3b82f6"><code>${esc(t.workflow_id)}</code></div></div><button class="btn primary" onclick="closeModal();inspectWorkflow('${esc(t.workflow_id)}')">直达画布</button></div>` : ''}
         ${t.error ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px;margin-bottom:12px;color:#991b1b"><div style="font-weight:600">异常/失败原因</div><div style="font-size:12px;white-space:pre-wrap;margin-top:4px">${esc(t.error)}</div></div>` : ''}
         <div style="display:flex;justify-content:flex-end"><button class="btn" onclick="closeModal()">关闭</button></div>
-      </div>
-    `);
-  }catch(e){
-    toast('读取任务失败: ' + e.message, true);
-  }
+      </div>`);
+  }catch(e){ toast('读取任务失败: ' + e.message, true); }
 }
 
 function showConfirmScopeModal(taskId){
   const projects = (state.overview && state.overview.projects) || [];
   const projOptions = projects.map(p => `<option value="${esc(p.project_id)}" data-ws="${esc(p.workspace_id||'')}">${esc(p.project_name||p.project_id)} (${esc(p.workspace_id||'无空间')})</option>`).join('');
-
   openModal('确认任务归属', `
     <div class="form">
       <div style="font-size:13px;color:var(--text-secondary,#4b5563);margin-bottom:12px">请确认该任务归属的项目和工作区。确认后任务将进入就绪排队队列。</div>
@@ -350,8 +358,7 @@ function showConfirmScopeModal(taskId){
       <label for="confirmScopeWorkspace">对应工作区 (自动联动)<span class="danger-text">*</span></label>
       <input id="confirmScopeWorkspace" disabled style="margin-bottom:14px">
       <div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="submitConfirmScope('${esc(taskId)}')">确认归属并排队</button></div>
-    </div>
-  `);
+    </div>`);
 }
 
 function onConfirmScopeProjectChange(){
@@ -372,9 +379,7 @@ async function submitConfirmScope(taskId){
     closeModal();
     toast('任务归属已确认，已进入排队队列');
     await loadInboxData();
-  }catch(e){
-    toast('确认失败: ' + e.message, true);
-  }
+  }catch(e){ toast('确认失败: ' + e.message, true); }
 }
 
 function showChangePriorityModal(taskId, currentPrio){
@@ -388,8 +393,7 @@ function showChangePriorityModal(taskId, currentPrio){
         <option value="LOW"${currentPrio==='LOW'?' selected':''}>低优 (LOW)</option>
       </select>
       <div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="submitChangePriority('${esc(taskId)}')">保存优先级</button></div>
-    </div>
-  `);
+    </div>`);
 }
 
 async function submitChangePriority(taskId){
@@ -400,18 +404,14 @@ async function submitChangePriority(taskId){
     closeModal();
     toast('优先级已更新为 ' + priorityLabel(prio));
     await loadInboxData();
-  }catch(e){
-    toast('更新失败: ' + e.message, true);
-  }
+  }catch(e){ toast('更新失败: ' + e.message, true); }
 }
 
 async function moveTaskOrder(taskId, direction){
   try{
     await api('/api/inbox/task/reorder', {method:'POST', body:JSON.stringify({task_id:taskId, direction})});
     await loadInboxData();
-  }catch(e){
-    toast('调整顺序失败: ' + e.message, true);
-  }
+  }catch(e){ toast('调整顺序失败: ' + e.message, true); }
 }
 
 function cancelInboxTask(taskId){
@@ -426,9 +426,7 @@ function cancelInboxTask(taskId){
         await api('/api/inbox/task/cancel', {method:'POST', body:JSON.stringify({task_id:taskId, reason:'用户在收件箱取消'})});
         toast('任务已取消');
         await loadInboxData();
-      }catch(e){
-        toast('取消失败: ' + e.message, true);
-      }
+      }catch(e){ toast('取消失败: ' + e.message, true); }
     }
   });
 }
@@ -439,9 +437,7 @@ async function retryInboxTask(taskId){
     await api('/api/inbox/task/retry', {method:'POST', body:JSON.stringify({task_id:taskId})});
     toast('任务已重新排队');
     await loadInboxData();
-  }catch(e){
-    toast('重试失败: ' + e.message, true);
-  }
+  }catch(e){ toast('重试失败: ' + e.message, true); }
 }
 
 function inspectWorkflow(wid){

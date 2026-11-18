@@ -80,6 +80,39 @@ class InboxStore:
         auto_confirm: bool = False,
     ) -> Dict[str, Any]:
         """Create a new task in Inbox."""
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            with conn:
+                return self.insert_task(
+                    conn, title, instruction, project_id, workspace_id, user_id=user_id,
+                    priority=priority, source_type=source_type, source_id=source_id,
+                    idempotency_key=idempotency_key, template_name=template_name,
+                    agent_override=agent_override, context=context, auto_confirm=auto_confirm,
+                )
+        finally:
+            conn.close()
+
+    @staticmethod
+    def insert_task(
+        conn: sqlite3.Connection,
+        title: str,
+        instruction: str,
+        project_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        user_id: str = "default",
+        priority: str = PRIORITY_DEFAULT,
+        source_type: str = "manual",
+        source_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        template_name: str = "software-development-v1",
+        agent_override: str = "auto",
+        context: Optional[Dict[str, Any]] = None,
+        auto_confirm: bool = False,
+    ) -> Dict[str, Any]:
+        """Validate and write using the caller's open transaction."""
+        if not conn.in_transaction:
+            raise RuntimeError("Inbox insert requires an open transaction")
         title = (title or "").strip()
         instruction = (instruction or "").strip()
         if not title:
@@ -93,90 +126,89 @@ class InboxStore:
         priority_weight = PRIORITY_WEIGHTS[p]
         eff_user = user_id or "default"
 
-        conn = self._conn()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-
-            # Check idempotency scoped per user
-            if idempotency_key:
-                cur = conn.execute(
-                    "SELECT * FROM user_inbox_tasks WHERE user_id = ? AND idempotency_key = ?",
-                    (eff_user, idempotency_key),
-                )
-                existing = cur.fetchone()
-                if existing:
-                    conn.execute("COMMIT")
-                    return _decode_row(existing)
-
-            # Determine initial status
-            # Only confirmed project + workspace can be PENDING.
-            has_scope = bool(project_id and workspace_id)
-            initial_status = "PENDING" if (has_scope and auto_confirm) else "DRAFT"
-
-            # Allocate sort_order at the tail of this priority queue in the workspace
-            next_sort_order = 0
-            if workspace_id:
-                cur_ord = conn.execute(
-                    """
-                    SELECT COALESCE(MAX(sort_order), -10) as max_ord
-                    FROM user_inbox_tasks
-                    WHERE workspace_id = ? AND priority = ?
-                    """,
-                    (workspace_id, p),
-                ).fetchone()
-                if cur_ord and cur_ord["max_ord"] is not None:
-                    next_sort_order = max(0, int(cur_ord["max_ord"]) + 10)
-
-            now = time.time()
-            task_id = f"inbox_{uuid.uuid4().hex[:12]}"
-            context_json = json.dumps(context or {}, ensure_ascii=False)
-
-            conn.execute(
-                """
-                INSERT INTO user_inbox_tasks (
-                    id, user_id, project_id, workspace_id, title, instruction,
-                    source_type, source_id, idempotency_key, priority, priority_weight,
-                    sort_order, status, template_name, agent_override, context_json,
-                    execution_history_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    eff_user,
-                    project_id,
-                    workspace_id,
-                    title,
-                    instruction,
-                    source_type or "manual",
-                    source_id,
-                    idempotency_key,
-                    p,
-                    priority_weight,
-                    next_sort_order,
-                    initial_status,
-                    template_name or "software-development-v1",
-                    agent_override or "auto",
-                    context_json,
-                    "[]",
-                    now,
-                    now,
-                ),
+        # Check idempotency scoped per user
+        if idempotency_key:
+            cur = conn.execute(
+                "SELECT * FROM user_inbox_tasks WHERE user_id = ? AND idempotency_key = ?",
+                (eff_user, idempotency_key),
             )
-            conn.execute("COMMIT")
-            return self.get_task(task_id)  # type: ignore
-        except Exception:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
+            existing = cur.fetchone()
+            if existing:
+                return _decode_row(existing)
 
-    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        # Determine initial status
+        # Only confirmed project + workspace can be PENDING.
+        has_scope = bool(project_id and workspace_id)
+        initial_status = "PENDING" if (has_scope and auto_confirm) else "DRAFT"
+
+        # Allocate sort_order at the tail of this priority queue in the workspace
+        next_sort_order = 0
+        if workspace_id:
+            cur_ord = conn.execute(
+                """
+                SELECT COALESCE(MAX(sort_order), -10) as max_ord
+                FROM user_inbox_tasks
+                WHERE workspace_id = ? AND priority = ?
+                """,
+                (workspace_id, p),
+            ).fetchone()
+            if cur_ord and cur_ord["max_ord"] is not None:
+                next_sort_order = max(0, int(cur_ord["max_ord"]) + 10)
+
+        now = time.time()
+        task_id = f"inbox_{uuid.uuid4().hex[:12]}"
+        context_json = json.dumps(context or {}, ensure_ascii=False)
+
+        conn.execute(
+            """
+            INSERT INTO user_inbox_tasks (
+                id, user_id, project_id, workspace_id, title, instruction,
+                source_type, source_id, idempotency_key, priority, priority_weight,
+                sort_order, status, template_name, agent_override, context_json,
+                execution_history_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                eff_user,
+                project_id,
+                workspace_id,
+                title,
+                instruction,
+                source_type or "manual",
+                source_id,
+                idempotency_key,
+                p,
+                priority_weight,
+                next_sort_order,
+                initial_status,
+                template_name or "software-development-v1",
+                agent_override or "auto",
+                context_json,
+                "[]",
+                now,
+                now,
+            ),
+        )
+        row = conn.execute("SELECT * FROM user_inbox_tasks WHERE id = ?", (task_id,)).fetchone()
+        return _decode_row(row)
+
+    @staticmethod
+    def _manual_filter(conn):
+        # Schema discovery and task reads must share a snapshot during migration.
+        conn.execute("BEGIN")
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'intake_task_links'").fetchone():
+            return "NOT EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = user_inbox_tasks.id)"
+        return "1=1"
+
+    def get_task(self, task_id: str, *, manual_only=False) -> Optional[Dict[str, Any]]:
         """Fetch an inbox task by ID."""
         conn = self._conn()
         try:
-            cur = conn.execute("SELECT * FROM user_inbox_tasks WHERE id = ?", (task_id,))
-            row = cur.fetchone()
+            condition = "id = ?"
+            if manual_only:
+                condition += " AND " + self._manual_filter(conn)
+            row = conn.execute(f"SELECT * FROM user_inbox_tasks WHERE {condition}", (task_id,)).fetchone()
             return _decode_row(row) if row else None
         finally:
             conn.close()
@@ -190,11 +222,13 @@ class InboxStore:
         priority: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        *,
+        manual_only: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """List tasks with filtering and queue position calculation."""
         conn = self._conn()
         try:
-            where_clauses = ["1=1"]
+            where_clauses = [self._manual_filter(conn) if manual_only else "1=1"]
             params: List[Any] = []
 
             if user_id:
@@ -669,11 +703,14 @@ class InboxStore:
         finally:
             conn.close()
 
-    def get_inbox_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+    def get_inbox_stats(self, user_id: Optional[str] = None, *, manual_only=False) -> Dict[str, Any]:
         """Return counts by status and busy workspaces summary."""
         conn = self._conn()
         try:
-            where = "WHERE user_id = ?" if user_id else ""
+            conditions = ["user_id = ?"] if user_id else ["1=1"]
+            if manual_only:
+                conditions.append(self._manual_filter(conn))
+            where = "WHERE " + " AND ".join(conditions)
             params = [user_id] if user_id else []
 
             cur = conn.execute(

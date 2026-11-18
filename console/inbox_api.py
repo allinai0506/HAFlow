@@ -1,6 +1,8 @@
 """REST API handlers for User Task Inbox endpoints."""
 
 import concurrent.futures
+import hmac
+from pathlib import Path
 import json
 import logging
 import os
@@ -117,13 +119,14 @@ def api_inbox_tasks(q: Dict[str, Any]) -> Dict[str, Any]:
         user_id=effective_user,
         limit=limit,
         offset=offset,
+        manual_only=True,
     )
     return {"ok": True, "tasks": tasks, "total": total}
 
 
 def api_inbox_task(task_id: str) -> Dict[str, Any]:
     """GET /api/inbox/task?id=..."""
-    task = get_inbox_store().get_task(task_id)
+    task = get_inbox_store().get_task(task_id, manual_only=True)
     if not task:
         return {"ok": False, "error": "not_found", "status_code": 404}
     _check_task_ownership(task, _resolve_current_user())
@@ -179,7 +182,7 @@ def api_inbox_confirm_task(b: Dict[str, Any]) -> Dict[str, Any]:
     project_id = str(b.get("project_id") or "").strip()
     workspace_id = str(b.get("workspace_id") or "").strip()
 
-    existing = get_inbox_store().get_task(task_id)
+    existing = get_inbox_store().get_task(task_id, manual_only=True)
     if not existing:
         return {"ok": False, "error": "not_found", "status_code": 404}
     _check_task_ownership(existing, _resolve_current_user())
@@ -202,7 +205,7 @@ def api_inbox_set_priority(b: Dict[str, Any]) -> Dict[str, Any]:
     b = b or {}
     task_id = str(b.get("task_id") or "").strip()
     priority = str(b.get("priority") or "").strip().upper()
-    existing = get_inbox_store().get_task(task_id)
+    existing = get_inbox_store().get_task(task_id, manual_only=True)
     if not existing:
         return {"ok": False, "error": "not_found", "status_code": 404}
     _check_task_ownership(existing, _resolve_current_user())
@@ -217,7 +220,7 @@ def api_inbox_reorder_task(b: Dict[str, Any]) -> Dict[str, Any]:
     b = b or {}
     task_id = str(b.get("task_id") or "").strip()
     direction = str(b.get("direction") or "").strip().lower()
-    existing = get_inbox_store().get_task(task_id)
+    existing = get_inbox_store().get_task(task_id, manual_only=True)
     if not existing:
         return {"ok": False, "error": "not_found", "status_code": 404}
     _check_task_ownership(existing, _resolve_current_user())
@@ -231,7 +234,7 @@ def api_inbox_cancel_task(b: Dict[str, Any]) -> Dict[str, Any]:
     b = b or {}
     task_id = str(b.get("task_id") or "").strip()
     reason = str(b.get("reason") or "Cancelled by user").strip()
-    existing = get_inbox_store().get_task(task_id)
+    existing = get_inbox_store().get_task(task_id, manual_only=True)
     if not existing:
         return {"ok": False, "error": "not_found", "status_code": 404}
     _check_task_ownership(existing, _resolve_current_user())
@@ -247,7 +250,7 @@ def api_inbox_retry_task(b: Dict[str, Any]) -> Dict[str, Any]:
     """POST /api/inbox/task/retry"""
     b = b or {}
     task_id = str(b.get("task_id") or "").strip()
-    existing = get_inbox_store().get_task(task_id)
+    existing = get_inbox_store().get_task(task_id, manual_only=True)
     if not existing:
         return {"ok": False, "error": "not_found", "status_code": 404}
     _check_task_ownership(existing, _resolve_current_user())
@@ -278,7 +281,7 @@ def api_inbox_stats(q: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     else:
         effective_user = server_user
 
-    stats = get_inbox_store().get_inbox_stats(user_id=effective_user)
+    stats = get_inbox_store().get_inbox_stats(user_id=effective_user, manual_only=True)
     return {"ok": True, **stats}
 
 
@@ -314,3 +317,40 @@ def api_inbox_sweep() -> Dict[str, Any]:
             "busy_workspaces": sanitized_busy,
         },
     }
+
+
+def api_intake_inbox(credential, *, query=None, body=None):
+    """Authenticate a private per-instance Inbox credential before selecting any data."""
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.materializer import local_config
+    from herdr.intake.store import ScopeDenied, StateConflict
+    from herdr.state_db import get_default_db_path
+
+    config = local_config()
+    secret = os.environ.get("HAFLOW_INTAKE_INBOX_TOKEN", "")
+    if config is None or len(secret) < 32:
+        return {"ok": False, "error": "intake_inbox_disabled", "status_code": 404}
+    if not credential or not hmac.compare_digest(credential.encode(), secret.encode()):
+        return {"ok": False, "error": "intake_inbox_authentication_required", "status_code": 401}
+    path = Path(get_inbox_store().db_path or get_default_db_path())
+    inbox = IntakeInbox(path, config)
+    try:
+        if body is not None:
+            if not isinstance(body, dict) or body.keys() - {"link_id", "action", "revision", "changes"}:
+                raise ValueError("invalid Intake action payload")
+            item = inbox.change(body.get("link_id"), body.get("action"),
+                                body.get("revision"), body.get("changes"))
+            return {"ok": True, "item": item}
+        return {"ok": True, "items": inbox.list_items(
+            view=query.get("view", ["ALL"])[0],
+            limit=int(query.get("limit", ["50"])[0]),
+            offset=int(query.get("offset", ["0"])[0]),
+            project=query.get("project_id", [None])[0],
+            priority=query.get("priority", [None])[0],
+        )}
+    except (ScopeDenied, KeyError):
+        return {"ok": False, "error": "intake_work_item_not_found", "status_code": 404}
+    except StateConflict as exc:
+        return {"ok": False, "error": str(exc), "status_code": 409}
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "error": str(exc), "status_code": 400}
