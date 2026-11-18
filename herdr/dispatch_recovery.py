@@ -298,7 +298,12 @@ def check_resources(db_path, workflow_id, operation_id, expected_version, operat
             for intent, report in zip(pending, reports):
                 status = report.get('resource_status', 'unknown')
                 if status == 'absent':
-                    status = task_resources.reconcile_launch_intent(store, intent, lambda _: 'absent', now=now, conn=conn)['status']
+                    result = task_resources.reconcile_launch_intent(
+                        store, intent,
+                        lambda current: 'absent' if task_resources.can_settle_absent_launch(current) else 'unknown',
+                        now=now, conn=conn,
+                    )
+                    status = result['status']
                     if status == 'registered' and (intent.get('resources') or {}).get('run_id'):
                         task_resources.finish_launch_intent(store, intent, now=now, conn=conn)
                 messages = {'resources_absent': '已确认没有启动资源', 'registered': '已找到登记任务，请处理已有任务',

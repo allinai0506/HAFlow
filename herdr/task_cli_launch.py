@@ -31,7 +31,8 @@ def launch_task(args, *, deps):
             raise
 
     try:
-        with workflow_launch_lock(get_store().db_path, args.workflow_id):
+        with workflow_launch_lock(get_store().db_path, args.workflow_id) as lock_fd:
+            args._workflow_launch_lock_fd = lock_fd
             if not source:
                 return run_launch()
             with deps["GitOperationLock"](source):

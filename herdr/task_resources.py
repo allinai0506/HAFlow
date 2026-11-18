@@ -4,7 +4,9 @@ import fcntl
 import hashlib
 import json
 import os
+import plistlib
 import subprocess
+import sys
 from pathlib import Path
 import time
 import uuid
@@ -89,10 +91,9 @@ def workflow_launch_lock(db_path, workflow_id, timeout=10):
                 if time.monotonic() >= deadline:
                     raise NodeLaunchBusy('workflow launch in progress; retry after it registers')
                 time.sleep(0.05)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+        # Closing the last descriptor releases the flock. An allocating
+        # worker can inherit it and keep the fence held if the launcher exits.
+        yield lock.fileno()
 
 
 def owned_live_pane(task, probe=None):
@@ -291,6 +292,11 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
         require_authorization(conn, workflow_id, node_id, dispatch_operation_id)
     finally:
         conn.close()
+    cur_wf = store.get_workflow(workflow_id) if hasattr(store, 'get_workflow') else None
+    if cur_wf:
+        cur_status = str(cur_wf.get('status') or '').lower()
+        if cur_status in {'closing', 'completed', 'failed', 'halted', 'abandoned'}:
+            raise ValueError(f"Cannot begin launch intent: workflow '{workflow_id}' is {cur_status}")
     now = time.time() if now is None else now
     if not 1 <= lease_seconds <= 600:
         raise ValueError('launch lease must be between 1 and 600 seconds')
@@ -392,6 +398,70 @@ def record_launch_resources(store, intent, resource_identity, *, now=None):
         raise ValueError('launch resource identity exceeds budget')
     _launch_event(store, updated, now)
     return updated
+
+
+def local_boot_identity():
+    """Return stable host identity and kernel boot identity for local processes."""
+    try:
+        if sys.platform == 'darwin':
+            platform = plistlib.loads(subprocess.check_output(
+                ['/usr/sbin/ioreg', '-ard1', '-c', 'IOPlatformExpertDevice'], timeout=2,
+            ))
+            host_id = platform[0]['IOPlatformUUID']
+            boot_id = subprocess.check_output(
+                ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], text=True, timeout=2,
+            )
+        elif sys.platform == 'linux':
+            host_id = Path('/sys/class/dmi/id/product_uuid').read_text()
+            boot_id = Path('/proc/sys/kernel/random/boot_id').read_text()
+        else:
+            return None
+        host, boot = (uuid.UUID(value.strip()) for value in (host_id, boot_id))
+        if host.int and boot.int:
+            return hashlib.sha256(host.bytes).hexdigest(), boot.hex
+    except (OSError, ValueError, IndexError, KeyError, TypeError, AttributeError,
+            subprocess.SubprocessError):
+        return None
+    return None
+
+
+def record_worker_start_checkpoint(store, intent_key, identity, clone, *, requested):
+    """Bind Pane allocation and the start barrier to the locked launch intent."""
+    intent = _latest_intent(store, intent_key)
+    if (not intent or intent['intent_id'] != identity['intent_id']
+            or intent['task_id'] != identity['task_id']):
+        raise ValueError('worker launch intent identity changed')
+    resources = intent['resources']
+    if (resources.get('run_id') != identity['run_id']
+            or resources.get('planned_clone_path') != str(Path(clone).resolve())):
+        raise ValueError('worker launch run or workspace identity changed')
+    pane = {key: identity.get(key) for key in ('pane_id', 'pane_source', 'terminal_id')}
+    if not pane['pane_id']:
+        raise ValueError('worker Pane identity missing')
+    previous = resources.get('agent_start_requested')
+    if requested:
+        if previous is not False or any(resources.get(key) != value for key, value in pane.items()):
+            raise ValueError('worker Pane allocation checkpoint changed')
+    elif previous is not None or resources.get('pane_id'):
+        raise ValueError('worker Pane allocation was already recorded')
+    checkpoint = {**pane, 'agent_start_requested': requested}
+    if requested and pane['terminal_id']:
+        boot_identity = local_boot_identity()
+        if boot_identity:
+            checkpoint['start_boot_identity'] = list(boot_identity)
+    record_launch_resources(store, intent, checkpoint)
+
+
+def can_settle_absent_launch(intent):
+    """An empty resource inventory cannot prove that an Agent process exited."""
+    resources = intent.get('resources') or {}
+    requested = resources.get('agent_start_requested')
+    if resources.get('agent_session_id') or resources.get('agent_name'):
+        return False
+    if requested is not None:
+        return (requested is False and resources.get('pane_source') == 'dynamic'
+                and bool(resources.get('pane_id')) and bool(resources.get('terminal_id')))
+    return not resources.get('pane_id')
 
 
 def finish_launch_intent(store, intent, *, now=None, conn=None):
@@ -529,11 +599,12 @@ def write_worker_launch_identity(clone, identity, *, initial=False):
         Path(temp).unlink(missing_ok=True)
 
 
-def inventory_launch_resources(intent, runner=None, *, timeout=10):
+def inventory_launch_resources(intent, runner=None, *, timeout=10, stopped_terminal_id=None):
     """Bounded read-only inventory; absence requires complete native + file facts.
 
     Native schemas lacking cwd cannot prove an unregistered Pane is absent.
-    No delete/stop/adopt operation is issued for owned, foreign or unknown rows.
+    A process stop receipt allows a replacement terminal to be checked by cwd
+    like any other pane. Other callers treat a known pane ID as unresolved.
     """
     import os
     resources = intent.get('resources') or {}
@@ -580,8 +651,12 @@ def inventory_launch_resources(intent, runner=None, *, timeout=10):
             if not isinstance(pane, dict) or not pane.get('pane_id'):
                 raise ValueError('native inventory incomplete')
             if known_pane and pane['pane_id'] == known_pane:
-                return {'resource_status': 'unknown', 'reason': 'pane_present_needs_instance_reconciliation',
-                        'pane_id': known_pane, 'clone_tag': tag}
+                live_terminal_id = pane.get('terminal_id')
+                replaced = (stopped_terminal_id and isinstance(live_terminal_id, str)
+                            and live_terminal_id and live_terminal_id != stopped_terminal_id)
+                if not replaced:
+                    return {'resource_status': 'unknown', 'reason': 'pane_present_needs_instance_reconciliation',
+                            'pane_id': known_pane, 'clone_tag': tag}
             cwd = pane.get('cwd')
             if not cwd:
                 remaining = deadline - time.monotonic()
@@ -628,8 +703,12 @@ def _recover_launch_resources(store, intent, *, runner=None, timeout=10):
         return reconcile_launch_intent(store, current, lambda _: 'unknown')
     report = inventory_launch_resources(current, runner=runner, timeout=timeout)
     if report['resource_status'] == 'absent':
-        return reconcile_launch_intent(store, current, lambda _: 'absent')
+        if can_settle_absent_launch(current):
+            return reconcile_launch_intent(store, current, lambda _: 'absent')
+        return {**report, 'status': 'recovery_required', 'reason': 'agent_process_exit_unverified'}
     retained = {'status': 'recovery_required', **report}
+    if current['resources'].get('agent_start_requested') is True:
+        return retained
     tag = report.get('clone_tag')
     if not tag or tag.get('phase') not in {'workspace_created', 'pane_allocated'}:
         return retained

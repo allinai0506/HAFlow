@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import uuid
 
 from .agent_adapter import (
@@ -505,13 +505,17 @@ def halt_task(
     reason: str = "human interrupt",
     operator: str = "human",
     execute_kill: bool = True,
+    verify_identity: bool = True,
+    probe: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Perform a graceful soft halt (SIGINT / ctrl-c) on a task via its AgentAdapter.
 
     Safety contract:
-      If interrupt fails (pane not found, agent unsupported, or signal failure),
-      the task status MUST NOT transition to "interrupted". Task remains in its
-      current status to prevent runtime fact drift.
+      1. Runtime identity verification MUST precede any interrupt signal (P1-01 / Invariant 11).
+         If pane ownership is not proven (e.g. session mismatch or reused pane), refuse to
+         send interrupt signals to protect other running agents.
+      2. If interrupt fails (pane not found, agent unsupported, signal failure, or identity unproven),
+         the task status MUST NOT transition to "interrupted". Task remains in its current status.
     """
     tasks_data = load_tasks_data()
     task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
@@ -533,8 +537,25 @@ def halt_task(
             interrupt_ok = False
             error_reason = f"agent_{adapter.name}_does_not_support_interrupt"
         else:
-            interrupt_ok = bool(adapter.interrupt(pane_id, reason=reason))
-            error_reason = None if interrupt_ok else "interrupt_signal_failed"
+            if verify_identity:
+                try:
+                    from herdr.task_resources import owned_live_pane
+                    owned, probe_reason = owned_live_pane(task, probe=probe)
+                    if not owned:
+                        interrupt_ok = False
+                        error_reason = (
+                            "pane_missing" if probe_reason == "pane_missing"
+                            else f"identity_verification_failed:{probe_reason}"
+                        )
+                    else:
+                        interrupt_ok = bool(adapter.interrupt(pane_id, reason=reason))
+                        error_reason = None if interrupt_ok else "interrupt_signal_failed"
+                except Exception as id_err:
+                    interrupt_ok = False
+                    error_reason = f"identity_probe_error:{id_err}"
+            else:
+                interrupt_ok = bool(adapter.interrupt(pane_id, reason=reason))
+                error_reason = None if interrupt_ok else "interrupt_signal_failed"
     else:
         # State-only transition without physical kill
         interrupt_ok = True

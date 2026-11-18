@@ -261,10 +261,10 @@ def test_adapter_steer_urgent_success():
     assert res["adapter"] == "codex"
     assert res["protocol_level"] == "tty_prototype"
 
-    # Verify subprocess calls: send-keys ctrl-c, send-text prompt, send-keys enter
+    # Verify subprocess calls: send-keys ctrl+c, send-text prompt, send-keys enter
     calls = mock_run.call_args_list
     assert len(calls) == 3
-    assert "ctrl-c" in calls[0][0][0]
+    assert "ctrl+c" in calls[0][0][0]
     assert "send-text" in calls[1][0][0]
     assert "Stop and refactor" in calls[1][0][0][4]
     assert "enter" in calls[2][0][0]
@@ -299,7 +299,7 @@ def test_adapter_steer_soft_success():
 
     calls = mock_run.call_args_list
     # Soft steer does NOT call ctrl-c
-    assert not any("ctrl-c" in c[0][0] for c in calls)
+    assert not any("ctrl+c" in c[0][0] for c in calls)
     assert any("send-text" in c[0][0] for c in calls)
     assert any("enter" in c[0][0] for c in calls)
 

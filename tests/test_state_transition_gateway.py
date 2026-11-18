@@ -757,7 +757,8 @@ class TestStateTransitionGateway:
         mock_adapter.protocol_level = "prototype"
         mock_adapter.name = "mock"
         mock_adapter.interrupt.return_value = {"ok": True}
-        with patch.object(steering, "get_agent_adapter", return_value=mock_adapter):
+        with patch.object(steering, "get_agent_adapter", return_value=mock_adapter), \
+             patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
             halt_res = steering.halt_task("t-fc-01", reason="test abort")
             assert halt_res["ok"] is False
             assert "transition_task_failed" in halt_res["error"]

@@ -202,6 +202,7 @@ function openWorkflowTab(id){
   if(id==='__templates__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('templates');if(typeof paintCrumb==='function')paintCrumb();if(typeof showTemplateLibrary==='function')showTemplateLibrary();return;}
   if(id==='__archive__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('archive');if(typeof paintCrumb==='function')paintCrumb();if(typeof showArchive==='function')showArchive();return;}
   if(id==='__logs__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('logs');if(typeof paintCrumb==='function')paintCrumb();if(typeof showLogs==='function')showLogs();return;}
+  if(id==='__inbox__'){if(typeof setWorkspaceMode==='function')setWorkspaceMode('aux');if(typeof paintCrumb==='function')paintCrumb();if(typeof showInbox==='function')showInbox();else if(typeof showShellView==='function')showShellView('inbox');return;}
   state.shellView='workbench';
   state.workflowView='flow';
   saveViewState();
@@ -218,6 +219,7 @@ function closeWorkflowTab(id,e){
   if(id==='__templates__'){const tplP=document.getElementById('templatesTabView');if(tplP)tplP.hidden=true;}
   if(id==='__archive__'){const arcP=document.getElementById('archiveTabView');if(arcP)arcP.hidden=true;}
   if(id==='__logs__'){const logP=document.getElementById('logsTabView');if(logP)logP.hidden=true;stopLogAutoRefresh();}
+  if(id==='__inbox__'){const inbP=document.getElementById('inboxTabView');if(inbP)inbP.hidden=true;if(typeof stopInboxTimer==='function')stopInboxTimer();}
   if(state.workflowId===id){
     if(state.openWorkflowTabIds.length>0){
       const nextIdx=Math.min(idx,state.openWorkflowTabIds.length-1);
@@ -274,6 +276,12 @@ function renderWorkflowTabs(){
       return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__logs__')" title="调度审计日志" role="tab" aria-selected="${isActive}">`+
         `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg><span class="tab-title">调度审计日志</span>`+
         `<button type="button" class="tab-close" onclick="closeWorkflowTab('__logs__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
+        `</div>`;
+    }
+    if(wid==='__inbox__'){
+      return `<div class="wf-tab ${isActive?'active':''}" onclick="openWorkflowTab('__inbox__')" title="统一任务收件箱" role="tab" aria-selected="${isActive}">`+
+        `<svg class="tab-icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg><span class="tab-title">任务收件箱</span>`+
+        `<button type="button" class="tab-close" onclick="closeWorkflowTab('__inbox__',event)" title="关闭页签" aria-label="关闭页签">×</button>`+
         `</div>`;
     }
     const w=wfMap[wid]||{workflow_id:wid,status:'waiting'};

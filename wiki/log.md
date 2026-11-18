@@ -8,6 +8,119 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-17] fix | Universal Workflow Shutdown Protocol & Factory Fencing Hardening (PR #420 第十四轮复审闭环)
+
+- 背景：PR #420 第十四轮独立复审指出 1 项阻断级 P1 与两项安全/测试建议：
+  1. P1-01（取消期间允许新 Agent 派发）：工作流关闭/取消过程中获取活动任务快照后工作流仍维持 `running` 状态，Coordinator 会并发派发新 Agent，导致产生孤儿 Agent 且工作区被错误释放；在途启动尚未完成注册的任务也存在竞争脱管风险；
+  2. P2-01（Fencing 回归测试需贴近真实恢复）：`test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate` 曾通过手动 SQL 更新模拟接管，需通过真实的 `recover_stale_tasks()` 与 `claim_next_task()` 进行全流程回归验证，保留预分配 workflow_id；
+  3. 防御性加固：Factory 注册入口在提供 `inbox_task_id` 时，必须强制要求同时提供 `fencing_token` 与 `launch_attempt_id`，杜绝缺失降级。
+- 变更：
+  1. `herdr/workflow_shutdown.py`：新增通用可复用工作流关闭协议 `shutdown_workflow`（8 步规范）：
+     - Step 1：原子流转至不可派发的 `closing` 状态；
+     - Step 2：通过 `node_dispatch.active`、`validate_unbound_launch` 与 `begin_launch_intent` 全面拒绝关闭中工作流的任何新派发与启动；
+     - Step 3：在 `workflow_launch_lock` 下协调在途启动并排空/回滚未结算的分配意向；
+     - Step 4：重新获取任务最新全量快照，确保不遗漏关闭边缘完成注册的任务；
+     - Step 5：安全停止所有活动任务（按 Invariant 11 强校验运行期实例所有权）；
+     - Step 6：二次强校验活跃执行实例数严格为 0；
+     - Step 7：原子流转至终态 `completed`（`outcome='abandoned'`）；
+     - Step 8：工作区占用安全解除。
+  2. `herdr/inbox/dispatcher.py`：`_safely_stop_fenced_workflow` 全面委托至通用关闭协议；`recover_stale_tasks` 修复事务未提交即跨连接查询的视图隔离问题；
+  3. `herdr/node_dispatch_store.py` & `herdr/task_resources.py`：在 `validate_unbound_launch` 与 `begin_launch_intent` 增加对 `closing` 工作流的拒绝逻辑；
+  4. `bin/herdr-factory`：`_verify_and_bind_inbox_task_fencing` 强制校验 `fencing_token` 与 `launch_attempt_id` 必填；
+  5. `tests/test_workflow_shutdown.py`：新增专项测试套件，完整覆盖关闭期间 Coordinator 派发被拒、在途启动安全协调不遗漏、未完全停止坚决拒绝终态与释放工作区 3 大验收场景；
+  6. `tests/test_inbox_dispatcher.py`：更新为真实恢复与领取逻辑，并补充必填参数检查测试。
+
+## [2026-11-17] fix | User Task Inbox V1 — 执行权生命周期完整防线、Pane 实例所有权校验与终态对齐 (PR #420 第十轮复审终局闭环)
+
+- 背景：PR #420 第十轮独立复审指出 4 项遗留问题：
+  1. P1-01（启动前竞态）：启动前需要全链路原子 CAS 续租并与已注册工作流实现严格 fencing；
+  2. P1-02（底层进程停止门禁）：`_safely_stop_fenced_workflow` 在 halt 失败且关闭 Pane 前必须遵循 Invariant 11 强校验 Pane 运行期实例归属（`task_resources.owned_live_pane`），未证明归属时坚决不得销毁 Pane，坚决返回 `STOP_FAILED` 且不得释放工作区；
+  3. P1-03（旧 Launcher 误杀已恢复 Workflow）：启动后更新受影响行数为 0 时，若任务已与该工作流保持关联（如被并发 Dispatcher 对账恢复为 RUNNING 或处于终态），严禁误杀正在正常推进的工作流；
+  4. P2-01（Semaphore 资源泄漏防线）：确保任何启动前检查、异常退出或异步提交失败路径均严格释放 `_LAUNCH_SEMAPHORE` 许可，杜绝并发池饥饿。
+- 变更：
+  1. `herdr/inbox/dispatcher.py`：
+     - 在 `launch_task` 预分配与执行器 `_fenced_runner` 前均严格执行原子 CAS 租约续展与归属校验（`lease_expires_at >= now`），失权即熔断；
+     - `_safely_stop_fenced_workflow` 严格按 Invariant 11 在关闭 Pane 前接入 `task_resources.owned_live_pane`：未证明归属（如 session_mismatch、unknown）时拒绝杀死 Pane 并返回 `STOP_FAILED` 保留工作区占用；仅当归属确证或底层 Pane 已物理消失（`pane_missing`）时才允许完成终止；
+     - `_handle_post_runner_fencing_mismatch` 区分真正孤儿工作流与已恢复工作流，当任务仍关联当前 `workflow_id` 且未被用户取消时坚决保留；
+     - 为 `launch_task` 启动全生命周期与 `dispatch_sweep` 声明统一 try-finally，确保 Semaphore 零泄漏；
+  2. `tests/test_inbox_dispatcher.py`：
+     - 新增 `test_safely_stop_workflow_halt_task_fails_and_ownership_unproven_refuses_to_close_pane` 验证 Pane 归属未确证时工作区锁定；
+     - 新增 `test_safely_stop_workflow_halt_task_fails_pane_missing_stops_and_releases` 验证物理消失确认路径；
+     - 新增 `test_full_execution_fencing_lifecycle` 完整验证领取 -> 租约 -> 原子校验 -> 注册 -> 持续续租 -> 并发竞争恢复 -> 终态对账 -> 释放接续全流程。
+
+## [2026-11-17] fix | User Task Inbox V1 — 原子执行权 CAS 续租、心跳失联即时熔断与底层停止证据门禁 (PR #420 第七轮复审 P1-01 / P1-02 闭环)
+
+- 背景：PR #420 第七轮独立复审指出 2 项阻断级 P1 缺陷：
+  1. P1-01（启动前竞态与心跳失联）：仅用 SELECT 检查执行权存在 TOCTOU 窗口，检查与启动间进程暂停可能发生双启动；心跳更新未校验 `rowcount`，失去所有权后未主动终止；缺乏进程启动幂等性；
+  2. P1-02（取消任务假装停止）：`_safely_stop_fenced_workflow` 无论底层 task halt 或 close pane 是否成功均被捕获吞掉，`cancel_task` 最终无条件将任务标为 `CANCELLED` 并释放工作区，违反“不能仅凭数据库状态变化认定 Agent 进程已停止”的铁律。
+- 变更：
+  1. `herdr/inbox/dispatcher.py`：
+     - 在 runner 执行前以原子 CAS UPDATE（校验 `status='CLAIMED'`、`worker_id` 及 `lease_expires_at >= now`）原子校验并续租 180 秒，`rowcount == 0` 时立即熔断；
+     - 心跳循环增加 `rowcount == 1` 断言，一旦失权立即触发 `lost_ownership` 事件退出循环；
+     - 包装 runner 执行网关，`lost_ownership` 置位时坚决禁止启动 Agent；执行异常时失权 Worker 不得重置任务状态；
+     - 在 Factory 启动入口增加已注册工作流幂等复用，杜绝外部进程重复创建；
+     - `_safely_stop_fenced_workflow` 引入严格停止结果契约（`STOPPED` / `ALREADY_TERMINAL` / `STOP_FAILED`），包含对活跃 Pane 的关闭与停止证据检查，无法证明停止时返回 `STOP_FAILED` 并拒绝将工作流置为终态；
+  2. `herdr/inbox/store.py`：
+     - `cancel_task` 严守终止证据门禁，仅当返回 `STOPPED` 或 `ALREADY_TERMINAL` 时才允许将收件箱任务更新为 `CANCELLED`；返回 `STOP_FAILED` 时抛出异常、严格保留原任务状态且不释放工作区；
+  3. `console/inbox_api.py`：
+     - `api_inbox_cancel_task` 捕获终止失败并返回 409 状态码与明确错误说明；
+  4. `tests/test_inbox_dispatcher.py`：
+     - 补充 3 项针对性回归与故障注入测试：租约过期前置原子 CAS 拦截、心跳失联即时熔断且不脏写 DB、halt/close_pane 双失败故障注入（验证状态保持 RUNNING 且工作区持续占用）。
+
+## [2026-11-17] fix | User Task Inbox V1 — 启动器 CAS 前置防重、取消任务停止底层工作流与对账全量分页 (PR #420 复审 Thread 24-26 闭环)
+
+- 背景：PR #420 审查线程指出 3 项并发与资源生命周期缺陷：
+  1. 启动器执行前未对任务所有权与租约做 CAS 校验，若挂起后被其他节点抢占可能发生重复执行 (Thread 24)；
+  2. 取消 WAITING 任务时未终止底层暂停工作流，导致工作区被无主工作流永久阻塞 (Thread 25)；
+  3. 控制器对账固定只取前 500 个任务，全局任务超限时导致老任务饥饿无法收敛 (Thread 26)。
+- 变更：
+  1. `herdr/inbox/dispatcher.py`：在 `launch_task` 更新 workflow_id 以及在执行 runner 前均增加严格 CAS 校验（检查 `status='CLAIMED'`、`worker_id` 及租约有效性），一旦失去所有权立即终止，杜绝侧效应重复执行；
+  2. `herdr/inbox/store.py`：在 `cancel_task` 中对处于 WAITING/RUNNING 状态的任务先通过 `_safely_stop_fenced_workflow` 优雅终止底层工作流与 Pane，释放工作区互斥锁后再标记 CANCELLED；
+  3. `herdr/inbox/dispatcher.py`：在 `reconcile_running_tasks` 中引入分页循环遍历，完整对账所有活跃任务，彻底消除 500 条限制导致的任务饥饿；
+  4. `tests/test_inbox_dispatcher.py`：新增 3 项回归测试，验证抢占终止、取消释放空间与超出 500 条全量对账。
+
+## [2026-11-17] fix | User Task Inbox V1 — 数据库迁移原子事务、前端分页刷新与 URL 显式优先级 (PR #420 第四轮复审修复)
+
+- 背景：PR #420 第四轮独立复审指出 1 项阻断级 P1（旧数据库迁移非原子操作，未显式事务包裹存在任务数据丢失风险）、2 项前端 P2（自动刷新重置已加载分页、显式 workflow_id 可能被旧 __inbox__ 状态覆盖），并要求对 WAITING 状态的工作区互斥与资源生命周期做出明确架构裁决。
+- 变更：
+  1. `herdr/inbox/schema.py`：在 `_migrate_legacy_schema` 引入 `BEGIN IMMEDIATE ... COMMIT` 原子事务与 `ROLLBACK` 异常回滚机制，所有表重建、数据搬迁、历史剥离、旧表删除、重命名与索引创建全部收拢在单一事务中；清除潜在残留临时表，并在 `tests/test_inbox_schema.py` 补充故障注入与回滚恢复测试；
+  2. `console/static/console/scripts/inbox.js`：重构分页刷新机制，自动刷新与手动刷新按已展示任务总量（`Math.max(pageSize, tasks.length)`）获取数据，杜绝 5 秒轮询重置已加载分页；筛选条件变更时显式重置第一页；
+  3. `console/static/console/scripts/bootstrap.js`：确立 URL 参数最高优先级，显式 `workflow_id` 自动覆写 localStorage 缓存的 `__inbox__` 状态并正确切回 workbench，显式 `?view=inbox` 保持最高优先级直开收件箱；
+  4. `wiki/user-task-inbox.md`：记录 ADR-INBOX-001 架构裁决，确立 V1 严守工作区互斥底线（WAITING 持续持有锁保护协调者 Pane 与未提交 Git 现场），规划 V2 引入 Checkpoint 挂起与 Coordinator Pane 优雅脱钩/恢复体系。
+
+## [2026-11-16] fix | User Task Inbox V1 — 执行历史隔离、Factory工作流门禁对齐与权限收敛 (PR #420 第二轮独立审查修复)
+
+- 背景：PR #420 第二轮独立审查指出 3 项 P1 与 5 项 P2 缺陷：失败任务重试时执行历史写入 Context 导致 Git 模板启动崩溃；WAITING 释放工作区与 Factory `_reject_if_active_workflow()` 判断不一致导致后续任务启动被拒；自动确认接口默认回退 user 身份导致自动化事件可绕过确认；Sweep 接口跨用户泄露任务指令；DRAFT 确认归属时队列插队；URL 冷启动不支持 `?view=inbox`；旧版数据库存在全局唯一键残留约束。
+- 变更：
+  1. `herdr/inbox/schema.py` 与 `herdr/inbox/store.py`：新增独立 `execution_history_json` 字段，执行历史与业务 Context 彻底解耦；`dispatcher.py` 调度时严格按模板契约过滤 Context 参数，Git 模式绝不注入 `--context` 选项；
+  2. `bin/herdr-factory` 与 `herdr/kernel.py`：统一工作区互斥语义。Factory 仅对真正执行中（`running`/`pending`/`in_progress`/`closing`）的工作流拦截，允许 `paused` 暂停态共存排队；`resume_workflow` 增加工作区重占门禁，当同项目存在运行中工作流时禁止恢复；
+  3. `console/inbox_api.py`：修复身份信任兜底，移除默认 `"user"` 回退，自动化来源（webhook/timer/cron 等）与无明确用户确认的操作统一强制落入 `DRAFT`；
+  4. `console/inbox_api.py`：`api_inbox_sweep` 对非管理员用户严格过滤任务明细，并对 `busy_workspaces` 进行原因脱敏，防止指令泄露；
+  5. `herdr/inbox/store.py`：`confirm_task_scope` 在同一 `BEGIN IMMEDIATE` 事务内为草稿重新计算目标工作区尾部 `sort_order`，彻底消除插队风险；
+  6. `console/static/console/scripts/bootstrap.js`：补齐 `?view=inbox` 冷启动路由及页签状态绑定；
+  7. `herdr/inbox/schema.py`：提供原生 SQLite 表重建迁移机制，安全擦除旧版本残留的 `idempotency_key TEXT UNIQUE` 全局约束并保留历史数据；
+  8. `console/static/console/scripts/inbox.js`：澄清弹窗必填文案，防止指令失焦重识别覆盖用户主动选择的项目。
+
+## [2026-11-16] fix | User Task Inbox V1 — 崩溃恢复幂等性、等待状态空间互斥释放与用户隔离加固 (PR #420 评审修复)
+
+- 背景：PR #420 第三轮深度审查发现启动崩溃窗口下租约过期重试可能启动两个工作流、WAITING 任务与 paused 工作流永久阻断后续任务无法继续、幂等键全局唯一碰撞、非管理员越权查询及缺少分页机制。
+- 变更：
+  1. `herdr/inbox/dispatcher.py`：启动前持久化预分配 `workflow_id`，崩溃自愈优先绑定已创建工作流，杜绝重复执行；
+  2. `herdr/inbox/dispatcher.py` 与 `herdr/inbox/transitions.py`：`WAITING` 状态与 `paused` 工作流释放工作区互斥锁，允许后续待执行任务并发调度；恢复 `RUNNING` 时强校验空间可用性；
+  3. `herdr/inbox/schema.py` 与 `herdr/inbox/store.py`：幂等键重构为 `(user_id, idempotency_key)` 用户范围唯一索引；队列重排后新任务严格追加到队列末尾；
+  4. `console/inbox_api.py`：强制显式用户确认（`confirmed_by == 'user'`），杜绝自动推荐静默排队；强化多用户查询隔离并脱敏跨用户工作区占用标题；
+  5. `console/static/console/scripts/inbox.js`：取消自动勾选确认框，新增「加载更多」分页机制，严格控制文件行数（468 行）。
+
+## [2026-11-16] feat | User Task Inbox V1 — 用户统一任务收件箱与自动调度
+
+- 背景：用户派发多个任务时必须等待当前任务执行完毕才能手动派发下一条指令，任务接入与任务执行紧耦合，且缺少任务排队缓冲机制。
+- 变更：
+  1. 新增 [[user-task-inbox]]；
+  2. 新增 `user_inbox_tasks` 表与 DDL 注册，建立 8 状态机（`DRAFT`、`PENDING`、`CLAIMED`、`RUNNING`、`WAITING`、`COMPLETED`、`FAILED`、`CANCELLED`）；
+  3. 实现 `herdr/inbox/store.py`、`herdr/inbox/detector.py` 与 `herdr/inbox/dispatcher.py`：单工作区单任务互斥、跨空间并行调度、优先级与 FIFO 排序、自动连续派发接续、草稿范围隔离与崩溃恢复；
+  4. 实现控制台后端 REST API（`console/inbox_api.py`）与前端完整交互界面（`console/static/console/scripts/inbox.js`、`inbox.css`、`console.html`）；
+  5. 编写全量单元测试与 10 任务自动接续端到端流水线测试（`tests/test_inbox_e2e_pipeline.py`）。
+
 ## [2026-11-13] fix | 仪表板回复工位所有权校验、暂停任务恢复与草稿保持 (PR #415 评审修复)
 
 - 背景：PR #415 审查提出四项缺陷：紧急插话未校验易失工位归属（违背 AGENTS.md Invariant 11）、paused/interrupted 任务 steer 后未重开导致后续事件被 Controller 忽略、stuck 异常卡片将 blocked 错标为 failed resume、仪表板 10 秒轮询刷新冲刷用户正在输入的草稿与光标。
@@ -4277,3 +4390,90 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   3. `shell-navigation.css` 与 `polish-shell.css` 为 `.wf-tab`、`.tab-title` 与 `.tab-status` 设置严谨的单行排版约束（`white-space: nowrap !important`、`overflow: hidden`、`text-overflow: ellipsis`、`flex-shrink: 0`）与精致微标胶囊样式，严格遵守 4px 间距栅格；
   4. 新增单测 `test_workflow_tabs_single_line_and_status_badge` 锁定单行展示与长提示剥离保障，更新基线哈希签名。
 - 验证：`tests/test_console_standard_layout_tabs.py` 与全部 517 项控制台测试全部 PASS。
+
+## [2026-11-16] Fix | User Task Inbox V1 全面自检与深度架构闭环 (PR #420 复审对齐)
+- 现场：PR #420 第二轮复审指出 8 项关键缺陷（含 3 项 P1 与 5 项 P2），特别是关于 WAITING 状态下释放工作区与 Factory/Coordinator Pane 物理资源冲突的深层架构悖论。
+- 根因分析：
+  1. **P1-01 (Context 污染)**：`retry_task` 将执行历史写回 `context_json`，而软件开发 Git 模式模板不接受 `--context` 参数，导致重试必然失败。执行历史属于审计事实，不属于工作流输入绑定。
+  2. **P1-02 (WAITING 与工作区互斥)**：前期试图让 WAITING 释放工作区以支持后续任务执行，但同一项目共享唯一的 Git 工作区、Coordinator Pane (`wX:p1`) 与阶段 Tab 拓扑，底层不支持工作流级挂起/还原（Suspend/Restore）。若放行下一任务启动，新工作流将抢占 Coordinator Pane 并污染代码现场，待前序工作流恢复时现场已遭破坏；若 Factory 拦截，则导致新任务启动重试并最终雪崩 FAILED。
+  3. **P1-03 (自动确认默认值绕过)**：接口默认 fallback 至 `"user"`，调用方只需传入 `auto_confirm: true` 即可绕过用户确认门禁进入 PENDING。
+  4. **P2-01 (多用户扫描数据泄露)**：`/api/inbox/sweep` 全局调度扫描结果原样返回全量任务与包含任务指令的 busy 原因，普通用户可探测其他用户私有任务。
+  5. **P2-02 (草稿确认插队)**：草稿创建时无工作区（`sort_order=0`），确认归属时未重算目标队列尾部位置，导致确认草稿意外插入队列首部。
+  6. **P2-03 (URL 冷启动恢复)**：`bootstrap.js` 支持列表未包含 `'inbox'`，导致带 `?view=inbox` 打开控制台时无法恢复收件箱视图。
+  7. **P2-04 (SQLite Schema 兼容迁移)**：旧表使用行级 `idempotency_key TEXT UNIQUE`，单纯改用 `CREATE TABLE IF NOT EXISTS` 无法消除旧约束，导致跨用户同名幂等键仍被拒绝。
+  8. **P2-05 (前端交互)**：表单缺少选择即时排队时的必填提示，自动探测覆盖了用户手动选定的项目。
+- 修复与闭环：
+  1. **执行历史独立存储**：在 Schema 中新增 `execution_history_json` 字段，`retry_task` 独立记录审计历史并彻底清理 `context_json`；`dispatcher` 按模板契约严格过滤上下文，Git 模式绝不注入 `--context`。
+  2. **严格工作区互斥与门禁统一**：明确 HAFlow 物理架构约束——同一项目/工作区同一时刻严格只允许一个活跃任务/工作流。WAITING 状态持续持有当前工作区互斥锁保护现场与 Coordinator Pane，后续任务在当前工作区安全排队；不同工作区独立并行调度。`herdr-factory` 与 `dispatcher` 门禁完全对齐（活跃工作流含 `paused` 一致判定占用），消除并发冲突与假性释放。
+  3. **接口强类型确认约束**：移除默认 `"user"` fallback，自动化来源（webhook/timer/detector）一律强制进入 `DRAFT`；仅当 `source_type="manual"` 且显式传入 `confirmation_source="user"` 时方允许自动排队。
+  4. **多用户数据隔离与脱敏**：`api_inbox_sweep` 按当前用户过滤任务，并对 `busy_workspaces` 进行脱敏处理，防止跨用户任务信息泄露。
+  5. **事务内原子计算队列尾部**：`confirm_task_scope` 在 `BEGIN IMMEDIATE` 事务内查询目标工作区和优先级的最大 `sort_order`，分配末尾位置（`+10`），杜绝插队。
+  6. **补全 URL 路由**：`bootstrap.js` 将 `'inbox'` 纳入受支持视图，冷启动直接路由水合。
+  7. **无损表重建迁移**：`ensure_inbox_schema` 引入自动检测机制，若存在旧全局唯一索引，则在事务内重建表并迁移数据至复合唯一索引 `(user_id, idempotency_key)`。
+  8. **前端交互保护**：明确表单提示，记录 `userSelectedProject` 状态，防止自动探测覆盖用户主动选择。
+- 验证：
+  - `tests/test_inbox_*.py`、`tests/test_console_inbox_api.py` 45 项专项全绿。
+  - 核心工作流测试 `tests/test_workflow_*.py` 83 项全绿。
+  - `python3 -m compileall -q herdr services bin tests` 零错误；`git diff --check` 零违规。
+
+## [2026-11-17] Fix | PR #420 第八轮复审闭环：停止验证保全工作区、原子执行权保护、避免误杀恢复工作流及 Semaphore 泄漏治理
+- 现场：PR #420 第八轮复审指出 3 项 P1 与 1 项 P2 调度安全与生命周期管理缺陷：
+  1. **P1-01 (停止 Agent 失败仍释放工作区)**：`_safely_stop_fenced_workflow` 在 `halt_task` 失败后降级修改数据库任务状态为 `failed`，随后即使无法确认 Agent 停止仍将 Workflow 标为 `completed`，导致工作区被误释放而造成两代 Agent 并发操作冲突；
+  2. **P1-02 (启动前检查非原子执行权保护)**：启动前 SELECT 与 runner 之间存在时间窗口，租约在窗口内失效可能引发 TOCTOU 竞态；
+  3. **P1-03 (旧 Launcher 误杀已恢复工作流)**：Launcher 启动 Workflow 后执行 CAS 更新 `WHERE status = 'CLAIMED'`，若任务已被恢复 Dispatcher 标记为 `RUNNING`，影响行数为 0，原代码将该行数判定为失去执行权并盲目停止该 Workflow；
+  4. **P2-01 (Semaphore 提前返回导致资源泄漏)**：执行权检查失败与提前退出路径未纳入同一清理作用域，导致容量为 2 的 `_LAUNCH_SEMAPHORE` 发生凭证永久泄露。
+- 根因分析与架构修复：
+  1. **可验证物理停止门禁**：`_safely_stop_fenced_workflow` 引入明确三态契约（`STOPPED` / `ALREADY_TERMINAL` / `STOP_FAILED`）。若 `halt_task` 与 `close_pane` 均失败，坚决拒绝修改任务与 Workflow 为终态，返回 `STOP_FAILED`；`cancel_task` 捕获该失败后在任务错误记录中持久化异常并抛出异常（API 返回 409），严格保持工作区忙碌互斥；
+  2. **原子 CAS 续租与执行权栅栏**：在 runner 启动前执行原子 `UPDATE` 校验租约有效性并延长租期（`rowcount == 1`），失去执行权立即中止启动；并在 runner 执行边界与 `_default_runner` 内部落实多重幂等重用与执行权防线；
+  3. **细分后验冲突语义（防误杀已恢复工作流）**：新增 `_handle_post_runner_fencing_mismatch`，当 CAS 更新影响 0 行时先核查当前任务状态。若任务已由恢复协程接管且绑定同一 `workflow_id`，保留该合法工作流的执行，仅在确认为无主孤儿工作流时才执行安全清理；
+  4. **生命周期全覆盖 Try-Finally 资源保障**：将整个 `_execute` 执行生命周期完全包进 `try ... finally`，保证无论启动校验失败、Agent 异常、还是正常执行退出，均 100% 触发 Semaphore 释放与心跳注销。
+- 验证：
+  - 新增 4 项专项测试覆盖停止失败工作区保全、Pane 关闭物理生效、交错恢复防误杀、CAS 失败 Semaphore 零泄漏；
+  - `tests/test_inbox_*.py` 与 `tests/test_console_inbox_api.py` 全部 64 项测试 100% PASS；
+  - `python3 -m compileall -q herdr services bin tests console` 与 `git diff --check` 均零违规。
+
+## [2026-11-17] Fix | CI 全量回归测试修复：Workflow 关闭状态门禁收敛、签名契约对齐与全量套件全绿
+- 现场：PR #420 远端 CI 全量执行发现 18 项存量测试失败，主要集中在 `validate_unbound_launch` 过度拦截历史已完成工作流、`_run_workflow_job` 位置参数展开破坏既有 mock 契约、`connection.py` AST 偏离以及测试环境下 `owned_live_pane` 缺失打桩。
+- 修复与闭环：
+  1. **收敛未绑定派发状态门禁**：`node_dispatch_store.validate_unbound_launch` 仅严格拦截处于 `closing` 状态的工作流，历史已完成（`completed` / `failed`）的工作流任务记录与状态迁移不再被误伤拦截。
+  2. **保留函数调用签名契约**：`console/workflow_api._run_workflow_job` 将可选扩展参数作为 `**kwargs` 按需解包，确保在无额外参数时原样使用位置参数调用 `run_workflow(root, req, agent, template)`，契合控制台模板测试的 Mock 契约。
+  3. **恢复状态连接 AST 基线一致性**：`herdr/state/connection.py` 恢复原始 AST 定义，消除 `test_state_db_split_source_equivalence` 报警。
+  4. **完善测试打桩环境**：在控制台、Steering API 及 Cockpit 驱动测试中对齐 `owned_live_pane` 的测试隔离打桩，验证任务安全叫停。
+- 验证：
+  - 18 项 CI 失败用例（含 `test_console_templates.py`、`test_critical_reads_fail_closed.py`、`test_console_controller_cockpit_*.py` 等）100% 全部通过。
+  - `tests/test_inbox_*.py`、`tests/test_workflow_shutdown.py`、`tests/test_steering_mesh.py` 等 119 项核心专项全绿。
+  - `python3 -m compileall -q herdr services bin tests console` 零错误；`git diff --check` 零违规。
+
+## [2026-11-18] Fix | Workflow Shutdown 核对进程退出与启动资源
+- 第十五轮复审修正了上一轮的停止判定。关闭流程按启动意图盘点资源，核对 Pane 归属，并在终端会话和已观测子进程退出后记录 `PROCESS_STOPPED`。证据不足时保持 `closing` 和工作区占用。
+- Evidence
+  - `herdr/workflow_shutdown.py#shutdown_workflow`
+  - `herdr/task_resources.py#workflow_launch_lock`
+  - `tests/test_workflow_shutdown.py#test_scenario_3_interrupt_ack_keeps_occupancy_until_process_stops`
+
+## [2026-11-18] Fix | Inbox 与 Factory 对齐 Workflow 占用
+- Inbox 繁忙检查、领取事务和 Factory 共用 Workflow 终态定义。FAILED 继续占用工作区，关闭完成后才允许后续任务领取。
+- Evidence
+  - `herdr/inbox/dispatcher.py#_blocking_workflow`
+  - `herdr/projects.py#active_workflows_for_project`
+  - `tests/test_inbox_dispatcher.py#test_failed_workflow_holds_workspace_until_shutdown`
+
+## [2026-11-18] Fix | Worker 崩溃后的启动证据与工作区恢复
+- Worker 在请求启动 Agent 前将 Pane 分配和启动请求检查点写入 Launch Intent。关闭与资源恢复依据同一记录处理资源消失场景。
+- Evidence
+  - `herdr/task_resources.py#record_worker_start_checkpoint`
+  - `tests/test_workflow_shutdown.py#test_worker_crash_recovers_absent_pane_only_before_agent_start`
+
+## [2026-11-18] Fix | Inbox 归属校验、提交防重和 Factory 数据库选择
+- 新任务创建前校验项目及绑定工作区。控制台重试同一提交时复用幂等键，Factory 启动使用明确指定的 SQLite。
+- Evidence
+  - `console/inbox_api.py#api_inbox_create_task`
+  - `console/static/console/scripts/inbox.js#submitNewInboxTask`
+  - `tests/test_workflow_startup_convergence.py#test_factory_cli_keeps_startup_in_explicit_database`
+
+## [2026-11-18] Fix | Workflow 恢复占用与无回执关闭
+- Workflow 恢复在当前控制事务内检查项目占用。关闭时可用绑定到原运行实例的本机重启证据补记停止回执。
+- Evidence
+  - `herdr/kernel.py#_set_workflow_pause`
+  - `herdr/workflow_shutdown.py#_reboot_stop_evidence`
+  - `tests/test_workflow_shutdown.py#test_missing_pane_recovers_after_verified_local_reboot`

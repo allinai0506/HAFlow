@@ -565,3 +565,120 @@ def test_startup_window_writes_never_resurrect_terminal(tmp_path, monkeypatch, f
     assert record["startup_ready"] is False
     assert "agent_override" not in record
     assert "preflight_checked_at" not in record
+
+
+@pytest.mark.parametrize("preflight_ok", [True, False])
+def test_factory_cli_keeps_startup_in_explicit_database(
+        factory, tmp_path, monkeypatch, capsys, preflight_ok):
+    import subprocess
+    import sys
+
+    from herdr.inbox.dispatcher import InboxDispatcher
+    from herdr.inbox.store import InboxStore
+    from herdr.state_store import get_state_store, sync_workflows_projection
+
+    explicit_db = tmp_path / "explicit.db"  # Initialized DBs can share a directory.
+    inbox = InboxStore(explicit_db)
+    default_store = _store()
+    project = _project(tmp_path)
+    default_store.save_workflow({
+        "workflow_id": "wf-other-db", "project_id": project["project_id"],
+        "status": "running",
+    })
+    assert sync_workflows_projection(store=default_store)
+    default_projection = Path(os.environ["WORKFLOWS_FILE"])
+    original_projection = default_projection.read_bytes()
+    task = inbox.create_task(
+        title="Explicit database", instruction="Run scoped workflow",
+        project_id=project["project_id"], workspace_id=project["workspace_id"],
+        auto_confirm=True,
+    )
+    claim = InboxDispatcher(store=inbox, db_path=explicit_db).claim_next_task(project["workspace_id"])
+    assert claim["id"] == task["id"]
+
+    monkeypatch.setattr(factory, "resolve_project_for_template", lambda *a, **k: project)
+    monkeypatch.setattr(factory, "ensure_pool_for_project", lambda _pid: {})
+    monkeypatch.setattr("herdr.workspace_trust.ensure_controller_env_trust", lambda _root: None)
+
+    def preflight_transport(cmd, *, check, timeout):
+        assert Path(cmd[0]).name == "herdr-deep-preflight"
+        # Exercise child-process inheritance without running external Agent probes.
+        child = subprocess.run(
+            [sys.executable, "-c", "import os; print(os.environ['HERDR_STATE_DB'])"],
+            check=True, capture_output=True, text=True,
+        )
+        assert Path(child.stdout.strip()) == explicit_db.resolve()
+        payload = {"agents": [{"agent": "codex", "final_status": "READY"}]} if preflight_ok else {"agents": []}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(factory, "run", preflight_transport)
+    workflow_id = "wf-explicit-db"
+    monkeypatch.setattr(sys, "argv", [
+        "herdr-factory", "run", "--project", project["project_root"],
+        "--workflow-id", workflow_id, "--db-path", str(explicit_db),
+        "--inbox-task-id", task["id"], "--fencing-token", claim["worker_id"],
+        "--launch-attempt-id", str(claim["attempt_count"]), "Scoped requirement",
+    ])
+    with pytest.raises(SystemExit) as result:
+        factory.main()
+
+    assert result.value.code == (0 if preflight_ok else 2)
+    output = capsys.readouterr()
+    explicit_store = get_state_store(explicit_db)
+    assert explicit_store.get_workflow("wf-other-db") is None
+    assert default_store.get_workflow(workflow_id) is None
+    assert default_store.get_workflow("wf-other-db")["status"] == "running"
+    assert default_projection.read_bytes() == original_projection
+    assert inbox.get_task(task["id"])["workflow_id"] == workflow_id
+    record = explicit_store.get_workflow(workflow_id)
+    assert record["startup_ready"] is preflight_ok
+    assert len(explicit_store.list_events(workflow_id=workflow_id, event_type="workflow_created")) == 1
+    assert default_store.list_events(workflow_id=workflow_id) == []
+    assert explicit_store.get_workflow(workflow_id)["config"]["nodes"][0]["id"] == "requirements"
+    if preflight_ok:
+        assert "WORKFLOW_ID=wf-explicit-db" in output.out
+        assert record["healthy_agents"] == ["codex"]
+    else:
+        assert record["outcome"] == "startup_failed"
+        assert record["failed_stage"] == "preflight"
+    projected, = (
+        path for path in tmp_path.glob("*.json")
+        if path != default_projection
+        and workflow_id in json.loads(path.read_text()).get("workflows", {})
+    )
+    assert json.loads(projected.read_text())["workflows"][workflow_id]["status"] == record["status"]
+
+
+def test_factory_cli_does_not_bootstrap_explicit_db_from_inherited_state(
+        factory, tmp_path, monkeypatch):
+    import sys
+
+    from herdr.state_store import get_state_store, sync_workflows_projection
+
+    project = _project(tmp_path)
+    default_store = _store()
+    default_store.save_workflow({
+        "workflow_id": "wf-other-db", "project_id": project["project_id"],
+        "status": "running",
+    })
+    assert sync_workflows_projection(store=default_store)
+    checkpoints = tmp_path / "legacy-checkpoints"
+    checkpoints.mkdir()
+    (checkpoints / "cp_foreign.json").write_text(json.dumps({
+        "checkpoint_id": "cp_foreign", "workflow_id": "wf-foreign-checkpoint",
+    }))
+    monkeypatch.setenv("CHECKPOINTS_DIR", str(checkpoints))
+    _patch_startup_seams(monkeypatch, factory, project, lambda *a, **k: (["codex"], {}))
+
+    explicit_db = tmp_path / "fresh.db"
+    monkeypatch.setattr(sys, "argv", [
+        "herdr-factory", "run", "--project", project["project_root"],
+        "--workflow-id", "wf-fresh", "--db-path", str(explicit_db), "Scoped requirement",
+    ])
+    with pytest.raises(SystemExit) as result:
+        factory.main()
+
+    assert result.value.code == 0
+    explicit_store = get_state_store(explicit_db)
+    assert [wf["workflow_id"] for wf in explicit_store.list_workflows()] == ["wf-fresh"]
+    assert default_store.get_workflow("wf-fresh") is None

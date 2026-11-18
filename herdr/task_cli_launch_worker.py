@@ -65,10 +65,19 @@ def run_launch_worker(args, node_id, run_id, store, launch_intent, planned_clone
     else:
         worker_cmd += ["--parent-pane", parent_pane]
 
+    lock_fd = getattr(args, "_workflow_launch_lock_fd", None)
+    worker_options = {}
+    if lock_fd is not None:
+        worker_options["pass_fds"] = (lock_fd,)
+        worker_cmd += [
+            "--launch-intent-key", launch_intent["key"],
+            "--launch-state-db", str(Path(store.db_path).resolve()),
+        ]
+    worker_cmd += ["--run-id", run_id, "--launch-intent-id", launch_intent["intent_id"]]
     try:
         worker = run_worker(
-            worker_cmd + ["--run-id", run_id, "--launch-intent-id", launch_intent["intent_id"]],
-            text=True, capture_output=True, timeout=300,
+            worker_cmd,
+            text=True, capture_output=True, timeout=300, **worker_options,
         )
     except subprocess.TimeoutExpired:
         store.record_event(

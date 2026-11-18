@@ -480,6 +480,176 @@ def run_workflow_preflight(project, workflow_id, agent=None):
 
 
 
+def _verify_and_bind_inbox_task_fencing(
+    db_path,
+    inbox_task_id,
+    fencing_token=None,
+    launch_attempt_id=None,
+    workflow_id=None,
+    stage="pre_registration",
+):
+    """Enforce task-level launch idempotency and fencing at Workflow registration entrance (P1-02).
+
+    Distinguishes 4 explicit execution states:
+      1. Launch attempt registered (valid CLAIMED status, correct worker fencing token, lease not expired).
+      2. Workflow already registered (idempotent re-entry for the same task attempt and workflow).
+      3. Original launcher still holds execution authority (fencing token and lease are valid).
+      4. Original launcher lost execution authority (lease expired, task reassigned, cancelled, or attempt mismatch).
+
+    Fail-closed: If an inbox_task_id is specified, the database and user_inbox_tasks table MUST
+    exist and be queryable; otherwise a fencing error is immediately raised.
+    """
+    import sqlite3
+    import time
+    try:
+        from herdr.kernel import state_db_path
+        resolved_db = Path(db_path).resolve() if db_path else Path(state_db_path()).resolve()
+    except Exception:
+        resolved_db = Path(db_path).resolve() if db_path else None
+
+    if not resolved_db or not resolved_db.exists():
+        raise RuntimeError(
+            f"Inbox task fencing failure: database not found for task '{inbox_task_id}' (resolved_db={resolved_db})"
+        )
+
+    conn = sqlite3.connect(str(resolved_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='user_inbox_tasks'"
+        )
+        if not cur.fetchone():
+            raise RuntimeError(
+                f"Inbox task fencing failure: user_inbox_tasks table not found for task '{inbox_task_id}'"
+            )
+
+        cur = conn.execute(
+            """
+            SELECT id, status, worker_id, lease_expires_at, attempt_count, workflow_id
+              FROM user_inbox_tasks
+             WHERE id = ?
+            """,
+            (inbox_task_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise RuntimeError(f"Inbox task fencing failure: task '{inbox_task_id}' not found")
+
+        cur_status = str(row["status"] or "").upper()
+        if cur_status == "CANCELLED":
+            raise RuntimeError(f"Inbox task fencing failure: task '{inbox_task_id}' was cancelled by user")
+        if cur_status in ("COMPLETED", "FAILED"):
+            raise RuntimeError(
+                f"Inbox task fencing failure: task '{inbox_task_id}' already in terminal state '{cur_status}'"
+            )
+        if cur_status != "CLAIMED":
+            raise RuntimeError(
+                f"Inbox task fencing violation: task '{inbox_task_id}' status is '{cur_status}', expected 'CLAIMED'"
+            )
+
+        now = time.time()
+        db_worker = row["worker_id"]
+        db_lease = row["lease_expires_at"]
+        db_attempt = row["attempt_count"]
+        db_wid = row["workflow_id"]
+
+        # 1. Mandatory execution authority params check: when inbox_task_id is provided, both fencing_token and launch_attempt_id are required
+        if not fencing_token:
+            raise RuntimeError(
+                f"Inbox task fencing failure: fencing_token is required when inbox_task_id is provided (task='{inbox_task_id}')"
+            )
+        if launch_attempt_id is None:
+            raise RuntimeError(
+                f"Inbox task fencing failure: launch_attempt_id is required when inbox_task_id is provided (task='{inbox_task_id}')"
+            )
+
+        # 2. Worker identity check: does launcher still hold execution authority?
+        if db_worker != fencing_token:
+            raise RuntimeError(
+                f"Inbox task fencing violation: execution lease lost (current worker is '{db_worker}', caller is '{fencing_token}')"
+            )
+
+        # 3. Lease expiration check: has launcher's lease expired?
+        if db_lease is not None and db_lease < now:
+            raise RuntimeError(
+                f"Inbox task fencing violation: execution lease expired at {db_lease} (now={now})"
+            )
+
+        # 4. Launch attempt check: has attempt counter changed (e.g. task reassigned/recovered)?
+        raw_att = str(launch_attempt_id).strip()
+        if ":" in raw_att:
+            tok_part, att_part = raw_att.rsplit(":", 1)
+            if tok_part != db_worker or (db_attempt is not None and int(att_part) != db_attempt):
+                raise RuntimeError(
+                    f"Inbox task fencing violation: launch attempt mismatch (db={db_worker}:{db_attempt}, caller={raw_att})"
+                )
+        else:
+            try:
+                expected_cnt = int(raw_att)
+                if db_attempt is not None and db_attempt != expected_cnt:
+                    raise RuntimeError(
+                        f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={expected_cnt})"
+                    )
+            except ValueError:
+                if raw_att != str(db_attempt):
+                    raise RuntimeError(
+                        f"Inbox task fencing violation: launch attempt mismatch (db={db_attempt}, caller={raw_att})"
+                    )
+
+        # 4. Workflow ID association check
+        if db_wid and workflow_id and db_wid != workflow_id:
+            raise RuntimeError(
+                f"Inbox task fencing violation: task '{inbox_task_id}' is already registered with workflow '{db_wid}' (caller provided '{workflow_id}')"
+            )
+
+        # 5. Pre-registration: check if workflow has actually been registered in state_db workflows table
+        if stage == "pre_registration":
+            wf_exists = False
+            cur_wf_tbl = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'"
+            )
+            if cur_wf_tbl.fetchone():
+                cur_chk = conn.execute(
+                    "SELECT workflow_id, status FROM workflows WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                if cur_chk.fetchone():
+                    wf_exists = True
+
+            if wf_exists:
+                # True idempotent re-entry: Workflow was already successfully registered in a prior attempt
+                # by the current valid owner.
+                return True
+            # Workflow is not yet registered in workflows table (it was only reserved in Inbox).
+            # Caller holds valid execution authority: proceed to registration!
+            return False
+
+        # 6. Post-registration: atomically update user_inbox_tasks under valid lease
+        if stage == "post_registration" and workflow_id:
+            cur_up = conn.execute(
+                """
+                UPDATE user_inbox_tasks
+                   SET workflow_id = ?,
+                       heartbeat_at = ?,
+                       lease_expires_at = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                   AND status = 'CLAIMED'
+                   AND (worker_id = ? OR ? IS NULL)
+                   AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+                """,
+                (workflow_id, now, now + 180.0, now, inbox_task_id, fencing_token, fencing_token, now),
+            )
+            conn.commit()
+            if cur_up.rowcount == 0:
+                raise RuntimeError(
+                    f"Inbox task fencing violation: failed to bind workflow '{workflow_id}' to task '{inbox_task_id}' (ownership changed during registration)"
+                )
+            return True
+    finally:
+        conn.close()
+
+
 def _reject_if_active_workflow(project, force=False):
     """同一项目工作流共享协调者 Pane 与阶段拓扑，并行注册只会产生幽灵竞争。"""
     active = active_workflows_for_project(project["project_id"])
@@ -508,6 +678,9 @@ def start_workflow(
     force=False,
     title=None,
     context_args=None,
+    inbox_task_id=None,
+    fencing_token=None,
+    launch_attempt_id=None,
 ):
     context_bindings = parse_context_binding_args(context_args)
     mode = execution_mode(load_template(template)) if template else "git"
@@ -539,6 +712,17 @@ def start_workflow(
         # 检查与注册必须持同一把进程锁，否则两个并发创建都能通过活跃检查。
         # 收敛在锁退出之后调用，且不在注册事务内跑预检或投影。
         with workflow_creation_lock(project["project_id"]):
+            if inbox_task_id:
+                already_registered = _verify_and_bind_inbox_task_fencing(
+                    db_path=None,
+                    inbox_task_id=inbox_task_id,
+                    fencing_token=fencing_token,
+                    launch_attempt_id=launch_attempt_id,
+                    workflow_id=workflow_id,
+                    stage="pre_registration",
+                )
+                if already_registered:
+                    return workflow_id
             _reject_if_active_workflow(project, force=force or e2e)
             register_workflow(
                 workflow_id,
@@ -550,6 +734,15 @@ def start_workflow(
                 context=context_bindings if mode == "context" else None,
                 on_committed=claim.note,
             )
+            if inbox_task_id:
+                _verify_and_bind_inbox_task_fencing(
+                    db_path=None,
+                    inbox_task_id=inbox_task_id,
+                    fencing_token=fencing_token,
+                    launch_attempt_id=launch_attempt_id,
+                    workflow_id=workflow_id,
+                    stage="post_registration",
+                )
 
         try:
             from herdr.workspace_trust import ensure_controller_env_trust
@@ -1000,6 +1193,10 @@ def main():
         help="绑定 Context 契约声明的业务上下文（可重复；仅 execution.mode=context 模板可用）",
     )
     run_cmd.add_argument("--force", action="store_true")
+    run_cmd.add_argument("--inbox-task-id", default=None, help="关联的 User Inbox 任务 ID，用于注册入口执行权校验")
+    run_cmd.add_argument("--fencing-token", default=None, help="派发 Worker 的 Fencing Token")
+    run_cmd.add_argument("--launch-attempt-id", default=None, help="预期的任务启动尝试序号或组合标识 (如 1 或 worker_A:1)")
+    run_cmd.add_argument("--db-path", default=None, help="自定义数据库路径")
 
     status_cmd = sub.add_parser("status")
     status_cmd.add_argument("workflow_id")
@@ -1089,6 +1286,19 @@ def main():
 
     if args.command == "run":
         try:
+            if args.db_path is not None:
+                from herdr.kernel import state_db_path
+
+                target_db = Path(args.db_path).expanduser().resolve()
+                if target_db != state_db_path().resolve():
+                    # An override must not write projections or run definitions
+                    # belonging to the inherited database, even in the same directory.
+                    os.environ["WORKFLOWS_FILE"] = f"{target_db}.workflows.json"
+                    os.environ["TASKS_FILE"] = f"{target_db}.tasks.json"
+                    os.environ["HERDR_WORKFLOW_DOCS_DIR"] = f"{target_db}.workflows"
+                    os.environ["HERDR_SKIP_LEGACY_BOOTSTRAP_DB"] = str(target_db)
+                # Store helpers and deep-preflight inherit the same CLI context.
+                os.environ["HERDR_STATE_DB"] = str(target_db)
             workflow_id = start_workflow(
                 " ".join(args.requirement),
                 args.workflow_id,
@@ -1099,6 +1309,9 @@ def main():
                 force=args.force,
                 title=args.title,
                 context_args=args.context,
+                inbox_task_id=getattr(args, "inbox_task_id", None),
+                fencing_token=getattr(args, "fencing_token", None),
+                launch_attempt_id=getattr(args, "launch_attempt_id", None),
             )
         except (ValueError, RuntimeError) as e:
             print(str(e), file=sys.stderr)
@@ -1156,7 +1369,6 @@ def main():
             fp = hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16]
             out = getattr(args, "out", None)
             if out:
-                from pathlib import Path
                 p = Path(out).expanduser().resolve()
                 p.parent.mkdir(parents=True, exist_ok=True)
                 temp_out = p.parent / f".tmp_{p.name}_{os.getpid()}"
@@ -1171,7 +1383,6 @@ def main():
 
             if getattr(args, "register_db", False):
                 from herdr import state_db
-                from pathlib import Path
                 db_p = Path(args.db_path).resolve() if getattr(args, "db_path", None) else None
                 state_db.save_user_token(args.operator, "operator", tok, db_path=db_p)
 

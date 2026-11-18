@@ -23,7 +23,7 @@ function closeSpaceMenu(){const m=document.getElementById('spaceMenu');if(m)m.hi
 function paintCrumb(){
   const sec=document.getElementById('crumbSection');
   const view=state.opsMode?'ops':state.dashMode?'dashboard':(state.shellView||'workbench');
-  const map={workbench:'工作台',dashboard:'仪表板',ops:'运维',alerts:'告警',agents:'执行者',slots:'工位',workflows:'工作流',experience:'企业经验',templates:'模板规范'};
+  const map={workbench:'工作台',dashboard:'仪表板',ops:'运维',alerts:'告警',agents:'执行者',slots:'工位',workflows:'工作流',experience:'企业经验',templates:'模板规范',inbox:'任务收件箱'};
   if(sec)sec.textContent=map[view]||'工作台';
   const tabsBar=document.getElementById('workflowTabsBar');
   const crumbEl=document.querySelector('.top .crumb');
@@ -38,7 +38,7 @@ function paintCrumb(){
   if(tplBtn&&tplBtn.classList)tplBtn.classList.toggle('on',state.workflowId==='__templates__');
   if(arcBtn&&arcBtn.classList)arcBtn.classList.toggle('on',state.workflowId==='__archive__');
   if(logBtn&&logBtn.classList)logBtn.classList.toggle('on',state.workflowId==='__logs__');
-  const railActiveId = (view === 'templates' || (view === 'workbench' && state.workflowId === '__templates__')) ? 'templates' : view;
+  const railActiveId = (view === 'templates' || (view === 'workbench' && state.workflowId === '__templates__')) ? 'templates' : (view === 'inbox' || (view === 'workbench' && state.workflowId === '__inbox__')) ? 'inbox' : view;
   document.querySelectorAll('.rail-item[data-rail-nav]').forEach(el=>el.classList&&el.classList.toggle('active', el.getAttribute('data-rail-nav')===railActiveId));
   const shell=document.querySelector('.shell');
   if(shell&&shell.dataset)shell.dataset.view=view;
@@ -91,6 +91,8 @@ async function showShellView(view){
   if(view==='dashboard'){state.shellView='dashboard';return showDashboard();}
   if(view==='ops'){state.shellView='ops';return showOpsCenter();}
   if(view==='templates'){return showTemplateLibrary();}
+  if(view==='inbox'){return showInbox();}
+  if(state.shellView==='inbox'&&view!=='inbox'&&typeof stopInboxTimer==='function')stopInboxTimer();
   const leaving=!!(state.opsMode||state.dashMode);
   state.opsMode=false;state.dashMode=false;stopDashTimer();
   state.shellView=view||'workbench';
@@ -124,6 +126,7 @@ async function showShellView(view){
 }
 function paintShellPage(view){
   if(view==='templates'){showTemplateLibrary();return;}
+  if(view==='inbox'){if(typeof showInbox==='function')showInbox();return;}
   setWorkspaceMode('aux');
   paintCrumb();
   if(['alerts','agents','slots','workflows'].includes(view)&&!state.overview){

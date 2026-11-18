@@ -27,7 +27,7 @@
     "herdr/state/schema.py": "58c2343b91a137253d80fe21216f5ac4fc3180aebe03a52dee20323a3f471032",
     "herdr/state/schema_ddl_helpers.py": "96eb80c2a159db280cac02cb86f7704cedb0ad59681d36629ee5f3a23bf51d69",
     "herdr/state/schema_ddl_txn.py": "fd9d1855a181ad3f4bf53a4039859d8a5535116f80c8cf9c9f6e37b190f2f763",
-    "herdr/state/schema_v1.py": "02241f2399191c17e6b3b28396b07773b098d7a92e73a367fac18c4bcd1ffa03",
+    "herdr/state/schema_v1.py": "25ae36d15da08f3b23270c32ebbfd8cbab30716bf61ba935f374391f59412435",
     "herdr/state/steering.py": "f79292d5fa3ec06d4dbfbbd1721b9ef2778ce3bd2f2e91eda1f716d8cb9de10a",
     "herdr/state/trajectory.py": "e5695a6d89deeb7cf74289e48c22c2818e77c03ac271128795a33a6c8d4ba958",
     "herdr/state/transition_gate.py": "901420939379752d11574d8491bacdeac355c013ce7b37d55a19059ae8a97644",
@@ -7875,7 +7875,7 @@
     "tests/test_trajectory_observer.py"
   ],
   "revalidation": {
-    "reason": "ego-browser V1 freezes execution declarations in workflow/task persistence",
+    "reason": "Factory explicit database bypasses inherited legacy bootstrap",
     "test_nodes": [
       "tests/test_blocker_resample_discipline.py::SentinelMainLoopResiduePatrolTest::test_residue_does_not_block_steering_delivery_or_reblock",
       "tests/test_state_db_real_patch_paths.py::test_default_paths_tokens_and_default_migration",
@@ -7934,7 +7934,7 @@
       "tests/test_context_compiler.py::test_dispatch_rejects_deleted_target_task": [3, 6, 10, 11, 21, 35, 36, 39, 76, 77, 78, 79],
       "tests/test_context_compiler.py::test_legacy_run_metrics_do_not_aggregate_other_per_task_runs": [3, 6, 10, 11, 12, 47, 76, 77, 78, 79],
       "tests/test_d1_privileged_transitions.py::TestD1StateDBPrivilegedTransitions::test_cas_mismatch_fails_closed": [3, 10, 11, 12, 83, 84],
-      "tests/test_impl_fix1_regression.py::test_router_failure_does_not_acquire_a_pane": [3, 6, 10, 11, 12, 13, 40, 43, 49, 95],
+      "tests/test_impl_fix1_regression.py::test_router_failure_does_not_acquire_a_pane": [3, 6, 7, 10, 11, 12, 13, 40, 43, 49, 95],
       "tests/test_impl_fix4_blocker_regression.py::test_fr1_conditional_clear_cannot_delete_a_new_epoch_observation": [3, 6, 10, 11, 12, 14, 15, 18, 19, 94],
       "tests/test_intervention_store.py::test_concurrent_creation_has_one_canonical_row": [3, 29, 30, 32],
       "tests/test_observation.py::test_changed_content_creates_new_observation": [3, 68, 69],
@@ -7946,7 +7946,7 @@
       "tests/test_collaboration_store.py::test_create_get_list_roundtrip": [35, 36, 38],
       "tests/test_state_transition_gateway.py::TestStateTransitionGateway::test_transition_workflow_success_and_event_recorded": [3, 6, 7, 8, 43, 90, 91]
     },
-    "raw_hits_sha256": "cd2b186d624b56a370603dcad210b1f5a895fe18bab2a59304d0a20f428436e8",
-    "pytest_log_sha256": "b162085b87b9df8348bc51f59f06b809fdaee595be8b8aeb8ec7f837c187bada"
+    "raw_hits_sha256": "6fa98d4ae25ce86017da395b147e7e0cffdaac9e15eac7e9da7e902b04a7f743",
+    "pytest_log_sha256": "cf3ae43f99694f6fabd4e4c5beab67d21377b431b453e8b49c84ae6245c70720"
   }
 }

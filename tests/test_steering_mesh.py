@@ -111,7 +111,7 @@ def test_urgent_steer_immediate_dispatch(steering_env):
 
     # Check first call sends ctrl-c
     first_cmd = calls[0][0][0]
-    assert "herdr" in first_cmd and "send-keys" in first_cmd and "ctrl-c" in first_cmd
+    assert "herdr" in first_cmd and "send-keys" in first_cmd and "ctrl+c" in first_cmd
 
     # Check subsequent call sends text
     text_calls = [c for c in calls if "send-text" in c[0][0]]
@@ -197,14 +197,15 @@ def test_halt_task_lifecycle(steering_env):
     mock_run = MagicMock()
     mock_run.return_value.returncode = 0
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), \
+         patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
         res = steering.halt_task(task_id, reason="Severe logic flaw detected", operator="lead")
 
     assert res["ok"] is True
     assert res["status"] == "interrupted"
 
     # Verify ctrl-c sent
-    assert any("ctrl-c" in c[0][0] for c in mock_run.call_args_list)
+    assert any("ctrl+c" in c[0][0] for c in mock_run.call_args_list)
 
     # Verify task status in tasks.json
     t_data = json.loads(steering_env["tasks_file"].read_text(encoding="utf-8"))
@@ -379,7 +380,8 @@ def test_halt_task_interrupt_failure_preserves_task_status(steering_env):
     mock_run = MagicMock()
     mock_run.return_value.returncode = 1  # ctrl-c failed
 
-    with patch("subprocess.run", mock_run):
+    with patch("subprocess.run", mock_run), \
+         patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
         res = steering.halt_task(task_id, reason="Emergency audit")
 
     assert res["ok"] is False
@@ -391,6 +393,29 @@ def test_halt_task_interrupt_failure_preserves_task_status(steering_env):
     t = next(x for x in t_data["tasks"] if x["task_id"] == task_id)
     assert t["status"] == "working"
     assert t["status"] != "interrupted"
+
+
+def test_halt_task_refuses_interrupt_when_runtime_identity_not_proven(steering_env):
+    """P1-01: When runtime identity is not proven (e.g. reused pane), halt_task refuses to send interrupt signal."""
+    task_id = "task-reused-pane-01"
+    _seed_task(steering_env, task_id, status="working", pane_id="pane-reused-888")
+
+    mock_run = MagicMock()
+    with patch("subprocess.run", mock_run), \
+         patch("herdr.task_resources.owned_live_pane", return_value=(False, "session_mismatch")):
+        res = steering.halt_task(task_id, reason="Old task halt attempt")
+
+    assert res["ok"] is False
+    assert "identity_verification_failed" in res["error"]
+    assert res["status"] == "working"
+
+    # Invariant: NO ctrl-c / interrupt signal sent to reused pane!
+    assert not any("ctrl+c" in str(c) for c in mock_run.call_args_list)
+
+    # Invariant: Task remains working, not corrupted
+    t_data = json.loads(steering_env["tasks_file"].read_text(encoding="utf-8"))
+    t = next(x for x in t_data["tasks"] if x["task_id"] == task_id)
+    assert t["status"] == "working"
 
 
 def test_dispatch_pending_steer_opencode_soft_steer_refused(steering_env):
@@ -445,11 +470,11 @@ def test_steer_urgent_interrupt_success_inject_failure_sets_task_interrupted(ste
     _seed_task(steering_env, task_id, status="working", pane_id="pane-partial-01", workflow_id="wf-test")
 
     # Mock subprocess.run:
-    # 1st call (send-keys ctrl-c): returncode = 0 (success)
+    # 1st call (send-keys ctrl+c): returncode = 0 (success)
     # 2nd call (send-text prompt): returncode = 1 (failure)
     def side_effect(cmd, *args, **kwargs):
         mock_res = MagicMock()
-        if "send-keys" in cmd and "ctrl-c" in cmd:
+        if "send-keys" in cmd and "ctrl+c" in cmd:
             mock_res.returncode = 0
         else:
             mock_res.returncode = 1
