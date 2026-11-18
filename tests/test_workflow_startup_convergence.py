@@ -647,3 +647,38 @@ def test_factory_cli_keeps_startup_in_explicit_database(
         and workflow_id in json.loads(path.read_text()).get("workflows", {})
     )
     assert json.loads(projected.read_text())["workflows"][workflow_id]["status"] == record["status"]
+
+
+def test_factory_cli_does_not_bootstrap_explicit_db_from_inherited_state(
+        factory, tmp_path, monkeypatch):
+    import sys
+
+    from herdr.state_store import get_state_store, sync_workflows_projection
+
+    project = _project(tmp_path)
+    default_store = _store()
+    default_store.save_workflow({
+        "workflow_id": "wf-other-db", "project_id": project["project_id"],
+        "status": "running",
+    })
+    assert sync_workflows_projection(store=default_store)
+    checkpoints = tmp_path / "legacy-checkpoints"
+    checkpoints.mkdir()
+    (checkpoints / "cp_foreign.json").write_text(json.dumps({
+        "checkpoint_id": "cp_foreign", "workflow_id": "wf-foreign-checkpoint",
+    }))
+    monkeypatch.setenv("CHECKPOINTS_DIR", str(checkpoints))
+    _patch_startup_seams(monkeypatch, factory, project, lambda *a, **k: (["codex"], {}))
+
+    explicit_db = tmp_path / "fresh.db"
+    monkeypatch.setattr(sys, "argv", [
+        "herdr-factory", "run", "--project", project["project_root"],
+        "--workflow-id", "wf-fresh", "--db-path", str(explicit_db), "Scoped requirement",
+    ])
+    with pytest.raises(SystemExit) as result:
+        factory.main()
+
+    assert result.value.code == 0
+    explicit_store = get_state_store(explicit_db)
+    assert [wf["workflow_id"] for wf in explicit_store.list_workflows()] == ["wf-fresh"]
+    assert default_store.get_workflow("wf-fresh") is None

@@ -677,7 +677,8 @@ def test_inbox_submission_blocks_duplicates_and_reuses_key_after_lost_response()
     const fields = {
       inboxTitle: {value: 'Task'},
       inboxInstruction: {value: 'Test the queue'},
-      inboxProject: {value: 'project', focus() {}},
+      inboxProject: {value: '', focus() {}, selectedOptions: [{dataset: {ws: 'workspace'}}]},
+      inboxDetectBanner: {style: {}},
       inboxWorkspace: {value: ''},
       inboxSubmit: {disabled: false},
       inboxAutoConfirm: {checked: false},
@@ -687,16 +688,21 @@ def test_inbox_submission_blocks_duplicates_and_reuses_key_after_lost_response()
     const esc = String;
     const noop = () => {};
     const badge = noop, formatElapsed = noop, paintCrumb = noop, setWorkspaceMode = noop;
-    const openModal = noop, toast = noop, showConfirmModal = noop;
+    const toast = noop, showConfirmModal = noop;
+    function openModal() { fields.inboxSubmit = {disabled: false}; }
     let closes = 0;
     function closeModal() { closes++; }
     let requests = [];
     let failResponse;
+    let holdFirstResponse = false;
     async function api(url, options) {
       if (options?.method !== 'POST') return {tasks: []};
+      if (url === '/api/inbox/detect') return {
+        is_confident: true, recommended_project_id: 'project', recommended_workspace_id: 'workspace', confidence: 1,
+      };
       assert.equal(url, '/api/inbox/tasks');
       requests.push(JSON.parse(options.body));
-      if (requests.length === 1) {
+      if (holdFirstResponse && requests.length === 1) {
         await new Promise((_, reject) => { failResponse = reject; });
       }
       return {ok: true};
@@ -708,24 +714,36 @@ def test_inbox_submission_blocks_duplicates_and_reuses_key_after_lost_response()
       await submitNewInboxTask();
       assert.equal(requests.length, 0, 'draft with no workspace cannot be submitted');
 
-      fields.inboxWorkspace.value = 'workspace';
+      await onInboxInstructionBlur();
+      assert.equal(fields.inboxProject.value, 'project');
+      fields.inboxInstruction.value = 'Changed instructions after project detection';
+      await submitNewInboxTask();
+      assert.equal(requests.length, 0, 'stale recommendation cannot choose the task scope');
+      onInboxProjectSelectChange(true);
+      holdFirstResponse = true;
       const first = submitNewInboxTask();
       assert.equal(fields.inboxSubmit.disabled, true);
       await submitNewInboxTask();
       assert.equal(requests.length, 1, 'second click must not send a POST');
+      closeModal();
+      await showNewInboxTaskModal();
+      assert.equal(fields.inboxSubmit.disabled, true, 'reopened form must wait for in-flight submission');
+      await submitNewInboxTask();
+      assert.equal(requests.length, 1, 'reopening must not start a second concurrent POST');
       failResponse(new Error('response lost after commit'));
       await first;
       assert.equal(fields.inboxSubmit.disabled, false);
-      assert.equal(closes, 0);
+      assert.equal(closes, 1);
       assert.ok(requests[0].idempotency_key);
 
+      closeModal();
+      await showNewInboxTaskModal();
       await submitNewInboxTask();
       assert.deepEqual(requests[1], requests[0], 'retry must use the same key and payload');
-      assert.equal(closes, 1);
+      assert.equal(closes, 3);
       await submitNewInboxTask();
       assert.equal(requests.length, 2, 'late click on the completed form cannot create a new task');
 
-      fields.inboxSubmit = {disabled: false};
       await showNewInboxTaskModal();
       await submitNewInboxTask();
       assert.notEqual(requests[2].idempotency_key, requests[0].idempotency_key);

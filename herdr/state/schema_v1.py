@@ -130,7 +130,9 @@ def _bootstrap_v1(conn, path_key):
             );
         """).fetchone()[0])
 
-        if has_existing_state:
+        # A Factory database override cannot inherit another store's legacy files.
+        # Match the exact database so nested callers still bootstrap other paths normally.
+        if has_existing_state or os.environ.get("HERDR_SKIP_LEGACY_BOOTSTRAP_DB") == path_key:
             conn.execute("""
                 INSERT INTO schema_meta (key, value) VALUES ('v1_migration_done', '1')
                 ON CONFLICT(key) DO UPDATE SET value = '1';

@@ -1296,6 +1296,7 @@ def main():
                     os.environ["WORKFLOWS_FILE"] = f"{target_db}.workflows.json"
                     os.environ["TASKS_FILE"] = f"{target_db}.tasks.json"
                     os.environ["HERDR_WORKFLOW_DOCS_DIR"] = f"{target_db}.workflows"
+                    os.environ["HERDR_SKIP_LEGACY_BOOTSTRAP_DB"] = str(target_db)
                 # Store helpers and deep-preflight inherit the same CLI context.
                 os.environ["HERDR_STATE_DB"] = str(target_db)
             workflow_id = start_workflow(

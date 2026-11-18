@@ -16,7 +16,9 @@ let inboxState = {
   filterStatus: 'ALL', filterProject: 'ALL', filterPriority: 'ALL',
   autoRefreshTimer: null, activeTaskId: null, pageSize: 50,
 };
-let newInboxTask = null;
+let inboxSubmitting = false;
+const pendingInboxSubmissions = new Map();
+let recommendedInstruction = null;
 
 function formatTime(ts){
   if(!ts) return '—';
@@ -194,7 +196,9 @@ async function showNewInboxTaskModal(){
   `);
 
   inboxState.userSelectedProject = false;
-  newInboxTask = {submitting: false, completed: false, keys: new Map()};
+  recommendedInstruction = null;
+  const button = document.getElementById('inboxSubmit');
+  if(button) button.disabled = inboxSubmitting;
 }
 
 function onInboxProjectSelectChange(isManual = false){
@@ -209,7 +213,6 @@ function onInboxProjectSelectChange(isManual = false){
 }
 
 async function onInboxInstructionBlur(){
-  const form = newInboxTask;
   const instruction = document.getElementById('inboxInstruction');
   const ins = (instruction?.value || '').trim();
   const ti = document.getElementById('inboxTitle');
@@ -222,7 +225,7 @@ async function onInboxInstructionBlur(){
   }
   try{
     const res = await api('/api/inbox/detect', {method:'POST', body:JSON.stringify({instruction:ins, title:ti?.value||''})});
-    if(form !== newInboxTask || form?.submitting || form?.completed
+    if(inboxSubmitting || document.getElementById('inboxSubmit')?.disabled
       || instruction !== document.getElementById('inboxInstruction') || instruction.value.trim() !== ins) return;
     const banner = document.getElementById('inboxDetectBanner');
     if(res && banner){
@@ -234,6 +237,7 @@ async function onInboxInstructionBlur(){
         const sel = document.getElementById('inboxProject');
         if(sel && !inboxState.userSelectedProject){
           sel.value = res.recommended_project_id;
+          recommendedInstruction = ins;
           onInboxProjectSelectChange(false);
         }
       } else {
@@ -243,6 +247,7 @@ async function onInboxInstructionBlur(){
         if(!inboxState.userSelectedProject){
           if(sel) sel.value = '';
           if(wsInput) wsInput.value = '';
+          recommendedInstruction = null;
         }
       }
     }
@@ -252,8 +257,8 @@ async function onInboxInstructionBlur(){
 }
 
 async function submitNewInboxTask(){
-  const form = newInboxTask;
-  if(!form || form.submitting || form.completed) return;
+  const button = document.getElementById('inboxSubmit');
+  if(!button || button.disabled || inboxSubmitting) return;
   const title = (document.getElementById('inboxTitle')?.value || '').trim();
   const ins = (document.getElementById('inboxInstruction')?.value || '').trim();
   const project = document.getElementById('inboxProject');
@@ -261,7 +266,6 @@ async function submitNewInboxTask(){
   const wid = (document.getElementById('inboxWorkspace')?.value || '').trim();
   const prio = (document.getElementById('inboxPriority')?.value || 'NORMAL').trim();
   const shouldConfirm = Boolean(document.getElementById('inboxAutoConfirm')?.checked);
-  const button = document.getElementById('inboxSubmit');
 
   if(!title) return toast('请输入任务标题', true);
   if(!ins) return toast('请输入任务指令/需求', true);
@@ -270,33 +274,40 @@ async function submitNewInboxTask(){
     return toast('请选择有归属工作区的项目', true);
   }
 
+  if(!inboxState.userSelectedProject && recommendedInstruction !== null && recommendedInstruction !== ins){
+    project.focus();
+    return toast('任务指令已修改，请重新确认推荐项目或手动选择项目', true);
+  }
+
   const payload = {
     title, instruction:ins, project_id:pid, workspace_id:wid,
     priority:prio, auto_confirm:shouldConfirm,
     confirmed_by:shouldConfirm ? 'user' : null
   };
   const submission = JSON.stringify(payload);
-  form.submitting = true;
+  inboxSubmitting = true;
   button.disabled = true;
+  let completed = false;
   try{
-    if(!form.keys.has(submission)){
+    if(!pendingInboxSubmissions.has(submission)){
       const bytes = crypto.getRandomValues(new Uint8Array(16));
-      form.keys.set(submission, Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''));
+      pendingInboxSubmissions.set(submission, Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''));
     }
     await api('/api/inbox/tasks', {
       method: 'POST',
-      body: JSON.stringify({...payload, idempotency_key:form.keys.get(submission)})
+      body: JSON.stringify({...payload, idempotency_key:pendingInboxSubmissions.get(submission)})
     });
-    form.completed = true;
-    form.keys.clear();
-    if(form === newInboxTask && button === document.getElementById('inboxSubmit')) closeModal();
+    completed = true;
+    pendingInboxSubmissions.delete(submission);
+    if(button === document.getElementById('inboxSubmit')) closeModal();
     toast(shouldConfirm ? '任务已提交并进入执行队列！' : '任务已保存为草稿');
     await loadInboxData(false, true);
   }catch(e){
     toast('提交失败: ' + e.message, true);
   }finally{
-    form.submitting = false;
-    button.disabled = form.completed;
+    inboxSubmitting = false;
+    const activeButton = document.getElementById('inboxSubmit');
+    if(activeButton && (!completed || activeButton !== button)) activeButton.disabled = false;
   }
 }
 
