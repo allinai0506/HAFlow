@@ -4477,3 +4477,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `herdr/kernel.py#_set_workflow_pause`
   - `herdr/workflow_shutdown.py#_reboot_stop_evidence`
   - `tests/test_workflow_shutdown.py#test_missing_pane_recovers_after_verified_local_reboot`
+
+## [2026-11-18] Feature | Active Intake Core V1
+- 同一个 State DB 保存事件正本、逐次回执、消费尝试和轮询进度。投递提交和轮询页提交使用专用 FULL 连接。独立 worker 按租约、代数和随机所有权凭证提交账本结果。
+- Evidence
+  - `herdr/intake/schema.py#initialize`
+  - `herdr/intake/store.py#EventStore`
+  - `herdr/intake/cursor.py#CursorStore`
+  - `tests/test_intake_faults.py#test_thousand_events_with_retries_duplicates_and_restarts`

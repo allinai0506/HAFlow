@@ -51,6 +51,7 @@
 | **排查 Tab/Pane 窗格误关、丢失或重建失败** | [[tab-node-model]] | `herdr/projects.py:ensure_node_runtime` |
 | **新增支持的 AI Agent CLI** | [[common-change-paths]] | `herdr/agent_binary.py`, `herdr/preflight.py`, `herdr/deep_preflight.py` |
 | **排查后台服务不推进、状态不同步** | [[architecture]] | `services/herdr-controller.py` |
+| **接收外部事实、恢复事件或轮询游标** | [Active Intake Core V1](../docs/walkthroughs/active-intake-core-v1.md) | `herdr/intake/`, `services/herdr-intake.py` |
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
 | **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |
 | **使用或修改极简项目/需求/成果工作台** | [[simple-workbench]] | `console/static/simple.js`, `console/read_api.py`, `console/http_server.py`, `console/static/console.html` |

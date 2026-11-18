@@ -40,7 +40,7 @@ def test_moved_function_bodies_preserve_authorized_ast():
     for original in BASELINE.body:
         if not isinstance(original, (ast.FunctionDef, ast.ClassDef)):
             continue
-        if original.name in {'_ensure_schema', 'save_workflow', 'save_task', 'create_checkpoint', 'restore_checkpoint', 'force_pass_gate', 'update_workflow_metadata', 'transition_task'}:
+        if original.name in {'_ensure_schema', 'save_workflow', 'save_task', 'create_checkpoint', 'restore_checkpoint', 'force_pass_gate', 'update_workflow_metadata', 'transition_task', 'list_events', 'record_event_if_absent'}:
             # _ensure_schema has the runtime DDL contract. save_task, create_checkpoint,
             # restore_checkpoint are changed by Controller Cockpit fencing.
             # save_workflow now atomically freezes V1 execution declarations;
@@ -54,6 +54,8 @@ def test_moved_function_bodies_preserve_authorized_ast():
             # transition_task records blocked_status_timestamp and status_updated_at
             # on entering blocked state to prevent SLA episode resets (Issue #8);
             # behavior is covered by tests/test_impl_fix4_blocker_regression.py.
+            # Generic event reads and idempotent writes exclude Intake audit rows, verified by
+            # tests/test_intake_store.py::test_admin_audit_is_scoped_and_private.
             continue
         function = getattr(state_db, original.name)
         actual = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
@@ -68,7 +70,7 @@ def test_moved_function_bodies_preserve_authorized_ast():
             expected = RemoveInlineTransitionImport().visit(expected)
         assert ast.dump(actual) == ast.dump(expected), original.name
         compared.append(original.name)
-    assert len(compared) == 146
+    assert len(compared) == 144
 
 
 def test_time_calls_remain_35_unchanged_expressions():
