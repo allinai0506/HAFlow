@@ -755,3 +755,97 @@ def test_inbox_submission_blocks_duplicates_and_reuses_key_after_lost_response()
     '''
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
+
+
+def test_inbox_and_intake_js_composition():
+    """Verify that intake.js and inbox.js compose cleanly in browser scope."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js not available")
+
+    root = Path(__file__).resolve().parents[1]
+    intake_code = (root / "console/static/console/scripts/intake.js").read_text()
+    inbox_code = (root / "console/static/console/scripts/inbox.js").read_text()
+
+    script = f"""
+    const assert = require('node:assert/strict');
+    const mockElements = {{
+      inboxTabView: {{
+        innerHTML: '',
+        querySelector: () => null,
+        querySelectorAll: () => []
+      }},
+      railInboxDot: {{ style: {{ display: 'none' }}, textContent: '' }}
+    }};
+    const listeners = [];
+    const document = {{
+      getElementById: id => mockElements[id] || {{
+        id, value: '', style: {{}}, classList: {{ add(){{}}, remove(){{}} }},
+        addEventListener(event, fn) {{ listeners.push({{ id, event, fn }}); }},
+        querySelector() {{ return null; }}, querySelectorAll() {{ return []; }}
+      }},
+      hidden: false
+    }};
+    const state = {{ shellView: 'inbox', overview: {{ projects: [] }} }};
+    const esc = s => s || '';
+    const badge = () => '';
+    const formatElapsed = () => '';
+    const toast = () => {{}};
+    let modalTitle = '', modalContent = '';
+    const openModal = (title, content) => {{ modalTitle = title; modalContent = content; }};
+    const closeModal = () => {{ modalTitle = ''; modalContent = ''; }};
+    const showConfirmModal = () => {{}};
+    const setWorkspaceMode = () => {{}};
+    const paintCrumb = () => {{}};
+    const saveViewState = () => {{}};
+    const syncOpsUi = () => {{}};
+
+    let intakeApiCalled = false;
+    async function api(url, options) {{
+      if (url.startsWith('/api/inbox/tasks')) return {{ ok: true, tasks: [], total: 0 }};
+      if (url.startsWith('/api/inbox/stats')) return {{ ok: true, total: 0, counts: {{}} }};
+      if (url.startsWith('/api/inbox/intake')) {{
+        intakeApiCalled = true;
+        return {{ ok: true, items: [
+          {{ link_id: 'link-1', status: 'DRAFT', title: 'Ext Task 1', description: 'desc', priority: 'NORMAL',
+             provider: 'linear', object_type: 'issue', external_id: 'LIN-1', assignment_source: 'MANUAL',
+             created_at: 1700000000000, updated_at: 1700000000000, display_name: 'Linear' }}
+        ] }};
+      }}
+      return {{ ok: true }};
+    }}
+
+    {intake_code}
+    {inbox_code}
+
+    (async () => {{
+      // 1. Initial load before intake token is set: no intake items requested
+      await loadInboxData(false, true);
+      assert.equal(intakeApiCalled, false);
+
+      // 2. Unlock intake via toggleIntakeAuth
+      toggleIntakeAuth();
+      assert.ok(modalTitle.includes('解锁外部任务'));
+
+      // 3. Simulate successful unlock with token
+      const formEl = {{
+        querySelector: () => ({{ disabled: false }}),
+        addEventListener: () => {{}}
+      }};
+      // Provide token directly to fetch
+      await fetchIntakeActiveItems(['limit=50', 'offset=0'], 'ALL', false);
+      // Now toggle auth with credential
+      const unlockForm = {{
+        querySelector: () => ({{ disabled: false }})
+      }};
+      assert.equal(typeof renderIntakeCards, 'function');
+      assert.equal(typeof fetchIntakeActiveItems, 'function');
+      assert.equal(typeof bindIntakeEvents, 'function');
+    }})().catch(err => {{ console.error(err); process.exitCode = 1; }});
+    """
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr

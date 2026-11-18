@@ -134,7 +134,7 @@ Inbox 任务具备严格受控的 8 状态转换模型（`herdr/inbox/transition
 - 智能项目探测: `herdr/inbox/detector.py:detect_project_and_workspace`
 - 调度器与真实收敛: `herdr/inbox/dispatcher.py:InboxDispatcher`
 - 控制台 API 路由: `console/inbox_api.py`, `console/http_server.py`
-- 控制台前端控制器: `console/static/console/scripts/inbox.js`, `console/static/console/styles/inbox.css`
+- 控制台前端控制器: `console/static/console/scripts/inbox.js`, `console/static/console/scripts/intake.js`, `console/static/console/styles/inbox.css`
 - 10 任务自动接续端到端验证: `tests/test_inbox_e2e_pipeline.py:test_ten_tasks_continuous_auto_dispatch`
 
 ## Active Intake 草稿
