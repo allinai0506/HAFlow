@@ -18,7 +18,7 @@ let inboxState = {
 };
 let inboxSubmitting = false;
 const pendingInboxSubmissions = new Map();
-let recommendedInstruction = null;
+let recommendedScope = null;
 
 function formatTime(ts){
   if(!ts) return '—';
@@ -179,7 +179,7 @@ async function showNewInboxTaskModal(){
     <div class="form" style="line-height:1.5">
       <div id="inboxDetectBanner" class="inbox-detect-banner" style="display:none"></div>
       <label for="inboxTitle">任务标题<span class="danger-text">*</span></label>
-      <input id="inboxTitle" placeholder="例如：适配深色模式切换 / 修复结算浮点精度" style="margin-bottom:10px">
+      <input id="inboxTitle" onblur="onInboxInstructionBlur()" placeholder="例如：适配深色模式切换 / 修复结算浮点精度" style="margin-bottom:10px">
       <label for="inboxInstruction">任务需求指令<span class="danger-text">*</span></label>
       <textarea id="inboxInstruction" rows="4" placeholder="请详细描述任务需求。支持直接输入代码路径，系统将自动识别推荐所属项目…" onblur="onInboxInstructionBlur()" style="margin-bottom:10px"></textarea>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px">
@@ -196,7 +196,7 @@ async function showNewInboxTaskModal(){
   `);
 
   inboxState.userSelectedProject = false;
-  recommendedInstruction = null;
+  recommendedScope = null;
   const button = document.getElementById('inboxSubmit');
   if(button) button.disabled = inboxSubmitting;
 }
@@ -223,10 +223,12 @@ async function onInboxInstructionBlur(){
       if(clean && !clean.startsWith('## 需求') && clean !== '需求'){ ti.value = clean.slice(0, 50); break; }
     }
   }
+  const title = (ti?.value || '').trim();
   try{
-    const res = await api('/api/inbox/detect', {method:'POST', body:JSON.stringify({instruction:ins, title:ti?.value||''})});
+    const res = await api('/api/inbox/detect', {method:'POST', body:JSON.stringify({instruction:ins, title})});
     if(inboxSubmitting || document.getElementById('inboxSubmit')?.disabled
-      || instruction !== document.getElementById('inboxInstruction') || instruction.value.trim() !== ins) return;
+      || instruction !== document.getElementById('inboxInstruction')
+      || instruction.value.trim() !== ins || (ti?.value || '').trim() !== title) return;
     const banner = document.getElementById('inboxDetectBanner');
     if(res && banner){
       banner.style.display = 'flex';
@@ -237,7 +239,7 @@ async function onInboxInstructionBlur(){
         const sel = document.getElementById('inboxProject');
         if(sel && !inboxState.userSelectedProject){
           sel.value = res.recommended_project_id;
-          recommendedInstruction = ins;
+          recommendedScope = {title, instruction:ins};
           onInboxProjectSelectChange(false);
         }
       } else {
@@ -247,7 +249,7 @@ async function onInboxInstructionBlur(){
         if(!inboxState.userSelectedProject){
           if(sel) sel.value = '';
           if(wsInput) wsInput.value = '';
-          recommendedInstruction = null;
+          recommendedScope = null;
         }
       }
     }
@@ -274,9 +276,10 @@ async function submitNewInboxTask(){
     return toast('请选择有归属工作区的项目', true);
   }
 
-  if(!inboxState.userSelectedProject && recommendedInstruction !== null && recommendedInstruction !== ins){
+  if(!inboxState.userSelectedProject && recommendedScope
+    && (recommendedScope.title !== title || recommendedScope.instruction !== ins)){
     project.focus();
-    return toast('任务指令已修改，请重新确认推荐项目或手动选择项目', true);
+    return toast('任务内容已修改，请重新确认推荐项目或手动选择项目', true);
   }
 
   const payload = {

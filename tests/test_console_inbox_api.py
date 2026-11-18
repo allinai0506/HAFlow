@@ -719,6 +719,10 @@ def test_inbox_submission_blocks_duplicates_and_reuses_key_after_lost_response()
       fields.inboxInstruction.value = 'Changed instructions after project detection';
       await submitNewInboxTask();
       assert.equal(requests.length, 0, 'stale recommendation cannot choose the task scope');
+      await onInboxInstructionBlur();
+      fields.inboxTitle.value = 'Changed title after project detection';
+      await submitNewInboxTask();
+      assert.equal(requests.length, 0, 'changing only the title also invalidates automatic scope');
       onInboxProjectSelectChange(true);
       holdFirstResponse = true;
       const first = submitNewInboxTask();
