@@ -16,8 +16,10 @@ from herdr.inbox.transitions import (
     ACTIVE_INBOX_STATUSES,
     WORKSPACE_HOLDING_STATUSES,
 )
-from herdr.projects import active_workflows_for_project, load_projects
+from herdr.projects import load_projects
 from herdr.state.connection import get_db_connection
+from herdr.transitions import TERMINAL_WORKFLOW_STATUSES
+from herdr.workflow_shutdown import shutdown_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -27,24 +29,14 @@ _LAUNCH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 _LAUNCH_SEMAPHORE = threading.Semaphore(2)
 
-ACTIVE_WORKFLOW_STATUSES = frozenset({
-    "running",
-    "pending",
-    "in_progress",
-    "paused",
-    "closing",
-})
-
-TERMINAL_WORKFLOW_STATUSES = frozenset({
+# An Inbox outcome can be settled while its Workflow still owns resources.
+INBOX_WORKFLOW_RESULT_STATUSES = frozenset({
     "completed",
     "failed",
     "cancelled",
     "abandoned",
     "halted",
 })
-
-
-from herdr.workflow_shutdown import shutdown_workflow
 
 
 class InboxDispatcher:
@@ -63,15 +55,33 @@ class InboxDispatcher:
     def _conn(self) -> sqlite3.Connection:
         return get_db_connection(self.db_path)
 
+    def _blocking_workflow(self, conn: sqlite3.Connection, workspace_id: str):
+        project_ids = {
+            project["project_id"]
+            for project in load_projects().get("projects", {}).values()
+            if project.get("workspace_id") == workspace_id and project.get("project_id")
+        }
+        terminal = tuple(sorted(TERMINAL_WORKFLOW_STATUSES))
+        placeholders = ", ".join("?" for _ in terminal)
+        rows = conn.execute(
+            f"""
+            SELECT workflow_id, title, status, metadata_json, config_json
+            FROM workflows
+            WHERE status IS NULL OR status NOT IN ({placeholders})
+            """,
+            terminal,
+        )
+        for row in rows:
+            meta = json.loads(row["metadata_json"] or "{}")
+            if meta.get("project_id") in project_ids:
+                return row
+            config = json.loads(row["config_json"] or "{}")
+            if (meta.get("workspace_id") or config.get("workspace_id")) == workspace_id:
+                return row
+        return None
+
     def is_workspace_busy(self, workspace_id: str) -> Tuple[bool, Optional[str]]:
-        """Check if workspace_id currently has an active task or running workflow.
-
-        Workflows in terminal states (completed, failed, cancelled, abandoned, halted)
-        do NOT occupy the workspace.
-
-        Returns:
-            (is_busy: bool, reason: Optional[str])
-        """
+        """Check for an Inbox task or Workflow that still owns the workspace."""
         if not workspace_id:
             return True, "Invalid empty workspace_id"
 
@@ -83,52 +93,16 @@ class InboxDispatcher:
                 f"Inbox task '{active_inbox_task['id']}' is {active_inbox_task['status']}",
             )
 
-        # 2. Check existing workflows table in SQLite (strictly ACTIVE statuses only)
         conn = self._conn()
         try:
-            rows = conn.execute(
-                """
-                SELECT workflow_id, title, status, metadata_json, config_json
-                FROM workflows
-                WHERE status IN ('running', 'pending', 'in_progress', 'paused', 'closing')
-                """
-            ).fetchall()
-            for r in rows:
-                meta = {}
-                if r["metadata_json"]:
-                    try:
-                        meta = json.loads(r["metadata_json"])
-                    except Exception:
-                        pass
-                config = {}
-                if r["config_json"]:
-                    try:
-                        config = json.loads(r["config_json"])
-                    except Exception:
-                        pass
-                ws = meta.get("workspace_id") or config.get("workspace_id")
-                if ws == workspace_id:
-                    return (
-                        True,
-                        f"Active workflow '{r['workflow_id']}' ({r['title']}) is {r['status']}",
-                    )
+            workflow = self._blocking_workflow(conn, workspace_id)
+            if workflow:
+                return (
+                    True,
+                    f"Active workflow '{workflow['workflow_id']}' ({workflow['title']}) is {workflow['status']}",
+                )
         finally:
             conn.close()
-
-        # 3. Check projects.json active workflows by project_id
-        projects_data = load_projects().get("projects", {})
-        for p in projects_data.values():
-            if p.get("workspace_id") == workspace_id:
-                active_wfs = [
-                    w for w in active_workflows_for_project(p.get("project_id"))
-                    if w.get("status") in ACTIVE_WORKFLOW_STATUSES
-                ]
-                if active_wfs:
-                    wf = active_wfs[0]
-                    return (
-                        True,
-                        f"Active project workflow '{wf.get('workflow_id')}' ({wf.get('title')}) is {wf.get('status')}",
-                    )
 
         return False, None
 
@@ -162,42 +136,9 @@ class InboxDispatcher:
                 conn.execute("COMMIT")
                 return None
 
-            # Check 2: Active workflows in database holding workspace
-            active_wf_cur = conn.execute(
-                """
-                SELECT workflow_id, metadata_json, config_json FROM workflows
-                WHERE status IN ('running', 'pending', 'in_progress', 'paused', 'closing')
-                """,
-            )
-            for wf_row in active_wf_cur.fetchall():
-                meta = {}
-                if wf_row["metadata_json"]:
-                    try:
-                        meta = json.loads(wf_row["metadata_json"])
-                    except Exception:
-                        pass
-                config = {}
-                if wf_row["config_json"]:
-                    try:
-                        config = json.loads(wf_row["config_json"])
-                    except Exception:
-                        pass
-                ws = meta.get("workspace_id") or config.get("workspace_id")
-                if ws == workspace_id:
-                    conn.execute("COMMIT")
-                    return None
-
-            # Check 3: Active workflows for project
-            projects_data = load_projects().get("projects", {})
-            for p in projects_data.values():
-                if p.get("workspace_id") == workspace_id:
-                    active_wfs = [
-                        w for w in active_workflows_for_project(p.get("project_id"))
-                        if w.get("status") in ACTIVE_WORKFLOW_STATUSES
-                    ]
-                    if active_wfs:
-                        conn.execute("COMMIT")
-                        return None
+            if self._blocking_workflow(conn, workspace_id):
+                conn.execute("COMMIT")
+                return None
 
             # Find candidate task: highest priority weight, then sort order, then FIFO
             cur = conn.execute(
@@ -684,7 +625,7 @@ class InboxDispatcher:
                                         reason_prefix="Fencing mismatch on recovery for paused task",
                                     )
                                 return self.store.get_task(task_id)
-                            elif wf_st in TERMINAL_WORKFLOW_STATUSES:
+                            elif wf_st in INBOX_WORKFLOW_RESULT_STATUSES:
                                 is_failed = (
                                     wf_st in ("failed", "cancelled", "halted", "abandoned")
                                     or wf_out in ("startup_failed", "failed", "failure", "abandoned", "error")
@@ -924,7 +865,7 @@ class InboxDispatcher:
                         )
                         recovered_ids.append(tid)
                         continue
-                    elif wf_st in TERMINAL_WORKFLOW_STATUSES:
+                    elif wf_st in INBOX_WORKFLOW_RESULT_STATUSES:
                         new_st = "FAILED" if (wf_st in ("failed", "cancelled", "halted", "abandoned") or wf_out in ("startup_failed", "failed", "failure", "abandoned", "error")) else "COMPLETED"
                         err = f"Workflow '{wid}' ended with status '{wf_st}'" if new_st == "FAILED" else None
                         conn.execute(

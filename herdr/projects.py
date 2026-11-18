@@ -19,6 +19,7 @@ WORKFLOWS_FILE = ROOT / "workflows.json"
 LEGACY_WORKFLOW_FILE = ROOT / "workflow.json"
 
 try:
+    from .transitions import TERMINAL_WORKFLOW_STATUSES
     from .workflow import (
         load_template,
         normalize_workflow,
@@ -27,6 +28,7 @@ try:
         validate_context_contract,
     )
 except ImportError:
+    from herdr.transitions import TERMINAL_WORKFLOW_STATUSES
     from herdr.workflow import (
         load_template,
         normalize_workflow,
@@ -202,9 +204,6 @@ def save_workflows(data):
     except ImportError:
         from herdr.state_store import sync_workflows_projection
     sync_workflows_projection(store=store)
-
-
-TERMINAL_WORKFLOW_STATUSES = {"completed"}
 
 
 def active_workflows_for_project(project_id):

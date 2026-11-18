@@ -206,45 +206,42 @@ def test_auto_continuation_pipeline(tmp_path: Path):
         assert total == 3
 
 
-def test_failed_and_cancelled_workflows_release_workspace(tmp_path: Path):
-    """P1-03: Workflows in failed, cancelled, or abandoned statuses do NOT block the workspace."""
-    db_file = tmp_path / "dispatcher_terminal.db"
+@pytest.mark.parametrize("project_only", [False, True])
+def test_failed_workflow_holds_workspace_until_shutdown(tmp_path, monkeypatch, project_only):
+    from herdr import projects
+    from herdr.workflow_shutdown import shutdown_workflow
+
+    db_file = tmp_path / "dispatcher_failed.db"
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
     store = InboxStore(db_file)
     dispatcher = InboxDispatcher(store=store, db_path=db_file)
+    project = {"project_id": "p_test", "workspace_id": "w_test"}
+    registry = {"root": project} if project_only else {}
+    monkeypatch.setattr(
+        "herdr.inbox.dispatcher.load_projects", lambda: {"projects": registry},
+    )
+    queued = store.create_task(
+        title="Next", instruction="Run next", project_id="p_test",
+        workspace_id="w_test", auto_confirm=True,
+    )
+    workflow = {
+        "workflow_id": "wf_failed", "project_id": "p_test",
+        "title": "Failed Run", "status": "failed",
+    }
+    if not project_only:
+        workflow["config"] = {"workspace_id": "w_test"}
+    save_workflow(workflow, db_path=db_file)
 
-    with patch("herdr.inbox.dispatcher.load_projects", return_value={"projects": {}}):
-        # 1. Failed workflow in database
-        save_workflow(
-            {"workflow_id": "wf_failed_1", "title": "Failed Run", "status": "failed", "config": {"workspace_id": "w_test"}},
-            db_path=db_file,
-        )
-        is_busy, reason = dispatcher.is_workspace_busy("w_test")
-        assert is_busy is False, f"Failed workflow must not block workspace, but got reason: {reason}"
+    assert [wf["workflow_id"] for wf in projects.active_workflows_for_project("p_test")] == ["wf_failed"]
+    assert dispatcher.is_workspace_busy("w_test")[0]
+    assert dispatcher.claim_next_task("w_test") is None
+    assert store.get_task(queued["id"])["status"] == "PENDING"
+    assert store.get_task(queued["id"])["attempt_count"] == 0
 
-        # 2. Cancelled workflow in database
-        save_workflow(
-            {"workflow_id": "wf_cancel_1", "title": "Cancelled Run", "status": "cancelled", "config": {"workspace_id": "w_test"}},
-            db_path=db_file,
-        )
-        is_busy, reason = dispatcher.is_workspace_busy("w_test")
-        assert is_busy is False, f"Cancelled workflow must not block workspace, but got reason: {reason}"
-
-        # 3. Abandoned workflow in database
-        save_workflow(
-            {"workflow_id": "wf_aban_1", "title": "Abandoned Run", "status": "abandoned", "config": {"workspace_id": "w_test"}},
-            db_path=db_file,
-        )
-        is_busy, reason = dispatcher.is_workspace_busy("w_test")
-        assert is_busy is False, f"Abandoned workflow must not block workspace, but got reason: {reason}"
-
-        # 4. Running workflow DOES block workspace
-        save_workflow(
-            {"workflow_id": "wf_run_1", "title": "Active Run", "status": "running", "config": {"workspace_id": "w_test"}},
-            db_path=db_file,
-        )
-        is_busy, reason = dispatcher.is_workspace_busy("w_test")
-        assert is_busy is True
-        assert "Active Run" in reason
+    assert shutdown_workflow("wf_failed", outcome="failed", db_path=db_file) == "STOPPED"
+    assert projects.active_workflows_for_project("p_test") == []
+    assert not dispatcher.is_workspace_busy("w_test")[0]
+    assert dispatcher.claim_next_task("w_test")["id"] == queued["id"]
 
 
 def test_reconcile_waiting_tasks(tmp_path: Path):

@@ -4450,3 +4450,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `herdr/workflow_shutdown.py#shutdown_workflow`
   - `herdr/task_resources.py#workflow_launch_lock`
   - `tests/test_workflow_shutdown.py#test_scenario_3_interrupt_ack_keeps_occupancy_until_process_stops`
+
+## [2026-11-18] Fix | Inbox 与 Factory 对齐 Workflow 占用
+- Inbox 繁忙检查、领取事务和 Factory 共用 Workflow 终态定义。FAILED 继续占用工作区，关闭完成后才允许后续任务领取。
+- Evidence
+  - `herdr/inbox/dispatcher.py#_blocking_workflow`
+  - `herdr/projects.py#active_workflows_for_project`
+  - `tests/test_inbox_dispatcher.py#test_failed_workflow_holds_workspace_until_shutdown`
