@@ -331,16 +331,18 @@ def _set_workflow_pause(workflow_id, node_id, store, expected_identity, paused):
                 # Gating check: ensure workspace / project is not occupied by another actively executing workflow
                 proj_id = target.get("project_id")
                 if proj_id:
-                    from .projects import active_workflows_for_project
-                    active = [
-                        w for w in active_workflows_for_project(proj_id)
-                        if w.get("workflow_id") != workflow_id
-                        and w.get("status") in {"running", "pending", "in_progress", "closing"}
-                    ]
-                    if active:
-                        other = active[0]
+                    other = conn.execute("""
+                        SELECT workflow_id, status FROM workflows
+                        WHERE workflow_id != ?
+                          AND status IN ('running', 'pending', 'in_progress', 'closing')
+                          AND CASE WHEN json_valid(metadata_json)
+                            THEN json_extract(metadata_json, '$.project_id') END = ?
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """, (workflow_id, proj_id)).fetchone()
+                    if other:
                         raise RuntimeError(
-                            f"Cannot resume workflow '{workflow_id}': project workspace is occupied by active workflow '{other.get('workflow_id')}' (status: {other.get('status')})"
+                            f"Cannot resume workflow '{workflow_id}': project workspace is occupied by active workflow '{other['workflow_id']}' (status: {other['status']})"
                         )
             state_db.transition_workflow(workflow_id, status,
                 reason='pause_workflow' if paused else 'resume_workflow', source='kernel', conn=conn)

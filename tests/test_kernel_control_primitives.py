@@ -96,6 +96,33 @@ def test_pause_and_resume_workflow(kernel_env):
     assert wf_data["status"] == "running"
 
 
+def test_resume_checks_occupancy_in_explicit_database(tmp_path, monkeypatch):
+    from herdr.state_store import SQLiteStateStore
+
+    default = SQLiteStateStore(tmp_path / "default.db")
+    selected = SQLiteStateStore(tmp_path / "selected.db")
+    monkeypatch.setenv("HERDR_STATE_DB", str(default.db_path))
+    monkeypatch.setenv("WORKFLOWS_FILE", str(tmp_path / "workflows.json"))
+    monkeypatch.setenv("HERDR_SKIP_LEGACY_BOOTSTRAP_DB", "1")
+
+    def save(store, workflow_id, status):
+        store.save_workflow({"workflow_id": workflow_id, "project_id": "project", "status": status})
+
+    save(default, "elsewhere", "completed")
+    save(selected, "paused", "paused")
+    save(selected, "busy", "running")
+
+    with pytest.raises(RuntimeError, match="occupied.*busy"):
+        kernel.resume_workflow("paused", store=selected)
+    assert selected.get_workflow("paused")["status"] == "paused"
+
+    save(selected, "busy", "completed")
+    save(default, "elsewhere", "running")
+    assert kernel.resume_workflow("paused", store=selected)["status"] == "running"
+    assert default.get_workflow("elsewhere")["status"] == "running"
+    assert default.get_workflow("paused") is None
+
+
 def test_pause_node_level(kernel_env):
     wid = "wf_test_pause_node"
     _seed_workflow(kernel_env, wid, status="running")

@@ -1403,6 +1403,13 @@ def main():
         print(f"[PANE] {pane_id}")
         print(f"[PANE SOURCE] {pane_source}")
         if launch_identity:
+            if launch_store is not None and pane_source == "prebuilt":
+                from herdr.observer.live import _get_pane, _run_herdr
+                outcome, observed_pane = _get_pane(_run_herdr, pane_id, 2)
+                if outcome == "ok" and observed_pane.get("pane_id") == pane_id:
+                    terminal_id = observed_pane.get("terminal_id")
+                    if isinstance(terminal_id, str) and terminal_id:
+                        launch_identity["terminal_id"] = terminal_id
             launch_identity.update(pane_id=pane_id, pane_source=pane_source, phase='pane_allocated')
             write_worker_launch_identity(clone, launch_identity)
             if launch_store is not None:

@@ -198,6 +198,7 @@ def test_real_cli_worker_store_preserve_off_base_frozen_candidate(frozen_worker,
     from herdr import scheduler_facts
     from herdr.state_store import get_state_store
     worker, source, frozen, argv = frozen_worker
+    monkeypatch.setenv('HERDR_CLONES_DIR', str(worker.CLONE_ROOT))
     if source_head == 'ahead':
         git(source, 'checkout', '--detach', frozen)
         (source / 'f').write_text('source advanced after freeze')

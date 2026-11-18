@@ -195,12 +195,14 @@ def _start_resistant_process(pane, cli, tmp_path):
             "desc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
             "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
             "stderr=subprocess.DEVNULL); "
-            f"Path({str(ready)!r}).write_text(f'{{os.getpid()}} {{desc.pid}}'); "
+            f"ready = Path({str(ready)!r}); staged = ready.with_suffix('.tmp'); "
+            "staged.write_text(f'{os.getpid()} {desc.pid}'); staged.replace(ready); "
             "time.sleep(30)")
     cli("pane", "run", pane, shlex.join([sys.executable, "-c", code]))
     deadline = time.monotonic() + 5
     while not ready.exists() and time.monotonic() < deadline:
         time.sleep(0.03)
+    assert ready.exists(), "resistant process did not publish its PID pair"
     foreground, descendant = ready.read_text().split()
     return int(foreground), int(descendant)
 
@@ -541,7 +543,9 @@ def test_reused_unregistered_pane_allows_inventory_to_settle_original_intent(tes
 
 
 @pytest.mark.parametrize("start_requested", [False, True])
-def test_worker_crash_recovers_absent_pane_only_before_agent_start(test_env, native_pane, start_requested):
+@pytest.mark.parametrize("pane_source", ["dynamic", "prebuilt"])
+def test_worker_crash_recovers_absent_pane_only_before_agent_start(
+        test_env, native_pane, start_requested, pane_source):
     from herdr.state_store import SQLiteStateStore
 
     inbox_id = _start_workflow(test_env)
@@ -560,7 +564,7 @@ import os, runpy, sys
 from pathlib import Path
 from herdr import task_resources
 
-worker_path, clone, pane_id, terminal_id, crash_after_request, *args = sys.argv[1:]
+worker_path, clone, pane_id, terminal_id, crash_after_request, pane_source, *args = sys.argv[1:]
 main = runpy.run_path(worker_path)["main"]
 worker = main.__globals__
 clone = Path(clone)
@@ -568,8 +572,9 @@ def create_workspace(task):
     clone.mkdir()
     return clone
 def allocate(parent, path, identity, task):
-    identity["terminal_id"] = terminal_id
-    return pane_id, "dynamic"
+    if pane_source == "dynamic":
+        identity["terminal_id"] = terminal_id
+    return pane_id, pane_source
 worker.update(create_context_task_workspace=create_workspace, allocate_task_pane=allocate,
               write_task_context=lambda *a, **k: ({}, {}), verify_request_preflight=lambda *a: {},
               start_agent=lambda *a: os._exit(18))
@@ -585,7 +590,7 @@ main()
     with task_resources.workflow_launch_lock(db, "wf_stop") as lock_fd:
         worker = subprocess.run([
             sys.executable, "-c", script, "services/herdr-worker.py", str(clone),
-            pane["pane_id"], pane["terminal_id"], str(start_requested),
+            pane["pane_id"], pane["terminal_id"], str(start_requested), pane_source,
             "--source", str(test_env["tmp_path"]), "--execution-mode", "context",
             "--task-id", intent["task_id"], "--agent", "codex", "--task-type", "fix",
             "--parent-pane", pane["pane_id"], "--run-id", "run",
@@ -595,13 +600,18 @@ main()
     assert worker.returncode == (18 if start_requested else 17), worker.stderr
     current = task_resources._latest_intent(store, intent["key"])
     assert current["resources"]["pane_id"] == pane["pane_id"]
+    assert current["resources"]["terminal_id"] == pane["terminal_id"]
     assert current["resources"]["agent_start_requested"] is start_requested
+    boot = task_resources.local_boot_identity()
+    assert current["resources"].get("start_boot_identity") == (
+        list(boot) if boot and start_requested else None
+    )
     assert not store.list_events(workflow_id="wf_stop", event_type="shutdown_process")
     cli("pane", "close", pane["pane_id"])
     shutil.rmtree(clone)
     assert task_resources.inventory_launch_resources(current)["resource_status"] == "absent"
 
-    if start_requested:
+    if start_requested or pane_source == "prebuilt":
         with task_resources.workflow_launch_lock(db, "wf_stop"):
             assert task_resources.recover_launch_resources(store, current)["status"] == "recovery_required"
         with pytest.raises(RuntimeError, match="failed to stop"):
@@ -614,3 +624,107 @@ main()
         assert not test_env["disp"].is_workspace_busy("ws_stop")[0]
         assert shutdown_workflow("wf_stop", db_path=db) == "ALREADY_TERMINAL"
     assert not store.list_events(workflow_id="wf_stop", event_type="shutdown_process")
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_missing_pane_recovers_after_verified_local_reboot(test_env, native_pane, monkeypatch, registered):
+    from herdr.state_store import SQLiteStateStore
+    from herdr.workflow_shutdown import _terminal_processes
+
+    inbox_id = _start_workflow(test_env)
+    db = test_env["db_file"]
+    pane, cli = native_pane
+    pane_id = pane["pane_id"]
+    clone = test_env["tmp_path"] / "missing-clone"
+    store = SQLiteStateStore(str(db))
+    # Only the OS boot observation is simulated. Pane, process and DB are real.
+    boot = ("local-host", "original-boot")
+    monkeypatch.setattr(task_resources, "local_boot_identity", lambda: boot)
+    with task_resources.workflow_launch_lock(db, "wf_stop"):
+        intent = task_resources.begin_launch_intent(
+            store, workflow_id="wf_stop", node_id="node", task_id="worker", run_id="run",
+        )["intent"]
+        intent = task_resources.record_launch_resources(
+            store, intent, {"planned_clone_path": str(clone), "run_id": "run"},
+        )
+        identity = {**intent, "run_id": "run", "pane_id": pane_id,
+                    "pane_source": "dynamic", "terminal_id": pane["terminal_id"]}
+        for requested in (False, True):
+            task_resources.record_worker_start_checkpoint(
+                store, intent["key"], identity, clone, requested=requested,
+            )
+        if registered:
+            save_task({"task_id": "worker", "workflow_id": "wf_stop", "run_id": "run",
+                       "node": "node", "status": "working", "pane_id": pane_id,
+                       "launch_intent_id": intent["intent_id"]}, db_path=db)
+            task_resources.finish_launch_intent(store, intent)
+
+    _, descendant = _start_resistant_process(pane_id, cli, test_env["tmp_path"])
+    try:
+        cli("pane", "close", pane_id)
+        os.kill(descendant, 0)
+        for observed in (boot, ("different-host", "current-boot"), None):
+            monkeypatch.setattr(task_resources, "local_boot_identity", lambda: observed)
+            with pytest.raises(RuntimeError, match="failed to stop"):
+                test_env["store"].cancel_task(inbox_id)
+            assert test_env["disp"].is_workspace_busy("ws_stop")[0]
+        assert not store.list_events(workflow_id="wf_stop", event_type="shutdown_process")
+    finally:
+        os.kill(descendant, signal.SIGTERM)
+    deadline = time.monotonic() + 3
+    while _terminal_processes(descendant):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+
+    monkeypatch.setattr(task_resources, "local_boot_identity", lambda: boot)
+    with pytest.raises(RuntimeError, match="failed to stop"):
+        test_env["store"].cancel_task(inbox_id)
+    monkeypatch.setattr(task_resources, "local_boot_identity", lambda: ("local-host", "current-boot"))
+    assert test_env["store"].cancel_task(inbox_id)["status"] == "CANCELLED"
+    receipt = store.list_events(workflow_id="wf_stop", event_type="shutdown_process", limit=1)[0]["payload"]
+    assert receipt["phase"] == "PROCESS_STOPPED"
+    assert receipt["terminal_id"] == pane["terminal_id"]
+    assert receipt["stopped_by"] == "local_reboot"
+    assert receipt["launch_intent_id"] == intent["intent_id"]
+    assert (receipt["previous_boot_id"], receipt["current_boot_id"]) == ("original-boot", "current-boot")
+    assert not test_env["disp"].is_workspace_busy("ws_stop")[0]
+
+
+@pytest.mark.parametrize("probe_error", [None, "malformed", "timeout", "nonzero"])
+def test_macos_boot_identity_native_contract(monkeypatch, probe_error):
+    import plistlib
+
+    host = "c047806a-2281-44a9-89a7-c3ddcc77b77f"
+    boot = "3dc934cb-2686-442c-813c-b7404d5d8342"
+    monkeypatch.setattr(task_resources.sys, "platform", "darwin")
+
+    def observe(argv, *, timeout, text=False):
+        assert timeout == 2
+        if argv == ["/usr/sbin/ioreg", "-ard1", "-c", "IOPlatformExpertDevice"]:
+            assert not text
+            return plistlib.dumps([{"IOPlatformUUID": host}])
+        assert argv == ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"] and text
+        if probe_error == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        if probe_error == "nonzero":
+            raise subprocess.CalledProcessError(1, argv)
+        return "invalid\n" if probe_error else boot.upper() + "\n"
+
+    monkeypatch.setattr(task_resources.subprocess, "check_output", observe)
+    identity = task_resources.local_boot_identity()
+    if probe_error:
+        assert identity is None
+    else:
+        assert identity and len(identity[0]) == 64
+        assert identity[1] == boot.replace("-", "")
+
+
+def test_linux_boot_identity_requires_native_host_uuid(monkeypatch):
+    monkeypatch.setattr(task_resources.sys, "platform", "linux")
+
+    def read(path):
+        assert str(path) == "/sys/class/dmi/id/product_uuid"
+        raise PermissionError(path)
+
+    monkeypatch.setattr(task_resources.Path, "read_text", read)
+    assert task_resources.local_boot_identity() is None

@@ -76,6 +76,7 @@ Inbox 任务具备严格受控的 8 状态转换模型（`herdr/inbox/transition
   - 检查收件箱内是否存在处于 `CLAIMED`、`RUNNING` 或 `WAITING` 状态的任务（`WAITING` 状态持续持有工作区锁保护执行现场与协调者 Pane）。
   - 核对当前工作区及其项目是否存在尚未完成的 Workflow。`failed` 与 `closing` 持续占用工作区，关闭协议完成并写入 `completed` 后才允许领取后续任务。
   - 对已分配 Pane 的未登记启动，关闭流程持有 Workflow 启动锁。完整盘点确认 Pane 和 clone 均不存在，且 Launch Intent 证明原 Worker 尚未请求启动 Agent 时，可以释放工作区。一旦请求过启动，仍需原运行实例的进程退出证据。
+  - 只有启动记录绑定了原终端及本机启动会话时，确认同一物理机或虚拟机已重启且原终端消失，可以在没有停止回执的情况下补记退出证据。同一次启动会话内，缺少可验证的进程退出证据时仍保持 `closing`。
   - 底层 `bin/herdr-factory` 与 `herdr/inbox/dispatcher` 严格对齐互斥语义：Factory 拒绝在存在活跃（含 `paused`）工作流时重复创建；Dispatcher 识别工作区占用并保持后续任务在队列排队等待，从根源杜绝协调者 Pane 抢占、代码分支冲突与重复启动失败。
 - **原子领取任务 (`claim_next_task`)**：
   - 在 SQLite `EXCLUSIVE` 事务保护下，基于条件原子执行 CAS 跃迁，彻底杜绝多 Worker 重复领取。

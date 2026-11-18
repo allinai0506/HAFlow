@@ -4470,3 +4470,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `console/inbox_api.py#api_inbox_create_task`
   - `console/static/console/scripts/inbox.js#submitNewInboxTask`
   - `tests/test_workflow_startup_convergence.py#test_factory_cli_keeps_startup_in_explicit_database`
+
+## [2026-11-18] Fix | Workflow 恢复占用与无回执关闭
+- Workflow 恢复在当前控制事务内检查项目占用。关闭时可用绑定到原运行实例的本机重启证据补记停止回执。
+- Evidence
+  - `herdr/kernel.py#_set_workflow_pause`
+  - `herdr/workflow_shutdown.py#_reboot_stop_evidence`
+  - `tests/test_workflow_shutdown.py#test_missing_pane_recovers_after_verified_local_reboot`

@@ -13,7 +13,7 @@ from herdr.agent_adapter import get_agent_adapter
 from herdr.kernel import state_db_path
 from herdr.node_capacity import CONCURRENT_STATUSES, pane_reference
 from herdr.observer.live import _get_pane, _run_herdr
-from herdr.state_db import get_workflow, transition_task, transition_workflow
+from herdr.state_db import get_readonly_db_connection, get_workflow, transition_task, transition_workflow
 from herdr.state_store import SQLiteStateStore
 from herdr.transitions import TERMINAL_WORKFLOW_STATUSES
 
@@ -71,6 +71,51 @@ def _terminal_processes(session_id, previous=()):
     return members.intersection(processes)
 
 
+def _reboot_stop_evidence(store, target, intent, pane, pane_id):
+    # A missing pane can leave detached descendants. A different kernel boot
+    # on the same host rules out every process of the earlier local launch.
+    if intent is None:
+        if not target.get("launch_intent_id"):
+            return None
+        conn = get_readonly_db_connection(store.db_path)
+        try:
+            row = conn.execute("""
+                SELECT payload_json FROM events
+                WHERE workflow_id = ? AND event_type = 'launch_intent' AND source = 'launch'
+                  AND json_extract(payload_json, '$.task_id') = ?
+                  AND json_extract(payload_json, '$.intent_id') = ?
+                ORDER BY timestamp DESC, id DESC LIMIT 1
+            """, (target["workflow_id"], target["task_id"], target["launch_intent_id"])).fetchone()
+        finally:
+            conn.close()
+        intent = json.loads(row["payload_json"]) if row else None
+        if not intent or intent.get("phase") != "registered":
+            return None
+    resources = intent["resources"]
+    terminal_id = resources.get("terminal_id")
+    if (intent["workflow_id"] != target["workflow_id"]
+            or intent["task_id"] != target["task_id"]
+            or not target.get("run_id") or resources.get("run_id") != target["run_id"]
+            or resources.get("pane_id") != pane_id
+            or not isinstance(terminal_id, str) or not terminal_id
+            or target.get("terminal_id") not in (None, terminal_id)
+            or resources.get("agent_start_requested") is not True
+            or not _original_terminal_gone(pane, terminal_id)):
+        return None
+    previous = resources.get("start_boot_identity")
+    if not isinstance(previous, list) or len(previous) != 2 or not all(previous):
+        return None
+    current = task_resources.local_boot_identity()
+    if current and current[0] == previous[0] and current[1] != previous[1]:
+        return terminal_id, {
+            "stopped_by": "local_reboot",
+            "launch_intent_id": intent["intent_id"],
+            "previous_boot_id": previous[1],
+            "current_boot_id": current[1],
+        }
+    return None
+
+
 def _stop_runtime(store, target, *, reason, deadline, intent=None) -> str | None:
     """Stop the original execution and return its confirmed terminal ID."""
     pane_id = pane_reference(target)
@@ -90,10 +135,10 @@ def _stop_runtime(store, target, *, reason, deadline, intent=None) -> str | None
             return None
         receipt = None
 
-    def record(phase, terminal_id, shell, pids):
+    def record(phase, terminal_id, shell, pids, **evidence):
         store.record_event(
             "shutdown_process", {"identity": identity, "phase": phase,
-                                 "terminal_id": terminal_id, "shell": shell, "pids": sorted(pids)},
+                                 "terminal_id": terminal_id, "shell": shell, "pids": sorted(pids), **evidence},
             workflow_id=workflow_id, task_id=task_id, source="workflow_shutdown",
         )
 
@@ -116,9 +161,15 @@ def _stop_runtime(store, target, *, reason, deadline, intent=None) -> str | None
         # A surviving/new pane with this terminal identity contradicts the receipt.
         terminal_id = receipt["terminal_id"]
         return terminal_id if _original_terminal_gone(pane, terminal_id) else None
-    if pane is None and not receipt:
-        logger.warning("STOP_FAILED for %s: pane missing without a process receipt", task_id)
-        return None
+    if not receipt:
+        reboot = _reboot_stop_evidence(store, target, intent, pane, pane_id)
+        if reboot:
+            terminal_id, evidence = reboot
+            record("PROCESS_STOPPED", terminal_id, None, (), **evidence)
+            return terminal_id
+        if pane is None:
+            logger.warning("STOP_FAILED for %s: pane missing without verified process exit", task_id)
+            return None
     if receipt and _original_terminal_gone(pane, receipt["terminal_id"]):
         if _terminal_processes(receipt["shell"], receipt["pids"]):
             return None
@@ -190,8 +241,6 @@ def _stop_runtime(store, target, *, reason, deadline, intent=None) -> str | None
 
 
 def _latest_events(store, workflow_id, event_type, source):
-    from herdr.state_db import get_readonly_db_connection
-
     conn = get_readonly_db_connection(store.db_path)
     try:
         return conn.execute("""

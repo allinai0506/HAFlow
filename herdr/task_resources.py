@@ -4,7 +4,9 @@ import fcntl
 import hashlib
 import json
 import os
+import plistlib
 import subprocess
+import sys
 from pathlib import Path
 import time
 import uuid
@@ -398,6 +400,31 @@ def record_launch_resources(store, intent, resource_identity, *, now=None):
     return updated
 
 
+def local_boot_identity():
+    """Return stable host identity and kernel boot identity for local processes."""
+    try:
+        if sys.platform == 'darwin':
+            platform = plistlib.loads(subprocess.check_output(
+                ['/usr/sbin/ioreg', '-ard1', '-c', 'IOPlatformExpertDevice'], timeout=2,
+            ))
+            host_id = platform[0]['IOPlatformUUID']
+            boot_id = subprocess.check_output(
+                ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], text=True, timeout=2,
+            )
+        elif sys.platform == 'linux':
+            host_id = Path('/sys/class/dmi/id/product_uuid').read_text()
+            boot_id = Path('/proc/sys/kernel/random/boot_id').read_text()
+        else:
+            return None
+        host, boot = (uuid.UUID(value.strip()) for value in (host_id, boot_id))
+        if host.int and boot.int:
+            return hashlib.sha256(host.bytes).hexdigest(), boot.hex
+    except (OSError, ValueError, IndexError, KeyError, TypeError, AttributeError,
+            subprocess.SubprocessError):
+        return None
+    return None
+
+
 def record_worker_start_checkpoint(store, intent_key, identity, clone, *, requested):
     """Bind Pane allocation and the start barrier to the locked launch intent."""
     intent = _latest_intent(store, intent_key)
@@ -417,7 +444,12 @@ def record_worker_start_checkpoint(store, intent_key, identity, clone, *, reques
             raise ValueError('worker Pane allocation checkpoint changed')
     elif previous is not None or resources.get('pane_id'):
         raise ValueError('worker Pane allocation was already recorded')
-    record_launch_resources(store, intent, {**pane, 'agent_start_requested': requested})
+    checkpoint = {**pane, 'agent_start_requested': requested}
+    if requested and pane['terminal_id']:
+        boot_identity = local_boot_identity()
+        if boot_identity:
+            checkpoint['start_boot_identity'] = list(boot_identity)
+    record_launch_resources(store, intent, checkpoint)
 
 
 def can_settle_absent_launch(intent):
