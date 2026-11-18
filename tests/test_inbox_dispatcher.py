@@ -1938,6 +1938,7 @@ def test_lease_expired_launcher_process_pause_and_resume_rejected_at_workflow_re
     loader.exec_module(factory)
 
     db_file = tmp_path / "fenced_gate.db"
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
     store = InboxStore(db_file)
     disp_a = InboxDispatcher(store=store, db_path=db_file, worker_id="worker_A")
 
@@ -1988,7 +1989,6 @@ def test_lease_expired_launcher_process_pause_and_resume_rejected_at_workflow_re
             inbox_task_id=t["id"],
             fencing_token=worker_a,
             launch_attempt_id=1,
-            db_path=str(db_file),
         )
 
     # 2. Worker B recovers the task
@@ -2008,7 +2008,6 @@ def test_lease_expired_launcher_process_pause_and_resume_rejected_at_workflow_re
         inbox_task_id=t["id"],
         fencing_token="worker_B",
         launch_attempt_id=2,
-        db_path=str(db_file),
     )
     assert registered_wid == "wf_B"
 
@@ -2025,7 +2024,6 @@ def test_lease_expired_launcher_process_pause_and_resume_rejected_at_workflow_re
             inbox_task_id=t["id"],
             fencing_token=worker_a,
             launch_attempt_id=1,
-            db_path=str(db_file),
         )
 
     # 4. Invariant: Task remains bound to wf_B; wf_A was never created
@@ -2041,7 +2039,6 @@ def test_lease_expired_launcher_process_pause_and_resume_rejected_at_workflow_re
         inbox_task_id=t["id"],
         fencing_token="worker_B",
         launch_attempt_id=2,
-        db_path=str(db_file),
     )
     assert reentry == "wf_B"
 
@@ -2069,6 +2066,7 @@ def test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate(tm
     loader.exec_module(factory)
 
     db_file = tmp_path / "fenced_prod.db"
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
     store = InboxStore(db_file)
     disp_a = InboxDispatcher(store=store, db_path=db_file, worker_id="worker_A")
 
@@ -2155,7 +2153,6 @@ def test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate(tm
             inbox_task_id=t["id"],
             fencing_token=worker_a,
             launch_attempt_id=f"{worker_a}:1",
-            db_path=str(db_file),
         )
 
     # 7. Confirm wf_A is NOT in workflows table
@@ -2172,7 +2169,6 @@ def test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate(tm
         inbox_task_id=t["id"],
         fencing_token=worker_b,
         launch_attempt_id=f"{worker_b}:2",
-        db_path=str(db_file),
     )
     assert registered_wid == "wf_A"
 
@@ -2188,7 +2184,6 @@ def test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate(tm
         inbox_task_id=t["id"],
         fencing_token=worker_b,
         launch_attempt_id=f"{worker_b}:2",
-        db_path=str(db_file),
     )
     assert reentry == "wf_A"
 

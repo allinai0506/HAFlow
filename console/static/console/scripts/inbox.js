@@ -16,6 +16,7 @@ let inboxState = {
   filterStatus: 'ALL', filterProject: 'ALL', filterPriority: 'ALL',
   autoRefreshTimer: null, activeTaskId: null, pageSize: 50,
 };
+let newInboxTask = null;
 
 function formatTime(ts){
   if(!ts) return '—';
@@ -180,19 +181,20 @@ async function showNewInboxTaskModal(){
       <label for="inboxInstruction">任务需求指令<span class="danger-text">*</span></label>
       <textarea id="inboxInstruction" rows="4" placeholder="请详细描述任务需求。支持直接输入代码路径，系统将自动识别推荐所属项目…" onblur="onInboxInstructionBlur()" style="margin-bottom:10px"></textarea>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px">
-        <div><label for="inboxProject">归属项目 <span class="muted" style="font-size:12px;font-weight:normal">(立即排队时必填)</span></label><select id="inboxProject" onchange="onInboxProjectSelectChange(true)"><option value="">-- 选择项目 --</option>${projOptions}</select></div>
-        <div><label for="inboxWorkspace">归属工作区 (自动联动) <span class="muted" style="font-size:12px;font-weight:normal">(立即排队时必填)</span></label><input id="inboxWorkspace" placeholder="选择项目后自动确定" disabled></div>
+        <div><label for="inboxProject">归属项目 <span class="danger-text" aria-hidden="true">*</span></label><select id="inboxProject" required onchange="onInboxProjectSelectChange(true)"><option value="">-- 选择项目 --</option>${projOptions}</select></div>
+        <div><label for="inboxWorkspace">归属工作区 <span class="danger-text">*</span></label><input id="inboxWorkspace" placeholder="选择项目后自动确定" readonly></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
         <div><label for="inboxPriority">优先级</label><select id="inboxPriority"><option value="NORMAL" selected>常规 (NORMAL)</option><option value="URGENT">紧急 (URGENT)</option><option value="HIGH">高优 (HIGH)</option><option value="LOW">低优 (LOW)</option></select></div>
-        <div style="display:flex;align-items:flex-end"><label class="inbox-scope-checkbox-label"><input type="checkbox" id="inboxAutoConfirm"><span>确认归属，立即排队等待执行</span></label></div>
+        <div style="display:flex;align-items:flex-end"><label class="inbox-scope-checkbox-label"><input type="checkbox" id="inboxAutoConfirm"><span>提交后立即排队等待执行</span></label></div>
       </div>
-      <div class="muted" style="font-size:12px;margin-bottom:14px">提示：若未勾选确认归属，任务将保存为【草稿 (DRAFT)】，绝不会进入可执行队列。</div>
-      <div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="submitNewInboxTask()">提交到收件箱</button></div>
+      <div class="muted" style="font-size:12px;margin-bottom:14px">请确认项目与工作区。未勾选立即排队时，任务会保存为草稿。</div>
+      <div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button id="inboxSubmit" class="btn primary" onclick="submitNewInboxTask()">确认归属并提交</button></div>
     </div>
   `);
 
   inboxState.userSelectedProject = false;
+  newInboxTask = {submitting: false, completed: false, keys: new Map()};
 }
 
 function onInboxProjectSelectChange(isManual = false){
@@ -207,7 +209,9 @@ function onInboxProjectSelectChange(isManual = false){
 }
 
 async function onInboxInstructionBlur(){
-  const ins = (document.getElementById('inboxInstruction')?.value || '').trim();
+  const form = newInboxTask;
+  const instruction = document.getElementById('inboxInstruction');
+  const ins = (instruction?.value || '').trim();
   const ti = document.getElementById('inboxTitle');
   if(!ins) return;
   if(ti && !ti.value.trim()){
@@ -218,6 +222,8 @@ async function onInboxInstructionBlur(){
   }
   try{
     const res = await api('/api/inbox/detect', {method:'POST', body:JSON.stringify({instruction:ins, title:ti?.value||''})});
+    if(form !== newInboxTask || form?.submitting || form?.completed
+      || instruction !== document.getElementById('inboxInstruction') || instruction.value.trim() !== ins) return;
     const banner = document.getElementById('inboxDetectBanner');
     if(res && banner){
       banner.style.display = 'flex';
@@ -231,15 +237,13 @@ async function onInboxInstructionBlur(){
           onInboxProjectSelectChange(false);
         }
       } else {
-        banner.innerHTML = `⚠️ <b>推荐置信度不足（${Math.round((res.confidence||0)*100)}%）：</b> ${esc(res.reason||'未达到自动确认门限')}。已保持草稿待确认，请手动选择项目与工作区。`;
+        banner.innerHTML = `⚠️ <b>推荐置信度不足（${Math.round((res.confidence||0)*100)}%）：</b> ${esc(res.reason||'未达到自动确认门限')}。请手动选择项目并确认工作区。`;
         const sel = document.getElementById('inboxProject');
         const wsInput = document.getElementById('inboxWorkspace');
         if(!inboxState.userSelectedProject){
           if(sel) sel.value = '';
           if(wsInput) wsInput.value = '';
         }
-        const chk = document.getElementById('inboxAutoConfirm');
-        if(chk) chk.checked = false;
       }
     }
   }catch(e){
@@ -248,35 +252,51 @@ async function onInboxInstructionBlur(){
 }
 
 async function submitNewInboxTask(){
+  const form = newInboxTask;
+  if(!form || form.submitting || form.completed) return;
   const title = (document.getElementById('inboxTitle')?.value || '').trim();
   const ins = (document.getElementById('inboxInstruction')?.value || '').trim();
-  const pid = (document.getElementById('inboxProject')?.value || '').trim();
+  const project = document.getElementById('inboxProject');
+  const pid = (project?.value || '').trim();
   const wid = (document.getElementById('inboxWorkspace')?.value || '').trim();
   const prio = (document.getElementById('inboxPriority')?.value || 'NORMAL').trim();
   const shouldConfirm = Boolean(document.getElementById('inboxAutoConfirm')?.checked);
+  const button = document.getElementById('inboxSubmit');
 
   if(!title) return toast('请输入任务标题', true);
   if(!ins) return toast('请输入任务指令/需求', true);
-  if(shouldConfirm && (!pid || !wid)) return toast('选择立即排队时，必须指定归属项目与工作区', true);
+  if(!pid || !wid){
+    project?.focus();
+    return toast('请选择有归属工作区的项目', true);
+  }
 
+  const payload = {
+    title, instruction:ins, project_id:pid, workspace_id:wid,
+    priority:prio, auto_confirm:shouldConfirm,
+    confirmed_by:shouldConfirm ? 'user' : null
+  };
+  const submission = JSON.stringify(payload);
+  form.submitting = true;
+  button.disabled = true;
   try{
-    toast('正在提交任务到收件箱…');
+    if(!form.keys.has(submission)){
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      form.keys.set(submission, Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''));
+    }
     await api('/api/inbox/tasks', {
       method: 'POST',
-      body: JSON.stringify({
-        title, instruction:ins,
-        project_id:pid||null,
-        workspace_id:wid||null,
-        priority:prio,
-        auto_confirm:shouldConfirm,
-        confirmed_by: shouldConfirm ? 'user' : null
-      })
+      body: JSON.stringify({...payload, idempotency_key:form.keys.get(submission)})
     });
-    closeModal();
+    form.completed = true;
+    form.keys.clear();
+    if(form === newInboxTask && button === document.getElementById('inboxSubmit')) closeModal();
     toast(shouldConfirm ? '任务已提交并进入执行队列！' : '任务已保存为草稿');
     await loadInboxData(false, true);
   }catch(e){
     toast('提交失败: ' + e.message, true);
+  }finally{
+    form.submitting = false;
+    button.disabled = form.completed;
   }
 }
 

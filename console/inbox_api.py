@@ -146,18 +146,12 @@ def api_inbox_create_task(b: Dict[str, Any]) -> Dict[str, Any]:
     source_id = str(b.get("source_id") or "").strip() or None
     idempotency_key = str(b.get("idempotency_key") or "").strip() or None
 
-    # Strict scope and user confirmation enforcement (P1-03)
-    if auto_confirm:
-        # Automated sources (webhook, timer, detector, system) can NEVER auto-confirm to PENDING
-        # Even manual sources must explicitly provide confirmation_source="user" or confirmed_by="user"
-        if source_type != "manual" or confirmation_source != "user":
-            auto_confirm = False
-        else:
-            if not project_id or not workspace_id:
-                raise ValueError("project_id and workspace_id must be provided when auto_confirm is enabled")
-            ok, err, _ = validate_project_and_workspace(project_id, workspace_id)
-            if not ok:
-                raise ValueError(f"Project and workspace validation failed: {err}")
+    ok, err, _ = validate_project_and_workspace(project_id, workspace_id)
+    if not ok:
+        raise ValueError(f"Project and workspace validation failed: {err}")
+
+    # Only explicit manual confirmation can move a new task directly to PENDING.
+    auto_confirm = auto_confirm and source_type == "manual" and confirmation_source == "user"
 
     task = get_inbox_store().create_task(
         title=title,

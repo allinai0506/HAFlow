@@ -681,7 +681,6 @@ def start_workflow(
     inbox_task_id=None,
     fencing_token=None,
     launch_attempt_id=None,
-    db_path=None,
 ):
     context_bindings = parse_context_binding_args(context_args)
     mode = execution_mode(load_template(template)) if template else "git"
@@ -715,7 +714,7 @@ def start_workflow(
         with workflow_creation_lock(project["project_id"]):
             if inbox_task_id:
                 already_registered = _verify_and_bind_inbox_task_fencing(
-                    db_path=db_path,
+                    db_path=None,
                     inbox_task_id=inbox_task_id,
                     fencing_token=fencing_token,
                     launch_attempt_id=launch_attempt_id,
@@ -737,7 +736,7 @@ def start_workflow(
             )
             if inbox_task_id:
                 _verify_and_bind_inbox_task_fencing(
-                    db_path=db_path,
+                    db_path=None,
                     inbox_task_id=inbox_task_id,
                     fencing_token=fencing_token,
                     launch_attempt_id=launch_attempt_id,
@@ -1287,6 +1286,18 @@ def main():
 
     if args.command == "run":
         try:
+            if args.db_path is not None:
+                from herdr.kernel import state_db_path
+
+                target_db = Path(args.db_path).expanduser().resolve()
+                if target_db != state_db_path().resolve():
+                    # An override must not write projections or run definitions
+                    # belonging to the inherited database, even in the same directory.
+                    os.environ["WORKFLOWS_FILE"] = f"{target_db}.workflows.json"
+                    os.environ["TASKS_FILE"] = f"{target_db}.tasks.json"
+                    os.environ["HERDR_WORKFLOW_DOCS_DIR"] = f"{target_db}.workflows"
+                # Store helpers and deep-preflight inherit the same CLI context.
+                os.environ["HERDR_STATE_DB"] = str(target_db)
             workflow_id = start_workflow(
                 " ".join(args.requirement),
                 args.workflow_id,
@@ -1300,7 +1311,6 @@ def main():
                 inbox_task_id=getattr(args, "inbox_task_id", None),
                 fencing_token=getattr(args, "fencing_token", None),
                 launch_attempt_id=getattr(args, "launch_attempt_id", None),
-                db_path=getattr(args, "db_path", None),
             )
         except (ValueError, RuntimeError) as e:
             print(str(e), file=sys.stderr)
@@ -1358,7 +1368,6 @@ def main():
             fp = hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16]
             out = getattr(args, "out", None)
             if out:
-                from pathlib import Path
                 p = Path(out).expanduser().resolve()
                 p.parent.mkdir(parents=True, exist_ok=True)
                 temp_out = p.parent / f".tmp_{p.name}_{os.getpid()}"
@@ -1373,7 +1382,6 @@ def main():
 
             if getattr(args, "register_db", False):
                 from herdr import state_db
-                from pathlib import Path
                 db_p = Path(args.db_path).resolve() if getattr(args, "db_path", None) else None
                 state_db.save_user_token(args.operator, "operator", tok, db_path=db_p)
 

@@ -4463,3 +4463,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
 - Evidence
   - `herdr/task_resources.py#record_worker_start_checkpoint`
   - `tests/test_workflow_shutdown.py#test_worker_crash_recovers_absent_pane_only_before_agent_start`
+
+## [2026-11-18] Fix | Inbox 归属校验、提交防重和 Factory 数据库选择
+- 新任务创建前校验项目及绑定工作区。控制台重试同一提交时复用幂等键，Factory 启动使用明确指定的 SQLite。
+- Evidence
+  - `console/inbox_api.py#api_inbox_create_task`
+  - `console/static/console/scripts/inbox.js#submitNewInboxTask`
+  - `tests/test_workflow_startup_convergence.py#test_factory_cli_keeps_startup_in_explicit_database`

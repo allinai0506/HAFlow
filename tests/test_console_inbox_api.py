@@ -57,6 +57,8 @@ def test_api_inbox_workflow():
         draft_res = api_inbox_create_task({
             "title": "Draft task",
             "instruction": "Need review first",
+            "project_id": "haflow-1de29d2d",
+            "workspace_id": "w1K",
             "priority": "LOW",
         })
         assert draft_res["ok"] is True
@@ -116,6 +118,27 @@ def test_api_inbox_workflow():
         assert stats_res["total"] == 2
         assert stats_res["counts"]["PENDING"] == 1
         assert stats_res["counts"]["CANCELLED"] == 1
+
+
+@pytest.mark.parametrize(("project_id", "workspace_id"), [
+    (None, "w1K"),
+    ("haflow-1de29d2d", "   "),
+    ("haflow-1de29d2d", "wrong-workspace"),
+    ("unknown-project", "w1K"),
+])
+@pytest.mark.parametrize("auto_confirm", [False, True])
+def test_task_creation_rejects_invalid_scope(project_id, workspace_id, auto_confirm, setup_inbox_test_db):
+    with patch("herdr.inbox.detector.load_projects", return_value=MOCK_PROJECTS):
+        with pytest.raises(ValueError, match="Project and workspace validation failed"):
+            api_inbox_create_task({
+                "title": "Invalid task",
+                "instruction": "Inspect queue",
+                "project_id": project_id,
+                "workspace_id": workspace_id,
+                "auto_confirm": auto_confirm,
+                "confirmed_by": "user",
+            })
+    assert setup_inbox_test_db.list_tasks() == ([], 0)
 
 
 def test_auto_confirm_source_validation_and_user_isolation(monkeypatch, setup_inbox_test_db):
@@ -637,3 +660,76 @@ def test_bootstrap_url_precedence_over_cached_inbox_state():
     assert out["test1_shell"] == "workbench"
     assert out["test2_inbox"] is True
     assert out["test2_wf"] is None
+
+
+def test_inbox_submission_blocks_duplicates_and_reuses_key_after_lost_response():
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js not available")
+
+    code = Path("console/static/console/scripts/inbox.js").read_text()
+    script = '''
+    const assert = require('node:assert/strict');
+    const crypto = require('node:crypto').webcrypto;
+    const fields = {
+      inboxTitle: {value: 'Task'},
+      inboxInstruction: {value: 'Test the queue'},
+      inboxProject: {value: 'project', focus() {}},
+      inboxWorkspace: {value: ''},
+      inboxSubmit: {disabled: false},
+      inboxAutoConfirm: {checked: false},
+    };
+    const document = {getElementById: id => fields[id]};
+    const state = {};
+    const esc = String;
+    const noop = () => {};
+    const badge = noop, formatElapsed = noop, paintCrumb = noop, setWorkspaceMode = noop;
+    const openModal = noop, toast = noop, showConfirmModal = noop;
+    let closes = 0;
+    function closeModal() { closes++; }
+    let requests = [];
+    let failResponse;
+    async function api(url, options) {
+      if (options?.method !== 'POST') return {tasks: []};
+      assert.equal(url, '/api/inbox/tasks');
+      requests.push(JSON.parse(options.body));
+      if (requests.length === 1) {
+        await new Promise((_, reject) => { failResponse = reject; });
+      }
+      return {ok: true};
+    }
+    ''' + code + '''
+    const watchdog = setTimeout(() => { throw new Error('submission test did not finish'); }, 1000);
+    (async () => {
+      await showNewInboxTaskModal();
+      await submitNewInboxTask();
+      assert.equal(requests.length, 0, 'draft with no workspace cannot be submitted');
+
+      fields.inboxWorkspace.value = 'workspace';
+      const first = submitNewInboxTask();
+      assert.equal(fields.inboxSubmit.disabled, true);
+      await submitNewInboxTask();
+      assert.equal(requests.length, 1, 'second click must not send a POST');
+      failResponse(new Error('response lost after commit'));
+      await first;
+      assert.equal(fields.inboxSubmit.disabled, false);
+      assert.equal(closes, 0);
+      assert.ok(requests[0].idempotency_key);
+
+      await submitNewInboxTask();
+      assert.deepEqual(requests[1], requests[0], 'retry must use the same key and payload');
+      assert.equal(closes, 1);
+      await submitNewInboxTask();
+      assert.equal(requests.length, 2, 'late click on the completed form cannot create a new task');
+
+      fields.inboxSubmit = {disabled: false};
+      await showNewInboxTaskModal();
+      await submitNewInboxTask();
+      assert.notEqual(requests[2].idempotency_key, requests[0].idempotency_key);
+    })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => clearTimeout(watchdog));
+    '''
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
