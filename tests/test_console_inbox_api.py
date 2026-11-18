@@ -849,3 +849,204 @@ def test_inbox_and_intake_js_composition():
     """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
+
+
+def test_intake_js_assign_unassign_assign_lifecycle():
+    """Verify that intake.js actions strictly derive from disposition and support Assign -> Unassign -> Assign."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js not available")
+
+    root = Path(__file__).resolve().parents[1]
+    intake_code = (root / "console/static/console/scripts/intake.js").read_text()
+
+    script = f"""
+    global.FormData = class {{ constructor(form) {{}} [Symbol.iterator]() {{ return [][Symbol.iterator](); }} }};
+
+    let modalTitle = '', modalHtml = '';
+    const openModal = (title, html) => {{ modalTitle = title; modalHtml = html; }};
+    const closeModal = () => {{ modalTitle = ''; modalHtml = ''; }};
+    const toast = () => {{}};
+    const esc = s => s == null ? '' : String(s);
+
+    let activeItem = {{
+      link_id: 'link-life-1',
+      task_id: null,
+      disposition: 'UNASSIGNED',
+      status: 'PENDING_ASSIGNMENT',
+      title: 'Initial External Task',
+      description: 'Initial description',
+      priority: 'NORMAL',
+      provider: 'linear',
+      object_type: 'issue',
+      external_id: 'LIN-100',
+      connection_id: 'conn-1',
+      event_id: 'evt-1',
+      revision: 1,
+      project_id: null,
+      workspace_id: null,
+      assignment_source: 'MANUAL',
+      display_name: 'Linear',
+      created_at: 1700000000000,
+      updated_at: 1700000000000,
+      source_title: 'Initial External Task',
+      source_description: 'Initial description'
+    }};
+
+    const state = {{
+      shellView: 'inbox',
+      overview: {{
+        projects: [
+          {{ project_id: 'proj-1', project_name: 'Project 1', workspace_id: 'ws-1' }}
+        ]
+      }}
+    }};
+
+    let unlockSubmitHandler = null;
+    let clickHandlers = new Map();
+
+    const document = {{
+      getElementById(id) {{
+        if (id === 'intakeUnlock') {{
+          return {{
+            querySelector: () => ({{ disabled: false }}),
+            addEventListener: (ev, fn) => {{ if (ev === 'submit') unlockSubmitHandler = fn; }}
+          }};
+        }}
+        if (id === 'intakeCredential') return {{ value: 'test-token-valid-longer-than-32-chars', focus() {{}} }};
+        if (id === 'intakeDetail') {{
+          return {{
+            dataset: {{ linkId: activeItem.link_id }},
+            querySelector(sel) {{
+              return {{ textContent: '', focus() {{}} }};
+            }},
+            querySelectorAll(sel) {{
+              if (sel === 'button') return [{{ disabled: false }}];
+              if (sel === '[data-action]') {{
+                const actions = (modalHtml.match(/data-action="([^"]+)"/g) || []).map(m => m.slice(13, -1));
+                return actions.map(act => ({{
+                  dataset: {{ action: act }},
+                  addEventListener(ev, fn) {{ clickHandlers.set(act, fn); }}
+                }}));
+              }}
+              return [];
+            }},
+            addEventListener() {{}}
+          }};
+        }}
+        if (id === 'intakeProject') return {{ value: 'proj-1', selectedOptions: [{{ dataset: {{ workspace: 'ws-1' }} }}], addEventListener() {{}} }};
+        if (id === 'intakeWorkspace') return {{ value: 'ws-1', addEventListener() {{}} }};
+        return {{ value: '', focus() {{}}, querySelector() {{ return null; }}, addEventListener() {{}} }};
+      }}
+    }};
+
+    async function api(url, options = {{}}) {{
+      if (url.startsWith('/api/inbox/intake')) {{
+        if (options.method === 'POST') {{
+          const payload = JSON.parse(options.body);
+          if (payload.action === 'assign') {{
+            if (!activeItem.task_id) activeItem.task_id = 'task-life-created';
+            activeItem.disposition = 'LINKED';
+            activeItem.revision += 1;
+            activeItem.status = (activeItem.project_id && activeItem.workspace_id) ? 'DRAFT' : 'PENDING_ASSIGNMENT';
+          }} else if (payload.action === 'unassign') {{
+            activeItem.disposition = 'UNASSIGNED';
+            activeItem.revision += 1;
+            activeItem.status = 'PENDING_ASSIGNMENT';
+          }}
+          return {{ ok: true, item: activeItem }};
+        }}
+        return {{ ok: true, items: [JSON.parse(JSON.stringify(activeItem))] }};
+      }}
+      return {{ ok: true }};
+    }}
+
+    {intake_code}
+
+    function getModalActions() {{
+      const matches = modalHtml.match(/data-action="([^"]+)"/g) || [];
+      return matches.map(m => m.slice(13, -1));
+    }}
+
+    function isModalEditable() {{
+      return modalHtml.includes('class="btn primary">保存修改</button>');
+    }}
+
+    (async () => {{
+      const assert = require('node:assert/strict');
+      toggleIntakeAuth();
+      await unlockSubmitHandler({{ preventDefault() {{}} }});
+
+      // 1. Initial state (UNASSIGNED, task_id: null)
+      await fetchIntakeActiveItems(['limit=50'], 'ALL', true);
+      showIntakeDetail('link-life-1');
+      assert.equal(isModalEditable(), false, 'Unassigned item should not be editable');
+      assert.deepEqual(getModalActions(), ['assign', 'ignore'], 'Unassigned item must show assign and ignore');
+
+      // 2. Assign -> LINKED
+      await clickHandlers.get('assign')();
+      await fetchIntakeActiveItems(['limit=50'], 'ALL', true);
+      showIntakeDetail('link-life-1');
+      assert.equal(isModalEditable(), true, 'Linked item should be editable');
+      assert.deepEqual(getModalActions(), ['unassign', 'ignore'], 'Linked item without scope should show unassign and ignore');
+      assert.equal(activeItem.task_id, 'task-life-created');
+
+      // 3. Unassign -> UNASSIGNED (task_id is still preserved!)
+      assert.ok(activeItem.task_id != null, 'Task ID should be preserved');
+      await clickHandlers.get('unassign')();
+      await fetchIntakeActiveItems(['limit=50'], 'ALL', true);
+      showIntakeDetail('link-life-1');
+      assert.equal(activeItem.disposition, 'UNASSIGNED');
+      assert.equal(activeItem.task_id, 'task-life-created', 'task_id must remain preserved across unassign');
+      assert.equal(isModalEditable(), false, 'Unassigned item must not be editable even if task_id exists');
+      assert.deepEqual(getModalActions(), ['assign', 'ignore'], 'Unassigned item with preserved task_id must show assign and ignore');
+
+      // 4. Re-assign -> LINKED again (reusing existing task_id)
+      await clickHandlers.get('assign')();
+      await fetchIntakeActiveItems(['limit=50'], 'ALL', true);
+      showIntakeDetail('link-life-1');
+      assert.equal(activeItem.disposition, 'LINKED');
+      assert.equal(activeItem.task_id, 'task-life-created', 'Re-assignment reuses existing task_id');
+      assert.equal(isModalEditable(), true, 'Re-assigned item is editable again');
+      assert.deepEqual(getModalActions(), ['unassign', 'ignore']);
+
+      // 5. Scope set -> DRAFT -> shows confirm
+      activeItem.project_id = 'proj-1';
+      activeItem.workspace_id = 'ws-1';
+      activeItem.status = 'DRAFT';
+      await fetchIntakeActiveItems(['limit=50'], 'ALL', true);
+      showIntakeDetail('link-life-1');
+      assert.deepEqual(getModalActions(), ['confirm', 'unassign', 'ignore'], 'DRAFT item with valid scope shows confirm, unassign, ignore');
+
+      // 6. Source closed while LINKED: non-editable, unassign/ignore
+      activeItem.status = 'SOURCE_CLOSED';
+      await fetchIntakeActiveItems(['limit=50'], 'ALL', true);
+      showIntakeDetail('link-life-1');
+      assert.equal(isModalEditable(), false);
+      assert.deepEqual(getModalActions(), ['unassign', 'ignore']);
+
+      // 7. Source closed while UNASSIGNED: non-editable, ignore only
+      activeItem.disposition = 'UNASSIGNED';
+      await fetchIntakeActiveItems(['limit=50'], 'ALL', true);
+      showIntakeDetail('link-life-1');
+      assert.equal(isModalEditable(), false);
+      assert.deepEqual(getModalActions(), ['ignore']);
+
+      // 8. IGNORED: non-editable, reactivate only
+      activeItem.disposition = 'IGNORED';
+      activeItem.status = 'IGNORED';
+      await fetchIntakeActiveItems(['limit=50'], 'ALL', true);
+      showIntakeDetail('link-life-1');
+      assert.equal(isModalEditable(), false);
+      assert.deepEqual(getModalActions(), ['reactivate']);
+    }})().catch(err => {{
+      console.error(err);
+      process.exitCode = 1;
+    }});
+    """
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, f"Node script failed:\\nSTDOUT:\\n{result.stdout}\\nSTDERR:\\n{result.stderr}"

@@ -111,7 +111,7 @@ def materialize(store, claim, policy):
         bind_instance(db, store.scope.tenant_id, user)
         if event["config_revision"] != claim.revision:
             return store._finish(db, event, now, "IGNORED", "SOURCE_AUTHORIZATION_CHANGED")
-        if event["data_json"] is None:
+        if event["data_json"] is None or event["received_at"] <= now - store.policy.retention_ms:
             return store._finish(db, event, now, "IGNORED", "NO_RETAINED_CANONICAL_DATA")
         try:
             incoming = _observation(event)

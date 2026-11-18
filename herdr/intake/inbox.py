@@ -64,9 +64,11 @@ class IntakeInbox:
         filters = {
             "ALL": "",
             "MINE": " AND l.disposition = 'LINKED'",
-            "PENDING_ASSIGNMENT": " AND l.disposition = 'UNASSIGNED' AND o.external_status = 'OPEN'",
+            "PENDING_ASSIGNMENT": """ AND (l.disposition = 'UNASSIGNED' OR l.project_id IS NULL OR l.workspace_id IS NULL)
+                AND o.external_status = 'OPEN' AND l.disposition <> 'IGNORED'""",
             "DRAFT": """ AND l.disposition = 'LINKED' AND t.status = 'DRAFT'
-                AND l.confirmation_json IS NULL AND o.external_status = 'OPEN'""",
+                AND l.confirmation_json IS NULL AND o.external_status = 'OPEN'
+                AND l.project_id IS NOT NULL AND l.workspace_id IS NOT NULL""",
         }
         if view not in filters:
             raise ValueError("invalid Inbox view")
@@ -164,8 +166,8 @@ class IntakeInbox:
             }
             event = "intake_task_edited"
         elif action == "confirm" and state == "LINKED":
-            if project and not valid_scope(project, workspace):
-                raise StateConflict("project/workspace binding changed")
+            if not project or not workspace or not valid_scope(project, workspace):
+                raise StateConflict("project/workspace binding required to confirm")
             content = [item["title"], item["instruction"], item["priority"], project, workspace]
             confirmation = canonical_json({
                 "user_id": self.user, "task_id": task_id, "confirmed_at": now,
@@ -210,7 +212,7 @@ def _project(row):
         status = "IGNORED"
     elif row["external_status"] != "OPEN":
         status = "SOURCE_CLOSED" if row["external_status"] == "CLOSED" else "SOURCE_CONFLICT"
-    elif disposition == "UNASSIGNED":
+    elif disposition == "UNASSIGNED" or not row["project_id"] or not row["workspace_id"]:
         status = "PENDING_ASSIGNMENT"
     elif row["task_status"] != "DRAFT":
         status = row["task_status"]

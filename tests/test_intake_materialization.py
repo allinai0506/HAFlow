@@ -60,15 +60,20 @@ def test_non_work_and_invalid_facts_never_create_tasks(store, action, title, sta
     assert InboxStore(store.path).list_tasks() == ([], 0)
 
 
-def test_operator_confirms_without_dispatch_and_can_remove_assignment(store):
+def test_operator_confirms_without_dispatch_and_can_remove_assignment(store, monkeypatch):
     from herdr.intake.inbox import IntakeInbox
     from herdr.intake.worker import run_once
     from herdr.inbox.dispatcher import InboxDispatcher
     from herdr.inbox.store import InboxStore
 
-    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+    registry = {"a": {"project_id": "project", "workspace_id": "workspace"}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
+    policy = {"user_id": "operator", "project_id": "project", "workspace_id": "workspace"}
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {
+        "one": {"project_id": "project", "workspace_id": "workspace"},
+    }}
     store.accept_event(fact())
-    run_once(store, materialization={"user_id": "operator", "auto_assign": False})
+    run_once(store, materialization={**policy, "auto_assign": False})
     inbox = IntakeInbox(store.path, config)
     item, = inbox.list_items()
     assert item["status"] == "PENDING_ASSIGNMENT"
@@ -86,7 +91,7 @@ def test_operator_confirms_without_dispatch_and_can_remove_assignment(store):
     item = inbox.change(item["link_id"], "unassign", item["revision"])
     assert item["status"] == "PENDING_ASSIGNMENT"
     store.accept_event(fact("later", version=2))
-    run_once(store, materialization={"user_id": "operator", "auto_assign": True})
+    run_once(store, materialization={**policy, "auto_assign": True})
     item, = inbox.list_items()
     assert item["status"] == "PENDING_ASSIGNMENT"
     assert item["assignment_source"] == "MANUAL"
@@ -220,7 +225,9 @@ def test_edit_mapping_survives_external_events_and_closed_item_stays_closed(stor
                 "b": {"project_id": "project-b", "workspace_id": "ws-b"}}
     monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
     settings = {"user_id": "operator", "project_id": "project-a", "workspace_id": "ws-a"}
-    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {
+        "one": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"},
+    }}
     store.accept_event(fact())
     run_once(store, materialization=settings)
     inbox = IntakeInbox(store.path, config)
@@ -283,14 +290,19 @@ def test_console_http_auth_and_no_legacy_inbox_access(store, monkeypatch):
     from console.http_server import Handler
     from herdr.intake.worker import run_once
 
-    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": {
+        "p": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"},
+    }})
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {
+        "one": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"}
+    }}
     monkeypatch.setenv("HERDR_STATE_DB", str(store.path))
     monkeypatch.setenv("HAFLOW_USER", "admin")
     monkeypatch.setenv("HAFLOW_INTAKE_INBOX_CONFIG", json.dumps(config))
     monkeypatch.setenv("HAFLOW_INTAKE_INBOX_TOKEN", "a" * 40)
     monkeypatch.setattr("console.inbox_api._store_instance", None)
     store.accept_event(fact())
-    run_once(store, materialization={"user_id": "operator"})
+    run_once(store, materialization={"user_id": "operator", "project_id": "haflow-1de29d2d", "workspace_id": "w1H"})
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -374,7 +386,9 @@ def test_authorization_rotation_hides_old_draft_and_prevents_old_ingress_materia
     from herdr.intake.inbox import IntakeInbox
     from herdr.intake.worker import run_once
 
-    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {
+        "one": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"},
+    }}
     inbox = IntakeInbox(store.path, config)
     settings = {"user_id": "operator"}
     store.accept_event(fact())
@@ -427,7 +441,9 @@ def test_late_close_and_conflicting_equal_version_block_confirmation(store, cloc
     from herdr.intake.store import StateConflict
     from herdr.intake.worker import run_once
 
-    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {
+        "one": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"},
+    }}
     settings = {"user_id": "operator"}
     inbox = IntakeInbox(store.path, config)
     store.accept_event(fact(version=4))
@@ -457,7 +473,16 @@ def test_worker_cli_reads_trusted_instance_policy(store, clock, monkeypatch):
 
     from herdr.intake.inbox import IntakeInbox
 
-    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+    from pathlib import Path
+    ctrl = Path.home() / ".herdr-controller"
+    ctrl.mkdir(parents=True, exist_ok=True)
+    (ctrl / "projects.json").write_text(json.dumps({
+        "version": 1,
+        "projects": {"/path": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"}},
+    }))
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {
+        "one": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"},
+    }}
     clock[0] = time.time_ns() // 1_000_000
     receipt = store.accept_event(fact())
     monkeypatch.setenv("HERDR_STATE_DB", str(store.path))
@@ -522,7 +547,9 @@ def test_projection_filters_before_pagination(store, clock, monkeypatch):
         "a": {"project_id": "alpha", "workspace_id": "ws"},
         "b": {"project_id": "beta", "workspace_id": "ws"},
     }})
-    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {
+        "one": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"},
+    }}
     for name, project in [("old-match", "alpha"), ("new-other", "beta"), ("new-match", "alpha")]:
         clock[0] += 1
         store.accept_event(fact(name, external_id=name))
@@ -544,3 +571,153 @@ def test_upgrade_preserves_manual_rows_and_reserves_no_source_flag(store):
     manual, = inbox.list_tasks(manual_only=True)[0]
     assert manual["id"] == task["id"]
     assert inbox.confirm_task_scope(task["id"], "project", "workspace")["status"] == "PENDING"
+
+
+def test_expired_event_beyond_retention_never_materializes_task(store, clock):
+    from herdr.intake.worker import run_once
+    from herdr.inbox.store import InboxStore
+
+    receipt = store.accept_event(fact())
+    # Advance clock beyond retention_ms (90 days)
+    clock[0] += store.policy.retention_ms + 1000
+    assert run_once(store, materialization={"user_id": "operator", "auto_assign": True})
+    event = store.get_event(receipt.event_id)
+    assert event["status"] == "IGNORED"
+    assert event["last_error"] == "NO_RETAINED_CANONICAL_DATA"
+    assert InboxStore(store.path).list_tasks() == ([], 0)
+
+
+def test_closed_and_conflict_items_support_unassign_and_ignore(store, clock, monkeypatch):
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.worker import run_once
+
+    registry = {"a": {"project_id": "p", "workspace_id": "w"}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
+    policy = {"user_id": "operator", "project_id": "p", "workspace_id": "w"}
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {
+        "project_id": "p", "workspace_id": "w",
+    }}}
+    inbox = IntakeInbox(store.path, config)
+
+    # 1. Closed external item: support unassign and ignore
+    store.accept_event(fact("item1", external_id="EXT-1", version=1))
+    run_once(store, materialization=policy)
+    clock[0] += 1
+    store.accept_event(fact("close1", external_id="EXT-1", version=2, action="closed"))
+    run_once(store, materialization=policy)
+    item, = inbox.list_items()
+    assert item["status"] == "SOURCE_CLOSED"
+    assert item["disposition"] == "LINKED"
+    item = inbox.change(item["link_id"], "unassign", item["revision"])
+    assert item["disposition"] == "UNASSIGNED"
+    item = inbox.change(item["link_id"], "ignore", item["revision"])
+    assert item["status"] == "IGNORED"
+
+    # 2. Conflicting external item: support unassign and ignore
+    clock[0] += 1
+    store.accept_event(fact("item2", external_id="EXT-2", version=1))
+    run_once(store, materialization=policy)
+    clock[0] += 1
+    store.accept_event(fact("conflict2", external_id="EXT-2", version=1, title="Conflicting title"))
+    run_once(store, materialization=policy)
+    item = [i for i in inbox.list_items() if i["external_id"] == "EXT-2"][0]
+    assert item["status"] == "SOURCE_CONFLICT"
+    assert item["disposition"] == "LINKED"
+    item = inbox.change(item["link_id"], "unassign", item["revision"])
+    assert item["disposition"] == "UNASSIGNED"
+    item = inbox.change(item["link_id"], "ignore", item["revision"])
+    assert item["status"] == "IGNORED"
+
+
+def test_missing_scope_enters_pending_assignment_and_blocks_confirmation_until_assigned(store, monkeypatch):
+    import pytest
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.store import StateConflict
+    from herdr.intake.worker import run_once
+    from herdr.inbox.store import InboxStore
+
+    registry = {"a": {"project_id": "p-valid", "workspace_id": "w-valid"}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+    # Materialize without project or workspace
+    store.accept_event(fact())
+    run_once(store, materialization={"user_id": "operator", "auto_assign": True})
+
+    inbox = IntakeInbox(store.path, config)
+    item, = inbox.list_items()
+    # In SQLite, task exists as DRAFT
+    tasks, total = InboxStore(store.path).list_tasks(user_id="operator")
+    assert total == 1 and tasks[0]["status"] == "DRAFT"
+    assert tasks[0]["project_id"] is None and tasks[0]["workspace_id"] is None
+
+    # But visible projection is PENDING_ASSIGNMENT because execution scope is missing
+    assert item["status"] == "PENDING_ASSIGNMENT"
+    assert item["disposition"] == "LINKED"
+    assert item["task_id"] == tasks[0]["id"]
+    assert len(inbox.list_items(view="PENDING_ASSIGNMENT")) == 1
+    assert len(inbox.list_items(view="DRAFT")) == 0
+
+    # Cannot confirm without project/workspace
+    with pytest.raises(StateConflict, match="project/workspace binding required"):
+        inbox.change(item["link_id"], "confirm", item["revision"])
+
+    # Edit to assign project and workspace
+    item = inbox.change(item["link_id"], "edit", item["revision"], {
+        "title": item["title"], "description": item["description"], "priority": "HIGH",
+        "project_id": "p-valid", "workspace_id": "w-valid",
+    })
+    # Now project and workspace are set, item transitions to DRAFT
+    assert item["status"] == "DRAFT"
+    assert len(inbox.list_items(view="DRAFT")) == 1
+    assert len(inbox.list_items(view="PENDING_ASSIGNMENT")) == 0
+
+    # Now it can be confirmed
+    item = inbox.change(item["link_id"], "confirm", item["revision"])
+    assert item["status"] == "CONFIRMED"
+
+
+def test_assign_unassign_reassign_cycle_reuses_task_and_updates_audit(store, monkeypatch):
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.worker import run_once
+    from herdr.inbox.store import InboxStore
+
+    registry = {"a": {"project_id": "p-valid", "workspace_id": "w-valid"}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+
+    # 1. Ingest event with auto_assign=False so it starts UNASSIGNED
+    store.accept_event(fact("cycle-item"))
+    run_once(store, materialization={"user_id": "operator", "auto_assign": False})
+
+    inbox = IntakeInbox(store.path, config)
+    item, = inbox.list_items()
+    assert item["disposition"] == "UNASSIGNED"
+    assert item["task_id"] is None
+    assert item["status"] == "PENDING_ASSIGNMENT"
+
+    # 2. First Assign: creates draft task in user_inbox_tasks
+    item = inbox.change(item["link_id"], "assign", item["revision"])
+    assert item["disposition"] == "LINKED"
+    assert item["task_id"] is not None
+    created_task_id = item["task_id"]
+
+    # 3. Unassign: resets disposition to UNASSIGNED, retains task_id
+    item = inbox.change(item["link_id"], "unassign", item["revision"])
+    assert item["disposition"] == "UNASSIGNED"
+    assert item["task_id"] == created_task_id
+    assert item["status"] == "PENDING_ASSIGNMENT"
+
+    # 4. Re-assign: reuses the draft task, sets disposition back to LINKED
+    item = inbox.change(item["link_id"], "assign", item["revision"])
+    assert item["disposition"] == "LINKED"
+    assert item["task_id"] == created_task_id
+    assert item["assignment_source"] == "MANUAL"
+
+    # Check audit log trail: 1 AUTO initial assignment record, then 3 MANUAL operations
+    audits = [a for a in store.list_admin_audit() if a["event_type"] == "intake_assignment"]
+    assert len(audits) == 4
+    assert [a["origin"] for a in audits] == ["AUTO", "MANUAL", "MANUAL", "MANUAL"]
+    assert [a["user_id"] for a in audits] == [None, "operator", None, "operator"]
+    assert audits[1]["previous_user_id"] is None
+    assert audits[2]["previous_user_id"] == "operator"
+    assert audits[3]["previous_user_id"] is None

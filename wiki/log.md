@@ -4492,3 +4492,24 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `herdr/intake/materializer.py#materialize`
   - `herdr/intake/inbox.py#IntakeInbox`
   - `tests/test_intake_materialization.py`
+
+## [2026-11-18] Fix | Active Intake Task Materialization V1 独立复审闭环 (PR #425)
+- 解决复审 3 项 P2 发现：
+  1. P2-01（超期事件物化防线）：物化事务前置核验事件保留期 `received_at <= now - retention_ms`，未清理过期数据安全忽略并记 `NO_RETAINED_CANONICAL_DATA`，杜绝超期事件生成新任务；
+  2. P2-02（关闭与冲突事项清理通道）：在 `intake.js` 为 `SOURCE_CLOSED` 与 `SOURCE_CONFLICT` 状态补齐 `unassign`（撤销归属）与 `ignore`（忽略事项）操作通道，继续阻断 `edit` 与 `confirm`；
+  3. P2-03（执行范围缺失进入待分配）：显式解耦收件人归属与执行归属，执行范围（Project/Workspace）缺失时统一投影为 `PENDING_ASSIGNMENT` 并阻断确认，补全有效范围后方可转 `DRAFT` 并确认。
+- Evidence
+  - `herdr/intake/materializer.py#materialize`
+  - `herdr/intake/inbox.py#IntakeInbox`
+  - `console/static/console/scripts/intake.js#showIntakeDetail`
+  - `tests/test_intake_materialization.py#test_expired_event_beyond_retention_never_materializes_task`
+  - `tests/test_intake_materialization.py#test_closed_and_conflict_items_support_unassign_and_ignore`
+  - `tests/test_intake_materialization.py#test_missing_scope_enters_pending_assignment_and_blocks_confirmation_until_assigned`
+
+## [2026-11-18] Fix | Active Intake Task Materialization V1 前端权限与重新分配闭环 (PR #425)
+- 解决复审遗留 P2 缺陷：
+  - P2-04（基于 disposition 统一前端操作权限与重新分配）：修复前端 `intake.js` 中 `editable` 与操作按钮判断逻辑，彻底移除对底层草稿 `task_id` 的依赖，统一严格根据 `item.disposition`（`LINKED` / `UNASSIGNED` / `IGNORED`）和状态计算可用动作。撤销归属后保留底层 `task_id` 以便重用，但在前端正确呈现“分配给我”与“忽略”按钮，并置为只读模式，完整闭环 `Assign → Unassign → Assign` 交互。
+- Evidence
+  - `console/static/console/scripts/intake.js#showIntakeDetail`
+  - `tests/test_console_inbox_api.py#test_intake_js_assign_unassign_assign_lifecycle`
+  - `tests/test_intake_materialization.py#test_assign_unassign_reassign_cycle_reuses_task_and_updates_audit`
