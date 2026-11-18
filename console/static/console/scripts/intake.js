@@ -162,12 +162,22 @@ function toggleIntakeAuth(onReload, onRender){
 function showIntakeDetail(linkId, onReload){
   const item = intakeItems.find(row => row.link_id === linkId);
   if(!item || !intakeToken) return;
-  const editable = ['DRAFT','CONFIRMED'].includes(item.status);
+  const editable = ['DRAFT','CONFIRMED'].includes(item.status) || (item.status === 'PENDING_ASSIGNMENT' && Boolean(item.task_id));
+  const closedActions = item.disposition === 'LINKED'
+    ? [['unassign','撤销归属'],['ignore','忽略']]
+    : [['ignore','忽略']];
+  const pendingActions = item.task_id
+    ? (item.project_id && item.workspace_id
+        ? [['confirm','确认'],['unassign','撤销归属'],['ignore','忽略']]
+        : [['unassign','撤销归属'],['ignore','忽略']])
+    : [['assign','分配给我'],['ignore','忽略']];
   const actions = {
     DRAFT:[['confirm','确认'],['unassign','撤销归属'],['ignore','忽略']],
     CONFIRMED:[['unassign','撤销归属'],['ignore','忽略']],
-    PENDING_ASSIGNMENT:[['assign','分配给我'],['ignore','忽略']],
+    PENDING_ASSIGNMENT: pendingActions,
     IGNORED:[['reactivate','重新激活']],
+    SOURCE_CLOSED: closedActions,
+    SOURCE_CONFLICT: closedActions,
   };
   const projects = (state.overview && state.overview.projects) || [];
   const options = projects.filter(p => p.workspace_id).map(p =>

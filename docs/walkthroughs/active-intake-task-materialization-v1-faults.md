@@ -19,11 +19,14 @@
 | 冲突版本 | 外部系统推送相同 version 但不同快照指纹的事实 | 外部对象状态被标记为 `CONFLICT`，事件标记 `IGNORED` (`OBJECT_VERSION_CONFLICT`)，关联任务的确认操作被物理阻断。 | PASS |
 | 外部关闭 | 外部事项收到 `action = 'closed'` 事件 | 外部对象状态转为 `CLOSED`，清空确认状态，操作员无法再确认该事项，杜绝将已失效的外部工作推向执行。 | PASS |
 | 执行防穿透 | 外部通过直接 SQL 或 API 尝试将 active intake 关联任务的 status 更新为 `PENDING` | 触发器 `intake_inbox_draft_only` 立即执行 `RAISE(ABORT)` 中止更新，保证 active intake 任务物理上不可被 Dispatcher 领取。 | PASS |
+| 保留期门禁 (P2-01) | 数据库中存在未及时被 prune 清理、但接收时间已超过 `retention_ms` 的事件 | 物化事务检测 `received_at <= now - retention_ms`，直接更新事件为 `IGNORED / NO_RETAINED_CANONICAL_DATA`，绝不物化新任务。 | PASS |
+| 终态清理 (P2-02) | 外部事项处于 `SOURCE_CLOSED` 或 `SOURCE_CONFLICT` 状态 | 允许操作员通过 `unassign`（撤销归属）与 `ignore`（忽略事项）清理控制台视图，依然严格阻断 `edit` 与 `confirm`。 | PASS |
+| 执行归属 (P2-03) | 外部事项完成物化但未配置或映射有效 Project/Workspace | 任务虽然归属操作员，但投影与视图维持 `PENDING_ASSIGNMENT`；确认操作抛出 `StateConflict` 阻断，仅在显式编辑补齐有效范围后方可转 DRAFT 并确认。 | PASS |
 
 ## 复现命令
 
 ```bash
-# 运行全部物化与故障注入测试套件
+# 运行全部物化与故障注入测试套件（27 passed）
 python3 -m pytest -q tests/test_intake_materialization.py
 ```
 

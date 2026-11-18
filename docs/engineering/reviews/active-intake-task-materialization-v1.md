@@ -38,6 +38,9 @@
 | 外部更新和终态 | 保留操作员内容和手动归属。乱序关闭使待办不可确认。同版本冲突阻断确认。忽略和手动重新激活保留同一任务 ID。 | 手动编辑再更新、撤销后工作事件、关闭和版本冲突、忽略与恢复 |
 | 确认与执行 | 普通确认和通用写入口受数据库门闸约束。Active Intake 确认保存本地回执，Dispatcher 只领取其原有队列。 | 真 Store、真 Dispatcher claim、真实 Console 浏览器的分配、编辑、确认和撤销 |
 | 来源与分页 | 查询绑定最近触发处置的事件及其正本回执，来源快照独立追溯，后端先筛项目和优先级，再分页。 | 浏览器来源详情、HTTP 读取、分页边界及旧数据库升级 |
+| 超期残存事件 (P2-01) | 未及时被 prune 清理但接收时间已过 90 天 retention 的事件仍可能被物化。现物化前置核验 `received_at <= now - retention_ms`，直接记 `NO_RETAINED_CANONICAL_DATA` 忽略。 | `test_expired_event_beyond_retention_never_materializes_task` 实测超期事件不产生任务 |
+| 终态清理通道 (P2-02) | `SOURCE_CLOSED` 与 `SOURCE_CONFLICT` 状态在前端缺失操作按钮，导致废弃事项无法清理。现前端开放 `unassign` 与 `ignore`，继续严格禁止编辑和确认。 | `test_closed_and_conflict_items_support_unassign_and_ignore` 实测关闭与冲突事项均可撤销归属或忽略 |
+| 执行归属一致性 (P2-03) | 执行范围（Project/Workspace）缺失时误显示为普通外部草稿。现明确区分收件人归属与执行归属：执行范围缺失时严格投影为 `PENDING_ASSIGNMENT` 并阻断确认，编辑补齐后方可转 DRAFT 并确认。 | `test_missing_scope_enters_pending_assignment_and_blocks_confirmation_until_assigned` 实测缺范围阻断确认与转 DRAFT 闭环 |
 
 ## 发布验证边界
 
