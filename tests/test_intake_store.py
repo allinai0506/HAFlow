@@ -61,13 +61,18 @@ def clock():
     return value
 
 
+def verify_synthetic(candidate):
+    return candidate.verified_via in ("LOCAL_JOB", "AUTHENTICATED_READ")
+
+
 @pytest.fixture
 def store(tmp_path, clock):
     from herdr.intake.schema import initialize
     from herdr.intake.store import EventStore, Scope
 
     store = EventStore(initialize(tmp_path / "state.db"), Scope("tenant", "one"),
-                       authorizer=lambda action, scope: "operator", clock=lambda: clock[0])
+                       authorizer=lambda action, scope: "operator", verifier=verify_synthetic,
+                       clock=lambda: clock[0])
     store.register_connection(provider="synthetic", instance="account",
                               display_name="Synthetic", connector_version="1.0.0")
     return store
@@ -149,7 +154,7 @@ def test_independent_connections_and_tenant_scope(store, clock):
 
     def connection(tenant, key):
         result = EventStore(store.path, Scope(tenant, key), authorizer=store.authorizer,
-                            clock=lambda: clock[0])
+                            verifier=verify_synthetic, clock=lambda: clock[0])
         result.register_connection(provider="synthetic", instance="account",
                                    display_name="Synthetic", connector_version="1.0.0")
         return result
@@ -168,7 +173,8 @@ def test_independent_connections_and_tenant_scope(store, clock):
     accepted = other.accept_event(delivery(scope=other.scope))
     assert accepted.outcome == "ACCEPTED" and accepted.event_id != first.event_id
     assert other.get_event(first.event_id) is None
-    unknown = EventStore(store.path, Scope("other", "one"))
+    unknown = EventStore(store.path, Scope("other", "one"),
+                         authorizer=store.authorizer, verifier=verify_synthetic)
     with pytest.raises(ScopeDenied):
         unknown.accept_event(delivery(scope=unknown.scope))
     with pytest.raises(ScopeDenied):
@@ -282,7 +288,8 @@ def test_stale_and_invalid_envelope_rejected_with_scoped_receipt(store):
 def test_verified_delivery_cannot_cross_scope_or_revision(store):
     from herdr.intake.store import EventStore, Scope, ScopeDenied
 
-    peer = EventStore(store.path, Scope("another", "peer"), authorizer=store.authorizer)
+    peer = EventStore(store.path, Scope("another", "peer"),
+                      authorizer=store.authorizer, verifier=verify_synthetic)
     peer.register_connection(provider="synthetic", instance="account", display_name="Peer",
                              connector_version="1.0.0")
     proof = delivery()
@@ -387,3 +394,58 @@ def test_reinitialize_replaced_database_at_same_path(tmp_path):
     initialize(path)
     with closing(open_db(path)) as db:
         assert not db.execute("SELECT 1 FROM intake_events").fetchall()
+
+
+def test_record_rejection_requires_scoped_grant(store):
+    from herdr.intake.store import EventStore, ScopeDenied
+
+    untrusted = EventStore(store.path, store.scope)
+    with pytest.raises(ScopeDenied):
+        untrusted.record_rejection("BAD_SIGNATURE")
+    wrong_grant = EventStore(store.path, store.scope,
+                             authorizer=lambda action, scope: "operator" if action == "replay" else None)
+    with pytest.raises(ScopeDenied):
+        wrong_grant.record_rejection("BAD_SIGNATURE")
+    assert not store.list_receipts()
+
+    def grant(action, scope):
+        if (action, scope) == ("record_rejection", store.scope):
+            return "trusted_ingress"
+        return None
+
+    ingress = EventStore(store.path, store.scope, authorizer=grant)
+    receipt = ingress.record_rejection("BAD_SIGNATURE")
+    assert receipt.outcome == "REJECTED"
+    assert [row["receipt_id"] for row in store.list_receipts()] == [receipt.receipt_id]
+    assert not store.list_events()
+
+
+def test_caller_supplied_delivery_fields_do_not_authorize_acceptance(store):
+    from dataclasses import replace
+
+    from herdr.intake.store import EventStore, ScopeDenied
+
+    untrusted = EventStore(store.path, store.scope, authorizer=store.authorizer)
+    with pytest.raises(ScopeDenied):
+        untrusted.accept_event(replace(delivery(), verified_via="SIGNATURE"))
+    assert not store.list_events()
+    assert not store.list_receipts()
+
+
+def test_verifier_denial_is_not_a_scoped_delivery_receipt(store):
+    from contextlib import closing
+
+    from herdr.intake.schema import open_db
+    from herdr.intake.store import EventStore, ScopeDenied
+
+    def verify(candidate):
+        with closing(open_db(store.path)) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.rollback()
+        return candidate.raw == b"verified"
+
+    ingress = EventStore(store.path, store.scope, verifier=verify, clock=store.now)
+    assert ingress.accept_event(delivery(transport="verified")).outcome == "ACCEPTED"
+    with pytest.raises(ScopeDenied):
+        ingress.accept_event(delivery(transport="unverified"))
+    assert [row["outcome"] for row in store.list_receipts()] == ["ACCEPTED"]

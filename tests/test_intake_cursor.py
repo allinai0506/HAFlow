@@ -148,3 +148,19 @@ def test_structurally_attributable_bad_position_receipts_without_advancing(store
         "INVALID_POLL_POSITION", "PAGE_ROLLED_BACK"}
     assert cursor.get("orders") == lease.state
     assert len(store.list_receipts()) == 2 and store.list_events() == []
+
+
+def test_unverified_poll_row_cannot_write_or_advance(store):
+    from herdr.intake.cursor import CursorStore
+    from herdr.intake.store import EventStore, ScopeDenied
+
+    cursor = CursorStore(store)
+    cursor.register("orders", capability="changes", initial_watermark=10)
+    lease = cursor.claim("orders", window_end=20)
+    denied = CursorStore(EventStore(store.path, store.scope, clock=store.now,
+                                    verifier=lambda candidate: candidate.raw == b"verified"))
+    with pytest.raises(ScopeDenied):
+        submit(denied, lease, (observed("a", 11, "a"),), exhausted=True)
+    assert cursor.get("orders") == lease.state
+    assert not store.list_events()
+    assert not store.list_receipts()

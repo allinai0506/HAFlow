@@ -13,7 +13,7 @@ from herdr.intake.schema import BUSY_TIMEOUT_MS, open_db
 from herdr.intake.store import EventStore, LeaseLost, Policy
 
 from tests.test_intake_cursor import observed, submit
-from tests.test_intake_store import clock, delivery, store
+from tests.test_intake_store import clock, delivery, store, verify_synthetic
 
 
 def crash(store, code):
@@ -25,9 +25,10 @@ from herdr.intake import store as module
 from herdr.intake.cursor import CursorStore
 from herdr.intake.store import EventStore, Policy, Scope
 from tests.test_intake_cursor import observed, submit
-from tests.test_intake_store import delivery
+from tests.test_intake_store import delivery, verify_synthetic
 
-store = EventStore(Path(sys.argv[1]), Scope("tenant", "one"), clock=lambda: int(sys.argv[2]))
+store = EventStore(Path(sys.argv[1]), Scope("tenant", "one"),
+                   verifier=verify_synthetic, clock=lambda: int(sys.argv[2]))
 real_open = module.open_db
 def die_on_commit(*args):
     db = real_open(*args)
@@ -150,7 +151,7 @@ def test_thousand_events_with_retries_duplicates_and_restarts(store, clock):
 
     def restart():
         return EventStore(store.path, store.scope, authorizer=store.authorizer,
-                          policy=policy, clock=lambda: clock[0])
+                          policy=policy, verifier=verify_synthetic, clock=lambda: clock[0])
 
     consumer = restart()
     cursor = CursorStore(consumer)

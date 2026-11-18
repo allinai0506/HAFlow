@@ -182,7 +182,7 @@ class Scope:
 
 @dataclass(frozen=True)
 class Delivery:
-    """Trusted ingress supplies verification evidence after authenticating bytes."""
+    """A delivery candidate. Its fields carry no verification authority."""
 
     envelope: bytes
     raw: bytes

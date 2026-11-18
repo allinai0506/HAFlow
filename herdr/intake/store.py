@@ -5,6 +5,7 @@ import logging
 import random
 import secrets
 import time
+from collections.abc import Callable
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,11 +115,12 @@ def prepare(delivery: Delivery) -> Prepared:
 
 class EventStore:
     def __init__(self, path: Path, scope: Scope, *, policy: Policy = Policy(),
-                 authorizer=None, clock=None):
+                 authorizer=None, verifier: Callable[[Delivery], bool] | None = None, clock=None):
         self.path = Path(path)
         self.scope = scope
         self.policy = policy
         self.authorizer = authorizer
+        self._verifier = verifier
         self.now = clock if clock is not None else lambda: time.time_ns() // 1_000_000
 
     @contextmanager
@@ -254,10 +256,15 @@ class EventStore:
     def _available(self, connection, revision):
         return connection["status"] in AVAILABLE and connection["config_revision"] == revision
 
-    def accept_event(self, delivery: Delivery) -> Receipt:
-        """Positive result is observable only after the write transaction commits."""
+    def _verify_delivery(self, delivery: Delivery) -> None:
         if delivery.scope != self.scope:
-            raise ScopeDenied("verified delivery scope mismatch")
+            raise ScopeDenied("delivery scope mismatch")
+        if self._verifier is None or self._verifier(delivery) is not True:
+            raise ScopeDenied("trusted ingress verification required")
+
+    def accept_event(self, delivery: Delivery) -> Receipt:
+        """Accept through the configured verifier. Return only after commit."""
+        self._verify_delivery(delivery)
         revision = integer(delivery.config_revision, 1)
         item = prepare(delivery)
         with self._write() as db:
@@ -278,7 +285,8 @@ class EventStore:
             self._audit(db, "intake_identity_collision", now, receipt_id=receipt.receipt_id)
 
     def record_rejection(self, reason):
-        """Trusted caller has established scope but failed ingress verification."""
+        """Record a rejection only when trusted ingress can establish scope."""
+        self._actor("record_rejection")
         error_code(reason)
         with self._write() as db:
             self._connection(db)

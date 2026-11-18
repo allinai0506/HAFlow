@@ -176,6 +176,7 @@ class CursorStore:
             size += len(delivery.raw) + len(delivery.envelope)
             if size > MAX_PAGE_BYTES:
                 raise ValueError("polling page exceeds byte budget")
+            self.events._verify_delivery(delivery)
             item = prepare(delivery)
             if not in_order:
                 item = replace(item, fact=None, reason="INVALID_POLL_POSITION")
