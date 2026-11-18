@@ -379,7 +379,9 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/inbox/task/confirm':return self.send_json(200,inbox_api.api_inbox_confirm_task(b))
             if p=='/api/inbox/task/priority':return self.send_json(200,inbox_api.api_inbox_set_priority(b))
             if p=='/api/inbox/task/reorder':return self.send_json(200,inbox_api.api_inbox_reorder_task(b))
-            if p=='/api/inbox/task/cancel':return self.send_json(200,inbox_api.api_inbox_cancel_task(b))
+            if p == '/api/inbox/task/cancel':
+                result = inbox_api.api_inbox_cancel_task(b)
+                return self.send_json(result.get('status_code', 200), result, error=result.get('error'))
             if p=='/api/inbox/task/retry':return self.send_json(200,inbox_api.api_inbox_retry_task(b))
             if p=='/api/inbox/detect':return self.send_json(200,inbox_api.api_inbox_detect(b))
             if p=='/api/inbox/sweep':return self.send_json(200,inbox_api.api_inbox_sweep())

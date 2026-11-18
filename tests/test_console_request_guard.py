@@ -141,3 +141,43 @@ def test_ui_sends_console_header_on_every_api_call():
     assert f"'{HEADER}':'1'" in console.HTML_TEMPLATE
     simple = (Path(common.CONSOLE_STATIC_DIR) / 'simple.js').read_text(encoding='utf-8')
     assert f"'{HEADER}':'1'" in simple
+
+
+def test_inbox_cancel_reports_http_status_and_preserves_unstopped_task(server, monkeypatch):
+    from herdr.inbox.store import InboxStore
+
+    port, db = server
+    store = InboxStore(db)
+    monkeypatch.setenv("HAFLOW_USER", "cancel-review")
+    monkeypatch.setattr("console.inbox_api.get_inbox_store", lambda: store)
+    # No terminal probe may reach a live Herdr instance.
+    monkeypatch.setattr("herdr.workflow_shutdown._pane", lambda _: None)
+    task = store.create_task(
+        title="Active task", instruction="Keep running until exit is verified",
+        project_id="p", workspace_id="w", user_id="cancel-review", auto_confirm=True,
+    )
+    store.update_task_status(task["id"], new_status="CLAIMED")
+    store.update_task_status(task["id"], new_status="RUNNING", workflow_id="owned")
+    state_db.save_task({"task_id": "worker", "workflow_id": "owned",
+                        "status": "working", "pane_id": "fixture-pane"}, db_path=db)
+    draft = store.create_task(
+        title="Draft", instruction="Cancel before launch",
+        project_id="p", workspace_id="w", user_id="cancel-review",
+    )
+
+    def cancel(task_id):
+        status, body = _send(port, "POST", "/api/inbox/task/cancel",
+                             json.dumps({"task_id": task_id}), {**JSON_HEADERS, HEADER: "1"})
+        return status, json.loads(body)
+
+    not_found_status, not_found = cancel("missing")
+    conflict_status, conflict = cancel(task["id"])
+    cancelled_status, cancelled = cancel(draft["id"])
+
+    assert (not_found_status, conflict_status, cancelled_status) == (404, 409, 200)
+    assert not_found["ok"] is False and not_found["error"] == "not_found"
+    assert conflict["ok"] is False and "failed to stop underlying workflow" in conflict["error"]
+    assert conflict["data"]["status_code"] == 409
+    assert cancelled["data"]["task"]["status"] == "CANCELLED"
+    assert store.get_task(task["id"])["status"] == "RUNNING"
+    assert state_db.get_workflow("owned", db_path=db)["status"] == "closing"
