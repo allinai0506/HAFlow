@@ -1,5 +1,7 @@
 # Active Intake Task Materialization V1 验收与对抗审查
 
+[实施报告](../../walkthroughs/active-intake-task-materialization-v1.md) · [故障注入报告](../../walkthroughs/active-intake-task-materialization-v1-faults.md) · [架构依据](../../architecture/active-intake-v1.md)
+
 ## 范围与实际入口
 
 一个 HAFlow 实例绑定一个租户和一个经认证的 Inbox 收件人。显式启用的连接默认自动把符合工作策略的事项交给该操作员。连接策略要求手动审查时，事项显示为待分配。外部负责人、创建者和审批者 ID 仅保留为来源事实。人工可核对并分配给自己、撤销归属、更新任务内容和范围、忽略事项或手动重新激活已忽略的开放事项。
