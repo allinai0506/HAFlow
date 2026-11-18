@@ -24,7 +24,12 @@ flowchart LR
   Workflow --> Dispatcher
 ```
 
-首发拓扑以**每个独立 HAFlow 实例一个租户、一个已认证本地运营主体**为部署边界。私有 Console 仅可由经 OS 或可信本地认证入口识别的专用运营主体访问。环境变量、Host 和 Origin 只能用于本地配置或请求边界，不能证明已完成主体认证。每个租户使用独立 SQLite、运行时、项目注册表、工作区和凭证命名空间。一个企业可以有多连接，同一连接只能绑定一个已核实的外部企业或账套。现有进程级用户名不足以安全承载共享服务。共享实例须先交付可验证的请求级身份、对象/任务/Workflow 读取授权及执行准入，不在首发承诺中。域模型可表达一租户多用户，只有已认证并可授权的主体才可收件。首发实例拒绝把其他用户的映射降级到本地操作员。
+### 产品阶段
+
+| 阶段 | 支持范围 | 进入条件 |
+| --- | --- | --- |
+| V1 首发 | 每个独立 HAFlow 实例一个租户、一个经认证的本地操作主体。可接同企业的多个连接，为该主体接收待办。采购、财务或销售团队成员各自登录并收件属于后续能力。 | 每租户使用独立 SQLite、运行时、项目注册表、工作区与凭证命名空间。私有 Console 依赖可信 OS 或本地认证入口，环境变量、Host 和 Origin 只用于配置或本地请求限制。每个连接绑定一个经核实的企业或账套。未核实或映射为其他用户的工作进入租户待处置，禁止落入操作员 Inbox。主动执行仍受第 4 节门槛约束。 |
+| 企业多人阶段 | 一个企业内多个用户按身份分别收件和确认，管理员可按显式授权委派。 | 先验证请求级主体、企业成员映射、用户级 Inbox 的读取和写入授权、对象与 Workflow 的读取授权、跨用户查看/改派的授权和审计，以及执行准入。跨租户共享部署须另外验证租户隔离。 |
 
 ## 2. 当前源码复用与差距
 
@@ -56,6 +61,8 @@ erDiagram
   TENANT ||--o{ INTAKE_CONNECTION : owns
   INTAKE_CONNECTION ||--o{ INTAKE_EVENT : receives
   INTAKE_CONNECTION ||--o{ INTAKE_CURSOR : tracks
+  INTAKE_CONNECTION ||--o{ INTAKE_DELIVERY_RECEIPT : receives
+  INTAKE_EVENT o|--o{ INTAKE_DELIVERY_RECEIPT : references
   INTAKE_EVENT ||--o{ INTAKE_ATTEMPT : records
   INTAKE_OBJECT o|--o{ INTAKE_EVENT : contextualizes
   INTAKE_OBJECT ||--o{ INTAKE_TASK_LINK : anchors
@@ -70,15 +77,20 @@ erDiagram
 | 实体 | 字段及含义 | 键与约束 |
 | --- | --- | --- |
 | `intake_connections` | `connection_id` 本地 ID，`tenant_id` 由实例确定，`provider` 提供方枚举，`provider_instance_key` 经过认证的组织/企业/账套命名空间，`display_name` 管理名称，`auth_ref` 外部凭证引用，`configuration` 非敏感配置，`connector_version` 固定版本，`config_revision` 配置代数，`status` 为 DISABLED/ACTIVE/DEGRADED/AUTH_REQUIRED，`created_at/updated_at` 时间，`last_health_at?`、`last_error?` 健康摘要。 | PK `connection_id`，复合唯一 `(tenant_id,connection_id)` 供 FK。组织、账套、信任边界变化开新连接。凭证轮换保留连接标识。 |
-| `intake_events` | `event_id` 本地 UUID，`tenant_id/connection_id` 接收范围，`provider_event_id?` 可证明的供应商事件 ID，`source/id` CloudEvents 身份，`type` 类型，`data_schema_uri?` 数据 Schema，`data_json?` canonical data，`subject?` 对象引用，`occurred_at?` 事实时间，`received_at` 接收时间，`payload_json?` 原始 JSON 或经允许保留的加密引用，`raw_digest` 原始字节摘要，`fact_digest` 稳定事实摘要，`signature_verified?` 仅签名传输为 true/false，`verified_via?` 为 SIGNATURE/AUTHENTICATED_READ/AUTHENTICATED_STREAM/LOCAL_JOB，`status` 事件状态，`attempt_count` 总尝试数，`retry_budget_used` 本轮已用数，`next_retry_at?` 到期时间，`last_error?` 错误码摘要，`correlation_id` 本地追踪 ID，`object_id?/link_id?` 结果引用，`lease_until?/claim_epoch` 租约与栅栏，`connector_version/config_revision/policy_revision` 解释证据，`payload_expires_at?` 原文到期。 | PK `event_id`，唯一 `(tenant_id,source,id)`。索引 `(tenant_id,status,next_retry_at,received_at)` 与过期 lease 查询。恶意请求无正本身份，按安全审计记录拒绝。 |
+| `intake_events` | `event_id` 本地 UUID，`tenant_id/connection_id` 接收范围，`provider_event_id?` 可证明的供应商事件 ID，`source/id` CloudEvents 身份，`type` 类型，`data_schema_uri?` 数据 Schema，`data_json?` canonical data，`subject?` 对象引用，`occurred_at?` 事实时间，`received_at` 接收时间，`payload_json?` 原始 JSON 或经允许保留的加密引用，`raw_digest` 原始字节摘要，`fact_digest` 带方案及投影版本的稳定事实摘要，`signature_verified?` 仅签名传输为 true/false，`verified_via?` 为 SIGNATURE/AUTHENTICATED_READ/AUTHENTICATED_STREAM/LOCAL_JOB，`status` 事件状态，`attempt_count` 总尝试数，`retry_budget_used` 本轮已用数，`next_retry_at?` 到期时间，`last_error?` 错误码摘要，`correlation_id` 本地追踪 ID，`object_id?/link_id?` 结果引用，`lease_until?/claim_epoch` 租约与栅栏，`connector_version/config_revision/policy_revision` 解释证据，`payload_expires_at?` 原文到期。 | PK `event_id`，唯一 `(tenant_id,source,id)`。索引 `(tenant_id,status,next_retry_at,received_at)` 与过期 lease 查询。认证失败的投递无正本身份，按回执或入口安全审计记录。 |
 | `intake_objects` | `object_id` 本地 UUID，`tenant_id/provider/provider_instance_key/object_type/external_id` 稳定外部坐标，`observed_connection_id` 当前有权读取的来源，`version?` 可比较版本或 opaque token，`snapshot_digest` 快照摘要，`url?` 经过来源白名单校验的外链，`snapshot_json` 最小业务字段，`external_status?` 外部状态，`last_event_id` 最近采用的证据，`first_seen_at/updated_at`。 | PK `object_id`，唯一 `(tenant_id,provider,provider_instance_key,object_type,external_id)`。两个已授权连接覆盖同一对象时共用键，读取另外连接观察到的数据仍须核验授权。 |
 | `intake_task_links` | `link_id` 本地 UUID，`tenant_id/object_id` 范围，`purpose_key` 已批准的稳定工作目的，`user_id?` 被授权收件人，`task_id?` 现有 Inbox 任务 ID，`disposition` 为 UNASSIGNED/LINKED/IGNORED，`reason_code?` 未分配或忽略原因，`created_at/updated_at`，`confirmation_json?` 已核实主体、项目、工作区、配置/授权版本、用户确认和执行快照摘要。 | PK `link_id`，唯一 `(tenant_id,object_id,purpose_key)`，非空 `task_id` 唯一。这个键有意排除当前负责人及投递连接。复合 FK 或同事务检查禁止跨租户引用，且事件同时引用 link 和 object 时必须属于同一对象。 |
 | `intake_cursors` | `tenant_id/connection_id/stream_key` 扫描范围，`cursor` 已提交水位及窗口内容，`last_sync_at?` 最近完成窗口，`sync_status` 为 IDLE/RUNNING/RETRY_WAIT/PAUSED，`last_error?`，`next_poll_at`，`lease_until?`，`claim_epoch`，`config_revision`。 | 复合 PK `(tenant_id,connection_id,stream_key)`。游标 opaque、带版本；只能由同代数持租约者 CAS 提交。 |
 | `intake_attempts` | `attempt_id` UUID，`tenant_id/event_id/attempt_number`，`started_at/finished_at?`，`outcome?` 结果，`error?`，`next_retry_at?`，`claim_epoch`，`trigger` 为 INITIAL/RETRY/REPLAY，`actor_ref?` 与 `replay_reason?` 供授权重放审计。 | PK `attempt_id`，唯一 `(tenant_id,event_id,attempt_number)`。尝试记录可从 open 完成一次，完成后保持。 |
-| 身份绑定 | `tenant_id/provider/provider_instance_key/subject_type/external_subject_id`，`user_id`，映射状态、核验人和核验时间。 | 首发用受管本地配置，按外部坐标唯一且保留配置版本。共享部署再接企业身份目录。 |
-| 投递审计 | `receipt_id/received_at/outcome/reason`，找到可信接收范围后记录 `tenant_id?/connection_id?`，`canonical_event_id?`，`raw_digest?` 和供应商传输 ID 摘要。 | 重复及拒绝落有界元数据审计。没有已有可证明满足查询、隔离与保留要求的审计时新增轻量表。匿名拒绝仅限额采样或计数。 |
+| 身份绑定（受管配置） | `tenant_id/provider/provider_instance_key/subject_type/external_subject_id`，`user_id`，映射状态、核验人和核验时间。 | V1 使用租户私有、原子更新、带修订号的持久配置，外部坐标唯一。配置更新保留变更审计。任务物化、改派及确认使用有效的映射版本，跨存储一致性按第 4 节的授权门槛验收。 |
+| `intake_delivery_receipts` | `receipt_id` UUID，`tenant_id/connection_id` 已建立的可信接收范围，`received_at`，`outcome` 为 ACCEPTED/DUPLICATE/REJECTED，`canonical_event_id?`，`reason_code?`，`raw_digest?`，`transport_id_digest?`，`batch_id?`。 | PK `receipt_id`，索引 `(tenant_id,connection_id,received_at)`。ACCEPTED/DUPLICATE 必须引用正本，REJECTED 的正本引用为空。多个回执可指向同一正本，回执不参与消费或重放。 |
 
-保留六个逻辑 Intake 表。Webhook-only 连接不产生游标。事件尝试无法复用 Inbox 的 Workflow 重试历史。事件→对象/任务的零一关系用事件上的可空引用承载，重放不能重定向已有链接。入箱后的对象更新仅写独立快照及事件关联，UI 可以展示“来源更新”和“来源已结束”，执行读取仍用已批准内容。长期保留最小身份墓碑，禁止清理原文时一并释放幂等键。
+六张核心表是 V1 的必需逻辑实体。V1 按六张独立物理表落地，并在同一 SQLite 文件新增第七张 `intake_delivery_receipts`。身份绑定使用前述受管配置。Webhook-only 连接无需游标行。
+
+- **数据库强制的外键。** 新表使用同库、带 `tenant_id` 的复合 FK。事件、游标、回执和对象的观察连接引用连接，尝试及非空回执正本引用事件，任务链接及事件的非空对象引用对象，事件的非空任务链接引用同一对象下的链接。目标表提供对应复合唯一键，历史引用使用限制删除，清理正文保留必要墓碑。
+- **事务内维护的关系。** `intake_objects.last_event_id` 在更新快照的同一事务验证租户和事件归属，避免与事件反向引用形成循环 FK。链接的 `task_id` 保留唯一约束，通过同库创建或改派事务验证现有 Inbox 任务及其用户、实例归属，避免依赖现有 Inbox 表迁移时的临时重建行为。现有 Inbox 到 Workflow 的关联沿用注册栅栏与对账。身份及项目/工作区来自受管配置和现有注册表，禁止将其当作 SQL FK。
+
+事件尝试无法复用 Inbox 的 Workflow 重试历史。事件→对象/任务的零一关系用事件上的可空引用承载，重放不能重定向已有链接。入箱后的对象更新仅写独立快照及事件关联，UI 可以展示“来源更新”和“来源已结束”，执行读取仍用已批准内容。长期保留最小身份墓碑，禁止清理原文时一并释放幂等键。
 
 ## 4. Inbox 归属与任务状态机
 
@@ -138,10 +150,11 @@ Inbox 状态边沿用 [现有定义](../../herdr/inbox/transitions.py#L41)。Wor
 
 实施按以下顺序，阶段成果由独立验收决定是否推进。
 
-1. 为关键不变量写 fixture 与故障矩阵，固定 manifest、供应商样本、身份和首发租户配置。验证 SQLite 兼容、配额及回收策略。
-2. 增设 Intake 账本、游标与消费器，先跑不产任务的持久化试验。验收故障注入覆盖数据库忙、ACK 丢失、消费租约过期及重放。
-3. 先交付服务端 DRAFT-only 门闸和回滚保护，再使用同库原子方式写入 Inbox DRAFT，串接来源可见性和身份待分配。验证老数据、人工创建和排序兼容。首发候选先验 Linear，再钉钉和 ERP。
-4. 单独验收授权代数、撤销与启动竞态、主动任务重试及所有直接入口。通过后才启用主动来源的人工确认和执行。
-5. 独立验证三个供应商的实际接入参数、权限、故障恢复与只读边界，形成租户级启用记录。共享部署需另外裁决。
+1. 交付同库 Event Inbox、投递回执、重试和游标。用合成推送与轮询样本验收幂等、重复确认、故障恢复和配额。
+2. 建立 Event 到 External Work Item 的关联和对象目的唯一键。用三类匿名样本验证乱序、重复和跨连接关联。
+3. 先部署服务端 DRAFT-only 门闸及回滚保护，再开放自动物化与待分配。验证老数据、改派和人工 Inbox 回归。
+4. 验收执行授权、撤权竞态、目标换绑和直接入口。通过后才允许主动来源由人工确认进入执行队列。
+5. 接入 Linear，验证真实重投、事实身份和只读权限。
+6. 接入钉钉 OA 与 ERP，分别验证 Stream 确认、审批转交以及真实账套的排序、游标和断点恢复。企业多人阶段继续单独裁决。
 
 当前交付止于设计和文档检查。
