@@ -91,6 +91,8 @@ def record_event_if_absent(
     payload = event.get("payload") or {}
     if not isinstance(payload, dict):
         raise ValueError("payload must be a dict")
+    if event.get("source") == "active_intake":
+        return {"status": "rejected", "reason": "reserved_source"}
     if not identity_value:
         return {"status": "rejected", "reason": "missing_identity"}
 
@@ -101,6 +103,7 @@ def record_event_if_absent(
             rows = conn.execute(
                 "SELECT id, timestamp, payload_json FROM events "
                 "WHERE workflow_id IS ? AND event_type = ? "
+                "AND (source IS NULL OR source != 'active_intake') "
                 "ORDER BY id DESC LIMIT ?",
                 (event.get("workflow_id"), event.get("event_type"),
                  int(scan_limit)),
@@ -160,7 +163,8 @@ def list_events(
     """
     conn = _facade().get_db_connection(db_path)
     try:
-        query = "SELECT * FROM events WHERE 1=1"
+        # Intake administrative audit has its own tenant/connection-scoped reader.
+        query = "SELECT * FROM events WHERE (source IS NULL OR source != 'active_intake')"
         params: List[Any] = []
         # Keep the legacy WorkflowEvent API behavior stable: trajectory rows
         # are queried through list_trajectory_events, unless explicitly asked
