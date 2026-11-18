@@ -674,3 +674,50 @@ def test_missing_scope_enters_pending_assignment_and_blocks_confirmation_until_a
     # Now it can be confirmed
     item = inbox.change(item["link_id"], "confirm", item["revision"])
     assert item["status"] == "CONFIRMED"
+
+
+def test_assign_unassign_reassign_cycle_reuses_task_and_updates_audit(store, monkeypatch):
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.worker import run_once
+    from herdr.inbox.store import InboxStore
+
+    registry = {"a": {"project_id": "p-valid", "workspace_id": "w-valid"}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {"one": {}}}
+
+    # 1. Ingest event with auto_assign=False so it starts UNASSIGNED
+    store.accept_event(fact("cycle-item"))
+    run_once(store, materialization={"user_id": "operator", "auto_assign": False})
+
+    inbox = IntakeInbox(store.path, config)
+    item, = inbox.list_items()
+    assert item["disposition"] == "UNASSIGNED"
+    assert item["task_id"] is None
+    assert item["status"] == "PENDING_ASSIGNMENT"
+
+    # 2. First Assign: creates draft task in user_inbox_tasks
+    item = inbox.change(item["link_id"], "assign", item["revision"])
+    assert item["disposition"] == "LINKED"
+    assert item["task_id"] is not None
+    created_task_id = item["task_id"]
+
+    # 3. Unassign: resets disposition to UNASSIGNED, retains task_id
+    item = inbox.change(item["link_id"], "unassign", item["revision"])
+    assert item["disposition"] == "UNASSIGNED"
+    assert item["task_id"] == created_task_id
+    assert item["status"] == "PENDING_ASSIGNMENT"
+
+    # 4. Re-assign: reuses the draft task, sets disposition back to LINKED
+    item = inbox.change(item["link_id"], "assign", item["revision"])
+    assert item["disposition"] == "LINKED"
+    assert item["task_id"] == created_task_id
+    assert item["assignment_source"] == "MANUAL"
+
+    # Check audit log trail: 1 AUTO initial assignment record, then 3 MANUAL operations
+    audits = [a for a in store.list_admin_audit() if a["event_type"] == "intake_assignment"]
+    assert len(audits) == 4
+    assert [a["origin"] for a in audits] == ["AUTO", "MANUAL", "MANUAL", "MANUAL"]
+    assert [a["user_id"] for a in audits] == [None, "operator", None, "operator"]
+    assert audits[1]["previous_user_id"] is None
+    assert audits[2]["previous_user_id"] == "operator"
+    assert audits[3]["previous_user_id"] is None

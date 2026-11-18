@@ -162,23 +162,29 @@ function toggleIntakeAuth(onReload, onRender){
 function showIntakeDetail(linkId, onReload){
   const item = intakeItems.find(row => row.link_id === linkId);
   if(!item || !intakeToken) return;
-  const editable = ['DRAFT','CONFIRMED'].includes(item.status) || (item.status === 'PENDING_ASSIGNMENT' && Boolean(item.task_id));
-  const closedActions = item.disposition === 'LINKED'
-    ? [['unassign','撤销归属'],['ignore','忽略']]
-    : [['ignore','忽略']];
-  const pendingActions = item.task_id
-    ? (item.project_id && item.workspace_id
-        ? [['confirm','确认'],['unassign','撤销归属'],['ignore','忽略']]
-        : [['unassign','撤销归属'],['ignore','忽略']])
-    : [['assign','分配给我'],['ignore','忽略']];
-  const actions = {
-    DRAFT:[['confirm','确认'],['unassign','撤销归属'],['ignore','忽略']],
-    CONFIRMED:[['unassign','撤销归属'],['ignore','忽略']],
-    PENDING_ASSIGNMENT: pendingActions,
-    IGNORED:[['reactivate','重新激活']],
-    SOURCE_CLOSED: closedActions,
-    SOURCE_CONFLICT: closedActions,
-  };
+  const isLinked = item.disposition === 'LINKED';
+  const isUnassigned = item.disposition === 'UNASSIGNED';
+  const isIgnored = item.disposition === 'IGNORED';
+  const isClosedOrConflict = ['SOURCE_CLOSED','SOURCE_CONFLICT'].includes(item.status);
+
+  const editable = isLinked && !isClosedOrConflict;
+
+  let availableActions = [];
+  if(isIgnored){
+    availableActions = [['reactivate','重新激活']];
+  }else if(isClosedOrConflict){
+    availableActions = isLinked
+      ? [['unassign','撤销归属'],['ignore','忽略']]
+      : [['ignore','忽略']];
+  }else if(isUnassigned){
+    availableActions = [['assign','分配给我'],['ignore','忽略']];
+  }else if(isLinked){
+    if(item.status === 'DRAFT'){
+      availableActions = [['confirm','确认'],['unassign','撤销归属'],['ignore','忽略']];
+    }else{
+      availableActions = [['unassign','撤销归属'],['ignore','忽略']];
+    }
+  }
   const projects = (state.overview && state.overview.projects) || [];
   const options = projects.filter(p => p.workspace_id).map(p =>
     `<option value="${esc(p.project_id)}" data-workspace="${esc(p.workspace_id)}"${p.project_id===item.project_id?' selected':''}>${esc(p.project_name || p.project_id)}</option>`
@@ -200,7 +206,7 @@ function showIntakeDetail(linkId, onReload){
       ` : `<p>${esc(item.title)}</p><p>${esc(item.description)}</p>`}
       <p role="status"></p>
       <div class="inbox-foot-actions">${editable ? '<button type="submit" class="btn primary">保存修改</button>' : ''}
-        ${(actions[item.status] || []).map(([action,label]) => `<button class="btn" type="button" data-action="${action}">${label}</button>`).join('')}
+        ${availableActions.map(([action,label]) => `<button class="btn" type="button" data-action="${action}">${label}</button>`).join('')}
       </div>
     </form>`);
   const form = document.getElementById('intakeDetail');

@@ -35,7 +35,7 @@
 
 ## 验收结果
 
-物化核心套件 `tests/test_intake_materialization.py` 共 27 项测试全部通过，覆盖：
+物化核心套件 `tests/test_intake_materialization.py` 共 28 项测试全部通过，覆盖：
 - 单次物化与来源保留、非工作事实与无效 Schema 拦截；
 - 操作员无派发确认、撤销归属与再次分配；
 - 并发竞争领取与重复物化去重；
@@ -47,9 +47,10 @@
 - 独立 CLI Worker 读取可信实例策略端到端执行；
 - **P2-01 回归**：超期事件（超出 90 天 retention）拒绝物化并安全忽略；
 - **P2-02 回归**：已关闭（SOURCE_CLOSED）与冲突（SOURCE_CONFLICT）事项支持撤销归属与忽略操作；
-- **P2-03 回归**：执行范围（Project/Workspace）缺失时进入待分配视图、物理阻断确认，补全后方可转 DRAFT 并确认。
+- **P2-03 回归**：执行范围（Project/Workspace）缺失时进入待分配视图、物理阻断确认，补全后方可转 DRAFT 并确认；
+- **P2-04 回归**：前端操作权限与可编辑态统一基于 `item.disposition` 判断，撤销归属后保留底层 `task_id` 但正确恢复“分配给我”与不可编辑状态，闭环 `Assign → Unassign → Assign` 交互与审计追踪。
 
-全量相关集成测试（80 项）全部通过。
+全量相关集成测试（82 项）全部通过。
 
 ## 实施决策与验证边界
 

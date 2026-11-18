@@ -41,6 +41,7 @@
 | 超期残存事件 (P2-01) | 未及时被 prune 清理但接收时间已过 90 天 retention 的事件仍可能被物化。现物化前置核验 `received_at <= now - retention_ms`，直接记 `NO_RETAINED_CANONICAL_DATA` 忽略。 | `test_expired_event_beyond_retention_never_materializes_task` 实测超期事件不产生任务 |
 | 终态清理通道 (P2-02) | `SOURCE_CLOSED` 与 `SOURCE_CONFLICT` 状态在前端缺失操作按钮，导致废弃事项无法清理。现前端开放 `unassign` 与 `ignore`，继续严格禁止编辑和确认。 | `test_closed_and_conflict_items_support_unassign_and_ignore` 实测关闭与冲突事项均可撤销归属或忽略 |
 | 执行归属一致性 (P2-03) | 执行范围（Project/Workspace）缺失时误显示为普通外部草稿。现明确区分收件人归属与执行归属：执行范围缺失时严格投影为 `PENDING_ASSIGNMENT` 并阻断确认，编辑补齐后方可转 DRAFT 并确认。 | `test_missing_scope_enters_pending_assignment_and_blocks_confirmation_until_assigned` 实测缺范围阻断确认与转 DRAFT 闭环 |
+| 归属撤销重分 (P2-04) | 撤销归属后前端依据 `task_id` 而非 `disposition` 判断权限，导致已撤销事项误显为不可重新分配。现前端所有操作权限与可编辑态严格按 `item.disposition` 判断，闭环 Assign → Unassign → Assign 完整交互。 | `test_intake_js_assign_unassign_assign_lifecycle`（Node.js 前端状态交互）与 `test_assign_unassign_reassign_cycle_reuses_task_and_updates_audit`（Python/DB 循环重分复用与审计）验证交互与审计追踪 |
 
 ## 发布验证边界
 

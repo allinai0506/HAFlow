@@ -4505,3 +4505,11 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `tests/test_intake_materialization.py#test_expired_event_beyond_retention_never_materializes_task`
   - `tests/test_intake_materialization.py#test_closed_and_conflict_items_support_unassign_and_ignore`
   - `tests/test_intake_materialization.py#test_missing_scope_enters_pending_assignment_and_blocks_confirmation_until_assigned`
+
+## [2026-11-18] Fix | Active Intake Task Materialization V1 前端权限与重新分配闭环 (PR #425)
+- 解决复审遗留 P2 缺陷：
+  - P2-04（基于 disposition 统一前端操作权限与重新分配）：修复前端 `intake.js` 中 `editable` 与操作按钮判断逻辑，彻底移除对底层草稿 `task_id` 的依赖，统一严格根据 `item.disposition`（`LINKED` / `UNASSIGNED` / `IGNORED`）和状态计算可用动作。撤销归属后保留底层 `task_id` 以便重用，但在前端正确呈现“分配给我”与“忽略”按钮，并置为只读模式，完整闭环 `Assign → Unassign → Assign` 交互。
+- Evidence
+  - `console/static/console/scripts/intake.js#showIntakeDetail`
+  - `tests/test_console_inbox_api.py#test_intake_js_assign_unassign_assign_lifecycle`
+  - `tests/test_intake_materialization.py#test_assign_unassign_reassign_cycle_reuses_task_and_updates_audit`
