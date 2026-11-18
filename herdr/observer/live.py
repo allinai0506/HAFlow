@@ -112,7 +112,8 @@ def _pane_payload(payload: str) -> Optional[Dict[str, Any]]:
         data = json.loads(payload)
     except (TypeError, ValueError):
         return None
-    pane = data.get("result", {}).get("pane") if isinstance(data, dict) else None
+    result = data.get("result") if isinstance(data, dict) else None
+    pane = result.get("pane") if isinstance(result, dict) else None
     return pane if isinstance(pane, dict) else None
 
 

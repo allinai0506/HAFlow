@@ -728,3 +728,14 @@ def test_linux_boot_identity_requires_native_host_uuid(monkeypatch):
 
     monkeypatch.setattr(task_resources.Path, "read_text", read)
     assert task_resources.local_boot_identity() is None
+
+
+@pytest.mark.parametrize("result", [None, []])
+def test_malformed_pane_result_is_a_failed_probe(result):
+    from herdr.observer.live import _get_pane
+
+    def observe(argv, timeout):
+        assert argv == ["herdr", "pane", "get", "pane"] and timeout == 2
+        return 0, json.dumps({"result": result}), ""
+
+    assert _get_pane(observe, "pane", 2) == ("failed", None)
