@@ -4485,3 +4485,10 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `herdr/intake/store.py#EventStore`
   - `herdr/intake/cursor.py#CursorStore`
   - `tests/test_intake_faults.py#test_thousand_events_with_retries_duplicates_and_restarts`
+
+## [2026-11-18] Feature | Active Intake Task Materialization V1
+- 工作事实按外部事项及稳定目的物化为唯一用户 Inbox 草稿。待分配沿用 Intake link，确认回执保留在同库，SQLite 门闸阻断执行态。
+- Evidence
+  - `herdr/intake/materializer.py#materialize`
+  - `herdr/intake/inbox.py#IntakeInbox`
+  - `tests/test_intake_materialization.py`

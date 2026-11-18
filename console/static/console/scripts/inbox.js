@@ -17,6 +17,15 @@ let inboxState = {
   autoRefreshTimer: null, activeTaskId: null, pageSize: 50,
 };
 let inboxSubmitting = false;
+let intakeToken = '';
+let intakeItems = [];
+let intakeLoad = 0;
+let intakeOffset = 0;
+const intakePageSize = 50;
+const intakeLabels = {
+  DRAFT:'外部草稿', PENDING_ASSIGNMENT:'待分配', CONFIRMED:'已确认',
+  IGNORED:'已忽略', SOURCE_CLOSED:'来源已关闭', SOURCE_CONFLICT:'来源信息冲突',
+};
 const pendingInboxSubmissions = new Map();
 let recommendedScope = null;
 
@@ -49,14 +58,33 @@ async function loadInboxData(isAppend, isReset){
     const currentCount = isReset ? (inboxState.pageSize || 50) : Math.max(inboxState.pageSize || 50, inboxState.tasks.length);
     const limit = isAppend ? (inboxState.pageSize || 50) : currentCount;
     const qParts = [`limit=${limit}`, `offset=${offset}`];
-    if(inboxState.filterStatus && inboxState.filterStatus !== 'ALL') qParts.push('status=' + encodeURIComponent(inboxState.filterStatus));
+    if(inboxState.filterStatus && !['ALL','MINE','PENDING_ASSIGNMENT'].includes(inboxState.filterStatus)) qParts.push('status=' + encodeURIComponent(inboxState.filterStatus));
     if(inboxState.filterProject && inboxState.filterProject !== 'ALL') qParts.push('project_id=' + encodeURIComponent(inboxState.filterProject));
     if(inboxState.filterPriority && inboxState.filterPriority !== 'ALL') qParts.push('priority=' + encodeURIComponent(inboxState.filterPriority));
 
-    const [tasksRes, statsRes] = await Promise.all([
-      api('/api/inbox/tasks?' + qParts.join('&')),
+    if(isReset) intakeOffset = 0;
+    const intakeRead = ++intakeLoad;
+    const view = inboxState.filterStatus;
+    const intakeQuery = new URLSearchParams(qParts.join('&'));
+    intakeQuery.delete('status');
+    intakeQuery.set('view', view);
+    intakeQuery.set('offset', intakeOffset);
+    intakeQuery.set('limit', intakePageSize);
+    const showIntake = ['ALL','MINE','DRAFT','PENDING_ASSIGNMENT'].includes(view);
+    const [tasksRes, statsRes, activeItems] = await Promise.all([
+      view === 'PENDING_ASSIGNMENT' ? Promise.resolve({ok:true,tasks:[],total:0}) : api('/api/inbox/tasks?' + qParts.join('&')),
       isAppend ? Promise.resolve(null) : api('/api/inbox/stats'),
+      intakeToken && showIntake ? intakeRequest('?' + intakeQuery)
+        .catch(error => ({error:error.message})) : null,
     ]);
+    if(intakeRead !== intakeLoad) return;
+    if(activeItems?.error === 'intake_inbox_authentication_required') intakeToken = '';
+    intakeItems = activeItems?.items || [];
+    const detail = document.getElementById('intakeDetail');
+    if(detail && !intakeItems.some(item => item.link_id === detail.dataset.linkId)){
+      closeModal();
+      detail.remove();
+    }
     if(tasksRes && tasksRes.ok){
       inboxState.tasks = isAppend ? inboxState.tasks.concat(tasksRes.tasks || []) : (tasksRes.tasks || []);
       inboxState.total = tasksRes.total || 0;
@@ -101,7 +129,7 @@ function renderInboxView(){
   let html = `<div class="inbox-view"><div class="inbox-metrics">` +
     metrics.map(m => `<div class="inbox-metric-card ${inboxState.filterStatus===m.k?'active':''}" onclick="setInboxStatusFilter('${m.k}')"><span class="inbox-metric-val"${m.c?' style="color:'+m.c+'"':''}>${m.v}</span><span class="inbox-metric-label">${m.l}</span></div>`).join('') +
     `</div><div class="inbox-toolbar"><div class="inbox-filters"><div class="inbox-filter-group">` +
-    ['ALL:全部','PENDING:待执行','RUNNING:执行中','COMPLETED:已完成','FAILED:失败'].map(s => {
+    ['ALL:全部','MINE:我的任务','PENDING_ASSIGNMENT:待分配','DRAFT:草稿','PENDING:待执行','RUNNING:执行中','COMPLETED:已完成','FAILED:失败'].map(s => {
       const [k, l] = s.split(':');
       return `<button class="inbox-tab-btn ${inboxState.filterStatus===k?'active':''}" onclick="setInboxStatusFilter('${k}')">${l}</button>`;
     }).join('') +
@@ -113,12 +141,22 @@ function renderInboxView(){
       return `<option value="${k}"${inboxState.filterPriority===k?' selected':''}>${l}</option>`;
     }).join('') +
     `</select></div><div class="inbox-actions">` +
+    `<button class="btn" type="button" data-intake-auth>${intakeToken ? '锁定外部任务' : '解锁外部任务'}</button>` +
     `<button class="btn" onclick="triggerInboxSweep()" title="立即触发工作区调度扫描">调度扫描</button>` +
     `<button class="btn" onclick="loadInboxData()" title="刷新任务列表">刷新</button>` +
     `<button class="btn primary" onclick="showNewInboxTaskModal()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>提交新任务</span></button>` +
     `</div></div><div class="inbox-task-list">`;
 
-  if(!inboxState.tasks.length){
+  html += intakeItems.map(renderIntakeCard).join('');
+  if(intakeToken && (intakeOffset || intakeItems.length === intakePageSize)){
+    html += `<div class="inbox-foot-actions" aria-label="外部任务分页">
+      <button class="btn" type="button" data-intake-page="-1" ${intakeOffset === 0 ? 'disabled' : ''}>外部任务上一页</button>
+      <button class="btn" type="button" data-intake-page="1" ${intakeItems.length < intakePageSize ? 'disabled' : ''}>外部任务下一页</button>
+    </div>`;
+  }
+  if(!inboxState.tasks.length && !intakeItems.length && inboxState.filterStatus === 'PENDING_ASSIGNMENT'){
+    html += `<div class="empty">${intakeToken ? '暂无待分配任务' : '解锁外部任务后查看待分配事项'}</div>`;
+  } else if(!inboxState.tasks.length && !intakeItems.length){
     html += `<div class="empty" style="padding:48px 0;background:var(--bg-surface,#fff);border:1px dashed var(--border-default,#e5e7eb);border-radius:8px"><strong>收件箱暂无任务</strong><span class="muted" style="margin-top:6px;font-size:13px">点击右上角【提交新任务】，随时向任何项目下达指令，系统将自动排队与接续调度。</span></div>`;
   } else {
     inboxState.tasks.forEach(t => {
@@ -153,6 +191,160 @@ function renderInboxView(){
   }
   html += `</div></div>`;
   container.innerHTML = html;
+  container.querySelector('[data-intake-auth]').addEventListener('click', toggleIntakeAuth);
+  container.querySelectorAll('[data-intake-page]').forEach(button => {
+    button.addEventListener('click', () => {
+      intakeOffset += Number(button.dataset.intakePage) * intakePageSize;
+      loadInboxData();
+    });
+  });
+  container.querySelectorAll('[data-intake-open]').forEach(button => {
+    button.addEventListener('click', () => showIntakeDetail(button.dataset.intakeOpen));
+  });
+}
+
+function intakeRequest(suffix = '', options = {}, credential = intakeToken){
+  return api('/api/inbox/intake' + suffix, {
+    ...options, headers:{'X-HAFlow-Intake-Inbox-Token':credential},
+  });
+}
+
+function renderIntakeCard(item){
+  const label = intakeLabels[item.status] || item.status;
+  return `<article class="inbox-card">
+    <div class="inbox-card-head"><div class="inbox-card-title-row">
+      <span class="prio-pill prio-${esc(item.priority.toLowerCase())}">${esc(priorityLabel(item.priority))}</span>
+      <span class="inbox-card-title">${esc(item.title)}</span>
+    </div><span class="status-pill pill-draft">${esc(label)}</span></div>
+    <div class="inbox-card-instruction">${esc(item.description)}</div>
+    <div class="inbox-card-meta">
+      <span>来源 ${esc(item.provider)} · ${esc(item.object_type)} / ${esc(item.external_id)}</span>
+      <span>项目 ${esc(item.project_id || '未指定')}</span>
+      <span>工作区 ${esc(item.workspace_id || '未指定')}</span>
+      <span>${item.assignment_source === 'MANUAL' ? '手动分配' : '自动判断'}</span>
+      <span>创建 ${formatTime(item.created_at / 1000)}</span>
+      <span>更新 ${formatTime(item.updated_at / 1000)}</span>
+    </div>
+    <div class="inbox-card-foot"><span class="inbox-foot-left">${esc(item.display_name)}</span>
+      <button class="btn-inbox-op" type="button" data-intake-open="${esc(item.link_id)}">查看详情</button>
+    </div>
+  </article>`;
+}
+
+function toggleIntakeAuth(){
+  if(intakeToken){
+    intakeToken = '';
+    intakeItems = [];
+    closeModal();
+    document.getElementById('intakeDetail')?.remove();
+    renderInboxView();
+    return loadInboxData();
+  }
+  openModal('解锁外部任务', `
+    <form class="form" id="intakeUnlock" action="/api/inbox/intake" method="post" aria-labelledby="modalTitle">
+      <label for="intakeCredential">Inbox 访问凭据</label>
+      <input id="intakeCredential" type="password" autocomplete="current-password" required minlength="32">
+      <p role="status"></p>
+      <button type="submit" class="btn primary">解锁</button>
+    </form>`);
+  const form = document.getElementById('intakeUnlock');
+  const field = document.getElementById('intakeCredential');
+  field.focus();
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const submit = form.querySelector('button');
+    submit.disabled = true;
+    try{
+      const credential = field.value;
+      await intakeRequest('?limit=1', {}, credential);
+      intakeToken = credential;
+      field.value = '';
+      closeModal();
+      await loadInboxData();
+    }catch(error){
+      form.querySelector('[role=status]').textContent =
+        error.message === 'intake_inbox_disabled' ? '当前实例未启用外部任务。' : '无法解锁，请核对 Inbox 访问凭据。';
+      field.focus();
+    }finally{ submit.disabled = false; }
+  });
+}
+
+function showIntakeDetail(linkId){
+  const item = intakeItems.find(row => row.link_id === linkId);
+  if(!item || !intakeToken) return;
+  const editable = ['DRAFT','CONFIRMED'].includes(item.status);
+  const actions = {
+    DRAFT:[['confirm','确认'],['unassign','撤销归属'],['ignore','忽略']],
+    CONFIRMED:[['unassign','撤销归属'],['ignore','忽略']],
+    PENDING_ASSIGNMENT:[['assign','分配给我'],['ignore','忽略']],
+    IGNORED:[['reactivate','重新激活']],
+  };
+  const projects = (state.overview && state.overview.projects) || [];
+  const options = projects.filter(p => p.workspace_id).map(p =>
+    `<option value="${esc(p.project_id)}" data-workspace="${esc(p.workspace_id)}"${p.project_id===item.project_id?' selected':''}>${esc(p.project_name || p.project_id)}</option>`
+  ).join('');
+  const priorities = ['NORMAL','LOW','HIGH','URGENT'].map(p =>
+    `<option value="${p}"${p===item.priority?' selected':''}>${priorityLabel(p)}</option>`
+  ).join('');
+  openModal('外部任务详情', `
+    <form class="form" id="intakeDetail" data-link-id="${esc(linkId)}" action="/api/inbox/intake" method="post" aria-labelledby="modalTitle">
+      <p>${esc(item.provider)} · ${esc(item.external_id)} · ${esc(intakeLabels[item.status] || item.status)}</p>
+      <p>连接 ${esc(item.connection_id)}<br>事件 ${esc(item.event_id)}<br>原始时间 ${esc(item.occurred_time || '未提供')}<br>投递回执 ${esc(item.receipt_id || '未保留')}</p>
+      <details><summary>来源快照</summary><p>${esc(item.source_title)}</p><p>${esc(item.source_description)}</p></details>
+      ${editable ? `
+        <label for="intakeTitle">标题</label><input id="intakeTitle" name="title" required maxlength="240" value="${esc(item.title)}">
+        <label for="intakeDescription">描述</label><textarea id="intakeDescription" name="description" required maxlength="8000" rows="4">${esc(item.description)}</textarea>
+        <label for="intakeProject">项目</label><select id="intakeProject" name="project_id"><option value="">未指定</option>${options}</select>
+        <label for="intakeWorkspace">工作区</label><input id="intakeWorkspace" readonly value="${esc(item.workspace_id || '')}">
+        <label for="intakePriority">优先级</label><select id="intakePriority" name="priority">${priorities}</select>
+      ` : `<p>${esc(item.title)}</p><p>${esc(item.description)}</p>`}
+      <p role="status"></p>
+      <div class="inbox-foot-actions">${editable ? '<button type="submit" class="btn primary">保存修改</button>' : ''}
+        ${(actions[item.status] || []).map(([action,label]) => `<button class="btn" type="button" data-action="${action}">${label}</button>`).join('')}
+      </div>
+    </form>`);
+  const form = document.getElementById('intakeDetail');
+  const project = document.getElementById('intakeProject');
+  const workspace = document.getElementById('intakeWorkspace');
+  const initial = editable ? JSON.stringify([...new FormData(form)]) : '';
+  const apply = async (action, changes) => {
+    if(action === 'confirm' && initial !== JSON.stringify([...new FormData(form)])){
+      form.querySelector('[role=status]').textContent = '请先保存修改，再确认当前任务。';
+      form.querySelector('button[type=submit]').focus();
+      return;
+    }
+    const buttons = [...form.querySelectorAll('button')];
+    buttons.forEach(button => {button.disabled = true;});
+    try{
+      await intakeRequest('', {method:'POST',body:JSON.stringify({
+        action, changes, link_id:item.link_id, revision:item.revision,
+      })});
+      closeModal();
+      await loadInboxData();
+      if(action === 'confirm') toast('已确认外部任务');
+    }catch(error){
+      const status = form.querySelector('[role=status]');
+      status.textContent = '操作未保存。' + error.message;
+      status.tabIndex = -1;
+      status.focus();
+    }finally{ buttons.forEach(button => {button.disabled = false;}); }
+  };
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    if(!editable) return;
+    const data = new FormData(form);
+    apply('edit', {
+      title:data.get('title'), description:data.get('description'), priority:data.get('priority'),
+      project_id:project.value || null, workspace_id:workspace.value || null,
+    });
+  });
+  if(project) project.addEventListener('change', () => {
+    workspace.value = project.selectedOptions[0]?.dataset.workspace || '';
+  });
+  form.querySelectorAll('[data-action]').forEach(button => {
+    button.addEventListener('click', () => apply(button.dataset.action));
+  });
+  form.querySelector('input, button')?.focus();
 }
 
 function setInboxStatusFilter(s){ inboxState.filterStatus = s; return loadInboxData(false, true); }
