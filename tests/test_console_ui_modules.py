@@ -133,7 +133,10 @@ closeWorkflowTab('__logs__');
 closeWorkflowTab('__logs__');
 if(JSON.stringify(stopped)!=='[10]')throw new Error('log timer must stop exactly once');
 """
-    result=subprocess.run(['node','-e',setup+main+enhancement+probe],text=True,capture_output=True,timeout=10)
+    # Classic scripts share global var bindings with window, as in the browser.
+    runner = "require('node:vm').runInThisContext(require('node:fs').readFileSync(0, 'utf8'))"
+    result = subprocess.run(['node', '-e', runner], input=setup+main+enhancement+probe,
+                            text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
 

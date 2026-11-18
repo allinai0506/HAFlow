@@ -197,8 +197,7 @@ async function showNewInboxTaskModal(){
 
   inboxState.userSelectedProject = false;
   recommendedScope = null;
-  const button = document.getElementById('inboxSubmit');
-  if(button) button.disabled = inboxSubmitting;
+  if(inboxSubmitting) document.getElementById('inboxSubmit').disabled = true;
 }
 
 function onInboxProjectSelectChange(isManual = false){
@@ -271,15 +270,12 @@ async function submitNewInboxTask(){
 
   if(!title) return toast('请输入任务标题', true);
   if(!ins) return toast('请输入任务指令/需求', true);
-  if(!pid || !wid){
+  const missingScope = !pid || !wid;
+  const staleScope = !inboxState.userSelectedProject && recommendedScope
+    && (recommendedScope.title !== title || recommendedScope.instruction !== ins);
+  if(missingScope || staleScope){
     project?.focus();
-    return toast('请选择有归属工作区的项目', true);
-  }
-
-  if(!inboxState.userSelectedProject && recommendedScope
-    && (recommendedScope.title !== title || recommendedScope.instruction !== ins)){
-    project.focus();
-    return toast('任务内容已修改，请重新确认推荐项目或手动选择项目', true);
+    return toast(missingScope ? '请选择有归属工作区的项目' : '任务内容已修改，请重新确认归属', true);
   }
 
   const payload = {
