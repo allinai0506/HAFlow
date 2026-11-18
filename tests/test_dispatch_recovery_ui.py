@@ -134,6 +134,28 @@ def test_frontend_resource_check_records_absence_before_restore(scene, monkeypat
     assert decision(scene,current,'restore_scope')['operation']['status']=='pending'
 
 
+def test_frontend_resource_check_cannot_settle_a_possibly_started_launch(scene, monkeypatch):
+    from herdr import dispatch_recovery, task_resources
+
+    old = cancelled(scene)
+    intent = {
+        'key': 'old-key', 'intent_id': 'old-intent', 'node_id': 'test', 'workflow_id': 'wf',
+        'task_id': 'never-registered', 'phase': 'allocating', 'execution_id': 'execution-1',
+        'resources': {'pane_id': 'pane-old', 'run_id': 'run-old', 'agent_start_requested': True},
+    }
+    scene.store.record_event('launch_intent', intent, workflow_id='wf', node_id='test',
+                             task_id=intent['key'], source='launch', timestamp=1000)
+    monkeypatch.setattr(task_resources, 'inventory_launch_resources',
+                        lambda *a, **k: {'resource_status': 'absent'})
+
+    result = dispatch_recovery.check_resources(
+        scene.store.db_path, 'wf', old['id'], old['version'], 'human', '已检查现场',
+        candidate_sha=SHA, now=1000,
+    )
+    assert result['checks'][0]['status'] == 'recovery_required'
+    assert task_resources._latest_intent(scene.store, intent['key'])['phase'] == 'allocating'
+
+
 def test_audited_partial_launch_retirement_unblocks_only_current_dispatch(scene, tmp_path):
     import hashlib, json
     from herdr import dispatch_recovery, node_dispatch_store as nd, scheduler_facts, task_resources

@@ -251,9 +251,8 @@ def drain_unsettled_launch_intents(store, workflow_id, *, reason, deadline, chec
         resources = intent["resources"]
         tag = inventory.get("clone_tag") or {}
         pane_id = resources.get("pane_id") or tag.get("pane_id")
-        # Inventory covers panes and clone paths. An allocated pane can leave
-        # detached descendants even when both resources are now absent.
-        if inventory["resource_status"] == "absent" and not pane_id:
+        if (inventory["resource_status"] == "absent"
+                and task_resources.can_settle_absent_launch(intent)):
             result = task_resources.reconcile_launch_intent(store, intent, lambda _: "absent")
             if result["status"] != "resources_absent":
                 return False

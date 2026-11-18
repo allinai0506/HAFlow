@@ -8,7 +8,7 @@ from herdr.task_cli_launch_worker import run_launch_worker
 
 def test_run_launch_worker_returns_identity_and_records_resources(monkeypatch, tmp_path):
     recorded = []
-    intent = {'intent_id': 'intent-1'}
+    intent = {'key': 'launch-1', 'intent_id': 'intent-1'}
     output = SimpleNamespace(
         returncode=0,
         stdout='noise\nHERDR_WORKER_RESULT={"clone":"/tmp/clone","branch":"agent/t",'
@@ -23,8 +23,9 @@ def test_run_launch_worker_returns_identity_and_records_resources(monkeypatch, t
 
     result, updated_intent = run_launch_worker(
         SimpleNamespace(task_id='t-1', workflow_id='wf-1', source=str(tmp_path),
-                        task_type='code', candidate_sha='sha-1'),
-        'build', 'run-1', object(), intent, tmp_path / 'clone', 'codex',
+                        task_type='code', candidate_sha='sha-1', _workflow_launch_lock_fd=3),
+        'build', 'run-1', SimpleNamespace(db_path=tmp_path / 'state.db'),
+        intent, tmp_path / 'clone', 'codex',
         {'execution_mode': 'git'}, 'main', 'agent/base', 'anchor', None,
         Path('/herdr'), run_worker=lambda cmd, **kwargs: command.extend([cmd, kwargs]) or output,
         get_store=lambda: None,
@@ -34,6 +35,11 @@ def test_run_launch_worker_returns_identity_and_records_resources(monkeypatch, t
     assert updated_intent is intent
     assert command[0][1:8] == ['--task-id', 't-1', '--source', str(tmp_path),
                               '--agent', 'codex', '--task-type']
+    assert command[0][-8:] == [
+        '--launch-intent-key', 'launch-1', '--launch-state-db', str(tmp_path / 'state.db'),
+        '--run-id', 'run-1', '--launch-intent-id', 'intent-1',
+    ]
+    assert command[1]['pass_fds'] == (3,)
     assert recorded[0][2] == {
         'clone_path': '/tmp/clone', 'pane_id': 'pane-1', 'pane_source': 'dynamic',
         'run_id': 'run-1', 'agent_session_id': None,

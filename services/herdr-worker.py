@@ -1143,6 +1143,8 @@ def _read_pane_text(pid, limit=4096):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--launch-intent-id', default=None)
+    parser.add_argument('--launch-intent-key')
+    parser.add_argument('--launch-state-db')
     parser.add_argument("--run-id", default=os.environ.get("HERDR_RUN_ID"),
                         help="Caller-owned run identity for startup failure evidence.")
 
@@ -1225,6 +1227,13 @@ def main():
     )
 
     args = parser.parse_args()
+    launch_store = None
+    if args.launch_intent_key or args.launch_state_db:
+        if not (args.launch_intent_key and args.launch_state_db and args.launch_intent_id):
+            parser.error('launch checkpoint requires intent key, ID and state database')
+        from herdr.state_store import SQLiteStateStore
+        from herdr.task_resources import record_worker_start_checkpoint
+        launch_store = SQLiteStateStore(args.launch_state_db)
 
     context_bindings = {}
     if args.execution_mode == "context":
@@ -1396,10 +1405,17 @@ def main():
         if launch_identity:
             launch_identity.update(pane_id=pane_id, pane_source=pane_source, phase='pane_allocated')
             write_worker_launch_identity(clone, launch_identity)
+            if launch_store is not None:
+                record_worker_start_checkpoint(
+                    launch_store, args.launch_intent_key, launch_identity, clone, requested=False,
+                )
 
-        if launch_identity:
             launch_identity.update(phase='agent_start_requested')
             write_worker_launch_identity(clone, launch_identity)
+            if launch_store is not None:
+                record_worker_start_checkpoint(
+                    launch_store, args.launch_intent_key, launch_identity, clone, requested=True,
+                )
 
         agent_start_attempted = True
         agent = start_agent(

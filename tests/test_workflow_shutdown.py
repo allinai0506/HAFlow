@@ -477,6 +477,8 @@ with workflow_launch_lock(db, "wf_stop"):
         assert get_task("unregistered", db_path=db) is None
         assert not store.list_events(workflow_id="wf_stop", event_type="shutdown_process")
         os.kill(descendant, 0)
+        with task_resources.workflow_launch_lock(db, "wf_stop"):
+            assert task_resources.recover_launch_resources(store, intent)["status"] == "recovery_required"
 
         with pytest.raises(RuntimeError, match="failed to stop"):
             test_env["store"].cancel_task(inbox_id)
@@ -536,3 +538,79 @@ def test_reused_unregistered_pane_allows_inventory_to_settle_original_intent(tes
     replacement["cwd"] = str(test_env["tmp_path"])
     assert test_env["store"].cancel_task(inbox_id)["status"] == "CANCELLED"
     assert task_resources._latest_intent(store, intent["key"])["phase"] == "resources_absent"
+
+
+@pytest.mark.parametrize("start_requested", [False, True])
+def test_worker_crash_recovers_absent_pane_only_before_agent_start(test_env, native_pane, start_requested):
+    from herdr.state_store import SQLiteStateStore
+
+    inbox_id = _start_workflow(test_env)
+    db = test_env["db_file"]
+    pane, cli = native_pane
+    clone = test_env["tmp_path"] / "worker-clone"
+    store = SQLiteStateStore(str(db))
+    intent = task_resources.begin_launch_intent(
+        store, workflow_id="wf_stop", node_id="node", task_id="unregistered",
+    )["intent"]
+    intent = task_resources.record_launch_resources(store, intent, {
+        "planned_clone_path": str(clone), "run_id": "run",
+    })
+    script = """
+import os, runpy, sys
+from pathlib import Path
+from herdr import task_resources
+
+worker_path, clone, pane_id, terminal_id, crash_after_request, *args = sys.argv[1:]
+main = runpy.run_path(worker_path)["main"]
+worker = main.__globals__
+clone = Path(clone)
+def create_workspace(task):
+    clone.mkdir()
+    return clone
+def allocate(parent, path, identity, task):
+    identity["terminal_id"] = terminal_id
+    return pane_id, "dynamic"
+worker.update(create_context_task_workspace=create_workspace, allocate_task_pane=allocate,
+              write_task_context=lambda *a, **k: ({}, {}), verify_request_preflight=lambda *a: {},
+              start_agent=lambda *a: os._exit(18))
+write_tag = task_resources.write_worker_launch_identity
+def crash_before_request(path, identity, **kwargs):
+    if crash_after_request == "False" and identity["phase"] == "agent_start_requested":
+        os._exit(17)
+    return write_tag(path, identity, **kwargs)
+task_resources.write_worker_launch_identity = crash_before_request
+sys.argv = [worker_path, *args]
+main()
+"""
+    with task_resources.workflow_launch_lock(db, "wf_stop") as lock_fd:
+        worker = subprocess.run([
+            sys.executable, "-c", script, "services/herdr-worker.py", str(clone),
+            pane["pane_id"], pane["terminal_id"], str(start_requested),
+            "--source", str(test_env["tmp_path"]), "--execution-mode", "context",
+            "--task-id", intent["task_id"], "--agent", "codex", "--task-type", "fix",
+            "--parent-pane", pane["pane_id"], "--run-id", "run",
+            "--launch-intent-id", intent["intent_id"], "--launch-intent-key", intent["key"],
+            "--launch-state-db", str(db),
+        ], pass_fds=(lock_fd,), capture_output=True, text=True, timeout=5)
+    assert worker.returncode == (18 if start_requested else 17), worker.stderr
+    current = task_resources._latest_intent(store, intent["key"])
+    assert current["resources"]["pane_id"] == pane["pane_id"]
+    assert current["resources"]["agent_start_requested"] is start_requested
+    assert not store.list_events(workflow_id="wf_stop", event_type="shutdown_process")
+    cli("pane", "close", pane["pane_id"])
+    shutil.rmtree(clone)
+    assert task_resources.inventory_launch_resources(current)["resource_status"] == "absent"
+
+    if start_requested:
+        with task_resources.workflow_launch_lock(db, "wf_stop"):
+            assert task_resources.recover_launch_resources(store, current)["status"] == "recovery_required"
+        with pytest.raises(RuntimeError, match="failed to stop"):
+            test_env["store"].cancel_task(inbox_id)
+        assert get_workflow("wf_stop", db_path=db)["status"] == "closing"
+        assert test_env["disp"].is_workspace_busy("ws_stop")[0]
+    else:
+        assert test_env["store"].cancel_task(inbox_id)["status"] == "CANCELLED"
+        assert task_resources._latest_intent(store, intent["key"])["phase"] == "resources_absent"
+        assert not test_env["disp"].is_workspace_busy("ws_stop")[0]
+        assert shutdown_workflow("wf_stop", db_path=db) == "ALREADY_TERMINAL"
+    assert not store.list_events(workflow_id="wf_stop", event_type="shutdown_process")

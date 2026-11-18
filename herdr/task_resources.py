@@ -398,6 +398,40 @@ def record_launch_resources(store, intent, resource_identity, *, now=None):
     return updated
 
 
+def record_worker_start_checkpoint(store, intent_key, identity, clone, *, requested):
+    """Bind Pane allocation and the start barrier to the locked launch intent."""
+    intent = _latest_intent(store, intent_key)
+    if (not intent or intent['intent_id'] != identity['intent_id']
+            or intent['task_id'] != identity['task_id']):
+        raise ValueError('worker launch intent identity changed')
+    resources = intent['resources']
+    if (resources.get('run_id') != identity['run_id']
+            or resources.get('planned_clone_path') != str(Path(clone).resolve())):
+        raise ValueError('worker launch run or workspace identity changed')
+    pane = {key: identity.get(key) for key in ('pane_id', 'pane_source', 'terminal_id')}
+    if not pane['pane_id']:
+        raise ValueError('worker Pane identity missing')
+    previous = resources.get('agent_start_requested')
+    if requested:
+        if previous is not False or any(resources.get(key) != value for key, value in pane.items()):
+            raise ValueError('worker Pane allocation checkpoint changed')
+    elif previous is not None or resources.get('pane_id'):
+        raise ValueError('worker Pane allocation was already recorded')
+    record_launch_resources(store, intent, {**pane, 'agent_start_requested': requested})
+
+
+def can_settle_absent_launch(intent):
+    """An empty resource inventory cannot prove that an Agent process exited."""
+    resources = intent.get('resources') or {}
+    requested = resources.get('agent_start_requested')
+    if resources.get('agent_session_id') or resources.get('agent_name'):
+        return False
+    if requested is not None:
+        return (requested is False and resources.get('pane_source') == 'dynamic'
+                and bool(resources.get('pane_id')) and bool(resources.get('terminal_id')))
+    return not resources.get('pane_id')
+
+
 def finish_launch_intent(store, intent, *, now=None, conn=None):
     """Registration precedes completion, so interrupted finish is deduplicated."""
     task = registered_launch_task(store, intent, conn=conn)
@@ -637,8 +671,12 @@ def _recover_launch_resources(store, intent, *, runner=None, timeout=10):
         return reconcile_launch_intent(store, current, lambda _: 'unknown')
     report = inventory_launch_resources(current, runner=runner, timeout=timeout)
     if report['resource_status'] == 'absent':
-        return reconcile_launch_intent(store, current, lambda _: 'absent')
+        if can_settle_absent_launch(current):
+            return reconcile_launch_intent(store, current, lambda _: 'absent')
+        return {**report, 'status': 'recovery_required', 'reason': 'agent_process_exit_unverified'}
     retained = {'status': 'recovery_required', **report}
+    if current['resources'].get('agent_start_requested') is True:
+        return retained
     tag = report.get('clone_tag')
     if not tag or tag.get('phase') not in {'workspace_created', 'pane_allocated'}:
         return retained

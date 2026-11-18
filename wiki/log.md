@@ -4457,3 +4457,9 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `herdr/inbox/dispatcher.py#_blocking_workflow`
   - `herdr/projects.py#active_workflows_for_project`
   - `tests/test_inbox_dispatcher.py#test_failed_workflow_holds_workspace_until_shutdown`
+
+## [2026-11-18] Fix | Worker 崩溃后的启动证据与工作区恢复
+- Worker 在请求启动 Agent 前将 Pane 分配和启动请求检查点写入 Launch Intent。关闭与资源恢复依据同一记录处理资源消失场景。
+- Evidence
+  - `herdr/task_resources.py#record_worker_start_checkpoint`
+  - `tests/test_workflow_shutdown.py#test_worker_crash_recovers_absent_pane_only_before_agent_start`
