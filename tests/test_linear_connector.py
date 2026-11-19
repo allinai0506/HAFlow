@@ -39,12 +39,16 @@ def sample_issue_payload(
     created_at="2026-11-19T08:00:00.000Z",
     org_id=ORG_ID,
     assignee_name="Alice Smith",
+    webhook_timestamp=None,
+    event_type="Issue",
 ):
+    if webhook_timestamp is None:
+        webhook_timestamp = int(datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp() * 1000)
     return {
         "action": action,
-        "type": "Issue",
+        "type": event_type,
         "createdAt": created_at,
-        "webhookTimestamp": int(datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp() * 1000),
+        "webhookTimestamp": webhook_timestamp,
         "organizationId": org_id,
         "data": {
             "id": issue_id,
@@ -128,9 +132,9 @@ def test_verifier_valid_and_invalid_signatures():
         TimestampSkewError,
     )
 
-    payload = json.dumps(sample_issue_payload()).encode("utf-8")
-    sig = sign(payload, SECRET)
     now_ms = 1780747500000
+    payload = json.dumps(sample_issue_payload(webhook_timestamp=now_ms)).encode("utf-8")
+    sig = sign(payload, SECRET)
 
     headers = {
         "Linear-Signature": sig,
@@ -145,6 +149,7 @@ def test_verifier_valid_and_invalid_signatures():
     assert verified.signature_verified is True
     assert verified.delivery_id == "delivery-uuid-1"
     assert verified.event_type == "Issue"
+    assert verified.payload["data"]["id"] == "issue-uuid-001"
 
     # Tampered payload
     tampered = payload + b" "
@@ -166,6 +171,36 @@ def test_verifier_valid_and_invalid_signatures():
     with pytest.raises(SignatureVerificationError, match="INVALID_SIGNATURE"):
         verifier.verify(payload, prefixed_headers, now_ms=now_ms)
 
+    # P1-01: Replay attack with historical valid signed body + signature and updated header timestamp
+    past_ms = now_ms - 300_000  # 5 minutes ago
+    past_payload = json.dumps(sample_issue_payload(webhook_timestamp=past_ms)).encode("utf-8")
+    past_sig = sign(past_payload, SECRET)
+    # Attacker sets Linear-Timestamp header to CURRENT time (now_ms)
+    spoofed_headers = {
+        "Linear-Signature": past_sig,
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Delivery": "replay-attack-001",
+        "Linear-Event": "Issue",
+    }
+    with pytest.raises(TimestampSkewError, match="TIMESTAMP_SKEW"):
+        verifier.verify(past_payload, spoofed_headers, now_ms=now_ms)
+
+    # Attacker deletes Linear-Timestamp header entirely
+    no_ts_header = {
+        "Linear-Signature": past_sig,
+        "Linear-Delivery": "replay-attack-002",
+        "Linear-Event": "Issue",
+    }
+    with pytest.raises(TimestampSkewError, match="TIMESTAMP_SKEW"):
+        verifier.verify(past_payload, no_ts_header, now_ms=now_ms)
+
+    # Missing webhookTimestamp in signed payload body -> rejected
+    no_body_ts_dict = sample_issue_payload(webhook_timestamp=now_ms)
+    del no_body_ts_dict["webhookTimestamp"]
+    no_body_ts_raw = json.dumps(no_body_ts_dict).encode("utf-8")
+    with pytest.raises(TimestampSkewError, match="missing webhookTimestamp in signed payload"):
+        verifier.verify(no_body_ts_raw, {"Linear-Signature": sign(no_body_ts_raw)}, now_ms=now_ms)
+
     # Clock skew past 60s
     skewed_past_headers = {**headers, "Linear-Timestamp": str(now_ms - 61_000)}
     with pytest.raises(TimestampSkewError, match="TIMESTAMP_SKEW"):
@@ -175,6 +210,11 @@ def test_verifier_valid_and_invalid_signatures():
     skewed_future_headers = {**headers, "Linear-Timestamp": str(now_ms + 61_000)}
     with pytest.raises(TimestampSkewError, match="TIMESTAMP_SKEW"):
         verifier.verify(payload, skewed_future_headers, now_ms=now_ms)
+
+    # P2: Event type mismatch between header and body -> rejected
+    mismatch_headers = {**headers, "Linear-Event": "Project"}
+    with pytest.raises(ValueError, match="EVENT_TYPE_MISMATCH"):
+        verifier.verify(payload, mismatch_headers, now_ms=now_ms)
 
 
 # =====================================================================
@@ -369,15 +409,17 @@ def test_end_to_end_linear_issue_lifecycle(intake_env):
     # -------------------------------------------------------------
     # 1. Issue Create Webhook -> Task Materialized in Inbox as DRAFT
     # -------------------------------------------------------------
-    raw_create = json.dumps(sample_issue_payload("create", "unstarted", updated_at="2026-11-19T08:00:00.000Z")).encode("utf-8")
+    t1_iso = "2026-11-19T08:00:00.000Z"
+    t1_ms = int(datetime.fromisoformat(t1_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    raw_create = json.dumps(sample_issue_payload("create", "unstarted", updated_at=t1_iso, created_at=t1_iso, webhook_timestamp=t1_ms)).encode("utf-8")
     headers_create = {
         "Linear-Signature": sign(raw_create),
         "Linear-Delivery": "delivery-create-001",
-        "Linear-Timestamp": "1780747500000",
+        "Linear-Timestamp": str(t1_ms),
         "Linear-Event": "Issue",
     }
 
-    delivery_create = connector.process_webhook(raw_create, headers_create, now_ms=1780747500000)
+    delivery_create = connector.process_webhook(raw_create, headers_create, now_ms=t1_ms)
     receipt_create = store.accept_event(delivery_create)
     assert receipt_create.outcome == "ACCEPTED"
 
@@ -408,20 +450,24 @@ def test_end_to_end_linear_issue_lifecycle(intake_env):
     # -------------------------------------------------------------
     # 3. Issue Update Webhook -> Source Snapshot Updated, No Duplicate Task
     # -------------------------------------------------------------
+    t2_iso = "2026-11-19T08:05:00.000Z"
+    t2_ms = int(datetime.fromisoformat(t2_iso.replace("Z", "+00:00")).timestamp() * 1000)
     raw_update = json.dumps(sample_issue_payload(
         "update", "started",
         title="Fix memory leak in buffer pool",
         description="Updated details: buffer pool leaks on restart.",
-        updated_at="2026-11-19T08:05:00.000Z",
+        updated_at=t2_iso,
+        created_at=t2_iso,
+        webhook_timestamp=t2_ms,
     )).encode("utf-8")
     headers_update = {
         "Linear-Signature": sign(raw_update),
         "Linear-Delivery": "delivery-update-002",
-        "Linear-Timestamp": "1780747800000",
+        "Linear-Timestamp": str(t2_ms),
         "Linear-Event": "Issue",
     }
 
-    delivery_update = connector.process_webhook(raw_update, headers_update, now_ms=1780747800000)
+    delivery_update = connector.process_webhook(raw_update, headers_update, now_ms=t2_ms)
     receipt_update = store.accept_event(delivery_update)
     assert receipt_update.outcome == "ACCEPTED"
     assert receipt_update.event_id != receipt_create.event_id
@@ -443,18 +489,22 @@ def test_end_to_end_linear_issue_lifecycle(intake_env):
     # -------------------------------------------------------------
     # 4. Issue Closed Webhook -> Task Projected as SOURCE_CLOSED
     # -------------------------------------------------------------
+    t3_iso = "2026-11-19T08:10:00.000Z"
+    t3_ms = int(datetime.fromisoformat(t3_iso.replace("Z", "+00:00")).timestamp() * 1000)
     raw_close = json.dumps(sample_issue_payload(
         "update", "completed",
-        updated_at="2026-11-19T08:10:00.000Z",
+        updated_at=t3_iso,
+        created_at=t3_iso,
+        webhook_timestamp=t3_ms,
     )).encode("utf-8")
     headers_close = {
         "Linear-Signature": sign(raw_close),
         "Linear-Delivery": "delivery-close-003",
-        "Linear-Timestamp": "1780748100000",
+        "Linear-Timestamp": str(t3_ms),
         "Linear-Event": "Issue",
     }
 
-    delivery_close = connector.process_webhook(raw_close, headers_close, now_ms=1780748100000)
+    delivery_close = connector.process_webhook(raw_close, headers_close, now_ms=t3_ms)
     receipt_close = store.accept_event(delivery_close)
     assert receipt_close.outcome == "ACCEPTED"
 
@@ -473,21 +523,25 @@ def test_end_to_end_linear_issue_lifecycle(intake_env):
     # -------------------------------------------------------------
     # 5. Empty Description Webhook -> Successfully Materializes
     # -------------------------------------------------------------
+    t4_iso = "2026-11-19T08:15:00.000Z"
+    t4_ms = int(datetime.fromisoformat(t4_iso.replace("Z", "+00:00")).timestamp() * 1000)
     raw_empty = json.dumps(sample_issue_payload(
         "create", "unstarted",
         issue_id="issue-uuid-empty-desc",
         identifier="TEST-102",
         title="Issue with empty description",
         description=None,
-        updated_at="2026-11-19T08:15:00.000Z",
+        updated_at=t4_iso,
+        created_at=t4_iso,
+        webhook_timestamp=t4_ms,
     )).encode("utf-8")
     headers_empty = {
         "Linear-Signature": sign(raw_empty),
         "Linear-Delivery": "delivery-empty-004",
-        "Linear-Timestamp": "1780748400000",
+        "Linear-Timestamp": str(t4_ms),
         "Linear-Event": "Issue",
     }
-    delivery_empty = connector.process_webhook(raw_empty, headers_empty, now_ms=1780748400000)
+    delivery_empty = connector.process_webhook(raw_empty, headers_empty, now_ms=t4_ms)
     receipt_empty = store.accept_event(delivery_empty)
     assert receipt_empty.outcome == "ACCEPTED"
     assert worker.run_once(store, materialization=policy) is True
@@ -508,11 +562,12 @@ def test_receiver_http_handler_dispatch(intake_env):
     path, store = intake_env
     from herdr.intake.connectors.linear.receiver import handle_linear_webhook
 
-    raw_body = json.dumps(sample_issue_payload("create", "unstarted")).encode("utf-8")
+    t_ms = 1780747500000
+    raw_body = json.dumps(sample_issue_payload("create", "unstarted", webhook_timestamp=t_ms)).encode("utf-8")
     headers = {
         "Linear-Signature": sign(raw_body),
         "Linear-Delivery": "delivery-http-001",
-        "Linear-Timestamp": "1780747500000",
+        "Linear-Timestamp": str(t_ms),
         "Linear-Event": "Issue",
     }
 
@@ -523,7 +578,7 @@ def test_receiver_http_handler_dispatch(intake_env):
         store=store,
         organization_id=ORG_ID,
         signing_secret=SECRET,
-        now_ms=1780747500000,
+        now_ms=t_ms,
     )
     assert status == 200
     assert body.get("received") is True
@@ -536,7 +591,7 @@ def test_receiver_http_handler_dispatch(intake_env):
         store=store,
         organization_id=ORG_ID,
         signing_secret=SECRET,
-        now_ms=1780747500000,
+        now_ms=t_ms,
     )
     assert status_dup == 200
     assert body_dup.get("received") is True
@@ -550,20 +605,63 @@ def test_receiver_http_handler_dispatch(intake_env):
         store=store,
         organization_id=ORG_ID,
         signing_secret=SECRET,
-        now_ms=1780747500000,
+        now_ms=t_ms,
     )
     assert status_bad == 401
     assert "error" in body_bad
 
-    # Non-issue event -> 200 IGNORED
-    comment_headers = {**headers, "Linear-Event": "Comment"}
+    # P2: Non-issue event (Project) -> 200 IGNORED, no task created
+    raw_project = json.dumps(sample_issue_payload("create", "unstarted", webhook_timestamp=t_ms, event_type="Project")).encode("utf-8")
+    project_headers = {
+        "Linear-Signature": sign(raw_project),
+        "Linear-Delivery": "delivery-proj-001",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Project",
+    }
+    status_proj, _, body_proj = handle_linear_webhook(
+        raw_body=raw_project,
+        headers=project_headers,
+        store=store,
+        organization_id=ORG_ID,
+        signing_secret=SECRET,
+        now_ms=t_ms,
+    )
+    assert status_proj == 200
+    assert body_proj.get("ignored") is True
+    assert "UNSUPPORTED_EVENT_TYPE" in body_proj.get("reason", "")
+
+    # Non-issue event (Project) WITHOUT Linear-Event header -> parsed from body type and safely ignored
+    project_no_hdr = {
+        "Linear-Signature": sign(raw_project),
+        "Linear-Delivery": "delivery-proj-002",
+        "Linear-Timestamp": str(t_ms),
+    }
+    status_proj2, _, body_proj2 = handle_linear_webhook(
+        raw_body=raw_project,
+        headers=project_no_hdr,
+        store=store,
+        organization_id=ORG_ID,
+        signing_secret=SECRET,
+        now_ms=t_ms,
+    )
+    assert status_proj2 == 200
+    assert body_proj2.get("ignored") is True
+
+    # Non-issue event (Comment) -> 200 IGNORED
+    raw_comment = json.dumps(sample_issue_payload("create", "unstarted", webhook_timestamp=t_ms, event_type="Comment")).encode("utf-8")
+    comment_headers = {
+        "Linear-Signature": sign(raw_comment),
+        "Linear-Delivery": "delivery-comm-001",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Comment",
+    }
     status_comm, _, body_comm = handle_linear_webhook(
-        raw_body=raw_body,
+        raw_body=raw_comment,
         headers=comment_headers,
         store=store,
         organization_id=ORG_ID,
         signing_secret=SECRET,
-        now_ms=1780747500000,
+        now_ms=t_ms,
     )
     assert status_comm == 200
     assert body_comm.get("ignored") is True
@@ -582,7 +680,7 @@ def test_console_api_linear_webhook_endpoint(intake_env, monkeypatch):
 
     # 2. Configured -> Success
     now_ms = int(time.time() * 1000)
-    raw_body = json.dumps(sample_issue_payload("create", "unstarted")).encode("utf-8")
+    raw_body = json.dumps(sample_issue_payload("create", "unstarted", webhook_timestamp=now_ms)).encode("utf-8")
     headers = {
         "Linear-Signature": sign(raw_body),
         "Linear-Delivery": "delivery-console-001",
@@ -623,6 +721,7 @@ def test_codex_p2_remove_with_same_updated_at_does_not_collide(intake_env):
         issue_id="issue-uuid-codex-p2",
         updated_at=t1_iso,
         created_at=t1_iso,
+        webhook_timestamp=t1_ms,
     )).encode("utf-8")
     headers_create = {
         "Linear-Signature": sign(raw_create),
@@ -643,6 +742,7 @@ def test_codex_p2_remove_with_same_updated_at_does_not_collide(intake_env):
         issue_id="issue-uuid-codex-p2",
         updated_at=t1_iso,  # Kept same as create!
         created_at=t2_iso,  # Later event creation time!
+        webhook_timestamp=t2_ms,
     )).encode("utf-8")
     headers_remove = {
         "Linear-Signature": sign(raw_remove),
@@ -698,3 +798,144 @@ def test_codex_p1_content_length_limit_enforced_before_read(monkeypatch):
 
     client_sock.close()
     t.join()
+
+
+def test_p1_02_authorization_revision_lifecycle_and_stale_rejection(intake_env):
+    """P1-02: Connection revision 1 -> 2 (DISABLED) -> 3 (ACTIVE), verifying no silent 200 on rejection."""
+    path, store = intake_env
+    from herdr.intake.connectors.linear.receiver import handle_linear_webhook
+
+    t_iso = "2026-11-19T08:00:00.000Z"
+    t_ms = int(datetime.fromisoformat(t_iso.replace("Z", "+00:00")).timestamp() * 1000)
+
+    # 1. Initial State: Connection registered at config_revision = 1, status = ACTIVE
+    raw_1 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-rev-1", webhook_timestamp=t_ms)).encode("utf-8")
+    headers_1 = {
+        "Linear-Signature": sign(raw_1),
+        "Linear-Delivery": "delivery-rev-001",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Issue",
+    }
+    status_1, _, body_1 = handle_linear_webhook(raw_1, headers_1, store, ORG_ID, SECRET, now_ms=t_ms)
+    assert status_1 == 200
+    assert body_1.get("outcome") == "ACCEPTED"
+
+    # 2. Revoke authorization: update connection status to DISABLED -> config_revision = 2
+    authorizer_store = EventStore(path, SCOPE, authorizer=lambda action, scope: "admin-actor")
+    new_rev = authorizer_store.update_connection_authorization(1, status="DISABLED", reason="OAuth revoked by user")
+    assert new_rev == 2
+
+    # Webhook sent when revoked -> must be rejected with 403 (NOT 200!)
+    raw_2 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-rev-2", webhook_timestamp=t_ms)).encode("utf-8")
+    headers_2 = {
+        "Linear-Signature": sign(raw_2),
+        "Linear-Delivery": "delivery-rev-002",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Issue",
+    }
+    status_2, _, body_2 = handle_linear_webhook(raw_2, headers_2, store, ORG_ID, SECRET, now_ms=t_ms)
+    assert status_2 == 403
+    assert "CONNECTION_UNAVAILABLE" in body_2.get("error", "")
+
+    # 3. Re-authorize connection: update connection status to ACTIVE -> config_revision = 3
+    new_rev_3 = authorizer_store.update_connection_authorization(2, status="ACTIVE", reason="Re-authenticated via OAuth")
+    assert new_rev_3 == 3
+
+    # Webhook sent after re-authorization -> dynamically picks up revision 3 -> 200 ACCEPTED
+    raw_3 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-rev-3", webhook_timestamp=t_ms)).encode("utf-8")
+    headers_3 = {
+        "Linear-Signature": sign(raw_3),
+        "Linear-Delivery": "delivery-rev-003",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Issue",
+    }
+    status_3, _, body_3 = handle_linear_webhook(raw_3, headers_3, store, ORG_ID, SECRET, now_ms=t_ms)
+    assert status_3 == 200
+    assert body_3.get("outcome") == "ACCEPTED"
+
+    # 4. Stale delivery test: if a delivery is explicitly stamped with stale config_revision = 1 against revision 3:
+    # EventStore rejects it as CONNECTION_UNAVAILABLE, and webhook handler MUST return 409 (NOT silent 200!)
+    raw_stale = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-rev-stale", webhook_timestamp=t_ms)).encode("utf-8")
+    headers_stale = {
+        "Linear-Signature": sign(raw_stale),
+        "Linear-Delivery": "delivery-rev-stale",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Issue",
+    }
+    status_stale, _, body_stale = handle_linear_webhook(
+        raw_stale, headers_stale, store, ORG_ID, SECRET, config_revision=1, now_ms=t_ms
+    )
+    assert status_stale == 409
+    assert body_stale.get("ok") is False
+    assert "CONNECTION_UNAVAILABLE" in body_stale.get("error", "")
+
+
+def test_p1_03_console_slow_client_read_timeout_and_incomplete_body():
+    """P1-03: Console webhook endpoint enforces read timeout and rejects incomplete body."""
+    import socket
+    import threading
+    from console.http_server import Handler
+
+    # Case 1: Incomplete body (Content-Length: 100, only 20 bytes received and client closes stream)
+    client_sock1, server_sock1 = socket.socketpair()
+    mock_server1 = MagicMock()
+
+    def handle1():
+        Handler(server_sock1, ("127.0.0.1", 12345), mock_server1)
+
+    t1 = threading.Thread(target=handle1)
+    t1.start()
+
+    client_sock1.sendall(b"POST /api/intake/webhook/linear HTTP/1.1\r\nContent-Length: 100\r\n\r\n" + b"X" * 20)
+    client_sock1.shutdown(socket.SHUT_WR)
+    res1_chunks = []
+    while True:
+        c = client_sock1.recv(4096)
+        if not c:
+            break
+        res1_chunks.append(c)
+        if b"INCOMPLETE_BODY" in b"".join(res1_chunks):
+            break
+    res1 = b"".join(res1_chunks).decode("utf-8")
+    assert "400" in res1
+    assert "INCOMPLETE_BODY" in res1
+    client_sock1.close()
+    t1.join()
+
+    # Case 2: Slow/hanging client socket read timeout
+    client_sock2, server_sock2 = socket.socketpair()
+    mock_server2 = MagicMock()
+
+    class FastTimeoutSocket:
+        def __init__(self, s):
+            self._s = s
+        def settimeout(self, _):
+            self._s.settimeout(0.1)
+        def makefile(self, *args, **kwargs):
+            return self._s.makefile(*args, **kwargs)
+        def __getattr__(self, name):
+            return getattr(self._s, name)
+
+    wrapped_sock2 = FastTimeoutSocket(server_sock2)
+
+    def handle2():
+        Handler(wrapped_sock2, ("127.0.0.1", 12345), mock_server2)
+
+    t2 = threading.Thread(target=handle2)
+    t2.start()
+
+    # Send Content-Length: 100, but only send 20 bytes and stall without closing
+    client_sock2.sendall(b"POST /api/intake/webhook/linear HTTP/1.1\r\nContent-Length: 100\r\n\r\n" + b"X" * 20)
+    res2_chunks = []
+    while True:
+        c = client_sock2.recv(4096)
+        if not c:
+            break
+        res2_chunks.append(c)
+        if b"REQUEST_TIMEOUT" in b"".join(res2_chunks):
+            break
+    res2 = b"".join(res2_chunks).decode("utf-8")
+    assert "408" in res2
+    assert "REQUEST_TIMEOUT" in res2
+    client_sock2.close()
+    t2.join()

@@ -152,3 +152,37 @@ python3 services/herdr-linear-webhook.py --help
 - **回归测试覆盖**：
   - `tests/test_linear_connector.py::test_codex_p1_content_length_limit_enforced_before_read`
   - `tests/test_linear_connector.py::test_codex_p2_remove_with_same_updated_at_does_not_collide`
+
+---
+
+## 7. 复审修复记录 (3 P1 + 1 P2)
+
+### 7.1 P1-01：Webhook 签名 Body 时间戳校验与防重放
+- **根因**：原 `LinearVerifier` 仅检查了未包含在 HMAC 摘要保护范围内的 HTTP Header `Linear-Timestamp`，攻击者可截获历史合法请求体后伪造当前 Header 时间戳绕过窗口校验。
+- **修复**：
+  - HMAC 摘要验证通过后，在解析出的签名 Body 中强制校验 `webhookTimestamp`。
+  - 使用经过签名保护的 `webhookTimestamp` 执行 60s 钟差新鲜度检查；若缺失或钟差超限立即阻断。
+  - Header 中的 `Linear-Timestamp` 仅作为辅助比对，若与签名 Body 差异超限亦直接阻断。
+- **测试**：`tests/test_linear_connector.py::test_verifier_valid_and_invalid_signatures`。
+
+### 7.2 P1-02：连接授权版本动态传递与非静默拒绝
+- **根因**：两个 Webhook HTTP 入口原先以硬编码 `config_revision=1` 构造 Connector，当外部连接执行授权变更（如 1 -> 2: DISABLED -> 3: ACTIVE）时，Connector 仍提交旧版本导致事件被拒绝；且 `handle_linear_webhook` 原先对 REJECTED 错误静默返回 200，造成外部误判成功。
+- **修复**：
+  - 在 `receiver.py` 增加 `get_connection_config(store)`，每次入库前从 State DB 可信读取当前连接状态与 `config_revision` 并注入 Connector。
+  - 对连接不可用（DISABLED / AUTH_REQUIRED）直接响应 403 Forbidden；对事务性拒绝（如版本过期、事实冲突）响应 409 / 400，严禁静默返回 200。
+- **测试**：`tests/test_linear_connector.py::test_p1_02_authorization_revision_lifecycle_and_stale_rejection`。
+
+### 7.3 P1-03：Console Webhook 慢速攻击防御与超时保护
+- **根因**：Console `ThreadingHTTPServer` 原先在读取请求体时未设置 socket 读取超时，慢速恶意客户端可发送虚高 Content-Length 并缓慢发送字节，挂起服务工作线程。
+- **修复**：
+  - 在 `console/http_server.py` 对 `/api/intake/webhook/linear` 设置 5.0s 强制读取超时及完整性检查（`len(raw) == n`）。
+  - 超时立即返回 408 并关闭 socket，未完整读取直接返回 400 并切断连接。
+- **测试**：`tests/test_linear_connector.py::test_p1_03_console_slow_client_read_timeout_and_incomplete_body`。
+
+### 7.4 P2：签名 Body 业务事件类型白名单验证
+- **根因**：原先仅在 HTTP Header 层过滤 `Linear-Event`，若缺失 Header 或 Header 伪造，非 Issue 事件（如 Project、Comment）可能被误当作 Issue 处理生成脏任务。
+- **修复**：
+  - `LinearNormalizer` 严格校验签名 Body 的 `type == "Issue"`，非 Issue 类型抛出 `UnsupportedEventTypeError`。
+  - `LinearVerifier` 交叉校验 Header 与 Body 类型一致性，不匹配抛出 400。
+  - 有效签名的非 Issue 事件在 Receiver 中安全丢弃并回复 200 IGNORED，不写入 EventStore，不生成 Inbox 任务。
+- **测试**：`tests/test_linear_connector.py::test_receiver_http_handler_dispatch`。

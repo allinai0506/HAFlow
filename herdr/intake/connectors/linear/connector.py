@@ -65,10 +65,18 @@ class LinearConnector:
         headers: Mapping[str, str],
         *,
         now_ms: int | None = None,
-    ) -> Delivery:
-        """Verify, normalize, and construct an Intake Delivery from incoming webhook bytes."""
+    ) -> Delivery | None:
+        """Verify, normalize, and construct an Intake Delivery from incoming webhook bytes.
+
+        Returns:
+            Delivery if the payload is an Issue event, or None if the payload is a valid
+            non-Issue event (e.g. Project, Comment) which is safely ignored.
+        """
         verified = self.verifier.verify(raw_bytes, headers, now_ms=now_ms)
-        payload = json.loads(raw_bytes.decode("utf-8"))
+        if verified.event_type != "Issue":
+            return None
+
+        payload = verified.payload if verified.payload is not None else json.loads(raw_bytes.decode("utf-8"))
 
         fact = self.normalizer.normalize(payload)
         source = f"urn:haflow:intake:linear:{self.organization_id}:{CAPABILITY}"

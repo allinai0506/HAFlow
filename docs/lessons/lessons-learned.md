@@ -10004,12 +10004,18 @@ Linear Connector 作为 HAFlow 第一个真实外部系统接入，在打通 `Li
 | **实体分裂或重复生成** | 外部 Issue 跨团队移动时其人类可读的 Identifier（如 `ENG-10` $\rightarrow$ `PROD-5`）改变 | **不可变 UUID 实体绑定**：必须使用 Linear 全局不可变 UUID `data.id` 作为 `external_id`，Identifier 仅作为标题展示前缀 |
 | **Webhook 重试风暴** | 在 Webhook 请求线程中同步执行耗时计算或外部调用超过 5 秒 | **Transactional Ingress 模式**：接收端仅执行验签、标准化、在单一短事务内原子记录回执与事实正本，立即应答 200 OK；物化完全交由后台独立 Worker 异步领取 |
 | **网络重传重复记账** | 外部系统因网络闪断重传同一事件 | **双层去重机制**：传输层以 `Linear-Delivery` UUID 去重回执，业务层以 `f"issue:{id}:{version}"` 事实 ID 幂等落库，判定为 `DUPLICATE` 且不生成新任务 |
+| **重放攻击绕过时间戳** | 仅校验未包含在 HMAC 签名中的 HTTP Header 时间戳，攻击者可截获旧 Body 修改 Header 伪造新鲜度 | **签名 Body 时间戳绑定**：必须强制使用经过 HMAC 签名保护的 Body 内 `webhookTimestamp` 执行 60s 钟差新鲜度检查，Header 仅作辅助对比 |
+| **授权失效静默丢失事件** | 静态硬编码版本号 `revision=1`，授权变更（1->2->3）后事件被 EventStore 事务拒绝但 HTTP 端点仍回 200 | **可信配置动态解析 + 显式错误响应**：Webhook 入口必须实时从 State DB 读取当前连接状态与 `config_revision` 注入 Connector；对不可用状态返回 403，对拒绝事务返回 409/400，绝不静默 ACK |
+| **慢速连接耗尽线程池** | Webhook 服务在读取请求体时未设置读取超时，慢速恶意连接占用 Worker 线程 | **严格流式超时与完整性约束**：设置 5.0s 刚性 socket 超时与 `MAX_BODY_BYTES (256KB)` 预检；必须验证读取字节数与 Content-Length 一致，超时或残缺立即断开连接 |
+| **未知事件污染工单库** | 仅依赖未签名的 Header 过滤事件类型，缺失 Header 时非 Issue 事件被默认反序列化 | **签名 Body 业务类型白名单**：在 Normalizer 中刚性断言 `payload.type == "Issue"`，非 Issue 类型在 Receiver 层安全忽略，严禁生成脏工单 |
 
 ### 操作规范
 
 1. **适配器 Normalizer 强制防卫**：所有 Connector 模块必须具备防御性字段清洗层，绝不允许裸传外部字典进入 EventStore / Materializer。
 2. **接收与消费彻底解耦**：Webhook Ingress HTTP 端点必须在 5 秒内返回，严格禁止在 HTTP 请求生命周期内调用阻塞操作或直接执行物化。
-3. **时钟偏差与签名恒定时间校验**：必须比对 `Linear-Timestamp`（<= 60s）防重放，并使用 `hmac.compare_digest` 恒定时间防时序攻击。
+3. **时钟偏差与签名恒定时间校验**：必须强制提取经 HMAC 签名的 `webhookTimestamp` 进行时钟偏差校验（<= 60s），并使用 `hmac.compare_digest` 恒定时间防时序攻击。
+4. **动态授权版本注入**：所有 Webhook Ingress 端点在创建 Connector 时必须统一从 State DB 检索当前权威 `config_revision`，严禁硬编码。
+5. **拒绝事件显式报错**：EventStore 判定为 REJECTED 的事件必须映射为 4xx/5xx HTTP 状态码，禁止向外部发送成功回执导致静默吞事件。
 
 ### 验证命令 / 守护测试
 

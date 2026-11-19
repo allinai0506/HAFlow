@@ -11,6 +11,10 @@ class OrganizationMismatchError(ValueError):
     """Raised when the incoming payload organizationId does not match the configured binding."""
 
 
+class UnsupportedEventTypeError(ValueError):
+    """Raised when the webhook event payload type is not supported by this connector."""
+
+
 def _clean_str(value: str | None) -> str:
     if not value:
         return ""
@@ -45,6 +49,12 @@ class LinearNormalizer:
     def normalize(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("payload must be a dictionary")
+
+        payload_type = str(payload.get("type") or "").strip()
+        if payload_type != "Issue":
+            raise UnsupportedEventTypeError(
+                f"UNSUPPORTED_EVENT_TYPE: event type '{payload_type}' is not supported; Linear V1 only subscribes to 'Issue'"
+            )
 
         payload_org = payload.get("organizationId")
         if payload_org != self.organization_id:

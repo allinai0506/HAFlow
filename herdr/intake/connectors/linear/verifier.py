@@ -2,9 +2,10 @@
 
 import hashlib
 import hmac
+import json
 import time
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 
 class SignatureVerificationError(ValueError):
@@ -22,6 +23,7 @@ class VerifiedDelivery:
     delivery_id: str | None
     event_type: str | None
     timestamp_ms: int | None
+    payload: dict[str, Any] | None = None
 
 
 class LinearVerifier:
@@ -54,21 +56,51 @@ class LinearVerifier:
         if not hmac.compare_digest(sig_header, expected_sig):
             raise SignatureVerificationError("INVALID_SIGNATURE: signature does not match expected digest")
 
-        # Clock skew validation
+        # Parse verified payload body
+        try:
+            payload = json.loads(raw_bytes.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be a JSON object")
+        except Exception as exc:
+            raise ValueError(f"MALFORMED_PAYLOAD: unable to parse JSON body: {exc}")
+
+        # Authoritative freshness check: must use the HMAC-protected webhookTimestamp in signed body
+        raw_ts = payload.get("webhookTimestamp")
+        if raw_ts is None:
+            raise TimestampSkewError("TIMESTAMP_SKEW: missing webhookTimestamp in signed payload")
+        try:
+            timestamp_ms = int(raw_ts)
+        except (ValueError, TypeError):
+            raise TimestampSkewError("TIMESTAMP_SKEW: invalid webhookTimestamp format in signed payload")
+
         now = now_ms if now_ms is not None else int(time.time() * 1000)
+        diff = abs(now - timestamp_ms)
+        if diff > self._max_skew_ms:
+            raise TimestampSkewError(f"TIMESTAMP_SKEW: clock skew {diff}ms exceeds {self._max_skew_ms}ms limit")
+
+        # Auxiliary header check: if Linear-Timestamp header is present, it must not contradict the signed body
         ts_header = lower_headers.get("linear-timestamp")
-        timestamp_ms = None
         if ts_header:
             try:
-                timestamp_ms = int(ts_header)
+                header_ts = int(ts_header)
+                if abs(header_ts - timestamp_ms) > 5000:
+                    raise TimestampSkewError(
+                        f"TIMESTAMP_SKEW: Linear-Timestamp header ({header_ts}) deviates from signed payload timestamp ({timestamp_ms})"
+                    )
             except ValueError:
                 raise TimestampSkewError("TIMESTAMP_SKEW: invalid Linear-Timestamp integer format")
-            if abs(now - timestamp_ms) > self._max_skew_ms:
-                diff = abs(now - timestamp_ms)
-                raise TimestampSkewError(f"TIMESTAMP_SKEW: clock skew {diff}ms exceeds {self._max_skew_ms}ms limit")
 
         delivery_id = lower_headers.get("linear-delivery")
-        event_type = lower_headers.get("linear-event")
+        payload_type = str(payload.get("type") or "").strip()
+        header_event = lower_headers.get("linear-event")
+
+        # Event type consistency check between header and body
+        if header_event and payload_type and header_event.lower() != payload_type.lower():
+            raise ValueError(
+                f"EVENT_TYPE_MISMATCH: Linear-Event header '{header_event}' != payload type '{payload_type}'"
+            )
+
+        event_type = payload_type or header_event or None
 
         return VerifiedDelivery(
             raw_bytes=raw_bytes,
@@ -76,4 +108,5 @@ class LinearVerifier:
             delivery_id=delivery_id,
             event_type=event_type,
             timestamp_ms=timestamp_ms,
+            payload=payload,
         )
