@@ -1039,3 +1039,286 @@ def test_p1_secret_rotation_bound_to_authorization_revision(tmp_path):
     assert body_new.get("outcome") == "ACCEPTED"
 
     clear_secret_registry()
+
+
+def _send_http_request(handler_cls, server_obj, path, headers, raw_body):
+    """Helper to send an HTTP POST request over socketpair to a BaseHTTPRequestHandler."""
+    import socket
+    import threading
+
+    client_sock, server_sock = socket.socketpair()
+
+    def handle():
+        try:
+            handler_cls(server_sock, ("127.0.0.1", 12345), server_obj)
+        finally:
+            try:
+                server_sock.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=handle)
+    t.start()
+
+    all_headers = {
+        "Host": "127.0.0.1",
+        "Content-Length": str(len(raw_body)),
+        "Connection": "close",
+        **headers,
+    }
+    header_lines = "".join(f"{k}: {v}\r\n" for k, v in all_headers.items())
+    req_bytes = f"POST {path} HTTP/1.1\r\n{header_lines}\r\n".encode("utf-8") + raw_body
+    client_sock.sendall(req_bytes)
+
+    chunks = []
+    while True:
+        c = client_sock.recv(4096)
+        if not c:
+            break
+        chunks.append(c)
+    client_sock.close()
+    t.join()
+
+    resp_data = b"".join(chunks).decode("utf-8")
+    status_line = resp_data.split("\r\n", 1)[0]
+    status_code = int(status_line.split()[1])
+    parts = resp_data.split("\r\n\r\n", 1)
+    body = json.loads(parts[1]) if len(parts) > 1 and parts[1].strip() else {}
+    return status_code, body
+
+
+def test_console_http_handler_secret_rotation(tmp_path, monkeypatch):
+    """Integration: Console HTTP Handler dynamically resolves signing secret via auth_ref without global secret."""
+    from console.http_server import Handler
+    from herdr.intake.connectors.linear.credentials import clear_secret_registry
+
+    clear_secret_registry()
+    path = tmp_path / "state_console_rot.db"
+    initialize(path)
+    store = EventStore(
+        path,
+        SCOPE,
+        authorizer=lambda action, scope: "admin",
+        verifier=lambda d: d.verified_via == "SIGNATURE",
+    )
+
+    old_secret = "console-old-secret-111"
+    new_secret = "console-new-secret-222"
+    ref_v1 = "linear-ref-v1"
+    ref_v2 = "linear-ref-v2"
+
+    # 1. Connection registered at revision 1 with auth_ref = ref_v1
+    store.register_connection(
+        provider="linear",
+        instance=ORG_ID,
+        display_name="Linear",
+        connector_version="1.0.0",
+        auth_ref=ref_v1,
+    )
+
+    # Ingress environment: LINEAR_WEBHOOK_SECRET is NOT set globally, credentials resolved per auth_ref
+    monkeypatch.setenv("LINEAR_ORGANIZATION_ID", ORG_ID)
+    monkeypatch.delenv("LINEAR_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("LINEAR_WEBHOOK_SECRET_REF", raising=False)
+    monkeypatch.setenv("HAFLOW_INTAKE_TENANT", SCOPE.tenant_id)
+    monkeypatch.setenv("HAFLOW_LINEAR_CONNECTION", SCOPE.connection_id)
+    monkeypatch.setattr("herdr.state_db.get_default_db_path", lambda: str(path))
+    monkeypatch.setattr("console.inbox_api.get_inbox_store", lambda: MagicMock(db_path=str(path)))
+
+    # Set secret for ref_v1 in environment
+    monkeypatch.setenv("HAFLOW_INTAKE_SECRET_LINEAR_REF_V1", old_secret)
+
+    mock_server = MagicMock()
+    now_ms = int(time.time() * 1000)
+
+    # Request 1: Signed with old_secret -> Console Handler returns 200 ACCEPTED
+    raw_1 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="console-rot-1", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_1 = {
+        "Linear-Signature": sign(raw_1, old_secret),
+        "Linear-Delivery": "delivery-console-rot-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_1, body_1 = _send_http_request(Handler, mock_server, "/api/intake/webhook/linear", headers_1, raw_1)
+    assert status_1 == 200
+    assert body_1.get("ok") is True
+    assert body_1["data"]["outcome"] == "ACCEPTED"
+
+    # 2. Administrator rotates connection authorization to ref_v2 in DB -> revision = 2
+    new_rev = store.update_connection_authorization(1, status="ACTIVE", reason="Key rotation", auth_ref=ref_v2)
+    assert new_rev == 2
+    monkeypatch.setenv("HAFLOW_INTAKE_SECRET_LINEAR_REF_V2", new_secret)
+
+    # Request 2 (Attacker): Signed with old_secret -> 401 INVALID_SIGNATURE (evaluated against dynamically resolved new_secret)
+    raw_2_att = json.dumps(sample_issue_payload("create", "unstarted", issue_id="console-rot-2-att", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_2_att = {
+        "Linear-Signature": sign(raw_2_att, old_secret),
+        "Linear-Delivery": "delivery-console-rot-002-att",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_2_att, body_2_att = _send_http_request(Handler, mock_server, "/api/intake/webhook/linear", headers_2_att, raw_2_att)
+    assert status_2_att == 401
+    assert body_2_att.get("ok") is False
+    assert "INVALID_SIGNATURE" in body_2_att.get("error", "")
+
+    # Request 3 (Legitimate): Signed with new_secret -> 200 ACCEPTED at revision 2
+    raw_2_legit = json.dumps(sample_issue_payload("create", "unstarted", issue_id="console-rot-2-legit", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_2_legit = {
+        "Linear-Signature": sign(raw_2_legit, new_secret),
+        "Linear-Delivery": "delivery-console-rot-002-legit",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_2_legit, body_2_legit = _send_http_request(Handler, mock_server, "/api/intake/webhook/linear", headers_2_legit, raw_2_legit)
+    assert status_2_legit == 200
+    assert body_2_legit.get("ok") is True
+    assert body_2_legit["data"]["outcome"] == "ACCEPTED"
+
+    # 3. Connection rotated in DB to unconfigured ref_v3 -> 401 CREDENTIAL_UNRESOLVED (Fail Closed)
+    store.update_connection_authorization(2, status="ACTIVE", reason="Key rotation to unconfigured v3", auth_ref="linear-ref-v3")
+    raw_3 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="console-rot-3", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_3 = {
+        "Linear-Signature": sign(raw_3, new_secret),
+        "Linear-Delivery": "delivery-console-rot-003",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_3, body_3 = _send_http_request(Handler, mock_server, "/api/intake/webhook/linear", headers_3, raw_3)
+    assert status_3 == 401
+    assert body_3.get("ok") is False
+    assert "CREDENTIAL_UNRESOLVED" in body_3.get("error", "")
+
+
+def test_standalone_webhook_handler_secret_rotation(tmp_path):
+    """Integration: Standalone Webhook Handler dynamically resolves secrets and enforces rotation Fail-Closed."""
+    from herdr.intake.connectors.linear.credentials import clear_secret_registry, register_secret
+    from herdr.intake.connectors.linear.receiver import LinearWebhookHandler
+
+    clear_secret_registry()
+    path = tmp_path / "state_standalone_rot.db"
+    initialize(path)
+    store = EventStore(
+        path,
+        SCOPE,
+        authorizer=lambda action, scope: "admin",
+        verifier=lambda d: d.verified_via == "SIGNATURE",
+    )
+
+    old_secret = "standalone-old-111"
+    new_secret = "standalone-new-222"
+    ref_v1 = "linear-ref-v1"
+    ref_v2 = "linear-ref-v2"
+
+    store.register_connection(
+        provider="linear",
+        instance=ORG_ID,
+        display_name="Linear",
+        connector_version="1.0.0",
+        auth_ref=ref_v1,
+    )
+    register_secret(ref_v1, old_secret)
+
+    # Dynamic server mock: signing_secret=None, auth_ref=None (fully dynamic resolution)
+    dynamic_server = MagicMock()
+    dynamic_server.store = store
+    dynamic_server.organization_id = ORG_ID
+    dynamic_server.signing_secret = None
+    dynamic_server.auth_ref = None
+
+    now_ms = int(time.time() * 1000)
+
+    # 1. Request signed with old_secret -> 200 ACCEPTED
+    raw_1 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="standalone-rot-1", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_1 = {
+        "Linear-Signature": sign(raw_1, old_secret),
+        "Linear-Delivery": "delivery-standalone-rot-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_1, body_1 = _send_http_request(LinearWebhookHandler, dynamic_server, "/", headers_1, raw_1)
+    assert status_1 == 200
+    assert body_1.get("received") is True
+    assert body_1.get("outcome") == "ACCEPTED"
+
+    # 2. Administrator rotates key in DB to ref_v2
+    new_rev = store.update_connection_authorization(1, status="ACTIVE", reason="Key rotation", auth_ref=ref_v2)
+    assert new_rev == 2
+    register_secret(ref_v2, new_secret)
+
+    # Request signed with old_secret sent to dynamic server -> 401 INVALID_SIGNATURE
+    raw_2_att = json.dumps(sample_issue_payload("create", "unstarted", issue_id="standalone-rot-2-att", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_2_att = {
+        "Linear-Signature": sign(raw_2_att, old_secret),
+        "Linear-Delivery": "delivery-standalone-rot-002-att",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_2_att, body_2_att = _send_http_request(LinearWebhookHandler, dynamic_server, "/", headers_2_att, raw_2_att)
+    assert status_2_att == 401
+    assert "INVALID_SIGNATURE" in body_2_att.get("error", "")
+
+    # Request signed with new_secret sent to dynamic server -> 200 ACCEPTED
+    raw_2_legit = json.dumps(sample_issue_payload("create", "unstarted", issue_id="standalone-rot-2-legit", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_2_legit = {
+        "Linear-Signature": sign(raw_2_legit, new_secret),
+        "Linear-Delivery": "delivery-standalone-rot-002-legit",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_2_legit, body_2_legit = _send_http_request(LinearWebhookHandler, dynamic_server, "/", headers_2_legit, raw_2_legit)
+    assert status_2_legit == 200
+    assert body_2_legit.get("outcome") == "ACCEPTED"
+
+    # 3. Stale daemon instance scenario:
+    # Server started with static ref_v1 credentials, DB is at ref_v2 -> FAIL CLOSED (401 AUTH_REF_MISMATCH)
+    stale_server = MagicMock()
+    stale_server.store = store
+    stale_server.organization_id = ORG_ID
+    stale_server.signing_secret = old_secret
+    stale_server.auth_ref = ref_v1
+
+    status_stale, body_stale = _send_http_request(LinearWebhookHandler, stale_server, "/", headers_2_att, raw_2_att)
+    assert status_stale == 401
+    assert "AUTH_REF_MISMATCH" in body_stale.get("error", "")
+
+    # 4. Unconfigured secret scenario: rotate in DB to ref_v3 without registering secret -> 401 CREDENTIAL_UNRESOLVED
+    store.update_connection_authorization(2, status="ACTIVE", reason="Rotate to v3", auth_ref="linear-ref-v3")
+    status_unresolved, body_unresolved = _send_http_request(LinearWebhookHandler, dynamic_server, "/", headers_2_legit, raw_2_legit)
+    assert status_unresolved == 401
+    assert "CREDENTIAL_UNRESOLVED" in body_unresolved.get("error", "")
+
+    clear_secret_registry()
+
+
+def test_standalone_cli_parser_allows_omitted_secret(monkeypatch):
+    """Verify that standalone CLI allows omitting --secret and defaults to dynamic resolution."""
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "services" / "herdr-linear-webhook.py"
+    spec = importlib.util.spec_from_file_location("herdr_linear_webhook", script_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    test_args = [
+        "herdr-linear-webhook.py",
+        "--tenant", "test-tenant",
+        "--connection", "test-conn",
+        "--org-id", ORG_ID,
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+    monkeypatch.delenv("LINEAR_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("LINEAR_WEBHOOK_SECRET_REF", raising=False)
+
+    with patch.object(mod, "LinearWebhookServer") as mock_server, \
+         patch.object(mod, "initialize") as mock_init, \
+         patch.object(mod, "EventStore") as mock_store, \
+         patch.object(mod.signal, "signal"):
+        mock_server.return_value.serve_forever.side_effect = SystemExit(0)
+        with pytest.raises(SystemExit):
+            mod.main()
+        mock_server.assert_called_once()
+        _, kwargs = mock_server.call_args
+        assert kwargs.get("signing_secret") is None
+        assert kwargs.get("auth_ref") is None
+        assert kwargs.get("organization_id") == ORG_ID

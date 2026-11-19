@@ -380,7 +380,7 @@ def api_linear_webhook(headers, raw_body):
                     connection = conn_id
                     break
 
-    if not org_id or not secret:
+    if not org_id:
         return 404, {"ok": False, "error": "linear_webhook_not_configured"}
 
     path = Path(get_inbox_store().db_path or get_default_db_path())

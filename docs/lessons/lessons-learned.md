@@ -10036,3 +10036,48 @@ git diff --check
 - `tests/test_linear_connector.py#test_end_to_end_linear_issue_lifecycle`
 - `docs/architecture/linear-connector-v1.md`
 - `docs/walkthroughs/linear-connector-v1.md`
+---
+
+## 237. 外部 Webhook 签名凭证轮换与不可变引用契约（Immutable Credential Contract & Fail-Closed Ingress）（2026-11-19）
+
+### 问题背景
+
+在实施 Linear Webhook 密钥轮换机制时，暴露出凭证管理与多入口分发中的三类高风险缺陷：
+1. **未重启服务版本越权穿透**：当管理员在数据库中执行密钥轮换（`update_connection_authorization(1, auth_ref="ref-v2")` $\rightarrow$ `config_revision = 2`）时，若 Webhook 接收进程未重启且依然使用内存中的旧密钥验签，一旦攻击者用旧密钥发送伪造事件，旧服务验证 HMAC 成功，并读取数据库最新的 `config_revision = 2` 盖戳写入 EventStore，导致旧密钥突破版本隔离注入事件。
+2. **静态凭据前置门禁阻断动态多版本解析**：Console 入口（`console/inbox_api.py`）最初包含 `if not org_id or not secret:` 强行要求单一全局环境变量 `LINEAR_WEBHOOK_SECRET`；独立守护进程 CLI（`services/herdr-linear-webhook.py`）同样要求必须提供 `--secret`。当运维按不可变凭证架构通过 `HAFLOW_INTAKE_SECRET_<REF>` 独立注入密钥时，由于缺乏全局环境变量，请求在进入动态解析前即被误报 404 或阻止启动。
+3. **缺少生产级 HTTP Handler 轮换集成覆盖**：单元测试仅直接调用内部 `handle_linear_webhook` 函数，未完整覆盖 Console `Handler` 与独立 `LinearWebhookHandler` 的真实 HTTP Socket 通信、状态码映射与 Fail-Closed 链路。
+
+### 经验教训
+
+| 问题现象 | 根因分析 | 治理原则与规范 |
+| :--- | :--- | :--- |
+| **旧密钥跨版本注入事件** | 服务未重启仍持有旧密钥，从数据库读到新版本号后代为验签 | **凭证引用不可变契约（Immutable Credential Contract）**：同一个 `auth_ref` 必须对应不可变的密钥版本。轮换密钥必须生成全新引用（`ref-v1` $\rightarrow$ `ref-v2`）并同步递增 `config_revision`，禁止在相同引用下就地篡改密钥内容 |
+| **未重启服务未能及时拦截** | 服务无法感知自己持有的内存密钥是否已经与数据库最新授权脱节 | **运行时引用漂移 Fail-Closed**：服务持有 `loaded_auth_ref` 若与数据库当前快照 `db_auth_ref` 不一致，必须立即中断验签，以 401 `AUTH_REF_MISMATCH` 阻断 |
+| **按引用配置密钥时入口报 404** | 入口代码过度耦合单一全局环境变量 `LINEAR_WEBHOOK_SECRET` | **双入口统一动态解析委托**：Console 与独立服务入口不再强求全局静态密钥，统一将 `signing_secret`（允许为 None）与 `auth_ref` 委托给 `resolve_signing_secret()` 执行多环境与注册表动态解析 |
+| **未配置密钥时未能优雅防护** | 数据库中配置了新引用但物理环境缺少对应密钥时缺少明确拒绝语义 | **缺失凭证 Fail-Closed**：无法解析出有效密钥时抛出 `CREDENTIAL_UNRESOLVED`，统一映射为 401 明确阻断 |
+
+### 操作规范
+
+1. **不可变凭证契约**：数据库 `intake_connections` 表严禁保存明文密钥，只保存可信 `auth_ref`；修改凭证必须同时递增 `config_revision` 并更换 `auth_ref`。
+2. **统一 Fail-Closed 决策中心**：所有 Webhook 入口统一通过 `herdr/intake/connectors/linear/credentials.py` 解析密钥，禁止在各 HTTP 适配层自行硬编码密钥判断。
+3. **两套生产入口严格端到端测试**：所有认证与轮换功能必须提供针对 Console `Handler` 与独立 `LinearWebhookHandler` 的真实 Socketpair HTTP 交换集成测试，覆盖合法接收、旧密钥拒绝、未刷新引用拦截及未配置引用报错。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_linear_connector.py -k "secret_rotation"
+pytest -q tests/test_intake_*.py tests/test_linear_connector.py
+python3 -m compileall -q herdr services console tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/intake/connectors/linear/credentials.py#resolve_signing_secret`
+- `herdr/intake/connectors/linear/receiver.py#handle_linear_webhook`
+- `console/inbox_api.py#api_linear_webhook`
+- `services/herdr-linear-webhook.py#main`
+- `tests/test_linear_connector.py#test_console_http_handler_secret_rotation`
+- `tests/test_linear_connector.py#test_standalone_webhook_handler_secret_rotation`
+- `tests/test_linear_connector.py#test_standalone_cli_parser_allows_omitted_secret`
+- `docs/walkthroughs/linear-connector-v1.md`

@@ -4545,3 +4545,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `tests/test_linear_connector.py`
   - `docs/architecture/linear-connector-v1.md`
   - `docs/walkthroughs/linear-connector-v1.md`
+
+## [2026-11-19] Fix | Linear Connector V1 动态凭证多版本解析与双入口集成闭环 (PR #426)
+- 解决复审遗留 P2 缺陷与不可变凭证契约冻结：
+  1. Console 入口动态凭据解析：放宽 `console/inbox_api.py` 的全局 `LINEAR_WEBHOOK_SECRET` 强制门禁，统一委托 `resolve_signing_secret()` 执行动态解析与 Fail-Closed 决策，支持无全局密钥时按 `auth_ref` 正常运作；
+  2. 独立服务命令行解耦：`services/herdr-linear-webhook.py` 支持省略 `--secret` 参数，允许按 `auth_ref` 在运行期动态解析凭证；
+  3. 凭证不可变契约（Immutable Credential Contract）：确立同一 `auth_ref` 对应不可变密钥版本的不变量；密钥轮换必须更新引用并递增 `config_revision`；
+  4. 生产级 HTTP Handler 集成覆盖：新增针对 Console `Handler` 与独立 `LinearWebhookHandler` 的完整 Socketpair HTTP 交换集成测试（合法接收、旧密钥拒绝、未刷新引用拦截、未配置引用报错）。
+- Evidence
+  - `console/inbox_api.py#api_linear_webhook`
+  - `services/herdr-linear-webhook.py#main`
+  - `tests/test_linear_connector.py#test_console_http_handler_secret_rotation`
+  - `tests/test_linear_connector.py#test_standalone_webhook_handler_secret_rotation`
+  - `tests/test_linear_connector.py#test_standalone_cli_parser_allows_omitted_secret`
+  - `docs/walkthroughs/linear-connector-v1.md`
+  - `docs/lessons/lessons-learned.md`

@@ -215,3 +215,38 @@ python3 services/herdr-linear-webhook.py --help
   3. 未重启、持有旧 `ref_v1` 的服务收到旧密钥请求 $\rightarrow$ 401 `AUTH_REF_MISMATCH`（Fail Closed）；
   4. 动态解析服务收到旧密钥请求 $\rightarrow$ 401 `INVALID_SIGNATURE`（新密钥验签失败）；
   5. 合法新密钥请求 $\rightarrow$ 200 ACCEPTED（revision 2 正确入库）。
+
+---
+
+## 9. 第五轮复审修复记录 (P2: 贯通双入口动态凭证解析与不可变凭证契约)
+
+### 9.1 问题背景与生产阻断点
+1. **Console HTTP 入口前置强校验阻断**：
+   - 原 `console/inbox_api.py` 包含 `if not org_id or not secret: return 404...` 校验。
+   - 当系统按照不可变凭证架构通过 `HAFLOW_INTAKE_SECRET_<REF>` 或凭证注册表按 `auth_ref` 分发密钥时，全局 `LINEAR_WEBHOOK_SECRET` 为空，导致合法 Webhook 请求被 Console 提前返回 404，未能进入 `resolve_signing_secret()`。
+2. **独立 Webhook 守护服务 CLI 强制参数限制**：
+   - `services/herdr-linear-webhook.py` 原要求 `if not args.secret: parser.error(...)`，强制要求启动参数提供明文 `--secret` 或全局环境变量。
+   - 这阻断了无明文密钥启动、完全按 `auth_ref` 动态加载安全凭据的运维场景。
+3. **缺少生产级 HTTP Handler 端到端轮换测试**：
+   - 上轮测试直接调用 `handle_linear_webhook`，未完整贯穿 Console `Handler` 与独立 `LinearWebhookHandler` 的 HTTP 请求/响应处理链路（Socket 读写、头部解析、JSON 封装与状态码映射）。
+
+### 9.2 修复实现与契约冻结
+1. **统一双入口凭证解析委托**：
+   - [console/inbox_api.py](file:///Users/user/haflow/console/inbox_api.py#L380-L396)：放宽前置门禁，仅要求 `LINEAR_ORGANIZATION_ID`；将 `secret`（可为 `None`）和 `secret_ref` 完整委托给 `handle_linear_webhook`，由 `resolve_signing_secret()` 统一解析，未配置时 Fail Closed 返回 401 `CREDENTIAL_UNRESOLVED`。
+   - [services/herdr-linear-webhook.py](file:///Users/user/haflow/services/herdr-linear-webhook.py#L35-L50)：将 `--secret` 设为可选参数，允许启动时不传入明文密钥，运行期按数据库当前 `auth_ref` 动态解析。
+2. **凭证不可变性契约（Immutable Credential Contract）**：
+   - **核心不变量**：同一个 `auth_ref` 对应不可变的密钥版本。
+   - **轮换准则**：轮换密钥必须在更新物理密钥的同时更换引用标识（如 `linear-secret-ref-v1` $\rightarrow$ `linear-secret-ref-v2`），并在数据库中调用 `update_connection_authorization` 递增授权版本（`config_revision`）。严禁在保持相同 `auth_ref` 不变的情况下篡改其背后的物理密钥内容。
+
+### 9.3 交付测试证据
+1. `tests/test_linear_connector.py::test_console_http_handler_secret_rotation`：
+   - 验证无全局 `LINEAR_WEBHOOK_SECRET` 时，Console `Handler` 经 socketpair 接收 HTTP POST，基于环境变量 `HAFLOW_INTAKE_SECRET_LINEAR_REF_V1` 动态解析密钥并成功入库（200 ACCEPTED）；
+   - 数据库连接授权轮换至 `ref_v2`（revision 2）后，携带旧密钥签名的请求立即被拒绝（401 INVALID_SIGNATURE）；
+   - 携带新密钥签名的请求成功入库（200 ACCEPTED）；
+   - 轮换至未配置物理密钥的 `ref_v3` 时，严格 Fail Closed（401 CREDENTIAL_UNRESOLVED）。
+2. `tests/test_linear_connector.py::test_standalone_webhook_handler_secret_rotation`：
+   - 验证独立 `LinearWebhookHandler` 在 `signing_secret=None` 时完全动态解析；
+   - 验证未重启、持有旧 `ref_v1` 的陈旧独立服务接收事件时，触发 `AUTH_REF_MISMATCH` 并 Fail Closed（401）；
+   - 验证未配置物理密钥时触发 `CREDENTIAL_UNRESOLVED`（401）。
+3. `tests/test_linear_connector.py::test_standalone_cli_parser_allows_omitted_secret`：
+   - 验证独立服务命令行在省略 `--secret` 时成功解析参数并启动。

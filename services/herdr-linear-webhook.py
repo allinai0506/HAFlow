@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--tenant", required=True, help="Instance tenant ID")
     parser.add_argument("--connection", required=True, help="Registered Intake connection ID")
     parser.add_argument("--org-id", default=os.environ.get("LINEAR_ORGANIZATION_ID"), help="Linear Organization ID")
-    parser.add_argument("--secret", default=os.environ.get("LINEAR_WEBHOOK_SECRET"), help="Linear Webhook Signing Secret")
+    parser.add_argument("--secret", default=os.environ.get("LINEAR_WEBHOOK_SECRET"), help="Linear Webhook Signing Secret (optional if resolvable via auth_ref/environment)")
     parser.add_argument("--secret-ref", default=os.environ.get("LINEAR_WEBHOOK_SECRET_REF"), help="Credential reference (auth_ref) for signing secret")
     parser.add_argument("--port", type=int, default=int(os.environ.get("HAFLOW_LINEAR_WEBHOOK_PORT", "8089")), help="Port to listen on (default: 8089)")
     parser.add_argument("--host", default=os.environ.get("HAFLOW_LINEAR_WEBHOOK_HOST", "0.0.0.0"), help="Host to bind (default: 0.0.0.0)")
@@ -44,8 +44,6 @@ def main():
 
     if not args.org_id:
         parser.error("Linear Organization ID is required (via --org-id or LINEAR_ORGANIZATION_ID)")
-    if not args.secret:
-        parser.error("Linear Webhook Signing Secret is required (via --secret or LINEAR_WEBHOOK_SECRET)")
 
     db_path = Path(args.db).resolve() if args.db else initialize()
     scope = Scope(args.tenant, args.connection)
