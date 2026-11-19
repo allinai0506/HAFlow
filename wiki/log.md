@@ -8,19 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
-## [2026-11-19] fix | Linear Connector V1 安全防线加固、动态授权版本流转与超时防护 (PR #426 复审闭环)
+## [2026-11-19] fix | Linear Connector V1 安全防线加固、动态授权版本流转与密钥轮换绑定 (PR #426 第三轮复审闭环)
 
-- 背景：PR #426 独立复审指出 3 项 P1 与 1 项 P2 关键安全与数据可靠性缺陷：
+- 背景：PR #426 独立复审指出 4 项关键安全与数据可靠性缺陷（含最新 P1 密钥轮换与授权版本解耦缺陷）：
   1. P1-01（Webhook 时间戳防重放绕过）：原 Verifier 仅检查了未签名 HTTP Header `Linear-Timestamp`，攻击者可重放旧 Body 并修改 Header 绕过新鲜度检查；
   2. P1-02（授权版本未动态传递且静默吞拒绝）：Webhook 入口硬编码 `config_revision=1`，连接授权变更后事务被拒绝但入口仍返回 200，造成外部误判成功；
   3. P1-03（Console Webhook 读取无超时）：Console 请求体读取缺乏 socket 超时与完整性检查，慢速攻击可挂起工作线程；
-  4. P2（未验证签名 Body 事件类型）：仅依赖 Header 过滤，Header 缺失时非 Issue 事件被错误反序列化为工作项生成脏任务。
+  4. P2（未验证签名 Body 事件类型）：仅依赖 Header 过滤，Header 缺失时非 Issue 事件被错误反序列化为工作项生成脏任务；
+  5. P1-04（签名密钥轮换与授权版本解耦）：服务仅使用启动时加载的静态密钥验签，数据库轮换 `auth_ref` 后旧服务仍可用旧密钥验签并通过新版本事务入库；必须建立可信凭据解析机制，服务加载的 `auth_ref` 与数据库授权不一致时 Fail Closed。
 - 变更：
-  1. `herdr/intake/connectors/linear/verifier.py`：HMAC 验签后，强制提取并校验签名 Body 内的 `webhookTimestamp`（<= 60s），Header 仅作辅助比对，杜绝截获重放；
-  2. `herdr/intake/connectors/linear/receiver.py`：增加 `get_connection_config(store)` 动态读取权威版本注入 Connector；对禁用连接返回 403，对事务拒绝返回 409/400，严禁静默 200；
-  3. `console/http_server.py`：对 Webhook 请求设置 5.0s socket 读取超时与 `len(raw) == n` 完整性断言，超时立即 408 并断开连接；
-  4. `herdr/intake/connectors/linear/normalizer.py` & `connector.py`：增加签名 Body 的 `type == "Issue"` 刚性断言，合法非 Issue 事件在 Receiver 层安全忽略，不写入存储且不生成 Inbox 任务；
-  5. `tests/test_linear_connector.py`：扩充至 12 项测试，涵盖历史重放阻断、1->2->3 授权演变、慢速超时切断、非 Issue 安全忽略等真实场景。
+  1. `herdr/intake/connectors/linear/credentials.py`：新增独立凭据解析层 `resolve_signing_secret()`，严格校验 `loaded_auth_ref == db_auth_ref`，不一致直接抛出 `AUTH_REF_MISMATCH`（401 阻断）；
+  2. `herdr/intake/connectors/linear/receiver.py`：在单一快照内提取 `(config_revision, auth_ref)`，动态解析对应当前版本的有效密钥并注入 Connector；遇到禁用连接返回 403，事务拒绝返回 409/400，严禁静默 200；
+  3. `services/herdr-linear-webhook.py` & `console/inbox_api.py`：新增 `--secret-ref` 与 `LINEAR_WEBHOOK_SECRET_REF`，统一两个入口的凭据引用与版本绑定；
+  4. `herdr/intake/connectors/linear/verifier.py`：HMAC 验签后，强制提取并校验签名 Body 内的 `webhookTimestamp`（<= 60s），Header 仅作辅助比对，杜绝截获重放；
+  5. `console/http_server.py`：对 Webhook 请求设置 5.0s socket 读取超时与 `len(raw) == n` 完整性断言，超时立即 408 并断开连接；
+  6. `herdr/intake/connectors/linear/normalizer.py` & `connector.py`：增加签名 Body 的 `type == "Issue"` 刚性断言，合法非 Issue 事件在 Receiver 层安全忽略，不写入存储且不生成 Inbox 任务；
+  7. `tests/test_linear_connector.py`：扩充至 13 项测试，新增完整的旧密钥/新密钥轮换与未刷新服务 Fail-Closed 回归用例。
 
 ## [2026-11-17] fix | Universal Workflow Shutdown Protocol & Factory Fencing Hardening (PR #420 第十四轮复审闭环)
 

@@ -20,11 +20,12 @@ LOG = logging.getLogger("herdr-linear-webhook")
 
 
 class LinearWebhookServer(HTTPServer):
-    def __init__(self, server_address, RequestHandlerClass, store, organization_id, signing_secret):
+    def __init__(self, server_address, RequestHandlerClass, store, organization_id, signing_secret=None, auth_ref=None):
         super().__init__(server_address, RequestHandlerClass)
         self.store = store
         self.organization_id = organization_id
         self.signing_secret = signing_secret
+        self.auth_ref = auth_ref
 
 
 def main():
@@ -33,6 +34,7 @@ def main():
     parser.add_argument("--connection", required=True, help="Registered Intake connection ID")
     parser.add_argument("--org-id", default=os.environ.get("LINEAR_ORGANIZATION_ID"), help="Linear Organization ID")
     parser.add_argument("--secret", default=os.environ.get("LINEAR_WEBHOOK_SECRET"), help="Linear Webhook Signing Secret")
+    parser.add_argument("--secret-ref", default=os.environ.get("LINEAR_WEBHOOK_SECRET_REF"), help="Credential reference (auth_ref) for signing secret")
     parser.add_argument("--port", type=int, default=int(os.environ.get("HAFLOW_LINEAR_WEBHOOK_PORT", "8089")), help="Port to listen on (default: 8089)")
     parser.add_argument("--host", default=os.environ.get("HAFLOW_LINEAR_WEBHOOK_HOST", "0.0.0.0"), help="Host to bind (default: 0.0.0.0)")
     parser.add_argument("--db", help="Path to state.db")
@@ -59,6 +61,7 @@ def main():
         store=store,
         organization_id=args.org_id,
         signing_secret=args.secret,
+        auth_ref=args.secret_ref,
     )
     server.timeout = 5.0
 

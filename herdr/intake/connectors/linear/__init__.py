@@ -2,6 +2,13 @@
 
 from .client import ConnectionTestReport, HealthStatus, LinearClient
 from .connector import LinearConnector
+from .credentials import (
+    SecretResolutionError,
+    clear_secret_registry,
+    register_secret,
+    resolve_signing_secret,
+    unregister_secret,
+)
 from .manifest import ConfigReport, LINEAR_MANIFEST, validate_config
 from .normalizer import LinearNormalizer, OrganizationMismatchError
 from .receiver import handle_linear_webhook
@@ -17,8 +24,13 @@ __all__ = [
     "LinearNormalizer",
     "LinearVerifier",
     "OrganizationMismatchError",
+    "SecretResolutionError",
     "SignatureVerificationError",
     "TimestampSkewError",
+    "clear_secret_registry",
     "handle_linear_webhook",
+    "register_secret",
+    "resolve_signing_secret",
+    "unregister_secret",
     "validate_config",
 ]

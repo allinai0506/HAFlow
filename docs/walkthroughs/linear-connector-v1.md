@@ -186,3 +186,32 @@ python3 services/herdr-linear-webhook.py --help
   - `LinearVerifier` 交叉校验 Header 与 Body 类型一致性，不匹配抛出 400。
   - 有效签名的非 Issue 事件在 Receiver 中安全丢弃并回复 200 IGNORED，不写入 EventStore，不生成 Inbox 任务。
 - **测试**：`tests/test_linear_connector.py::test_receiver_http_handler_dispatch`。
+
+---
+
+## 8. 第三轮复审修复记录 (P1: 签名密钥轮换与连接授权版本绑定)
+
+### 8.1 问题背景与攻击面分析
+- **漏洞成因**：原先 Webhook 服务（Console 或独立进程）在启动时静态加载单一 `signing_secret`。当管理员在数据库中轮换密钥（`update_connection_authorization(1, auth_ref="new-ref")` $\rightarrow$ `config_revision = 2`）时，未重启的旧服务依然使用内存中旧密钥验签；攻击者用旧密钥伪造新事件，旧服务验证 HMAC 成功并读取数据库中的新版本号 `revision = 2` 盖戳，导致旧密钥突破版本隔离注入事件。
+- **治理原则**：
+  1. 数据库只存可信 `auth_ref`，绝不存明文密钥；
+  2. 签名密钥必须根据数据库当前授权的 `auth_ref` 动态解析；
+  3. 服务运行期加载的凭证引用若与数据库当前授权的 `auth_ref` 不一致，**立即 Fail Closed（401 / 403 阻断）**；
+  4. 密钥轮换后，旧密钥立即丧失接收资格。
+
+### 8.2 修复实现
+1. **可信凭证解析模块**：新建 [herdr/intake/connectors/linear/credentials.py](file:///Users/user/haflow/herdr/intake/connectors/linear/credentials.py)，提供 `resolve_signing_secret()`。实施 Fail-Closed 策略：
+   - 检查服务声称持有的 `loaded_auth_ref` 是否与数据库当前快照的 `db_auth_ref` 一致，若不一致抛出 `SecretResolutionError: AUTH_REF_MISMATCH`；
+   - 支持环境变量动态多版本解析（`HAFLOW_INTAKE_SECRET_<REF>`、`LINEAR_WEBHOOK_SECRET_<REF>`）与自定义 Resolver。
+2. **两套 Webhook 入口统一对齐**：
+   - [receiver.py](file:///Users/user/haflow/herdr/intake/connectors/linear/receiver.py#L70-L95)：在单一快照内提取 `(config_revision, auth_ref)`，动态解析对应当前版本的有效密钥并注入 Connector；遇到 `SecretResolutionError` 返回 401。
+   - [services/herdr-linear-webhook.py](file:///Users/user/haflow/services/herdr-linear-webhook.py#L35-L65)：新增 `--secret-ref` 参数，将进程凭据引用绑定到 Server。
+   - [console/inbox_api.py](file:///Users/user/haflow/console/inbox_api.py#L365-L395)：从 `LINEAR_WEBHOOK_SECRET_REF` 提取凭据引用并注入 handler。
+
+### 8.3 回归测试覆盖
+- `tests/test_linear_connector.py::test_p1_secret_rotation_bound_to_authorization_revision`：
+  1. Old Secret + revision 1 $\rightarrow$ 200 ACCEPTED；
+  2. 轮换密钥至 revision 2 (`auth_ref = ref_v2`)；
+  3. 未重启、持有旧 `ref_v1` 的服务收到旧密钥请求 $\rightarrow$ 401 `AUTH_REF_MISMATCH`（Fail Closed）；
+  4. 动态解析服务收到旧密钥请求 $\rightarrow$ 401 `INVALID_SIGNATURE`（新密钥验签失败）；
+  5. 合法新密钥请求 $\rightarrow$ 200 ACCEPTED（revision 2 正确入库）。

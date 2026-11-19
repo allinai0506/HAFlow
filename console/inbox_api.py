@@ -366,6 +366,7 @@ def api_linear_webhook(headers, raw_body):
 
     org_id = os.environ.get("LINEAR_ORGANIZATION_ID")
     secret = os.environ.get("LINEAR_WEBHOOK_SECRET")
+    secret_ref = os.environ.get("LINEAR_WEBHOOK_SECRET_REF")
     tenant = os.environ.get("HAFLOW_INTAKE_TENANT", "tenant")
     connection = os.environ.get("HAFLOW_LINEAR_CONNECTION", "linear")
 
@@ -390,5 +391,6 @@ def api_linear_webhook(headers, raw_body):
         store=store,
         organization_id=org_id,
         signing_secret=secret,
+        auth_ref=secret_ref,
     )
     return status, body

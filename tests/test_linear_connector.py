@@ -365,7 +365,8 @@ def test_linear_client_test_connection_and_health():
 
 
 @pytest.fixture
-def intake_env(tmp_path):
+def intake_env(tmp_path, monkeypatch):
+    from herdr.intake.connectors.linear.credentials import clear_secret_registry, register_secret
     path = tmp_path / "state.db"
     initialize(path)
     store = EventStore(
@@ -380,7 +381,11 @@ def intake_env(tmp_path):
         connector_version="1.0.0",
         auth_ref="test-secret-ref",
     )
-    return path, store
+    register_secret("test-secret-ref", SECRET)
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET_REF", "test-secret-ref")
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", SECRET)
+    yield path, store
+    clear_secret_registry()
 
 
 def test_end_to_end_linear_issue_lifecycle(intake_env):
@@ -939,3 +944,98 @@ def test_p1_03_console_slow_client_read_timeout_and_incomplete_body():
     assert "REQUEST_TIMEOUT" in res2
     client_sock2.close()
     t2.join()
+
+
+def test_p1_secret_rotation_bound_to_authorization_revision(tmp_path):
+    """P1: Webhook signing secret rotation is bound to connection auth_ref and config_revision."""
+    from herdr.intake.connectors.linear.credentials import clear_secret_registry, register_secret
+    from herdr.intake.connectors.linear.receiver import handle_linear_webhook
+
+    clear_secret_registry()
+    path = tmp_path / "state_rot.db"
+    initialize(path)
+    store = EventStore(
+        path, SCOPE,
+        authorizer=lambda action, scope: "admin",
+        verifier=lambda d: d.verified_via == "SIGNATURE",
+    )
+
+    old_secret = "old-secret-key-111"
+    new_secret = "new-secret-key-222"
+    ref_v1 = "linear-secret-ref-v1"
+    ref_v2 = "linear-secret-ref-v2"
+
+    register_secret(ref_v1, old_secret)
+
+    # 1. Initial connection: revision = 1, auth_ref = ref_v1
+    store.register_connection(
+        provider="linear",
+        instance=ORG_ID,
+        display_name="Linear",
+        connector_version="1.0.0",
+        auth_ref=ref_v1,
+    )
+
+    t_iso = "2026-11-19T08:00:00.000Z"
+    t_ms = int(datetime.fromisoformat(t_iso.replace("Z", "+00:00")).timestamp() * 1000)
+
+    # Event signed with Old Secret at revision 1 -> ACCEPTED
+    raw_1 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-rot-1", webhook_timestamp=t_ms)).encode("utf-8")
+    headers_1 = {
+        "Linear-Signature": sign(raw_1, old_secret),
+        "Linear-Delivery": "delivery-rot-001",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Issue",
+    }
+    status_1, _, body_1 = handle_linear_webhook(raw_1, headers_1, store, ORG_ID, signing_secret=old_secret, auth_ref=ref_v1, now_ms=t_ms)
+    assert status_1 == 200
+    assert body_1.get("outcome") == "ACCEPTED"
+
+    # 2. Administrator rotates secret in DB: update auth_ref to ref_v2, revision increments to 2
+    new_rev = store.update_connection_authorization(1, status="ACTIVE", reason="Key rotation", auth_ref=ref_v2)
+    assert new_rev == 2
+
+    # Register the new secret in secret manager / registry
+    register_secret(ref_v2, new_secret)
+
+    # 3. Scenario A: Old service has NOT restarted and NOT refreshed credentials (still holding old_secret with ref_v1)
+    # Attacker sends event using old_secret to the un-refreshed service -> FAIL CLOSED (401 AUTH_REF_MISMATCH)
+    raw_2_att = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-rot-2-att", webhook_timestamp=t_ms)).encode("utf-8")
+    headers_2_att = {
+        "Linear-Signature": sign(raw_2_att, old_secret),
+        "Linear-Delivery": "delivery-rot-002-att",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Issue",
+    }
+    status_unrefreshed, _, body_unrefreshed = handle_linear_webhook(
+        raw_2_att, headers_2_att, store, ORG_ID,
+        signing_secret=old_secret, auth_ref=ref_v1, now_ms=t_ms,
+    )
+    assert status_unrefreshed == 401
+    assert "AUTH_REF_MISMATCH" in body_unrefreshed.get("error", "")
+
+    # 4. Scenario B: Service resolves credentials dynamically from registry/env for ref_v2
+    # Attacker sends event signed with Old Secret to the service -> HMAC signature failure against new_secret (401 INVALID_SIGNATURE)
+    status_old_sig, _, body_old_sig = handle_linear_webhook(
+        raw_2_att, headers_2_att, store, ORG_ID,
+        signing_secret=None, auth_ref=None, now_ms=t_ms,
+    )
+    assert status_old_sig == 401
+    assert "INVALID_SIGNATURE" in body_old_sig.get("error", "")
+
+    # 5. Legitimate Linear event signed with New Secret sent to the updated/resolving service -> ACCEPTED at revision 2
+    raw_2_legit = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-rot-2-legit", webhook_timestamp=t_ms)).encode("utf-8")
+    headers_2_legit = {
+        "Linear-Signature": sign(raw_2_legit, new_secret),
+        "Linear-Delivery": "delivery-rot-002-legit",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Issue",
+    }
+    status_new, _, body_new = handle_linear_webhook(
+        raw_2_legit, headers_2_legit, store, ORG_ID,
+        signing_secret=new_secret, auth_ref=ref_v2, now_ms=t_ms,
+    )
+    assert status_new == 200
+    assert body_new.get("outcome") == "ACCEPTED"
+
+    clear_secret_registry()

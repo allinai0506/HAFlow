@@ -5,12 +5,13 @@ import json
 import logging
 import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from herdr.intake.protocol import MAX_BODY_BYTES, Scope
 from herdr.intake.schema import open_db
 from herdr.intake.store import EventStore, ScopeDenied
 from .connector import LinearConnector
+from .credentials import SecretResolutionError, resolve_signing_secret
 from .normalizer import OrganizationMismatchError, UnsupportedEventTypeError
 from .verifier import SignatureVerificationError, TimestampSkewError
 
@@ -18,7 +19,7 @@ LOG = logging.getLogger(__name__)
 
 
 def get_connection_config(store: EventStore) -> dict[str, Any]:
-    """Fetch trusted connection status and config revision from the State DB."""
+    """Fetch trusted connection status, config revision, and auth_ref from the State DB."""
     with closing(open_db(store.path)) as db:
         row = db.execute(
             "SELECT config_revision, status, auth_ref, connector_version FROM intake_connections WHERE tenant_id = ? AND connection_id = ?",
@@ -34,9 +35,11 @@ def handle_linear_webhook(
     headers: Mapping[str, str],
     store: EventStore,
     organization_id: str,
-    signing_secret: str,
+    signing_secret: str | None = None,
     *,
+    auth_ref: str | None = None,
     config_revision: int | None = None,
+    secret_resolver: Callable[[str], str | None] | None = None,
     now_ms: int | None = None,
 ) -> tuple[int, dict[str, str], dict[str, Any]]:
     """Process an incoming Linear Webhook HTTP request payload and commit to EventStore.
@@ -49,30 +52,45 @@ def handle_linear_webhook(
     if len(raw_body) > MAX_BODY_BYTES:
         return 413, json_headers, {"ok": False, "error": "PAYLOAD_TOO_LARGE"}
 
-    # Resolve config_revision and check connection availability from authoritative State DB
-    if config_revision is None:
-        try:
-            conn_info = get_connection_config(store)
-        except ScopeDenied as exc:
-            LOG.warning("Linear webhook scope denied: %s", exc)
-            return 403, json_headers, {"ok": False, "error": str(exc)}
-        except Exception as exc:
-            LOG.error("Failed to load connection config: %s", exc)
-            return 500, json_headers, {"ok": False, "error": "INTERNAL_STORAGE_ERROR"}
+    # 1. Fetch connection configuration snapshot from State DB
+    try:
+        conn_info = get_connection_config(store)
+    except ScopeDenied as exc:
+        LOG.warning("Linear webhook scope denied: %s", exc)
+        return 403, json_headers, {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        LOG.error("Failed to load connection config: %s", exc)
+        return 500, json_headers, {"ok": False, "error": "INTERNAL_STORAGE_ERROR"}
 
-        if conn_info["status"] not in ("ACTIVE", "DEGRADED"):
-            LOG.warning("Linear webhook rejected: connection status is %s", conn_info["status"])
-            return 403, json_headers, {
-                "ok": False,
-                "error": f"CONNECTION_UNAVAILABLE: status is {conn_info['status']}",
-            }
-        config_revision = int(conn_info["config_revision"])
+    if conn_info["status"] not in ("ACTIVE", "DEGRADED"):
+        LOG.warning("Linear webhook rejected: connection status is %s", conn_info["status"])
+        return 403, json_headers, {
+            "ok": False,
+            "error": f"CONNECTION_UNAVAILABLE: status is {conn_info['status']}",
+        }
 
+    db_revision = int(conn_info["config_revision"])
+    effective_revision = config_revision if config_revision is not None else db_revision
+    db_auth_ref = str(conn_info.get("auth_ref") or "none")
+
+    # 2. Resolve authoritative signing secret for db_auth_ref
+    try:
+        effective_secret = resolve_signing_secret(
+            db_auth_ref,
+            loaded_secret=signing_secret,
+            loaded_auth_ref=auth_ref,
+            custom_resolver=secret_resolver,
+        )
+    except SecretResolutionError as exc:
+        LOG.warning("Linear webhook secret resolution failed: %s", exc)
+        return 401, json_headers, {"ok": False, "error": str(exc)}
+
+    # 3. Construct LinearConnector with verified secret and revision
     connector = LinearConnector(
         scope=store.scope,
         organization_id=organization_id,
-        signing_secret=signing_secret,
-        config_revision=config_revision,
+        signing_secret=effective_secret,
+        config_revision=effective_revision,
     )
 
     try:
@@ -131,7 +149,8 @@ class LinearWebhookHandler(BaseHTTPRequestHandler):
 
     store: EventStore
     organization_id: str
-    signing_secret: str
+    signing_secret: str | None = None
+    auth_ref: str | None = None
 
     def setup(self):
         super().setup()
@@ -188,7 +207,8 @@ class LinearWebhookHandler(BaseHTTPRequestHandler):
             headers=dict(self.headers),
             store=self.server.store,
             organization_id=self.server.organization_id,
-            signing_secret=self.server.signing_secret,
+            signing_secret=getattr(self.server, "signing_secret", None),
+            auth_ref=getattr(self.server, "auth_ref", None),
         )
 
         resp_bytes = json.dumps(body).encode("utf-8")
