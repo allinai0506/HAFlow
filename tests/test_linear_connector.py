@@ -601,3 +601,100 @@ def test_console_api_linear_webhook_endpoint(intake_env, monkeypatch):
     assert res_ok.get("received") is True
     assert res_ok.get("outcome") == "ACCEPTED"
 
+
+def test_codex_p2_remove_with_same_updated_at_does_not_collide(intake_env):
+    """Codex P2 regression: create followed by remove using same data.updatedAt and later payload.createdAt."""
+    path, store = intake_env
+    from herdr.intake.connectors.linear.connector import LinearConnector
+
+    connector = LinearConnector(
+        scope=SCOPE,
+        organization_id=ORG_ID,
+        signing_secret=SECRET,
+    )
+    policy = {"user_id": "operator", "auto_assign": True, "project_id": None, "workspace_id": None}
+    inbox_config = {"tenant_id": SCOPE.tenant_id, "user_id": "operator", "connections": {SCOPE.connection_id: {"auto_assign": True}}}
+
+    # Step 1: Create issue at T1
+    t1_iso = "2026-11-19T08:00:00.000Z"
+    t1_ms = int(datetime.fromisoformat(t1_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    raw_create = json.dumps(sample_issue_payload(
+        "create", "unstarted",
+        issue_id="issue-uuid-codex-p2",
+        updated_at=t1_iso,
+        created_at=t1_iso,
+    )).encode("utf-8")
+    headers_create = {
+        "Linear-Signature": sign(raw_create),
+        "Linear-Delivery": "delivery-codex-001",
+        "Linear-Timestamp": str(t1_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery_create = connector.process_webhook(raw_create, headers_create, now_ms=t1_ms)
+    receipt_create = store.accept_event(delivery_create)
+    assert receipt_create.outcome == "ACCEPTED"
+    assert worker.run_once(store, materialization=policy) is True
+
+    # Step 2: Remove issue retaining SAME data.updatedAt = T1, but later payload.createdAt = T2
+    t2_iso = "2026-11-19T08:10:00.000Z"
+    t2_ms = int(datetime.fromisoformat(t2_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    raw_remove = json.dumps(sample_issue_payload(
+        "remove", "unstarted",
+        issue_id="issue-uuid-codex-p2",
+        updated_at=t1_iso,  # Kept same as create!
+        created_at=t2_iso,  # Later event creation time!
+    )).encode("utf-8")
+    headers_remove = {
+        "Linear-Signature": sign(raw_remove),
+        "Linear-Delivery": "delivery-codex-002",
+        "Linear-Timestamp": str(t2_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery_remove = connector.process_webhook(raw_remove, headers_remove, now_ms=t2_ms)
+    receipt_remove = store.accept_event(delivery_remove)
+    # Must be ACCEPTED, NOT rejected as FACT_IDENTITY_COLLISION!
+    assert receipt_remove.outcome == "ACCEPTED"
+    assert receipt_remove.event_id != receipt_create.event_id
+
+    # Consume with worker -> successfully marks item CLOSED
+    assert worker.run_once(store, materialization=policy) is True
+    inbox = IntakeInbox(path, inbox_config)
+    items = inbox.list_items()
+    assert len(items) == 1
+    assert items[0]["status"] == "SOURCE_CLOSED"
+
+
+def test_codex_p1_content_length_limit_enforced_before_read(monkeypatch):
+    """Codex P1 regression: body size limit is enforced before reading from stream."""
+    import socket
+    import threading
+    from herdr.intake.connectors.linear.receiver import LinearWebhookHandler
+
+    client_sock, server_sock = socket.socketpair()
+    mock_server = MagicMock()
+    mock_server.store = MagicMock()
+    mock_server.organization_id = ORG_ID
+    mock_server.signing_secret = SECRET
+
+    def handle():
+        LinearWebhookHandler(server_sock, ("127.0.0.1", 12345), mock_server)
+
+    t = threading.Thread(target=handle)
+    t.start()
+
+    # Send 300,000 Content-Length with only 50 bytes of body
+    client_sock.sendall(b"POST / HTTP/1.1\r\nContent-Length: 300000\r\n\r\n" + b"X" * 50)
+    response_chunks = []
+    while True:
+        chunk = client_sock.recv(4096)
+        if not chunk:
+            break
+        response_chunks.append(chunk)
+        if b"PAYLOAD_TOO_LARGE" in b"".join(response_chunks):
+            break
+    response_data = b"".join(response_chunks).decode("utf-8")
+    assert "413" in response_data
+    assert "PAYLOAD_TOO_LARGE" in response_data
+
+    client_sock.close()
+    t.join()

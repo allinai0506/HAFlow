@@ -60,6 +60,7 @@ def main():
         organization_id=args.org_id,
         signing_secret=args.secret,
     )
+    server.timeout = 5.0
 
     def shutdown(*_):
         LOG.info("Shutting down Linear webhook server...")

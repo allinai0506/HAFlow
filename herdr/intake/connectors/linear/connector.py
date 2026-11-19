@@ -75,10 +75,18 @@ class LinearConnector:
 
         occurred_time = None
         data = payload.get("data")
-        if isinstance(data, dict) and data.get("updatedAt"):
+        action = str(payload.get("action") or "").lower()
+        if action == "remove":
+            if payload.get("createdAt"):
+                occurred_time = str(payload["createdAt"])
+            elif isinstance(data, dict) and data.get("updatedAt"):
+                occurred_time = str(data["updatedAt"])
+        elif isinstance(data, dict) and data.get("updatedAt"):
             occurred_time = str(data["updatedAt"])
 
-        envelope_dict = self.normalizer.to_cloudevents_envelope(fact, source, occurred_time)
+        envelope_dict = self.normalizer.to_cloudevents_envelope(
+            fact, source, occurred_time, lifecycle_action=action or None
+        )
         envelope_bytes = json.dumps(envelope_dict).encode("utf-8")
 
         return Delivery(

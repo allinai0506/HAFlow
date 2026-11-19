@@ -139,3 +139,16 @@ python3 services/herdr-linear-webhook.py --help
 5. **重试投递**：在 Linear Webhooks 页面点击 `Redeliver`，检查 HAFlow 返回 200 且无多余任务。
 6. **空描述测试**：在 Linear 新建无描述 Issue，检查正常入箱。
 7. **连接管理**：更新连接状态为 DISABLED，验证新事件被隔离。
+
+---
+
+## 6. PR Review 修复记录 (Codex P1 / P2)
+
+- **Codex P1 (Resource Exhaustion Prevention)**:
+  - 在 `LinearWebhookHandler` 和 `console/http_server.py` 中，在调用 `rfile.read()` 之前增加 `Content-Length <= 256KB` 刚性上限校验与 socket 5.0s 超时；超长或非法长度请求直接响应 413 / 400 并关闭连接，避免拒绝服务风险。
+- **Codex P2 (Removal Fact Identity Collision)**:
+  - Linear 在发送 `remove` 事件时，`data.updatedAt` 可能会保留删除前的旧版本时间戳。若 CloudEvents ID 仅采用 `issue:{id}:{version}`，会导致删除事实与此前版本的 Fact ID 冲突而被 `EventStore` 判定为 `FACT_IDENTITY_COLLISION` 拒绝。
+  - 修复：CloudEvents ID 引入生命周期动作维度 `issue:{id}:{action}:{version}`；并在删除事件中优先以 `payload.createdAt` 作为生命周期事实版本时间戳，保障删除事实被正常接收并使任务进入 `SOURCE_CLOSED`。
+- **回归测试覆盖**：
+  - `tests/test_linear_connector.py::test_codex_p1_content_length_limit_enforced_before_read`
+  - `tests/test_linear_connector.py::test_codex_p2_remove_with_same_updated_at_does_not_collide`

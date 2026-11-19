@@ -284,8 +284,13 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path).path
         if p == '/api/intake/webhook/linear':
             try:
-                n = int(self.headers.get('Content-Length', '0') or 0)
-                raw = self.rfile.read(n) if n else b''
+                try:
+                    n = int(self.headers.get('Content-Length', '0') or 0)
+                except (ValueError, TypeError):
+                    return self.send_json(400, {'ok': False, 'error': 'INVALID_CONTENT_LENGTH'})
+                if n > 262144:
+                    return self.send_json(413, {'ok': False, 'error': 'PAYLOAD_TOO_LARGE'})
+                raw = self.rfile.read(n) if n > 0 else b''
                 status, res = inbox_api.api_linear_webhook(self.headers, raw)
                 return self.send_json(status, res, error=res.get('error') if status >= 400 else None)
             except Exception as e:

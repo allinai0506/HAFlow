@@ -88,8 +88,29 @@ class LinearWebhookHandler(BaseHTTPRequestHandler):
     organization_id: str
     signing_secret: str
 
+    def setup(self):
+        super().setup()
+        self.request.settimeout(5.0)
+
     def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (ValueError, TypeError):
+            self.send_error(400, "Invalid Content-Length")
+            return
+
+        if content_length > MAX_BODY_BYTES:
+            self.close_connection = True
+            self.send_response(413)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Connection", "close")
+            body = b'{"ok": false, "error": "PAYLOAD_TOO_LARGE"}'
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            return
+
         raw_body = self.rfile.read(content_length) if content_length > 0 else b""
 
         status, resp_headers, body = handle_linear_webhook(
@@ -107,6 +128,7 @@ class LinearWebhookHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(resp_bytes)))
         self.end_headers()
         self.wfile.write(resp_bytes)
+        self.wfile.flush()
 
     def log_message(self, format, *args):
         LOG.info(format, *args)

@@ -105,7 +105,12 @@ class LinearNormalizer:
             )
 
         # Version timestamp
-        updated_at = data.get("updatedAt") or payload.get("createdAt")
+        # For remove actions, the deletion event timestamp in payload.createdAt is the
+        # lifecycle fact time, whereas data.updatedAt may retain the pre-deletion timestamp.
+        if action == "remove":
+            updated_at = payload.get("createdAt") or data.get("updatedAt")
+        else:
+            updated_at = data.get("updatedAt") or payload.get("createdAt")
         if updated_at:
             version = _parse_iso_ms(str(updated_at))
         else:
@@ -137,12 +142,15 @@ class LinearNormalizer:
         fact: dict[str, Any],
         source: str,
         occurred_time: str | None = None,
+        *,
+        lifecycle_action: str | None = None,
     ) -> dict[str, Any]:
         """Wrap the work-item fact into a CloudEvents 1.0 JSON object."""
+        action_tag = lifecycle_action or fact.get("action") or "work"
         envelope: dict[str, Any] = {
             "specversion": "1.0",
             "source": source,
-            "id": f"issue:{fact['external_id']}:{fact['version']}",
+            "id": f"issue:{fact['external_id']}:{action_tag}:{fact['version']}",
             "type": EVENT_TYPE,
             "dataschema": DATA_SCHEMA,
             "subject": f"issue/{fact['external_id']}",
