@@ -9984,3 +9984,49 @@ git diff --check
 - `tests/test_workflow_shutdown.py#test_scenario_2_launcher_crash_preserves_unregistered_pane_and_occupancy`
 - `tests/test_workflow_shutdown.py#test_scenario_3_interrupt_ack_keeps_occupancy_until_process_stops`
 - `tests/test_inbox_dispatcher.py#test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate`
+
+---
+
+## 236. 外部 Webhook 接入防御：载荷空字段与内部不变量阻抗失配治理与 Transactional Ingress 解耦（2026-11-19）
+
+### 问题背景
+
+Linear Connector 作为 HAFlow 第一个真实外部系统接入，在打通 `Linear -> Active Intake Core -> Task Materializer -> Inbox` 闭环时，暴露出外部系统协议与本地核心不变量之间的两类典型冲突：
+1. **阻抗失配（Impedance Mismatch）**：Linear Issue 的 `description` 字段允许为 `null` 或纯空白；但 HAFlow 内部已冻结的 Task Materializer 核心契约 `task_text` 对 `title` 与 `description` 执行了严格的非空和空白剔除校验（`len(value.strip()) > 0`）。若 Connector 直接透传未经清洗的原始字段，合法事件将在物化写事务中抛出 `ValueError`，进而被永久标记为 `REJECTED: INVALID_WORK_ITEM` 丢弃；
+2. **时限失配（Response Deadline Mismatch）**：Linear 强制 Webhook 接收端必须在 **5 秒内** 返回 HTTP 200，超时即判定失败并重试（最多 3 次）。若在 Webhook 接收线程内同步执行物化、外部网络补读或遇到写锁阻塞，会导致 Linear 持续重传产生雪崩。
+
+### 经验教训
+
+| 问题现象 | 根因分析 | 治理原则与规范 |
+| :--- | :--- | :--- |
+| **合法外部事项被拒绝** | 外部载荷字段的可选性与内部强类型校验存在阻抗失配（如 `description = null`） | **Normalizer 防卫兜底**：适配器在 Ingress 层必须强制实施清洗，对可能为 null 的字段生成结构化兜底文本（如附带 Identifier 与 Title 的说明），确保 100% 满足核心不变量 |
+| **超长文本抛错拒绝** | 外部 Issue 标题或描述可能超出 HAFlow 240B / 8000B 上限 | **字符边界截断**：按 UTF-8 安全字符边界截断，并在描述中保留原始完整信息及截断标记 |
+| **实体分裂或重复生成** | 外部 Issue 跨团队移动时其人类可读的 Identifier（如 `ENG-10` $\rightarrow$ `PROD-5`）改变 | **不可变 UUID 实体绑定**：必须使用 Linear 全局不可变 UUID `data.id` 作为 `external_id`，Identifier 仅作为标题展示前缀 |
+| **Webhook 重试风暴** | 在 Webhook 请求线程中同步执行耗时计算或外部调用超过 5 秒 | **Transactional Ingress 模式**：接收端仅执行验签、标准化、在单一短事务内原子记录回执与事实正本，立即应答 200 OK；物化完全交由后台独立 Worker 异步领取 |
+| **网络重传重复记账** | 外部系统因网络闪断重传同一事件 | **双层去重机制**：传输层以 `Linear-Delivery` UUID 去重回执，业务层以 `f"issue:{id}:{version}"` 事实 ID 幂等落库，判定为 `DUPLICATE` 且不生成新任务 |
+
+### 操作规范
+
+1. **适配器 Normalizer 强制防卫**：所有 Connector 模块必须具备防御性字段清洗层，绝不允许裸传外部字典进入 EventStore / Materializer。
+2. **接收与消费彻底解耦**：Webhook Ingress HTTP 端点必须在 5 秒内返回，严格禁止在 HTTP 请求生命周期内调用阻塞操作或直接执行物化。
+3. **时钟偏差与签名恒定时间校验**：必须比对 `Linear-Timestamp`（<= 60s）防重放，并使用 `hmac.compare_digest` 恒定时间防时序攻击。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_linear_connector.py
+pytest -q tests/test_intake_*.py tests/test_linear_connector.py
+python3 -m compileall -q herdr services console tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/intake/connectors/linear/normalizer.py#LinearNormalizer`
+- `herdr/intake/connectors/linear/verifier.py#LinearVerifier`
+- `herdr/intake/connectors/linear/receiver.py#handle_linear_webhook`
+- `services/herdr-linear-webhook.py`
+- `tests/test_linear_connector.py#test_normalizer_defensive_sanitization`
+- `tests/test_linear_connector.py#test_end_to_end_linear_issue_lifecycle`
+- `docs/architecture/linear-connector-v1.md`
+- `docs/walkthroughs/linear-connector-v1.md`

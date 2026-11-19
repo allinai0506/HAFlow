@@ -4513,3 +4513,18 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `console/static/console/scripts/intake.js#showIntakeDetail`
   - `tests/test_console_inbox_api.py#test_intake_js_assign_unassign_assign_lifecycle`
   - `tests/test_intake_materialization.py#test_assign_unassign_reassign_cycle_reuses_task_and_updates_audit`
+
+## [2026-11-19] Feature | Linear Connector V1 基础设施与事件接入
+- 零侵入已冻结的 Active Intake Core 与 Task Materializer，通过标准 Connector 协议实现首个真实外部系统闭环：
+  1. 基础设施：Manifest 规范、HMAC-SHA256 签名校验（bare hex 与常量时间比对）、时钟偏差校验（<= 60s）、只读 GraphQL Client 预检与健康检查；
+  2. 事件标准化：Linear Issue 事件（create/update/remove）标准化为 CloudEvents 1.0 work-item observed 事实；Delivery ID 与事实 ID 双层去重；
+  3. 防卫清洗：空描述结构化兜底（防 task_text 崩溃被拒）、标题与描述长度截断、控制字符剥离、不可变 UUID 实体绑定；
+  4. 真实端到端链路：独立 Ingress 守护服务（services/herdr-linear-webhook.py）与控制台路由（/api/intake/webhook/linear），5 秒应答事务提交与后台 Worker 物化解耦。
+- Evidence
+  - `herdr/intake/connectors/linear/`
+  - `services/herdr-linear-webhook.py`
+  - `console/http_server.py`
+  - `console/inbox_api.py`
+  - `tests/test_linear_connector.py`
+  - `docs/architecture/linear-connector-v1.md`
+  - `docs/walkthroughs/linear-connector-v1.md`

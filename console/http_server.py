@@ -281,8 +281,17 @@ class Handler(BaseHTTPRequestHandler):
             self.log_message('GET %s failed: %s', self.path, e)
             return self.send_json(500,error=e)
     def do_POST(self):
-        if self.reject_untrusted('POST'):return
         p=urllib.parse.urlparse(self.path).path
+        if p == '/api/intake/webhook/linear':
+            try:
+                n = int(self.headers.get('Content-Length', '0') or 0)
+                raw = self.rfile.read(n) if n else b''
+                status, res = inbox_api.api_linear_webhook(self.headers, raw)
+                return self.send_json(status, res, error=res.get('error') if status >= 400 else None)
+            except Exception as e:
+                self.log_message('POST /api/intake/webhook/linear failed: %s', e)
+                return self.send_json(500, error=e)
+        if self.reject_untrusted('POST'):return
         try:
             b=self.body()
             if p=='/api/run':
