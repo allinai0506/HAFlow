@@ -255,7 +255,8 @@ MATERIALIZATION_DDL = (
     """CREATE TRIGGER intake_inbox_draft_only BEFORE UPDATE ON user_inbox_tasks
        WHEN (NEW.user_id IS NOT OLD.user_id OR NEW.id IS NOT OLD.id)
          OR (
-           EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = OLD.id AND confirmation_json IS NULL)
+           OLD.status IN ('DRAFT', 'CANCELLED')
+           AND EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = OLD.id AND confirmation_json IS NULL)
            AND (NEW.status NOT IN ('DRAFT', 'CANCELLED') OR NEW.workflow_id IS NOT NULL OR NEW.worker_id IS NOT NULL)
          )
        BEGIN SELECT RAISE(ABORT, 'active intake task may not be dispatched or transferred'); END""",
@@ -281,7 +282,8 @@ DISPATCH_DDL = (
     """CREATE TRIGGER intake_inbox_draft_only BEFORE UPDATE ON user_inbox_tasks
        WHEN (NEW.user_id IS NOT OLD.user_id OR NEW.id IS NOT OLD.id)
          OR (
-           EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = OLD.id AND confirmation_json IS NULL)
+           OLD.status IN ('DRAFT', 'CANCELLED')
+           AND EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = OLD.id AND confirmation_json IS NULL)
            AND (NEW.status NOT IN ('DRAFT', 'CANCELLED') OR NEW.workflow_id IS NOT NULL OR NEW.worker_id IS NOT NULL)
          )
        BEGIN SELECT RAISE(ABORT, 'active intake task may not be dispatched or transferred'); END""",

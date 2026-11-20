@@ -38,11 +38,12 @@ class LinearSyncDispatcher:
                 """
                 SELECT
                     l.link_id, l.task_id, l.disposition, l.project_id, l.workspace_id,
+                    l.authorization_revision,
                     o.provider, o.external_id, o.object_type, o.snapshot_json,
-                    c.auth_ref, c.status AS connection_status
+                    c.auth_ref, c.status AS connection_status, c.config_revision AS connection_revision
                 FROM intake_task_links l
                 JOIN intake_objects o ON l.tenant_id = o.tenant_id AND l.object_id = o.object_id
-                LEFT JOIN intake_connections c ON l.tenant_id = c.tenant_id AND l.origin_connection_id = c.connection_id
+                LEFT JOIN intake_connections c ON l.tenant_id = c.tenant_id AND COALESCE(l.origin_connection_id, o.observed_connection_id) = c.connection_id
                 WHERE l.link_id = ?
                 """,
                 (link_id,),
@@ -56,11 +57,12 @@ class LinearSyncDispatcher:
                 """
                 SELECT
                     l.link_id, l.task_id, l.disposition, l.project_id, l.workspace_id,
+                    l.authorization_revision,
                     o.provider, o.external_id, o.object_type, o.snapshot_json,
-                    c.auth_ref, c.status AS connection_status
+                    c.auth_ref, c.status AS connection_status, c.config_revision AS connection_revision
                 FROM intake_task_links l
                 JOIN intake_objects o ON l.tenant_id = o.tenant_id AND l.object_id = o.object_id
-                LEFT JOIN intake_connections c ON l.tenant_id = c.tenant_id AND l.origin_connection_id = c.connection_id
+                LEFT JOIN intake_connections c ON l.tenant_id = c.tenant_id AND COALESCE(l.origin_connection_id, o.observed_connection_id) = c.connection_id
                 WHERE l.task_id = ?
                 """,
                 (task_id,),
@@ -74,6 +76,18 @@ class LinearSyncDispatcher:
             raise SecretResolutionError("Connection auth_ref missing; cannot resolve Linear API token")
         token = resolve_api_token(auth_ref)
         return LinearClient(api_token=token)
+
+    def _is_connection_authorized(self, info: dict[str, Any] | None) -> tuple[bool, str]:
+        if not info:
+            return False, "Link not found"
+        status = info.get("connection_status")
+        if status != "ACTIVE":
+            return False, f"Connection is not active (status: {status})"
+        link_rev = info.get("authorization_revision")
+        conn_rev = info.get("connection_revision")
+        if link_rev is not None and conn_rev is not None and link_rev != conn_rev:
+            return False, f"Stale connection authorization (link={link_rev}, conn={conn_rev})"
+        return True, ""
 
     def sync_task_confirmed(
         self,
@@ -93,6 +107,10 @@ class LinearSyncDispatcher:
         external_id = info.get("external_id")
         if not external_id:
             return SyncResult(ok=False, action="confirm", error="Missing external issue id")
+
+        auth_ok, auth_err = self._is_connection_authorized(info)
+        if not auth_ok:
+            return SyncResult(ok=False, action="confirm", issue_id=external_id, error=auth_err)
 
         snapshot = json.loads(info.get("snapshot_json") or "{}")
         team = snapshot.get("team") or {}
@@ -162,6 +180,10 @@ class LinearSyncDispatcher:
         if not external_id:
             return SyncResult(ok=False, action="complete", error="Missing external issue id")
 
+        auth_ok, auth_err = self._is_connection_authorized(info)
+        if not auth_ok:
+            return SyncResult(ok=False, action="complete", issue_id=external_id, error=auth_err)
+
         snapshot = json.loads(info.get("snapshot_json") or "{}")
         team = snapshot.get("team") or {}
         team_id = team.get("id")
@@ -228,6 +250,10 @@ class LinearSyncDispatcher:
         external_id = info.get("external_id")
         if not external_id:
             return SyncResult(ok=False, action="failed", error="Missing external issue id")
+
+        auth_ok, auth_err = self._is_connection_authorized(info)
+        if not auth_ok:
+            return SyncResult(ok=False, action="failed", issue_id=external_id, error=auth_err)
 
         try:
             client = self._resolve_client(info.get("auth_ref"))

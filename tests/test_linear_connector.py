@@ -2003,3 +2003,204 @@ def test_linear_sync_resolves_team_dynamically(tmp_path):
     mock_client.get_issue_team_id.assert_called_once_with("linear-issue-999")
     mock_client.resolve_state_id_by_type.assert_called_once_with("dynamic-team-id", "started")
     mock_client.update_issue_state.assert_called_once_with("linear-issue-999", "state-started-123")
+
+
+def test_trigger_preserves_lifecycle_when_confirmation_cleared(tmp_path: Path):
+    """P1 regression: If a confirmed task is queued or running and source confirmation
+    is cleared (e.g. Linear sent an event clearing confirmation), heartbeat, claim,
+    and completion updates must not be rejected by intake_inbox_draft_only.
+    """
+    from herdr.intake.schema import initialize, initialize_materialization, open_db
+    from contextlib import closing
+    db_path = tmp_path / "state.db"
+    initialize(db_path)
+    initialize_materialization(db_path)
+
+    with closing(open_db(db_path)) as db:
+        # Create connection first to satisfy foreign key constraints
+        db.execute(
+            """INSERT INTO intake_connections (tenant_id, connection_id, provider, provider_instance_key, display_name, connector_version, status, config_revision, auth_ref, created_at, updated_at)
+               VALUES ('t-1', 'conn-1', 'linear', 'inst-1', 'Linear', '1.0.0', 'ACTIVE', 1, 'linear-prod-v1', 1000, 1000)"""
+        )
+        # Create an unconfirmed draft task linked to an intake link
+        db.execute(
+            """INSERT INTO user_inbox_tasks (id, user_id, title, instruction, status, priority, priority_weight, sort_order, created_at, updated_at)
+               VALUES ('task-1', 'op-1', 'Title', 'Inst', 'DRAFT', 'NORMAL', 2, 10, 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_objects (object_id, tenant_id, provider, provider_instance_key, object_type, external_id, observed_connection_id, snapshot_digest, snapshot_json, external_status, last_event_id, first_seen_at, updated_at)
+               VALUES ('obj-1', 't-1', 'linear', 'inst-1', 'issue', 'ext-1', 'conn-1', 'dig', '{}', 'OPEN', 'ev-1', 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, created_at, updated_at, task_id, user_id, confirmation_json)
+               VALUES ('link-1', 't-1', 'obj-1', 'primary', 'LINKED', 1000, 1000, 'task-1', 'op-1', '{"project_id": "p1"}')"""
+        )
+
+        # 1. Confirmed task can transition DRAFT -> PENDING
+        db.execute("UPDATE user_inbox_tasks SET status = 'PENDING', updated_at = 1010 WHERE id = 'task-1'")
+        row = db.execute("SELECT status FROM user_inbox_tasks WHERE id = 'task-1'").fetchone()
+        assert row["status"] == "PENDING"
+
+        # 2. Linear sends update or clears confirmation while task is queued/running
+        db.execute("UPDATE intake_task_links SET confirmation_json = NULL WHERE link_id = 'link-1'")
+
+        # 3. Task claims, heartbeats, and completes must succeed without IntegrityError
+        db.execute("UPDATE user_inbox_tasks SET status = 'CLAIMED', worker_id = 'w-1', lease_expires_at = 2000, updated_at = 1020 WHERE id = 'task-1'")
+        db.execute("UPDATE user_inbox_tasks SET status = 'RUNNING', heartbeat_at = 1030, updated_at = 1030 WHERE id = 'task-1'")
+        db.execute("UPDATE user_inbox_tasks SET heartbeat_at = 1040, updated_at = 1040 WHERE id = 'task-1'")
+        db.execute("UPDATE user_inbox_tasks SET status = 'COMPLETED', completed_at = 1050, updated_at = 1050 WHERE id = 'task-1'")
+
+        final_row = db.execute("SELECT status, completed_at FROM user_inbox_tasks WHERE id = 'task-1'").fetchone()
+        assert final_row["status"] == "COMPLETED"
+        assert final_row["completed_at"] == 1050
+
+        # 4. But an unconfirmed DRAFT task STILL cannot be dispatched directly
+        db.execute(
+            """INSERT INTO user_inbox_tasks (id, user_id, title, instruction, status, priority, priority_weight, sort_order, created_at, updated_at)
+               VALUES ('task-unconf', 'op-1', 'Draft', 'Inst', 'DRAFT', 'NORMAL', 2, 20, 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, created_at, updated_at, task_id, user_id, confirmation_json)
+               VALUES ('link-unconf', 't-1', 'obj-1', 'secondary', 'LINKED', 1000, 1000, 'task-unconf', 'op-1', NULL)"""
+        )
+        import pytest
+        import sqlite3
+        with pytest.raises(sqlite3.IntegrityError, match="active intake task may not be dispatched or transferred"):
+            db.execute("UPDATE user_inbox_tasks SET status = 'PENDING' WHERE id = 'task-unconf'")
+
+
+def test_sync_rejects_disabled_connection_and_stale_auth_revision(tmp_path: Path):
+    """P1 regression: LinearSyncDispatcher must reject outbound calls when the
+    connection is disabled or when the link has a stale authorization revision.
+    """
+    from herdr.intake.connectors.linear.sync import LinearSyncDispatcher
+    from herdr.intake.schema import initialize, initialize_materialization, open_db
+    from contextlib import closing
+    db_path = tmp_path / "state.db"
+    initialize(db_path)
+    initialize_materialization(db_path)
+
+    with closing(open_db(db_path)) as db:
+        db.execute(
+            """INSERT INTO intake_connections (tenant_id, connection_id, provider, provider_instance_key, display_name, connector_version, status, config_revision, auth_ref, created_at, updated_at)
+               VALUES ('tenant-test', 'linear', 'linear', 'inst-1', 'Linear', '1.0.0', 'ACTIVE', 1, 'linear-prod-v1', 1000, 1000)"""
+        )
+        # user_inbox_tasks must be inserted before intake_task_links due to intake_inbox_no_replace
+        db.execute(
+            """INSERT INTO user_inbox_tasks (id, user_id, title, instruction, status, priority, priority_weight, sort_order, created_at, updated_at)
+               VALUES ('task-99', 'op-1', 'Title', 'Inst', 'RUNNING', 'NORMAL', 2, 10, 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_objects (object_id, tenant_id, provider, provider_instance_key, object_type, external_id, observed_connection_id, snapshot_digest, snapshot_json, external_status, last_event_id, first_seen_at, updated_at)
+               VALUES ('obj-1', 'tenant-test', 'linear', 'inst-1', 'issue', 'issue-99', 'linear', 'dig', '{}', 'OPEN', 'ev-1', 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, created_at, updated_at, task_id, user_id, origin_connection_id, authorization_revision)
+               VALUES ('link-1', 'tenant-test', 'obj-1', 'primary', 'LINKED', 1000, 1000, 'task-99', 'op-1', 'linear', 1)"""
+        )
+
+    dispatcher = LinearSyncDispatcher(db_path=db_path)
+    mock_client = MagicMock()
+    dispatcher._client = mock_client
+
+    # 1. Active connection with matching revision succeeds
+    res_ok = dispatcher.sync_task_completed("task-99", summary="Delivered")
+    assert res_ok.ok is True
+    assert mock_client.create_comment.called
+
+    # 2. Disable connection -> outbound calls must be rejected
+    mock_client.reset_mock()
+    with closing(open_db(db_path)) as db:
+        db.execute("UPDATE intake_connections SET status = 'DISABLED' WHERE connection_id = 'linear'")
+
+    res_disabled = dispatcher.sync_task_completed("task-99", summary="Delivered")
+    assert res_disabled.ok is False
+    assert "Connection is not active" in res_disabled.error
+    assert not mock_client.create_comment.called
+    assert not mock_client.update_issue_state.called
+
+    res_failed = dispatcher.sync_task_failed("task-99", error="Fatal error")
+    assert res_failed.ok is False
+    assert "Connection is not active" in res_failed.error
+
+    res_confirm = dispatcher.sync_task_confirmed("link-1")
+    assert res_confirm.ok is False
+    assert "Connection is not active" in res_confirm.error
+
+    # 3. Connection is active, but config_revision bumped (stale authorization on link)
+    with closing(open_db(db_path)) as db:
+        db.execute("UPDATE intake_connections SET status = 'ACTIVE', config_revision = 2 WHERE connection_id = 'linear'")
+
+    res_stale = dispatcher.sync_task_completed("task-99", summary="Delivered")
+    assert res_stale.ok is False
+    assert "Stale connection authorization" in res_stale.error
+    assert not mock_client.create_comment.called
+
+
+def test_ignore_queued_task_and_reactivate(tmp_path: Path, monkeypatch):
+    """P2 regression: confirm -> ignore -> reactivate must be reversible.
+    Ignoring a queued PENDING task sets it to CANCELLED, and reactivating it
+    must restore it to DRAFT without raising StateConflict("terminal task").
+    """
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.connectors.linear.connector import LinearConnector, register_linear_connection
+    from herdr.intake.worker import run_once
+    from herdr.intake.protocol import Scope
+    from herdr.intake.schema import initialize, open_db
+    from herdr.intake.store import EventStore
+    from contextlib import closing
+    db_path = tmp_path / "state.db"
+    initialize(db_path)
+
+    scope = Scope("tenant-test", "linear")
+    store = EventStore(db_path, scope, clock=lambda: 1000, verifier=lambda d: d.verified_via == "SIGNATURE", authorizer=lambda a, s: "admin")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+    conn_adapter = LinearConnector(store.scope, ORG_ID, SECRET)
+
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": {
+        "p": {"project_id": "proj-a", "workspace_id": "ws-a"}
+    }})
+
+    now_ms = int(time.time() * 1000)
+    raw = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-reactivate-001", webhook_timestamp=now_ms)).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw, SECRET),
+        "Linear-Delivery": "del-reactivate-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery = conn_adapter.process_webhook(raw, headers, now_ms=now_ms)
+    store.accept_event(delivery)
+
+    policy = {"user_id": "operator", "project_id": "proj-a", "workspace_id": "ws-a", "auto_assign": True}
+    run_once(store, materialization=policy)
+
+    config = {"tenant_id": "tenant-test", "user_id": "operator", "connections": {"linear": {}}}
+    inbox = IntakeInbox(db_path, config)
+    item, = inbox.list_items()
+    task_id = item["task_id"]
+
+    # 1. Confirm -> PENDING
+    item_conf = inbox.change(item["link_id"], "confirm", item["revision"], dispatch=True)
+    assert item_conf["status"] == "CONFIRMED"
+    with closing(open_db(db_path)) as db:
+        t_row = db.execute("SELECT status FROM user_inbox_tasks WHERE id = ?", (task_id,)).fetchone()
+        assert t_row["status"] == "PENDING"
+
+    # 2. Ignore queued task -> task becomes CANCELLED, link becomes IGNORED
+    item_ign = inbox.change(item["link_id"], "ignore", item_conf["revision"])
+    assert item_ign["disposition"] == "IGNORED"
+
+    with closing(open_db(db_path)) as db:
+        t_row = db.execute("SELECT status FROM user_inbox_tasks WHERE id = ?", (task_id,)).fetchone()
+        assert t_row["status"] == "CANCELLED"
+
+    # 3. Reactivate ignored task -> must succeed, restoring task to DRAFT and link to UNASSIGNED
+    item_react = inbox.change(item["link_id"], "reactivate", item_ign["revision"])
+    assert item_react["disposition"] == "UNASSIGNED"
+    assert item_react["status"] == "PENDING_ASSIGNMENT"
+
+    with closing(open_db(db_path)) as db:
+        t_row2 = db.execute("SELECT status FROM user_inbox_tasks WHERE id = ?", (task_id,)).fetchone()
+        assert t_row2["status"] == "DRAFT"
+

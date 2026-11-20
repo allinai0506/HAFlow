@@ -113,7 +113,8 @@ class IntakeInbox:
                 item = self._get(db, link_id)
                 if item["revision"] != revision:
                     raise StateConflict("work item changed; refresh before editing")
-                if item["task_status"] not in (None, "DRAFT", "PENDING"):
+                allowed_task_statuses = (None, "DRAFT", "PENDING", "CANCELLED") if action == "reactivate" else (None, "DRAFT", "PENDING")
+                if item["task_status"] not in allowed_task_statuses:
                     raise StateConflict("terminal task")
                 if item["external_status"] != "OPEN" and action not in ("unassign", "ignore"):
                     raise StateConflict("external work item is closed or has conflicting source evidence")
@@ -169,6 +170,9 @@ class IntakeInbox:
         elif action == "reactivate" and state == "IGNORED":
             state, owner, assignment = "UNASSIGNED", None, "MANUAL"
             event = "intake_task_reactivated"
+            if item["task_status"] == "CANCELLED" and task_id:
+                db.execute("UPDATE user_inbox_tasks SET status = 'DRAFT', updated_at = ? WHERE id = ?",
+                           (now / 1000, task_id))
         elif action == "edit" and state == "LINKED":
             project, workspace = changes["project_id"], changes["workspace_id"]
             db.execute("""UPDATE user_inbox_tasks SET title = ?, instruction = ?, project_id = ?,
