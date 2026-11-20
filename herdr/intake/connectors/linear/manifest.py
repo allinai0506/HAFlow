@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from herdr.intake.protocol import token, text
+from .credentials import CANONICAL_AUTH_REF_RE
 
 ORGANIZATION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 TEAM_KEY_RE = re.compile(r"^[A-Z0-9]{1,16}$")
@@ -119,6 +120,10 @@ def validate_config(config: dict[str, Any]) -> ConfigReport:
         errors.append("webhook_signing_secret_ref is required")
     elif secret_ref.lower() in ("none", "default"):
         errors.append("webhook_signing_secret_ref cannot be 'none' or 'default'")
+    elif not CANONICAL_AUTH_REF_RE.fullmatch(secret_ref):
+        errors.append(
+            f"webhook_signing_secret_ref '{secret_ref}' must be canonical lowercase kebab-case (^[a-z0-9]+(-[a-z0-9]+)*$)"
+        )
     else:
         try:
             token(secret_ref)

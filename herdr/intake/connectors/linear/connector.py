@@ -5,6 +5,7 @@ from typing import Any, Mapping
 
 from herdr.intake.protocol import Delivery, Scope
 from .client import ConnectionTestReport, HealthStatus, LinearClient
+from .credentials import CANONICAL_AUTH_REF_RE
 from .manifest import ConfigReport, LINEAR_MANIFEST, validate_config
 from .normalizer import LinearNormalizer
 from .verifier import LinearVerifier, VerifiedDelivery
@@ -21,9 +22,15 @@ def register_linear_connection(
     connector_version: str = "1.0.0",
 ) -> None:
     """Register a Linear connection ensuring immutable auth_ref contract is satisfied."""
-    if not auth_ref or not isinstance(auth_ref, str) or auth_ref.lower() in ("none", "default"):
+    if not auth_ref or not isinstance(auth_ref, str):
+        raise ValueError("auth_ref is required and must be a non-empty string")
+    if auth_ref.lower() in ("none", "default"):
         raise ValueError(
             f"DISALLOWED_DEFAULT_AUTH_REF: Linear connection requires an explicit, immutable auth_ref (cannot use '{auth_ref}')"
+        )
+    if not CANONICAL_AUTH_REF_RE.fullmatch(auth_ref):
+        raise ValueError(
+            f"NON_CANONICAL_AUTH_REF: auth_ref '{auth_ref}' must be canonical lowercase kebab-case (^[a-z0-9]+(-[a-z0-9]+)*$) to prevent credential collision"
         )
     store.register_connection(
         provider="linear",

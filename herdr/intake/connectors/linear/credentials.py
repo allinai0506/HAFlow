@@ -1,7 +1,25 @@
 """Credential resolution and rotation security for Linear Connector."""
 
 import os
+import re
 from typing import Callable
+
+CANONICAL_AUTH_REF_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def validate_canonical_auth_ref(auth_ref: str) -> str:
+    """Validate that auth_ref is non-empty, non-default, and follows canonical lowercase kebab-case."""
+    if not auth_ref or not isinstance(auth_ref, str):
+        raise SecretResolutionError("MISSING_AUTH_REF: connection auth_ref is empty")
+    if auth_ref.lower() in ("none", "default"):
+        raise SecretResolutionError(
+            f"DISALLOWED_DEFAULT_AUTH_REF: Linear webhook requires an explicit, immutable auth_ref (cannot use '{auth_ref}')"
+        )
+    if not CANONICAL_AUTH_REF_RE.fullmatch(auth_ref):
+        raise SecretResolutionError(
+            f"NON_CANONICAL_AUTH_REF: auth_ref '{auth_ref}' must be canonical lowercase kebab-case (^[a-z0-9]+(-[a-z0-9]+)*$) to preserve distinct credential identities"
+        )
+    return auth_ref
 
 
 class SecretResolutionError(ValueError):
@@ -58,13 +76,7 @@ def resolve_signing_secret(
     Raises:
         SecretResolutionError if secret cannot be resolved or reference mismatches.
     """
-    if not auth_ref or not isinstance(auth_ref, str):
-        raise SecretResolutionError("MISSING_AUTH_REF: connection auth_ref is empty")
-
-    if auth_ref.lower() in ("none", "default"):
-        raise SecretResolutionError(
-            f"DISALLOWED_DEFAULT_AUTH_REF: Linear webhook requires an explicit, immutable auth_ref (cannot use '{auth_ref}')"
-        )
+    auth_ref = validate_canonical_auth_ref(auth_ref)
 
     # 1. Custom resolver hook
     if custom_resolver is not None:
@@ -89,7 +101,7 @@ def resolve_signing_secret(
             return val.strip()
 
     # 4. Environment variables specific to auth_ref
-    sanitized_ref = auth_ref.upper().replace("-", "_").replace(".", "_")
+    sanitized_ref = auth_ref.upper().replace("-", "_")
     env_keys = [
         f"HAFLOW_INTAKE_SECRET_{sanitized_ref}",
         f"LINEAR_WEBHOOK_SECRET_{sanitized_ref}",

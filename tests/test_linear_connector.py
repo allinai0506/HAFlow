@@ -1354,12 +1354,15 @@ def test_register_linear_connection_rejects_none_and_default(tmp_path):
     initialize(path)
     store = EventStore(path, SCOPE, authorizer=lambda a, s: "admin")
 
-    for bad_ref in ("none", "default", "NONE", "Default", ""):
+    for bad_ref in ("none", "default", "NONE", "Default"):
         with pytest.raises(ValueError, match="DISALLOWED_DEFAULT_AUTH_REF"):
             register_linear_connection(store, instance=ORG_ID, auth_ref=bad_ref)
 
         with pytest.raises(ValueError, match="DISALLOWED_DEFAULT_AUTH_REF"):
             LinearConnector.register_connection(store, instance=ORG_ID, auth_ref=bad_ref)
+
+    with pytest.raises(ValueError, match="auth_ref is required"):
+        register_linear_connection(store, instance=ORG_ID, auth_ref="")
 
     # Valid explicit reference succeeds
     register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-ref-v1")
@@ -1435,3 +1438,62 @@ def test_webhook_receiver_and_http_handlers_reject_default_auth_ref(tmp_path, mo
     status_standalone, body_standalone = _send_http_request(LinearWebhookHandler, standalone_server, "/", headers, raw)
     assert status_standalone == 401
     assert "DISALLOWED_DEFAULT_AUTH_REF" in body_standalone.get("error", "")
+
+
+def test_canonical_auth_ref_prevents_environment_lookup_collision(tmp_path, monkeypatch):
+    """Codex P2 regression: distinct auth_ref identities must be canonical kebab-case to prevent env lookup collision."""
+    from herdr.intake.connectors.linear.connector import register_linear_connection
+    from herdr.intake.connectors.linear.credentials import SecretResolutionError, resolve_signing_secret
+    from herdr.intake.connectors.linear.manifest import validate_config
+    from herdr.intake.connectors.linear.receiver import handle_linear_webhook
+
+    # 1. Manifest layer rejects non-canonical names (underscores, dots, mixed case)
+    for bad_name in ("linear_key", "Linear-Key", "linear.key", "linear--key"):
+        rep = validate_config({"organization_id": ORG_ID, "webhook_signing_secret_ref": bad_name})
+        assert rep.valid is False
+        assert any("must be canonical lowercase kebab-case" in e for e in rep.errors)
+
+    # 2. Registration layer rejects non-canonical names
+    path = tmp_path / "state_canon.db"
+    initialize(path)
+    store = EventStore(path, SCOPE, authorizer=lambda a, s: "admin", verifier=lambda d: d.verified_via == "SIGNATURE")
+
+    with pytest.raises(ValueError, match="NON_CANONICAL_AUTH_REF"):
+        register_linear_connection(store, instance=ORG_ID, auth_ref="linear_key")
+
+    # 3. Credentials resolution layer rejects non-canonical references
+    with pytest.raises(SecretResolutionError, match="NON_CANONICAL_AUTH_REF"):
+        resolve_signing_secret("linear_key")
+
+    # 4. Codex reproduction scenario:
+    # Register connection with canonical 'linear-key' at revision 1
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-key")
+    old_secret = "secret-for-linear-key-111"
+    monkeypatch.setenv("HAFLOW_INTAKE_SECRET_LINEAR_KEY", old_secret)
+
+    now_ms = int(time.time() * 1000)
+    raw_1 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="canon-1", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_1 = {
+        "Linear-Signature": sign(raw_1, old_secret),
+        "Linear-Delivery": "delivery-canon-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_1, _, body_1 = handle_linear_webhook(raw_1, headers_1, store, ORG_ID, now_ms=now_ms)
+    assert status_1 == 200
+    assert body_1.get("outcome") == "ACCEPTED"
+
+    # Administrator updates authorization to non-canonical 'linear_key' at revision 2
+    # In the vulnerability, 'linear_key' collapsed to LINEAR_KEY and silently reused old_secret at revision 2.
+    # Now, the receiver strictly rejects non-canonical 'linear_key' with 401 NON_CANONICAL_AUTH_REF!
+    store.update_connection_authorization(1, status="ACTIVE", reason="Rotate to underscore name", auth_ref="linear_key")
+    raw_2 = json.dumps(sample_issue_payload("create", "unstarted", issue_id="canon-2", webhook_timestamp=now_ms)).encode("utf-8")
+    headers_2 = {
+        "Linear-Signature": sign(raw_2, old_secret),
+        "Linear-Delivery": "delivery-canon-002",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_2, _, body_2 = handle_linear_webhook(raw_2, headers_2, store, ORG_ID, now_ms=now_ms)
+    assert status_2 == 401
+    assert "NON_CANONICAL_AUTH_REF" in body_2.get("error", "")

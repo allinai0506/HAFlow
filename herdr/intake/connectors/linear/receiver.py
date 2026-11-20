@@ -11,7 +11,7 @@ from herdr.intake.protocol import MAX_BODY_BYTES, Scope
 from herdr.intake.schema import open_db
 from herdr.intake.store import EventStore, ScopeDenied
 from .connector import LinearConnector
-from .credentials import SecretResolutionError, resolve_signing_secret
+from .credentials import CANONICAL_AUTH_REF_RE, SecretResolutionError, resolve_signing_secret
 from .normalizer import OrganizationMismatchError, UnsupportedEventTypeError
 from .verifier import SignatureVerificationError, TimestampSkewError
 
@@ -78,6 +78,13 @@ def handle_linear_webhook(
         return 401, json_headers, {
             "ok": False,
             "error": f"DISALLOWED_DEFAULT_AUTH_REF: Linear webhook requires an explicit, immutable auth_ref (cannot use '{db_auth_ref}')",
+        }
+
+    if not CANONICAL_AUTH_REF_RE.fullmatch(db_auth_ref):
+        LOG.warning("Linear webhook rejected: connection auth_ref '%s' is non-canonical", db_auth_ref)
+        return 401, json_headers, {
+            "ok": False,
+            "error": f"NON_CANONICAL_AUTH_REF: auth_ref '{db_auth_ref}' must be canonical lowercase kebab-case",
         }
 
     # 2. Resolve authoritative signing secret for db_auth_ref
