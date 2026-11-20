@@ -41,6 +41,7 @@ let intakeOffset = 0;
 const intakePageSize = 50;
 const intakeLabels = {
   DRAFT:'外部草稿', PENDING_ASSIGNMENT:'待分配', CONFIRMED:'已确认',
+  PENDING:'排队待执行', RUNNING:'正在执行', COMPLETED:'已完成', FAILED:'执行失败',
   IGNORED:'已忽略', SOURCE_CLOSED:'来源已关闭', SOURCE_CONFLICT:'来源信息冲突',
 };
 
@@ -113,8 +114,12 @@ function renderIntakeCard(item){
   </article>`;
 }
 
-function renderIntakeCards(){
-  return intakeItems.map(renderIntakeCard).join('');
+function renderIntakeCards(existingTasks = []){
+  const existingIds = new Set((existingTasks || []).map(t => t.id));
+  return intakeItems
+    .filter(item => !item.task_id || !existingIds.has(item.task_id))
+    .map(renderIntakeCard)
+    .join('');
 }
 
 function renderIntakePagination(){
@@ -199,7 +204,9 @@ function showIntakeDetail(linkId, onReload){
     availableActions = [['assign','分配给我'],['ignore','忽略']];
   }else if(isLinked){
     if(item.status === 'DRAFT'){
-      availableActions = [['confirm','确认'],['unassign','撤销归属'],['ignore','忽略']];
+      availableActions = [['confirm','确认并排队'],['unassign','撤销归属'],['ignore','忽略']];
+    }else if(item.status === 'CONFIRMED'){
+      availableActions = [['dispatch','排队执行'],['unassign','撤销归属'],['ignore','忽略']];
     }else{
       availableActions = [['unassign','撤销归属'],['ignore','忽略']];
     }
@@ -246,7 +253,7 @@ function showIntakeDetail(linkId, onReload){
       })});
       closeModal();
       if(typeof onReload === 'function') await onReload();
-      if(action === 'confirm') toast('已确认外部任务');
+      if(action === 'confirm' || action === 'dispatch') toast('已确认外部任务并加入执行队列');
     }catch(error){
       const status = form.querySelector('[role=status]');
       status.textContent = '操作未保存。' + error.message;

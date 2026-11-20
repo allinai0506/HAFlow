@@ -68,7 +68,10 @@ def _resolve_current_user(requested_user: Optional[str] = None) -> str:
     operator rather than arbitrary client-spoofed identities.
     Only admin or root server identities may act on behalf of requested_user.
     """
-    server_user = os.environ.get("HAFLOW_USER") or os.environ.get("USER") or "default"
+    from herdr.intake.materializer import local_config
+    cfg = local_config()
+    intake_user = (cfg.get("user_id") if isinstance(cfg, dict) else None)
+    server_user = os.environ.get("HAFLOW_USER") or intake_user or os.environ.get("USER") or "default"
     if server_user in ("root", "admin"):
         if requested_user and str(requested_user).strip():
             return str(requested_user).strip()
@@ -336,10 +339,15 @@ def api_intake_inbox(credential, *, query=None, body=None):
     inbox = IntakeInbox(path, config)
     try:
         if body is not None:
-            if not isinstance(body, dict) or body.keys() - {"link_id", "action", "revision", "changes"}:
+            if not isinstance(body, dict) or body.keys() - {"link_id", "action", "revision", "changes", "dispatch"}:
                 raise ValueError("invalid Intake action payload")
-            item = inbox.change(body.get("link_id"), body.get("action"),
-                                body.get("revision"), body.get("changes"))
+            action = body.get("action")
+            dispatch_requested = body.get("dispatch", action in ("confirm", "dispatch"))
+            item = inbox.change(body.get("link_id"), action,
+                                body.get("revision"), body.get("changes"),
+                                dispatch=dispatch_requested)
+            if dispatch_requested:
+                _trigger_background_sweep()
             return {"ok": True, "item": item}
         return {"ok": True, "items": inbox.list_items(
             view=query.get("view", ["ALL"])[0],

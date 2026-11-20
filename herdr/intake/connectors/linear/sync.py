@@ -104,6 +104,12 @@ class LinearSyncDispatcher:
             LOG.warning("Linear sync client resolution failed for confirm: %s", exc)
             return SyncResult(ok=False, action="confirm", issue_id=external_id, error=str(exc))
 
+        if not team_id:
+            try:
+                team_id = client.get_issue_team_id(external_id)
+            except Exception as exc:
+                LOG.warning("Failed to resolve team_id for issue %s: %s", external_id, exc)
+
         state_id = None
         if team_id:
             try:
@@ -165,6 +171,12 @@ class LinearSyncDispatcher:
         except Exception as exc:
             LOG.warning("Linear sync client resolution failed for complete: %s", exc)
             return SyncResult(ok=False, action="complete", issue_id=external_id, error=str(exc))
+
+        if not team_id:
+            try:
+                team_id = client.get_issue_team_id(external_id)
+            except Exception as exc:
+                LOG.warning("Failed to resolve team_id for issue %s: %s", external_id, exc)
 
         state_id = None
         if team_id:

@@ -236,6 +236,8 @@ DDL = (
 
 
 MATERIALIZATION_KEY = 'active_intake_inbox_v1'
+DISPATCH_KEY = 'active_intake_dispatch_v1'
+
 MATERIALIZATION_DDL = (
     "ALTER TABLE intake_task_links ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE intake_task_links ADD COLUMN origin_connection_id TEXT",
@@ -251,9 +253,11 @@ MATERIALIZATION_DDL = (
     """CREATE INDEX intake_receipt_event ON intake_delivery_receipts
        (tenant_id, connection_id, canonical_event_id, received_at, receipt_id)""",
     """CREATE TRIGGER intake_inbox_draft_only BEFORE UPDATE ON user_inbox_tasks
-       WHEN EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = OLD.id)
-         AND (NEW.status NOT IN ('DRAFT', 'CANCELLED') OR NEW.user_id IS NOT OLD.user_id
-              OR NEW.id IS NOT OLD.id OR NEW.workflow_id IS NOT NULL OR NEW.worker_id IS NOT NULL)
+       WHEN (NEW.user_id IS NOT OLD.user_id OR NEW.id IS NOT OLD.id)
+         OR (
+           EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = OLD.id AND confirmation_json IS NULL)
+           AND (NEW.status NOT IN ('DRAFT', 'CANCELLED') OR NEW.workflow_id IS NOT NULL OR NEW.worker_id IS NOT NULL)
+         )
        BEGIN SELECT RAISE(ABORT, 'active intake task may not be dispatched or transferred'); END""",
     """CREATE TRIGGER intake_inbox_no_replace BEFORE INSERT ON user_inbox_tasks
        WHEN EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = NEW.id)
@@ -264,12 +268,33 @@ MATERIALIZATION_DDL = (
           OR (NEW.disposition = 'LINKED' AND (NEW.user_id IS NULL OR NEW.task_id IS NULL))
           OR (NEW.disposition <> 'LINKED' AND NEW.user_id IS NOT NULL)
           OR (NEW.task_id IS NOT NULL AND NOT EXISTS (
-              SELECT 1 FROM user_inbox_tasks t WHERE t.id = NEW.task_id AND t.status = 'DRAFT'
+              SELECT 1 FROM user_inbox_tasks t WHERE t.id = NEW.task_id
               AND (NEW.user_id IS NULL OR t.user_id = NEW.user_id)))
        BEGIN SELECT RAISE(ABORT, 'invalid active intake task link'); END""",
     """CREATE TRIGGER intake_inbox_no_delete BEFORE DELETE ON user_inbox_tasks
        WHEN EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = OLD.id)
        BEGIN SELECT RAISE(ABORT, 'active intake history must be retained'); END""",
+)
+
+DISPATCH_DDL = (
+    "DROP TRIGGER IF EXISTS intake_inbox_draft_only",
+    """CREATE TRIGGER intake_inbox_draft_only BEFORE UPDATE ON user_inbox_tasks
+       WHEN (NEW.user_id IS NOT OLD.user_id OR NEW.id IS NOT OLD.id)
+         OR (
+           EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = OLD.id AND confirmation_json IS NULL)
+           AND (NEW.status NOT IN ('DRAFT', 'CANCELLED') OR NEW.workflow_id IS NOT NULL OR NEW.worker_id IS NOT NULL)
+         )
+       BEGIN SELECT RAISE(ABORT, 'active intake task may not be dispatched or transferred'); END""",
+    "DROP TRIGGER IF EXISTS intake_link_task_guard",
+    """CREATE TRIGGER intake_link_task_guard BEFORE UPDATE OF task_id, user_id, disposition
+       ON intake_task_links WHEN
+          (OLD.task_id IS NOT NULL AND NEW.task_id IS NOT OLD.task_id)
+          OR (NEW.disposition = 'LINKED' AND (NEW.user_id IS NULL OR NEW.task_id IS NULL))
+          OR (NEW.disposition <> 'LINKED' AND NEW.user_id IS NOT NULL)
+          OR (NEW.task_id IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM user_inbox_tasks t WHERE t.id = NEW.task_id
+              AND (NEW.user_id IS NULL OR t.user_id = NEW.user_id)))
+       BEGIN SELECT RAISE(ABORT, 'invalid active intake task link'); END""",
 )
 
 
@@ -305,10 +330,15 @@ def initialize_materialization(path: Path) -> None:
 
     exists = "SELECT 1 FROM schema_meta WHERE key = ?"
     with closing(open_db(path)) as db:
-        if db.execute(exists, (MATERIALIZATION_KEY,)).fetchone():
+        has_mat = db.execute(exists, (MATERIALIZATION_KEY,)).fetchone()
+        has_disp = db.execute(exists, (DISPATCH_KEY,)).fetchone()
+        if has_mat and has_disp:
             return
     with _schema_initialization_lock(path), closing(open_db(path)) as db:
         if not db.execute(exists, (MATERIALIZATION_KEY,)).fetchone():
             ensure_inbox_schema(db)
             _run_exclusive(db, (*MATERIALIZATION_DDL,
                                 f"INSERT INTO schema_meta VALUES ('{MATERIALIZATION_KEY}','1')"))
+        if not db.execute(exists, (DISPATCH_KEY,)).fetchone():
+            _run_exclusive(db, (*DISPATCH_DDL,
+                                f"INSERT INTO schema_meta VALUES ('{DISPATCH_KEY}','1')"))

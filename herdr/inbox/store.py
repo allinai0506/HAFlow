@@ -198,7 +198,7 @@ class InboxStore:
         # Schema discovery and task reads must share a snapshot during migration.
         conn.execute("BEGIN")
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'intake_task_links'").fetchone():
-            return "NOT EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = user_inbox_tasks.id)"
+            return "NOT EXISTS (SELECT 1 FROM intake_task_links WHERE task_id = user_inbox_tasks.id AND user_inbox_tasks.status = 'DRAFT')"
         return "1=1"
 
     def get_task(self, task_id: str, *, manual_only=False) -> Optional[Dict[str, Any]]:

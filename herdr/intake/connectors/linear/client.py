@@ -218,6 +218,27 @@ class LinearClient:
         matches.sort(key=lambda s: (s.get("position", 0), s.get("id", "")))
         return matches[0].get("id")
 
+    def get_issue_team_id(self, issue_id: str) -> str | None:
+        """Fetch the team ID for a given issue ID."""
+        if not issue_id or not isinstance(issue_id, str):
+            return None
+        query = """
+        query IssueTeam($id: String!) {
+            issue(id: $id) {
+                id
+                team {
+                    id
+                }
+            }
+        }
+        """
+        try:
+            res = self._post_graphql(query, {"id": issue_id})
+            return res.get("data", {}).get("issue", {}).get("team", {}).get("id")
+        except Exception as exc:
+            logger.warning("Failed to query team for issue %s: %s", issue_id, exc)
+            return None
+
     def update_issue_state(self, issue_id: str, state_id: str) -> dict[str, Any]:
         """Update an issue's workflow state in Linear."""
         if not issue_id or not isinstance(issue_id, str):
