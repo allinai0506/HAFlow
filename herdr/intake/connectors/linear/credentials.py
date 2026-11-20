@@ -28,6 +28,7 @@ class SecretResolutionError(ValueError):
 
 # In-memory registry for programmatic secret injection and testing
 _SECRET_REGISTRY: dict[str, str] = {}
+_TOKEN_REGISTRY: dict[str, str] = {}
 
 
 def register_secret(auth_ref: str, secret: str) -> None:
@@ -47,6 +48,25 @@ def unregister_secret(auth_ref: str) -> None:
 def clear_secret_registry() -> None:
     """Clear all in-memory registered secrets."""
     _SECRET_REGISTRY.clear()
+
+
+def register_api_token(auth_ref: str, token: str) -> None:
+    """Register a Linear API token for an auth_ref in memory."""
+    if not auth_ref or not isinstance(auth_ref, str):
+        raise ValueError("auth_ref must be a non-empty string")
+    if not token or not isinstance(token, str):
+        raise ValueError("token must be a non-empty string")
+    _TOKEN_REGISTRY[auth_ref] = token
+
+
+def unregister_api_token(auth_ref: str) -> None:
+    """Remove an API token from in-memory registry."""
+    _TOKEN_REGISTRY.pop(auth_ref, None)
+
+
+def clear_token_registry() -> None:
+    """Clear all in-memory registered API tokens."""
+    _TOKEN_REGISTRY.clear()
 
 
 def resolve_signing_secret(
@@ -127,4 +147,61 @@ def resolve_signing_secret(
 
     raise SecretResolutionError(
         f"CREDENTIAL_UNRESOLVED: cannot resolve signing secret for auth_ref '{auth_ref}'"
+    )
+
+
+def resolve_api_token(
+    auth_ref: str,
+    *,
+    loaded_token: str | None = None,
+    loaded_auth_ref: str | None = None,
+    custom_resolver: Callable[[str], str | None] | None = None,
+) -> str:
+    """Resolve the authoritative Linear API token for egress mutations."""
+    auth_ref = validate_canonical_auth_ref(auth_ref)
+
+    if custom_resolver is not None:
+        val = custom_resolver(auth_ref)
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
+
+    if loaded_auth_ref:
+        if loaded_auth_ref != auth_ref:
+            raise SecretResolutionError(
+                f"AUTH_REF_MISMATCH: loaded token ref '{loaded_auth_ref}' does not match connection authorized auth_ref '{auth_ref}'"
+            )
+        if loaded_token and isinstance(loaded_token, str) and loaded_token.strip():
+            return loaded_token.strip()
+
+    if auth_ref in _TOKEN_REGISTRY:
+        val = _TOKEN_REGISTRY[auth_ref]
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
+
+    sanitized_ref = auth_ref.upper().replace("-", "_")
+    env_keys = [
+        f"HAFLOW_INTAKE_TOKEN_{sanitized_ref}",
+        f"LINEAR_API_TOKEN_{sanitized_ref}",
+        "HAFLOW_LINEAR_API_TOKEN",
+        "LINEAR_API_TOKEN",
+    ]
+    for key in env_keys:
+        val = os.environ.get(key)
+        if val and val.strip():
+            return val.strip()
+
+    if loaded_token and isinstance(loaded_token, str) and loaded_token.strip():
+        env_ref = os.environ.get("LINEAR_API_TOKEN_REF")
+        if env_ref:
+            if env_ref == auth_ref:
+                return loaded_token.strip()
+            raise SecretResolutionError(
+                f"AUTH_REF_MISMATCH: environment token ref '{env_ref}' does not match connection authorized auth_ref '{auth_ref}'"
+            )
+        raise SecretResolutionError(
+            f"AUTH_REF_MISMATCH: connection requires authorized auth_ref '{auth_ref}', but loaded token has no matching reference"
+        )
+
+    raise SecretResolutionError(
+        f"CREDENTIAL_UNRESOLVED: cannot resolve Linear API token for auth_ref '{auth_ref}'"
     )

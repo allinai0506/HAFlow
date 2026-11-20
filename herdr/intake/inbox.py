@@ -119,7 +119,18 @@ class IntakeInbox:
                     raise StateConflict("external work item is closed or has conflicting source evidence")
                 store = EventStore(self.path, Scope(self.tenant, item["connection_id"]))
                 self._apply(db, store, item, action, changes)
-                return _project(self._get(db, link_id))
+                projected = _project(self._get(db, link_id))
+
+        if action == "confirm" and ("provider" in item.keys() and item["provider"] == "linear"):
+            try:
+                from .connectors.linear.sync import dispatch_linear_sync_on_confirm
+                dispatch_linear_sync_on_confirm(
+                    self.path, link_id, user_id=self.user, project_id=projected.get("project_id")
+                )
+            except Exception:
+                pass
+
+        return projected
 
     def _apply(self, db, store, item, action, changes):
         now = store.now()

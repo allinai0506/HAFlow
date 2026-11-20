@@ -15,7 +15,26 @@ var {
   state, api, esc, openModal, closeModal, toast
 }){
 
-let intakeToken = '';
+const INBOX_TOKEN_STORAGE_KEY = 'haflow_intake_token';
+
+function getStoredToken(){
+  try{
+    return sessionStorage.getItem(INBOX_TOKEN_STORAGE_KEY) || '';
+  }catch(_){ return ''; }
+}
+
+function storeToken(token){
+  intakeToken = token || '';
+  try{
+    if(intakeToken){
+      sessionStorage.setItem(INBOX_TOKEN_STORAGE_KEY, intakeToken);
+    }else{
+      sessionStorage.removeItem(INBOX_TOKEN_STORAGE_KEY);
+    }
+  }catch(_){}
+}
+
+let intakeToken = getStoredToken();
 let intakeItems = [];
 let intakeLoad = 0;
 let intakeOffset = 0;
@@ -59,7 +78,7 @@ async function fetchIntakeActiveItems(qParts, view, isReset){
     activeItems = await intakeRequest('?' + intakeQuery).catch(error => ({error:error.message}));
   }
   if(intakeRead !== intakeLoad) return;
-  if(activeItems?.error === 'intake_inbox_authentication_required') intakeToken = '';
+  if(activeItems?.error === 'intake_inbox_authentication_required') storeToken('');
   intakeItems = activeItems?.items || [];
   syncIntakeDetail();
 }
@@ -121,7 +140,7 @@ function getIntakeAuthButtonHtml(){
 
 function toggleIntakeAuth(onReload, onRender){
   if(intakeToken){
-    intakeToken = '';
+    storeToken('');
     intakeItems = [];
     closeModal();
     const detail = document.getElementById('intakeDetail');
@@ -147,7 +166,7 @@ function toggleIntakeAuth(onReload, onRender){
     try{
       const credential = field.value;
       await intakeRequest('?limit=1', {}, credential);
-      intakeToken = credential;
+      storeToken(credential);
       field.value = '';
       closeModal();
       if(typeof onReload === 'function') await onReload();

@@ -1497,3 +1497,317 @@ def test_canonical_auth_ref_prevents_environment_lookup_collision(tmp_path, monk
     status_2, _, body_2 = handle_linear_webhook(raw_2, headers_2, store, ORG_ID, now_ms=now_ms)
     assert status_2 == 401
     assert "NON_CANONICAL_AUTH_REF" in body_2.get("error", "")
+
+
+# =====================================================================
+# V2 Tests: Bidirectional Synchronization, Echo Loop Suppression & Egress
+# =====================================================================
+
+
+def test_linear_client_states_and_mutations():
+    """Verify LinearClient GraphQL state queries, caching, and mutation requests."""
+    from herdr.intake.connectors.linear.client import LinearClient
+
+    client = LinearClient("lin_api_test_secret_token")
+
+    # 1. Mock get_team_workflow_states
+    mock_states_data = {
+        "data": {
+            "team": {
+                "id": "team-eng",
+                "states": {
+                    "nodes": [
+                        {"id": "st-backlog", "name": "Backlog", "type": "backlog", "position": 1},
+                        {"id": "st-started", "name": "In Progress", "type": "started", "position": 2},
+                        {"id": "st-done", "name": "Done", "type": "completed", "position": 3},
+                    ]
+                }
+            }
+        }
+    }
+    with patch.object(client, "_post_graphql", return_value=mock_states_data) as mock_post:
+        states = client.get_team_workflow_states("team-eng")
+        assert len(states) == 3
+        assert mock_post.call_count == 1
+
+        # Verify caching (second call uses cache, no additional HTTP request)
+        states_cached = client.get_team_workflow_states("team-eng")
+        assert states_cached == states
+        assert mock_post.call_count == 1
+
+        # Verify state resolution by type
+        started_id = client.resolve_state_id_by_type("team-eng", "started")
+        assert started_id == "st-started"
+        done_id = client.resolve_state_id_by_type("team-eng", "completed")
+        assert done_id == "st-done"
+        missing_id = client.resolve_state_id_by_type("team-eng", "nonexistent")
+        assert missing_id is None
+
+    # 2. Mock update_issue_state
+    mock_update_data = {
+        "data": {
+            "issueUpdate": {
+                "success": True,
+                "issue": {"id": "issue-123", "state": {"id": "st-started", "name": "In Progress", "type": "started"}}
+            }
+        }
+    }
+    with patch.object(client, "_post_graphql", return_value=mock_update_data) as mock_post:
+        res = client.update_issue_state("issue-123", "st-started")
+        assert res["success"] is True
+        assert res["issue"]["id"] == "issue-123"
+        mock_post.assert_called_once()
+        args = mock_post.call_args[0]
+        assert "mutation IssueUpdate" in args[0]
+        assert args[1] == {"id": "issue-123", "input": {"stateId": "st-started"}}
+
+    # 3. Mock create_comment
+    mock_comment_data = {
+        "data": {
+            "commentCreate": {
+                "success": True,
+                "comment": {"id": "cmt-999", "body": "Hello Linear", "createdAt": "2026-11-20T08:00:00Z"}
+            }
+        }
+    }
+    with patch.object(client, "_post_graphql", return_value=mock_comment_data) as mock_post:
+        res = client.create_comment("issue-123", "Hello Linear")
+        assert res["success"] is True
+        assert res["comment"]["id"] == "cmt-999"
+        mock_post.assert_called_once()
+        args = mock_post.call_args[0]
+        assert "mutation CommentCreate" in args[0]
+        assert args[1] == {"input": {"issueId": "issue-123", "body": "Hello Linear"}}
+
+
+def test_credentials_resolve_api_token(monkeypatch):
+    """Verify Linear API token resolution rules, memory registry, and fail-closed security."""
+    from herdr.intake.connectors.linear.credentials import (
+        SecretResolutionError,
+        clear_token_registry,
+        register_api_token,
+        resolve_api_token,
+        unregister_api_token,
+    )
+
+    clear_token_registry()
+
+    # 1. Rejects invalid auth_ref
+    with pytest.raises(SecretResolutionError, match="DISALLOWED_DEFAULT_AUTH_REF"):
+        resolve_api_token("default")
+
+    # 2. In-memory registry resolution
+    register_api_token("linear-prod-v2", "lin_api_mem_12345")
+    assert resolve_api_token("linear-prod-v2") == "lin_api_mem_12345"
+
+    unregister_api_token("linear-prod-v2")
+    with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
+        resolve_api_token("linear-prod-v2")
+
+    # 3. Environment variable lookup
+    monkeypatch.setenv("HAFLOW_INTAKE_TOKEN_LINEAR_PROD_V2", "lin_api_env_token_456")
+    assert resolve_api_token("linear-prod-v2") == "lin_api_env_token_456"
+
+    # 4. Explicit loaded token with ref check
+    assert resolve_api_token("linear-prod-v2", loaded_token="lin_api_direct", loaded_auth_ref="linear-prod-v2") == "lin_api_direct"
+    with pytest.raises(SecretResolutionError, match="AUTH_REF_MISMATCH"):
+        resolve_api_token("linear-prod-v2", loaded_token="lin_api_direct", loaded_auth_ref="linear-other-ref")
+
+
+def test_echo_loop_detection_and_drop(tmp_path):
+    """Verify Webhooks generated by HAFlow's bot actor are safely dropped with 200 ignored."""
+    from herdr.intake.connectors.linear.connector import register_linear_connection
+    from herdr.intake.connectors.linear.receiver import handle_linear_webhook
+
+    path = tmp_path / "state_echo.db"
+    initialize(path)
+    store = EventStore(path, SCOPE, authorizer=lambda a, s: "admin", verifier=lambda d: d.verified_via == "SIGNATURE")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+
+    now_ms = int(time.time() * 1000)
+    bot_id = "user-bot-haflow-uuid"
+
+    # Normal user payload -> Accepted
+    normal_payload = sample_issue_payload("update", "started", issue_id="echo-test-1", webhook_timestamp=now_ms)
+    normal_payload["actor"] = {"id": "user-human-alice", "type": "user", "name": "Alice"}
+    raw_norm = json.dumps(normal_payload).encode("utf-8")
+    headers_norm = {
+        "Linear-Signature": sign(raw_norm, SECRET),
+        "Linear-Delivery": "delivery-echo-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_norm, _, body_norm = handle_linear_webhook(
+        raw_norm, headers_norm, store, ORG_ID, signing_secret=SECRET, auth_ref="linear-prod-v1",
+        bot_user_ids=(bot_id,), now_ms=now_ms,
+    )
+    assert status_norm == 200
+    assert body_norm.get("outcome") == "ACCEPTED"
+
+    # Bot actor payload -> Safely ignored (echo loop suppressed)
+    bot_payload = sample_issue_payload("update", "started", issue_id="echo-test-1", webhook_timestamp=now_ms)
+    bot_payload["actor"] = {"id": bot_id, "type": "user", "name": "HAFlow Bot"}
+    raw_bot = json.dumps(bot_payload).encode("utf-8")
+    headers_bot = {
+        "Linear-Signature": sign(raw_bot, SECRET),
+        "Linear-Delivery": "delivery-echo-002",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_bot, _, body_bot = handle_linear_webhook(
+        raw_bot, headers_bot, store, ORG_ID, signing_secret=SECRET, auth_ref="linear-prod-v1",
+        bot_user_ids=(bot_id,), now_ms=now_ms,
+    )
+    assert status_bot == 200
+    assert body_bot.get("ignored") is True
+    assert "BOT_ECHO_IGNORED" in body_bot.get("reason", "")
+
+
+def test_sync_dispatcher_confirm_complete_and_fail(tmp_path):
+    """Verify LinearSyncDispatcher updates state and creates comments on confirm, complete, and fail."""
+    from herdr.intake.connectors.linear.client import LinearClient
+    from herdr.intake.connectors.linear.sync import LinearSyncDispatcher
+
+    db_path = tmp_path / "sync_test.db"
+    initialize(db_path)
+
+    from herdr.intake.schema import initialize_materialization, open_db
+    from contextlib import closing
+    initialize_materialization(db_path)
+    with closing(open_db(db_path)) as db:
+        db.execute(
+            """INSERT INTO intake_connections (tenant_id, connection_id, provider, provider_instance_key, display_name, connector_version, status, config_revision, auth_ref, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("tenant-test", "linear", "linear", ORG_ID, "Linear", "1.0.0", "ACTIVE", 1, "linear-prod-v1", 1000, 1000)
+        )
+        db.execute(
+            """INSERT INTO intake_objects (object_id, tenant_id, provider, provider_instance_key, object_type, external_id, observed_connection_id, version, snapshot_digest, snapshot_json, external_status, last_event_id, first_seen_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("obj-123", "tenant-test", "linear", ORG_ID, "issue", "issue-linear-uuid-456", "linear", "1", "sha256-mock",
+             json.dumps({"title": "Test Issue", "description": "Test Desc", "team": {"id": "team-linear-1"}}), "OPEN", "evt-1", 1000, 1000)
+        )
+        db.execute(
+            """INSERT INTO user_inbox_tasks (id, user_id, title, instruction, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ("inbox_task_abc", "operator", "Test Issue", "Test Desc", "DRAFT", 1000, 1000)
+        )
+        db.execute(
+            """INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, task_id, origin_connection_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("link-123", "tenant-test", "obj-123", "review", "LINKED", "inbox_task_abc", "linear", 1000, 1000)
+        )
+
+    mock_client = MagicMock(spec=LinearClient)
+    mock_client.resolve_state_id_by_type.side_effect = lambda team_id, st_type: f"state-{st_type}"
+    mock_client.update_issue_state.return_value = {"success": True}
+    mock_client.create_comment.return_value = {"success": True, "comment": {"id": "cmt-111"}}
+
+    dispatcher = LinearSyncDispatcher(db_path, client=mock_client)
+
+    # 1. Sync confirm
+    res_confirm = dispatcher.sync_task_confirmed("link-123", user_id="operator", project_id="proj-haflow")
+    assert res_confirm.ok is True
+    assert res_confirm.action == "confirm"
+    assert res_confirm.state_id == "state-started"
+    mock_client.update_issue_state.assert_called_with("issue-linear-uuid-456", "state-started")
+    mock_client.create_comment.assert_called()
+
+    # 2. Sync completed
+    res_complete = dispatcher.sync_task_completed("inbox_task_abc", summary="All PRs passed")
+    assert res_complete.ok is True
+    assert res_complete.action == "complete"
+    assert res_complete.state_id == "state-completed"
+    mock_client.update_issue_state.assert_called_with("issue-linear-uuid-456", "state-completed")
+
+    # 3. Sync failed
+    res_fail = dispatcher.sync_task_failed("inbox_task_abc", error="Build failed")
+    assert res_fail.ok is True
+    assert res_fail.action == "failed"
+    mock_client.create_comment.assert_called()
+
+
+def test_sync_dispatcher_resilient_error_handling(tmp_path):
+    """Verify outbound sync failure never raises or disrupts calling context."""
+    from herdr.intake.connectors.linear.client import LinearClient
+    from herdr.intake.connectors.linear.sync import (
+        dispatch_linear_sync_on_confirm,
+        dispatch_linear_sync_on_task_status,
+    )
+
+    db_path = tmp_path / "sync_fail.db"
+    initialize(db_path)
+
+    # Client that fails with network error
+    failing_client = MagicMock(spec=LinearClient)
+    failing_client.resolve_state_id_by_type.side_effect = RuntimeError("Network timeout to api.linear.app")
+
+    # None of these should raise
+    res1 = dispatch_linear_sync_on_confirm(db_path, "nonexistent-link", client=failing_client)
+    assert res1.ok is False
+
+    res2 = dispatch_linear_sync_on_task_status(db_path, "nonexistent-task", "COMPLETED", client=failing_client)
+    assert res2.ok is False
+
+
+def test_lifecycle_hooks_trigger_linear_sync(tmp_path, monkeypatch):
+    """Verify IntakeInbox.confirm and InboxStore status updates hook into Linear sync."""
+    from herdr.intake.connectors.linear.connector import LinearConnector, register_linear_connection
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.inbox.store import InboxStore
+    from herdr.intake.worker import run_once
+
+    db_path = tmp_path / "hooks_test.db"
+    initialize(db_path)
+
+    registry = {"a": {"project_id": "proj-a", "workspace_id": "ws-a"}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
+
+    store = EventStore(db_path, Scope("tenant-test", "linear"), authorizer=lambda a, s: "admin", verifier=lambda d: d.verified_via == "SIGNATURE")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+    conn = LinearConnector(store.scope, ORG_ID, SECRET)
+
+    now_ms = int(time.time() * 1000)
+    raw = json.dumps(sample_issue_payload("create", "unstarted", issue_id="hook-issue-1", webhook_timestamp=now_ms)).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw, SECRET),
+        "Linear-Delivery": "delivery-hook-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery = conn.process_webhook(raw, headers, now_ms=now_ms)
+    store.accept_event(delivery)
+    run_once(store, materialization={"user_id": "operator", "auto_assign": True, "project_id": "proj-a", "workspace_id": "ws-a"})
+
+    config = {"tenant_id": "tenant-test", "user_id": "operator", "connections": {"linear": {}}}
+    inbox = IntakeInbox(db_path, config)
+    item, = inbox.list_items()
+    assert item["status"] == "DRAFT"
+
+    # 1. Verify confirm triggers dispatch_linear_sync_on_confirm
+    with patch("herdr.intake.connectors.linear.sync.dispatch_linear_sync_on_confirm") as mock_confirm_sync:
+        confirmed_item = inbox.change(item["link_id"], "confirm", item["revision"])
+        assert confirmed_item["status"] == "CONFIRMED"
+        mock_confirm_sync.assert_called_once_with(
+            db_path, item["link_id"], user_id="operator", project_id="proj-a"
+        )
+
+    # 2. Verify InboxStore COMPLETED triggers dispatch_linear_sync_on_task_status
+    with patch("herdr.intake.connectors.linear.sync.dispatch_linear_sync_on_task_status") as mock_status_sync:
+        inbox_store = InboxStore(db_path=Path(db_path))
+        # Insert a standalone active_intake task that can transition through normal workflow lifecycle
+        active_task = inbox_store.create_task(
+            title="Active Task",
+            instruction="Execute task",
+            project_id="proj-a",
+            workspace_id="ws-a",
+            source_type="active_intake",
+            source_id="link-standalone",
+        )
+        tid = active_task["id"]
+        inbox_store.update_task_status(tid, "PENDING")
+        inbox_store.update_task_status(tid, "CLAIMED", worker_id="w-1")
+        inbox_store.update_task_status(tid, "RUNNING", workflow_id="wf-1")
+        inbox_store.update_task_status(tid, "COMPLETED")
+        mock_status_sync.assert_called_once_with(
+            Path(db_path), tid, "COMPLETED", error=None
+        )

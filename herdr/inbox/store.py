@@ -360,7 +360,14 @@ class InboxStore:
             conn.execute(update_sql, tuple(params))
             conn.execute("COMMIT")
 
-            return self.get_task(task_id)  # type: ignore
+            res_task = self.get_task(task_id)  # type: ignore
+            if target in ("COMPLETED", "FAILED") and row["source_type"] == "active_intake":
+                try:
+                    from herdr.intake.connectors.linear.sync import dispatch_linear_sync_on_task_status
+                    dispatch_linear_sync_on_task_status(Path(self.db_path), task_id, target, error=error)
+                except Exception:
+                    pass
+            return res_task
         except Exception:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
