@@ -73,6 +73,13 @@ def handle_linear_webhook(
     effective_revision = config_revision if config_revision is not None else db_revision
     db_auth_ref = str(conn_info.get("auth_ref") or "none")
 
+    if db_auth_ref.lower() in ("none", "default"):
+        LOG.warning("Linear webhook rejected: connection auth_ref is '%s' (cannot be 'none' or 'default')", db_auth_ref)
+        return 401, json_headers, {
+            "ok": False,
+            "error": f"DISALLOWED_DEFAULT_AUTH_REF: Linear webhook requires an explicit, immutable auth_ref (cannot use '{db_auth_ref}')",
+        }
+
     # 2. Resolve authoritative signing secret for db_auth_ref
     try:
         effective_secret = resolve_signing_secret(

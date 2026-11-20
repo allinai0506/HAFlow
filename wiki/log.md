@@ -4560,3 +4560,21 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `tests/test_linear_connector.py#test_standalone_cli_parser_allows_omitted_secret`
   - `docs/walkthroughs/linear-connector-v1.md`
   - `docs/lessons/lessons-learned.md`
+## [2026-11-20] Fix | Linear Connector V1 严禁默认 auth_ref 绕过不可变凭证契约 (PR #426)
+- 解决第七轮复审指出的凭证管理安全边界缺陷：
+  1. Manifest 层门禁：`validate_config` 显式拒绝 `none` 与 `default` 作为 `webhook_signing_secret_ref`；
+  2. 连接注册层门禁：新增 `register_linear_connection` 与 `LinearConnector.register_connection`，强制断言 `auth_ref` 必须非空且不可为 `none`/`default`；
+  3. 凭据解析层门禁：`resolve_signing_secret` 彻底移除对 `none`/`default` 返回全局 secret 的旁路逻辑，输入缺省引用直接抛出 `DISALLOWED_DEFAULT_AUTH_REF`；
+  4. Receiver 层防御：`handle_linear_webhook` 在读取 DB `auth_ref` 为 `none`/`default` 时直接返回 HTTP 401 `DISALLOWED_DEFAULT_AUTH_REF`；
+  5. 回归测试守护：新增 4 项测试覆盖 Manifest、注册、解析器及双生产入口面对默认引用的拒绝行为。
+- Evidence
+  - `herdr/intake/connectors/linear/manifest.py#validate_config`
+  - `herdr/intake/connectors/linear/connector.py#register_linear_connection`
+  - `herdr/intake/connectors/linear/credentials.py#resolve_signing_secret`
+  - `herdr/intake/connectors/linear/receiver.py#handle_linear_webhook`
+  - `tests/test_linear_connector.py#test_manifest_rejects_none_and_default_auth_ref`
+  - `tests/test_linear_connector.py#test_register_linear_connection_rejects_none_and_default`
+  - `tests/test_linear_connector.py#test_credentials_resolver_rejects_none_and_default`
+  - `tests/test_linear_connector.py#test_webhook_receiver_and_http_handlers_reject_default_auth_ref`
+  - `docs/walkthroughs/linear-connector-v1.md`
+  - `docs/lessons/lessons-learned.md`

@@ -12,6 +12,28 @@ from .verifier import LinearVerifier, VerifiedDelivery
 CAPABILITY = "issue-webhook"
 
 
+def register_linear_connection(
+    store: Any,
+    *,
+    instance: str,
+    auth_ref: str,
+    display_name: str = "Linear",
+    connector_version: str = "1.0.0",
+) -> None:
+    """Register a Linear connection ensuring immutable auth_ref contract is satisfied."""
+    if not auth_ref or not isinstance(auth_ref, str) or auth_ref.lower() in ("none", "default"):
+        raise ValueError(
+            f"DISALLOWED_DEFAULT_AUTH_REF: Linear connection requires an explicit, immutable auth_ref (cannot use '{auth_ref}')"
+        )
+    store.register_connection(
+        provider="linear",
+        instance=instance,
+        display_name=display_name,
+        connector_version=connector_version,
+        auth_ref=auth_ref,
+    )
+
+
 class LinearConnector:
     """Linear Connector V1 managing webhook verification, payload normalization, and health checks."""
 
@@ -42,6 +64,24 @@ class LinearConnector:
     @classmethod
     def validate_config(cls, config: dict[str, Any]) -> ConfigReport:
         return validate_config(config)
+
+    @classmethod
+    def register_connection(
+        cls,
+        store: Any,
+        *,
+        instance: str,
+        auth_ref: str,
+        display_name: str = "Linear",
+        connector_version: str = "1.0.0",
+    ) -> None:
+        register_linear_connection(
+            store,
+            instance=instance,
+            auth_ref=auth_ref,
+            display_name=display_name,
+            connector_version=connector_version,
+        )
 
     def test_connection(self, expected_team_keys: list[str] | None = None) -> ConnectionTestReport:
         if not self.client:

@@ -10055,12 +10055,14 @@ git diff --check
 | **未重启服务未能及时拦截** | 服务无法感知自己持有的内存密钥是否已经与数据库最新授权脱节 | **运行时引用漂移 Fail-Closed**：服务持有 `loaded_auth_ref` 若与数据库当前快照 `db_auth_ref` 不一致，必须立即中断验签，以 401 `AUTH_REF_MISMATCH` 阻断 |
 | **按引用配置密钥时入口报 404** | 入口代码过度耦合单一全局环境变量 `LINEAR_WEBHOOK_SECRET` | **双入口统一动态解析委托**：Console 与独立服务入口不再强求全局静态密钥，统一将 `signing_secret`（允许为 None）与 `auth_ref` 委托给 `resolve_signing_secret()` 执行多环境与注册表动态解析 |
 | **未配置密钥时未能优雅防护** | 数据库中配置了新引用但物理环境缺少对应密钥时缺少明确拒绝语义 | **缺失凭证 Fail-Closed**：无法解析出有效密钥时抛出 `CREDENTIAL_UNRESOLVED`，统一映射为 401 明确阻断 |
+| **默认 auth_ref 绕过不可变契约** | 连接使用缺省 `none`/`default`，导致系统回退到无引用绑定的全局密钥模式，轮换时旧服务依然验签通过 | **四重门禁严禁缺省引用**：Manifest、连接注册、Resolver 与 Receiver 四层统一强制 `auth_ref` 必须显式配置且禁止为 `none`/`default`；违规即刻 Fail Closed（401 / ValueError） |
 
 ### 操作规范
 
 1. **不可变凭证契约**：数据库 `intake_connections` 表严禁保存明文密钥，只保存可信 `auth_ref`；修改凭证必须同时递增 `config_revision` 并更换 `auth_ref`。
-2. **统一 Fail-Closed 决策中心**：所有 Webhook 入口统一通过 `herdr/intake/connectors/linear/credentials.py` 解析密钥，禁止在各 HTTP 适配层自行硬编码密钥判断。
-3. **两套生产入口严格端到端测试**：所有认证与轮换功能必须提供针对 Console `Handler` 与独立 `LinearWebhookHandler` 的真实 Socketpair HTTP 交换集成测试，覆盖合法接收、旧密钥拒绝、未刷新引用拦截及未配置引用报错。
+2. **严禁使用默认缺省引用**：生产级 Webhook 连接必须显式指定 `auth_ref`，严禁使用 `none` 或 `default`；Manifest、注册函数、解析器与接收器全链路校验。
+3. **统一 Fail-Closed 决策中心**：所有 Webhook 入口统一通过 `herdr/intake/connectors/linear/credentials.py` 解析密钥，禁止在各 HTTP 适配层自行硬编码密钥判断。
+4. **两套生产入口严格端到端测试**：所有认证与轮换功能必须提供针对 Console `Handler` 与独立 `LinearWebhookHandler` 的真实 Socketpair HTTP 交换集成测试，覆盖合法接收、旧密钥拒绝、未刷新引用拦截及未配置引用报错。
 
 ### 验证命令 / 守护测试
 

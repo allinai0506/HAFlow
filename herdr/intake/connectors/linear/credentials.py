@@ -41,17 +41,17 @@ def resolve_signing_secret(
     """Resolve the authoritative webhook signing secret for the connection's auth_ref.
 
     Fail-closed policy:
-    1. If custom_resolver is provided, query it.
-    2. Check the in-memory secret registry.
-    3. Check environment variables:
+    1. Reject empty, 'none', or 'default' auth_ref (DISALLOWED_DEFAULT_AUTH_REF).
+    2. If custom_resolver is provided, query it.
+    3. Check the in-memory secret registry.
+    4. Check environment variables:
        - HAFLOW_INTAKE_SECRET_<AUTH_REF>
        - LINEAR_WEBHOOK_SECRET_<AUTH_REF>
        - <AUTH_REF> (if auth_ref matches an env var name)
-    4. If loaded_auth_ref is explicitly specified:
+    5. If loaded_auth_ref is explicitly specified:
        - If loaded_auth_ref != auth_ref, raise SecretResolutionError (fail closed).
        - If loaded_auth_ref == auth_ref and loaded_secret is present, return loaded_secret.
-    5. If loaded_secret is provided without an explicit loaded_auth_ref:
-       - If auth_ref in ('none', 'default'), return loaded_secret.
+    6. If loaded_secret is provided without an explicit loaded_auth_ref:
        - If LINEAR_WEBHOOK_SECRET_REF env var is set, compare with auth_ref; if mismatch, fail closed.
        - Otherwise, fail closed: cannot verify unreferenced secret matches authorized auth_ref.
 
@@ -60,6 +60,11 @@ def resolve_signing_secret(
     """
     if not auth_ref or not isinstance(auth_ref, str):
         raise SecretResolutionError("MISSING_AUTH_REF: connection auth_ref is empty")
+
+    if auth_ref.lower() in ("none", "default"):
+        raise SecretResolutionError(
+            f"DISALLOWED_DEFAULT_AUTH_REF: Linear webhook requires an explicit, immutable auth_ref (cannot use '{auth_ref}')"
+        )
 
     # 1. Custom resolver hook
     if custom_resolver is not None:
@@ -97,8 +102,6 @@ def resolve_signing_secret(
 
     # 5. Loaded secret without loaded_auth_ref
     if loaded_secret and isinstance(loaded_secret, str) and loaded_secret.strip():
-        if auth_ref.lower() in ("none", "default"):
-            return loaded_secret.strip()
         env_ref = os.environ.get("LINEAR_WEBHOOK_SECRET_REF")
         if env_ref:
             if env_ref == auth_ref:

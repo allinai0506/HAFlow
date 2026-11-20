@@ -1,7 +1,7 @@
 """Linear Connector V1 package."""
 
 from .client import ConnectionTestReport, HealthStatus, LinearClient
-from .connector import LinearConnector
+from .connector import LinearConnector, register_linear_connection
 from .credentials import (
     SecretResolutionError,
     clear_secret_registry,
@@ -29,6 +29,7 @@ __all__ = [
     "TimestampSkewError",
     "clear_secret_registry",
     "handle_linear_webhook",
+    "register_linear_connection",
     "register_secret",
     "resolve_signing_secret",
     "unregister_secret",

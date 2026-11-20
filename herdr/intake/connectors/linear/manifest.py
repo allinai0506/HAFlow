@@ -117,6 +117,8 @@ def validate_config(config: dict[str, Any]) -> ConfigReport:
     secret_ref = config.get("webhook_signing_secret_ref")
     if not secret_ref or not isinstance(secret_ref, str):
         errors.append("webhook_signing_secret_ref is required")
+    elif secret_ref.lower() in ("none", "default"):
+        errors.append("webhook_signing_secret_ref cannot be 'none' or 'default'")
     else:
         try:
             token(secret_ref)

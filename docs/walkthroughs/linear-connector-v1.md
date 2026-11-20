@@ -250,3 +250,31 @@ python3 services/herdr-linear-webhook.py --help
    - 验证未配置物理密钥时触发 `CREDENTIAL_UNRESOLVED`（401）。
 3. `tests/test_linear_connector.py::test_standalone_cli_parser_allows_omitted_secret`：
    - 验证独立服务命令行在省略 `--secret` 时成功解析参数并启动。
+
+---
+
+## 10. 第七轮复审修复记录 (P2: 严禁默认 auth_ref 绕过不可变凭证契约)
+
+### 10.1 问题背景与安全漏洞分析
+- **漏洞成因**：通用底层存储接口 `store.register_connection(..., auth_ref="none")` 拥有 `auth_ref="none"` 默认值，且凭证解析器 `resolve_signing_secret()` 原包含 `if auth_ref.lower() in ("none", "default"): return loaded_secret.strip()` 的兼容分支。
+- **风险链路**：若管理员或自动化脚本在注册连接时未显式指定凭据引用（或错误使用了 `"none"` / `"default"`），系统将回退到无引用绑定的全局密钥模式。管理员在外部轮换全局密钥后，持有旧密钥的陈旧服务因连接 `auth_ref` 始终为 `none`，将继续成功验签并注入事件，从而突破了 `auth_ref` 与授权版本 `config_revision` 绑定的防线。
+
+### 10.2 修复方案：Manifest、连接注册、Resolver 与 Receiver 四重门禁
+1. **Manifest 配置校验层** ([manifest.py](file:///Users/user/haflow/herdr/intake/connectors/linear/manifest.py#L117-L125))：
+   - `validate_config` 明确将 `none` 与 `default`（大小写不敏感）判定为非法 `webhook_signing_secret_ref`。
+2. **连接注册层** ([connector.py](file:///Users/user/haflow/herdr/intake/connectors/linear/connector.py#L15-L65))：
+   - 提供 `register_linear_connection` 与 `LinearConnector.register_connection`，强制断言 `auth_ref` 必须为有效字符串且不可为 `none`/`default`，否则立即抛出 `ValueError: DISALLOWED_DEFAULT_AUTH_REF`。
+3. **权威凭证解析层** ([credentials.py](file:///Users/user/haflow/herdr/intake/connectors/linear/credentials.py#L60-L105))：
+   - `resolve_signing_secret` 严格断言 `if auth_ref.lower() in ("none", "default")` 抛出 `SecretResolutionError: DISALLOWED_DEFAULT_AUTH_REF`；彻底移除默认引用的全局密钥 bypass 逻辑，保证任何全局环境变量必须通过明确引用（如 `LINEAR_WEBHOOK_SECRET_REF`）绑定。
+4. **Webhook 接收入口层** ([receiver.py](file:///Users/user/haflow/herdr/intake/connectors/linear/receiver.py#L70-L85))：
+   - `handle_linear_webhook` 在提取 `conn_info` 快照后即刻进行防御性断言，若数据库 `auth_ref` 为 `none` 或 `default`，立即阻断并返回 HTTP 401 `DISALLOWED_DEFAULT_AUTH_REF`。
+
+### 10.3 交付测试证据
+1. `tests/test_linear_connector.py::test_manifest_rejects_none_and_default_auth_ref`：
+   - 验证 `validate_config` 严格拒绝 `none`、`default`、`NONE`、`Default` 作为密钥引用。
+2. `tests/test_linear_connector.py::test_register_linear_connection_rejects_none_and_default`：
+   - 验证 `register_linear_connection` 与 `LinearConnector.register_connection` 拒绝缺省引用。
+3. `tests/test_linear_connector.py::test_credentials_resolver_rejects_none_and_default`：
+   - 验证 `resolve_signing_secret` 拒绝缺省引用，即使传入了全局明文密钥依然拒绝（证明全局密钥无法旁路绕过契约）。
+4. `tests/test_linear_connector.py::test_webhook_receiver_and_http_handlers_reject_default_auth_ref`：
+   - 验证 Receiver、Console HTTP Handler、独立 Webhook Handler 在面对使用 `none` 或 `default` 的连接时，均以 HTTP 401 `DISALLOWED_DEFAULT_AUTH_REF` 坚固阻断。

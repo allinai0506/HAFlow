@@ -1322,3 +1322,116 @@ def test_standalone_cli_parser_allows_omitted_secret(monkeypatch):
         assert kwargs.get("signing_secret") is None
         assert kwargs.get("auth_ref") is None
         assert kwargs.get("organization_id") == ORG_ID
+
+
+def test_manifest_rejects_none_and_default_auth_ref():
+    """Manifest: validate_config rejects 'none' and 'default' for webhook_signing_secret_ref."""
+    from herdr.intake.connectors.linear.manifest import validate_config
+
+    for bad_ref in ("none", "default", "NONE", "Default"):
+        cfg = {
+            "organization_id": ORG_ID,
+            "webhook_signing_secret_ref": bad_ref,
+        }
+        report = validate_config(cfg)
+        assert report.valid is False
+        assert any("cannot be 'none' or 'default'" in e for e in report.errors)
+
+    # Valid non-default token succeeds
+    valid_cfg = {
+        "organization_id": ORG_ID,
+        "webhook_signing_secret_ref": "linear-webhook-prod-v1",
+    }
+    report_valid = validate_config(valid_cfg)
+    assert report_valid.valid is True
+
+
+def test_register_linear_connection_rejects_none_and_default(tmp_path):
+    """Registration: register_linear_connection rejects 'none' and 'default'."""
+    from herdr.intake.connectors.linear.connector import LinearConnector, register_linear_connection
+
+    path = tmp_path / "state_reg.db"
+    initialize(path)
+    store = EventStore(path, SCOPE, authorizer=lambda a, s: "admin")
+
+    for bad_ref in ("none", "default", "NONE", "Default", ""):
+        with pytest.raises(ValueError, match="DISALLOWED_DEFAULT_AUTH_REF"):
+            register_linear_connection(store, instance=ORG_ID, auth_ref=bad_ref)
+
+        with pytest.raises(ValueError, match="DISALLOWED_DEFAULT_AUTH_REF"):
+            LinearConnector.register_connection(store, instance=ORG_ID, auth_ref=bad_ref)
+
+    # Valid explicit reference succeeds
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-ref-v1")
+
+
+def test_credentials_resolver_rejects_none_and_default():
+    """Credentials: resolve_signing_secret rejects 'none' and 'default' even with global secret."""
+    from herdr.intake.connectors.linear.credentials import SecretResolutionError, resolve_signing_secret
+
+    for bad_ref in ("none", "default", "NONE", "Default"):
+        # Without loaded secret
+        with pytest.raises(SecretResolutionError, match="DISALLOWED_DEFAULT_AUTH_REF"):
+            resolve_signing_secret(bad_ref)
+
+        # With loaded secret (proves global secret cannot bypass immutable auth_ref contract)
+        with pytest.raises(SecretResolutionError, match="DISALLOWED_DEFAULT_AUTH_REF"):
+            resolve_signing_secret(bad_ref, loaded_secret="some-global-secret")
+
+
+def test_webhook_receiver_and_http_handlers_reject_default_auth_ref(tmp_path, monkeypatch):
+    """Receiver & HTTP Handlers: strictly reject webhooks when connection has auth_ref 'none' or 'default'."""
+    from console.http_server import Handler
+    from herdr.intake.connectors.linear.receiver import LinearWebhookHandler, handle_linear_webhook
+
+    path = tmp_path / "state_def_reject.db"
+    initialize(path)
+    store = EventStore(path, SCOPE, authorizer=lambda a, s: "admin", verifier=lambda d: d.verified_via == "SIGNATURE")
+
+    # 1. Connection registered with default auth_ref = 'none' (e.g. legacy/unconfigured)
+    store.register_connection(
+        provider="linear",
+        instance=ORG_ID,
+        display_name="Linear",
+        connector_version="1.0.0",
+        auth_ref="none",
+    )
+
+    t_ms = int(time.time() * 1000)
+    raw = json.dumps(sample_issue_payload("create", "unstarted", issue_id="def-1", webhook_timestamp=t_ms)).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw, SECRET),
+        "Linear-Delivery": "delivery-def-001",
+        "Linear-Timestamp": str(t_ms),
+        "Linear-Event": "Issue",
+    }
+
+    # Case A: handle_linear_webhook directly -> 401 DISALLOWED_DEFAULT_AUTH_REF
+    status, _, body = handle_linear_webhook(raw, headers, store, ORG_ID, signing_secret=SECRET, now_ms=t_ms)
+    assert status == 401
+    assert "DISALLOWED_DEFAULT_AUTH_REF" in body.get("error", "")
+
+    # Case B: Console HTTP Handler -> 401 DISALLOWED_DEFAULT_AUTH_REF
+    monkeypatch.setenv("LINEAR_ORGANIZATION_ID", ORG_ID)
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", SECRET)
+    monkeypatch.setenv("HAFLOW_INTAKE_TENANT", SCOPE.tenant_id)
+    monkeypatch.setenv("HAFLOW_LINEAR_CONNECTION", SCOPE.connection_id)
+    monkeypatch.setattr("herdr.state_db.get_default_db_path", lambda: str(path))
+    monkeypatch.setattr("console.inbox_api.get_inbox_store", lambda: MagicMock(db_path=str(path)))
+
+    mock_server = MagicMock()
+    status_console, body_console = _send_http_request(Handler, mock_server, "/api/intake/webhook/linear", headers, raw)
+    assert status_console == 401
+    assert "DISALLOWED_DEFAULT_AUTH_REF" in body_console.get("error", "")
+
+    # Case C: Standalone Webhook Handler with DB auth_ref = 'default' -> 401 DISALLOWED_DEFAULT_AUTH_REF
+    store.update_connection_authorization(1, status="ACTIVE", reason="Update to default", auth_ref="default")
+    standalone_server = MagicMock()
+    standalone_server.store = store
+    standalone_server.organization_id = ORG_ID
+    standalone_server.signing_secret = SECRET
+    standalone_server.auth_ref = None
+
+    status_standalone, body_standalone = _send_http_request(LinearWebhookHandler, standalone_server, "/", headers, raw)
+    assert status_standalone == 401
+    assert "DISALLOWED_DEFAULT_AUTH_REF" in body_standalone.get("error", "")
