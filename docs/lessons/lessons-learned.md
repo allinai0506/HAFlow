@@ -9984,3 +9984,102 @@ git diff --check
 - `tests/test_workflow_shutdown.py#test_scenario_2_launcher_crash_preserves_unregistered_pane_and_occupancy`
 - `tests/test_workflow_shutdown.py#test_scenario_3_interrupt_ack_keeps_occupancy_until_process_stops`
 - `tests/test_inbox_dispatcher.py#test_preallocated_workflow_id_lease_expired_rejected_at_registration_gate`
+
+---
+
+## 236. 外部 Webhook 接入防御：载荷空字段与内部不变量阻抗失配治理与 Transactional Ingress 解耦（2026-11-19）
+
+### 问题背景
+
+Linear Connector 作为 HAFlow 第一个真实外部系统接入，在打通 `Linear -> Active Intake Core -> Task Materializer -> Inbox` 闭环时，暴露出外部系统协议与本地核心不变量之间的两类典型冲突：
+1. **阻抗失配（Impedance Mismatch）**：Linear Issue 的 `description` 字段允许为 `null` 或纯空白；但 HAFlow 内部已冻结的 Task Materializer 核心契约 `task_text` 对 `title` 与 `description` 执行了严格的非空和空白剔除校验（`len(value.strip()) > 0`）。若 Connector 直接透传未经清洗的原始字段，合法事件将在物化写事务中抛出 `ValueError`，进而被永久标记为 `REJECTED: INVALID_WORK_ITEM` 丢弃；
+2. **时限失配（Response Deadline Mismatch）**：Linear 强制 Webhook 接收端必须在 **5 秒内** 返回 HTTP 200，超时即判定失败并重试（最多 3 次）。若在 Webhook 接收线程内同步执行物化、外部网络补读或遇到写锁阻塞，会导致 Linear 持续重传产生雪崩。
+
+### 经验教训
+
+| 问题现象 | 根因分析 | 治理原则与规范 |
+| :--- | :--- | :--- |
+| **合法外部事项被拒绝** | 外部载荷字段的可选性与内部强类型校验存在阻抗失配（如 `description = null`） | **Normalizer 防卫兜底**：适配器在 Ingress 层必须强制实施清洗，对可能为 null 的字段生成结构化兜底文本（如附带 Identifier 与 Title 的说明），确保 100% 满足核心不变量 |
+| **超长文本抛错拒绝** | 外部 Issue 标题或描述可能超出 HAFlow 240B / 8000B 上限 | **字符边界截断**：按 UTF-8 安全字符边界截断，并在描述中保留原始完整信息及截断标记 |
+| **实体分裂或重复生成** | 外部 Issue 跨团队移动时其人类可读的 Identifier（如 `ENG-10` $\rightarrow$ `PROD-5`）改变 | **不可变 UUID 实体绑定**：必须使用 Linear 全局不可变 UUID `data.id` 作为 `external_id`，Identifier 仅作为标题展示前缀 |
+| **Webhook 重试风暴** | 在 Webhook 请求线程中同步执行耗时计算或外部调用超过 5 秒 | **Transactional Ingress 模式**：接收端仅执行验签、标准化、在单一短事务内原子记录回执与事实正本，立即应答 200 OK；物化完全交由后台独立 Worker 异步领取 |
+| **网络重传重复记账** | 外部系统因网络闪断重传同一事件 | **双层去重机制**：传输层以 `Linear-Delivery` UUID 去重回执，业务层以 `f"issue:{id}:{version}"` 事实 ID 幂等落库，判定为 `DUPLICATE` 且不生成新任务 |
+| **重放攻击绕过时间戳** | 仅校验未包含在 HMAC 签名中的 HTTP Header 时间戳，攻击者可截获旧 Body 修改 Header 伪造新鲜度 | **签名 Body 时间戳绑定**：必须强制使用经过 HMAC 签名保护的 Body 内 `webhookTimestamp` 执行 60s 钟差新鲜度检查，Header 仅作辅助对比 |
+| **授权失效静默丢失事件** | 静态硬编码版本号 `revision=1`，授权变更（1->2->3）后事件被 EventStore 事务拒绝但 HTTP 端点仍回 200 | **可信配置动态解析 + 显式错误响应**：Webhook 入口必须实时从 State DB 读取当前连接状态与 `config_revision` 注入 Connector；对不可用状态返回 403，对拒绝事务返回 409/400，绝不静默 ACK |
+| **慢速连接耗尽线程池** | Webhook 服务在读取请求体时未设置读取超时，慢速恶意连接占用 Worker 线程 | **严格流式超时与完整性约束**：设置 5.0s 刚性 socket 超时与 `MAX_BODY_BYTES (256KB)` 预检；必须验证读取字节数与 Content-Length 一致，超时或残缺立即断开连接 |
+| **未知事件污染工单库** | 仅依赖未签名的 Header 过滤事件类型，缺失 Header 时非 Issue 事件被默认反序列化 | **签名 Body 业务类型白名单**：在 Normalizer 中刚性断言 `payload.type == "Issue"`，非 Issue 类型在 Receiver 层安全忽略，严禁生成脏工单 |
+
+### 操作规范
+
+1. **适配器 Normalizer 强制防卫**：所有 Connector 模块必须具备防御性字段清洗层，绝不允许裸传外部字典进入 EventStore / Materializer。
+2. **接收与消费彻底解耦**：Webhook Ingress HTTP 端点必须在 5 秒内返回，严格禁止在 HTTP 请求生命周期内调用阻塞操作或直接执行物化。
+3. **时钟偏差与签名恒定时间校验**：必须强制提取经 HMAC 签名的 `webhookTimestamp` 进行时钟偏差校验（<= 60s），并使用 `hmac.compare_digest` 恒定时间防时序攻击。
+4. **动态授权版本注入**：所有 Webhook Ingress 端点在创建 Connector 时必须统一从 State DB 检索当前权威 `config_revision`，严禁硬编码。
+5. **拒绝事件显式报错**：EventStore 判定为 REJECTED 的事件必须映射为 4xx/5xx HTTP 状态码，禁止向外部发送成功回执导致静默吞事件。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_linear_connector.py
+pytest -q tests/test_intake_*.py tests/test_linear_connector.py
+python3 -m compileall -q herdr services console tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/intake/connectors/linear/normalizer.py#LinearNormalizer`
+- `herdr/intake/connectors/linear/verifier.py#LinearVerifier`
+- `herdr/intake/connectors/linear/receiver.py#handle_linear_webhook`
+- `services/herdr-linear-webhook.py`
+- `tests/test_linear_connector.py#test_normalizer_defensive_sanitization`
+- `tests/test_linear_connector.py#test_end_to_end_linear_issue_lifecycle`
+- `docs/architecture/linear-connector-v1.md`
+- `docs/walkthroughs/linear-connector-v1.md`
+---
+
+## 237. 外部 Webhook 签名凭证轮换与不可变引用契约（Immutable Credential Contract & Fail-Closed Ingress）（2026-11-19）
+
+### 问题背景
+
+在实施 Linear Webhook 密钥轮换机制时，暴露出凭证管理与多入口分发中的三类高风险缺陷：
+1. **未重启服务版本越权穿透**：当管理员在数据库中执行密钥轮换（`update_connection_authorization(1, auth_ref="ref-v2")` $\rightarrow$ `config_revision = 2`）时，若 Webhook 接收进程未重启且依然使用内存中的旧密钥验签，一旦攻击者用旧密钥发送伪造事件，旧服务验证 HMAC 成功，并读取数据库最新的 `config_revision = 2` 盖戳写入 EventStore，导致旧密钥突破版本隔离注入事件。
+2. **静态凭据前置门禁阻断动态多版本解析**：Console 入口（`console/inbox_api.py`）最初包含 `if not org_id or not secret:` 强行要求单一全局环境变量 `LINEAR_WEBHOOK_SECRET`；独立守护进程 CLI（`services/herdr-linear-webhook.py`）同样要求必须提供 `--secret`。当运维按不可变凭证架构通过 `HAFLOW_INTAKE_SECRET_<REF>` 独立注入密钥时，由于缺乏全局环境变量，请求在进入动态解析前即被误报 404 或阻止启动。
+3. **缺少生产级 HTTP Handler 轮换集成覆盖**：单元测试仅直接调用内部 `handle_linear_webhook` 函数，未完整覆盖 Console `Handler` 与独立 `LinearWebhookHandler` 的真实 HTTP Socket 通信、状态码映射与 Fail-Closed 链路。
+
+### 经验教训
+
+| 问题现象 | 根因分析 | 治理原则与规范 |
+| :--- | :--- | :--- |
+| **旧密钥跨版本注入事件** | 服务未重启仍持有旧密钥，从数据库读到新版本号后代为验签 | **凭证引用不可变契约（Immutable Credential Contract）**：同一个 `auth_ref` 必须对应不可变的密钥版本。轮换密钥必须生成全新引用（`ref-v1` $\rightarrow$ `ref-v2`）并同步递增 `config_revision`，禁止在相同引用下就地篡改密钥内容 |
+| **未重启服务未能及时拦截** | 服务无法感知自己持有的内存密钥是否已经与数据库最新授权脱节 | **运行时引用漂移 Fail-Closed**：服务持有 `loaded_auth_ref` 若与数据库当前快照 `db_auth_ref` 不一致，必须立即中断验签，以 401 `AUTH_REF_MISMATCH` 阻断 |
+| **按引用配置密钥时入口报 404** | 入口代码过度耦合单一全局环境变量 `LINEAR_WEBHOOK_SECRET` | **双入口统一动态解析委托**：Console 与独立服务入口不再强求全局静态密钥，统一将 `signing_secret`（允许为 None）与 `auth_ref` 委托给 `resolve_signing_secret()` 执行多环境与注册表动态解析 |
+| **未配置密钥时未能优雅防护** | 数据库中配置了新引用但物理环境缺少对应密钥时缺少明确拒绝语义 | **缺失凭证 Fail-Closed**：无法解析出有效密钥时抛出 `CREDENTIAL_UNRESOLVED`，统一映射为 401 明确阻断 |
+| **默认 auth_ref 绕过不可变契约** | 连接使用缺省 `none`/`default`，导致系统回退到无引用绑定的全局密钥模式，轮换时旧服务依然验签通过 | **四重门禁严禁缺省引用**：Manifest、连接注册、Resolver 与 Receiver 四层统一强制 `auth_ref` 必须显式配置且禁止为 `none`/`default`；违规即刻 Fail Closed（401 / ValueError） |
+
+### 操作规范
+
+1. **不可变凭证契约**：数据库 `intake_connections` 表严禁保存明文密钥，只保存可信 `auth_ref`；修改凭证必须同时递增 `config_revision` 并更换 `auth_ref`。
+2. **严禁使用默认缺省引用**：生产级 Webhook 连接必须显式指定 `auth_ref`，严禁使用 `none` 或 `default`；Manifest、注册函数、解析器与接收器全链路校验。
+3. **统一 Fail-Closed 决策中心**：所有 Webhook 入口统一通过 `herdr/intake/connectors/linear/credentials.py` 解析密钥，禁止在各 HTTP 适配层自行硬编码密钥判断。
+4. **两套生产入口严格端到端测试**：所有认证与轮换功能必须提供针对 Console `Handler` 与独立 `LinearWebhookHandler` 的真实 Socketpair HTTP 交换集成测试，覆盖合法接收、旧密钥拒绝、未刷新引用拦截及未配置引用报错。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_linear_connector.py -k "secret_rotation"
+pytest -q tests/test_intake_*.py tests/test_linear_connector.py
+python3 -m compileall -q herdr services console tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/intake/connectors/linear/credentials.py#resolve_signing_secret`
+- `herdr/intake/connectors/linear/receiver.py#handle_linear_webhook`
+- `console/inbox_api.py#api_linear_webhook`
+- `services/herdr-linear-webhook.py#main`
+- `tests/test_linear_connector.py#test_console_http_handler_secret_rotation`
+- `tests/test_linear_connector.py#test_standalone_webhook_handler_secret_rotation`
+- `tests/test_linear_connector.py#test_standalone_cli_parser_allows_omitted_secret`
+- `docs/walkthroughs/linear-connector-v1.md`

@@ -354,3 +354,43 @@ def api_intake_inbox(credential, *, query=None, body=None):
         return {"ok": False, "error": str(exc), "status_code": 409}
     except (TypeError, ValueError) as exc:
         return {"ok": False, "error": str(exc), "status_code": 400}
+
+
+def api_linear_webhook(headers, raw_body):
+    """Ingress handler for Linear webhooks routed via the Console HTTP listener."""
+    from herdr.intake.connectors.linear.receiver import handle_linear_webhook
+    from herdr.intake.materializer import local_config
+    from herdr.intake.protocol import Scope
+    from herdr.intake.store import EventStore
+    from herdr.state_db import get_default_db_path
+
+    org_id = os.environ.get("LINEAR_ORGANIZATION_ID")
+    secret = os.environ.get("LINEAR_WEBHOOK_SECRET")
+    secret_ref = os.environ.get("LINEAR_WEBHOOK_SECRET_REF")
+    tenant = os.environ.get("HAFLOW_INTAKE_TENANT", "tenant")
+    connection = os.environ.get("HAFLOW_LINEAR_CONNECTION", "linear")
+
+    config = local_config()
+    if config:
+        tenant = config.get("tenant_id", tenant)
+        conns = config.get("connections", {})
+        if connection not in conns:
+            for conn_id in conns:
+                if "linear" in conn_id:
+                    connection = conn_id
+                    break
+
+    if not org_id:
+        return 404, {"ok": False, "error": "linear_webhook_not_configured"}
+
+    path = Path(get_inbox_store().db_path or get_default_db_path())
+    store = EventStore(path, Scope(tenant, connection), verifier=lambda d: d.verified_via == "SIGNATURE")
+    status, _, body = handle_linear_webhook(
+        raw_body=raw_body,
+        headers=headers,
+        store=store,
+        organization_id=org_id,
+        signing_secret=secret,
+        auth_ref=secret_ref,
+    )
+    return status, body

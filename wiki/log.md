@@ -8,6 +8,23 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-19] fix | Linear Connector V1 安全防线加固、动态授权版本流转与密钥轮换绑定 (PR #426 第三轮复审闭环)
+
+- 背景：PR #426 独立复审指出 4 项关键安全与数据可靠性缺陷（含最新 P1 密钥轮换与授权版本解耦缺陷）：
+  1. P1-01（Webhook 时间戳防重放绕过）：原 Verifier 仅检查了未签名 HTTP Header `Linear-Timestamp`，攻击者可重放旧 Body 并修改 Header 绕过新鲜度检查；
+  2. P1-02（授权版本未动态传递且静默吞拒绝）：Webhook 入口硬编码 `config_revision=1`，连接授权变更后事务被拒绝但入口仍返回 200，造成外部误判成功；
+  3. P1-03（Console Webhook 读取无超时）：Console 请求体读取缺乏 socket 超时与完整性检查，慢速攻击可挂起工作线程；
+  4. P2（未验证签名 Body 事件类型）：仅依赖 Header 过滤，Header 缺失时非 Issue 事件被错误反序列化为工作项生成脏任务；
+  5. P1-04（签名密钥轮换与授权版本解耦）：服务仅使用启动时加载的静态密钥验签，数据库轮换 `auth_ref` 后旧服务仍可用旧密钥验签并通过新版本事务入库；必须建立可信凭据解析机制，服务加载的 `auth_ref` 与数据库授权不一致时 Fail Closed。
+- 变更：
+  1. `herdr/intake/connectors/linear/credentials.py`：新增独立凭据解析层 `resolve_signing_secret()`，严格校验 `loaded_auth_ref == db_auth_ref`，不一致直接抛出 `AUTH_REF_MISMATCH`（401 阻断）；
+  2. `herdr/intake/connectors/linear/receiver.py`：在单一快照内提取 `(config_revision, auth_ref)`，动态解析对应当前版本的有效密钥并注入 Connector；遇到禁用连接返回 403，事务拒绝返回 409/400，严禁静默 200；
+  3. `services/herdr-linear-webhook.py` & `console/inbox_api.py`：新增 `--secret-ref` 与 `LINEAR_WEBHOOK_SECRET_REF`，统一两个入口的凭据引用与版本绑定；
+  4. `herdr/intake/connectors/linear/verifier.py`：HMAC 验签后，强制提取并校验签名 Body 内的 `webhookTimestamp`（<= 60s），Header 仅作辅助比对，杜绝截获重放；
+  5. `console/http_server.py`：对 Webhook 请求设置 5.0s socket 读取超时与 `len(raw) == n` 完整性断言，超时立即 408 并断开连接；
+  6. `herdr/intake/connectors/linear/normalizer.py` & `connector.py`：增加签名 Body 的 `type == "Issue"` 刚性断言，合法非 Issue 事件在 Receiver 层安全忽略，不写入存储且不生成 Inbox 任务；
+  7. `tests/test_linear_connector.py`：扩充至 13 项测试，新增完整的旧密钥/新密钥轮换与未刷新服务 Fail-Closed 回归用例。
+
 ## [2026-11-17] fix | Universal Workflow Shutdown Protocol & Factory Fencing Hardening (PR #420 第十四轮复审闭环)
 
 - 背景：PR #420 第十四轮独立复审指出 1 项阻断级 P1 与两项安全/测试建议：
@@ -4513,3 +4530,53 @@ C13b最终：66相邻passed/3子测试（32.93s）；最新main4cca57e合并后�
   - `console/static/console/scripts/intake.js#showIntakeDetail`
   - `tests/test_console_inbox_api.py#test_intake_js_assign_unassign_assign_lifecycle`
   - `tests/test_intake_materialization.py#test_assign_unassign_reassign_cycle_reuses_task_and_updates_audit`
+
+## [2026-11-19] Feature | Linear Connector V1 基础设施与事件接入
+- 零侵入已冻结的 Active Intake Core 与 Task Materializer，通过标准 Connector 协议实现首个真实外部系统闭环：
+  1. 基础设施：Manifest 规范、HMAC-SHA256 签名校验（bare hex 与常量时间比对）、时钟偏差校验（<= 60s）、只读 GraphQL Client 预检与健康检查；
+  2. 事件标准化：Linear Issue 事件（create/update/remove）标准化为 CloudEvents 1.0 work-item observed 事实；Delivery ID 与事实 ID 双层去重；
+  3. 防卫清洗：空描述结构化兜底（防 task_text 崩溃被拒）、标题与描述长度截断、控制字符剥离、不可变 UUID 实体绑定；
+  4. 真实端到端链路：独立 Ingress 守护服务（services/herdr-linear-webhook.py）与控制台路由（/api/intake/webhook/linear），5 秒应答事务提交与后台 Worker 物化解耦。
+- Evidence
+  - `herdr/intake/connectors/linear/`
+  - `services/herdr-linear-webhook.py`
+  - `console/http_server.py`
+  - `console/inbox_api.py`
+  - `tests/test_linear_connector.py`
+  - `docs/architecture/linear-connector-v1.md`
+  - `docs/walkthroughs/linear-connector-v1.md`
+
+## [2026-11-19] Fix | Linear Connector V1 动态凭证多版本解析与双入口集成闭环 (PR #426)
+- 解决复审遗留 P2 缺陷与不可变凭证契约冻结：
+  1. Console 入口动态凭据解析：放宽 `console/inbox_api.py` 的全局 `LINEAR_WEBHOOK_SECRET` 强制门禁，统一委托 `resolve_signing_secret()` 执行动态解析与 Fail-Closed 决策，支持无全局密钥时按 `auth_ref` 正常运作；
+  2. 独立服务命令行解耦：`services/herdr-linear-webhook.py` 支持省略 `--secret` 参数，允许按 `auth_ref` 在运行期动态解析凭证；
+  3. 凭证不可变契约（Immutable Credential Contract）：确立同一 `auth_ref` 对应不可变密钥版本的不变量；密钥轮换必须更新引用并递增 `config_revision`；
+  4. 生产级 HTTP Handler 集成覆盖：新增针对 Console `Handler` 与独立 `LinearWebhookHandler` 的完整 Socketpair HTTP 交换集成测试（合法接收、旧密钥拒绝、未刷新引用拦截、未配置引用报错）。
+- Evidence
+  - `console/inbox_api.py#api_linear_webhook`
+  - `services/herdr-linear-webhook.py#main`
+  - `tests/test_linear_connector.py#test_console_http_handler_secret_rotation`
+  - `tests/test_linear_connector.py#test_standalone_webhook_handler_secret_rotation`
+  - `tests/test_linear_connector.py#test_standalone_cli_parser_allows_omitted_secret`
+  - `docs/walkthroughs/linear-connector-v1.md`
+  - `docs/lessons/lessons-learned.md`
+## [2026-11-20] Fix | Linear Connector V1 严禁默认 auth_ref 绕过不可变凭证契约 (PR #426)
+- 解决第七轮复审指出的凭证管理安全边界缺陷：
+  1. Manifest 层门禁：`validate_config` 显式拒绝 `none` 与 `default` 作为 `webhook_signing_secret_ref`；
+  2. 连接注册层门禁：新增 `register_linear_connection` 与 `LinearConnector.register_connection`，强制断言 `auth_ref` 必须非空且不可为 `none`/`default`；
+  3. 凭据解析层门禁：`resolve_signing_secret` 彻底移除对 `none`/`default` 返回全局 secret 的旁路逻辑，输入缺省引用直接抛出 `DISALLOWED_DEFAULT_AUTH_REF`；
+  4. Receiver 层防御：`handle_linear_webhook` 在读取 DB `auth_ref` 为 `none`/`default` 时直接返回 HTTP 401 `DISALLOWED_DEFAULT_AUTH_REF`；
+  5. 规范化命名防碰撞：强制 `auth_ref` 采用小写 kebab-case 规范，确保环境变量单射映射，防止 `linear-key` 与 `linear_key` 产生凭证混淆；
+  6. 回归测试守护：新增 5 项测试覆盖 Manifest、注册、解析器、双生产入口及 Codex 碰撞场景。
+- Evidence
+  - `herdr/intake/connectors/linear/manifest.py#validate_config`
+  - `herdr/intake/connectors/linear/connector.py#register_linear_connection`
+  - `herdr/intake/connectors/linear/credentials.py#resolve_signing_secret`
+  - `herdr/intake/connectors/linear/receiver.py#handle_linear_webhook`
+  - `tests/test_linear_connector.py#test_manifest_rejects_none_and_default_auth_ref`
+  - `tests/test_linear_connector.py#test_register_linear_connection_rejects_none_and_default`
+  - `tests/test_linear_connector.py#test_credentials_resolver_rejects_none_and_default`
+  - `tests/test_linear_connector.py#test_webhook_receiver_and_http_handlers_reject_default_auth_ref`
+  - `tests/test_linear_connector.py#test_canonical_auth_ref_prevents_environment_lookup_collision`
+  - `docs/walkthroughs/linear-connector-v1.md`
+  - `docs/lessons/lessons-learned.md`
