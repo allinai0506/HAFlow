@@ -10083,3 +10083,49 @@ git diff --check
 - `tests/test_linear_connector.py#test_standalone_webhook_handler_secret_rotation`
 - `tests/test_linear_connector.py#test_standalone_cli_parser_allows_omitted_secret`
 - `docs/walkthroughs/linear-connector-v1.md`
+---
+
+## 238. 协作平台双向同步的回环抑制与旁路隔离契约（Bi-directional Sync, Echo Loop Prevention & Bypass Isolation）（2026-11-20）
+
+### 问题背景
+
+在实现 Linear Connector V2 双向同步（HAFlow $\rightarrow$ Linear 状态变更与进度评论回写）过程中，面临两类分布式协同与高可用核心风险：
+1. **Webhook 自我死循环回环（Echo Loop）**：当 HAFlow 内部接手任务、推进工作流或完成交付时，通过 GraphQL API 更新 Linear Issue 状态或发表评论；Linear 会即刻触发向 HAFlow 的 Webhook 广播（`action="update"` 或 `action="create"`）。若接收端无法识别该事件正是由自身触发的，系统会再次解析、入库、派生任务并再次触发回写，造成无限自我触发的雪崩死循环。
+2. **外部依赖故障阻断内部核心流转**：若出站回写（网络调用 Linear GraphQL）在数据库事务内同步执行，一旦 Linear 出现网络抖动、DNS 超时、速率限制（Rate Limit）或 Token 凭证失效，可能导致 HAFlow 内部任务确认或工作流终态提交失败回滚，违反旁路隔离原则。
+3. **前端凭据无状态体验摩擦**：控制台前端 Inbox 访问凭据仅保存在页面 JS 闭包变量中，刷新页面（F5）导致令牌重置，操作者每次刷新都面临“0 全部任务”的误判。
+
+### 经验教训
+
+| 问题现象 | 根因分析 | 治理原则与规范 |
+| :--- | :--- | :--- |
+| **外部回写触发无限自我死循环** | Webhook 接收器未识别自发事件的操作主体（Actor） | **多维主体回环防御（Echo Loop Suppression）**：在 Normalizer 中多层检查 `payload.actor`（ID 匹配、名称识别 `HAFlow Bot`、应用类型判定）。检测到 Bot 自发事件直接以 200 OK 并标明 `ignored: True, reason: BOT_ECHO_IGNORED` 优雅阻断，既不落盘也不报错重发 |
+| **外部 API 失败导致内部任务状态回滚** | 外部网络 I/O 与本地持久化事务耦合，未遵守旁路隔离 | **事务提交后旁路触发（Post-Commit Bypass Isolation）**：出站同步严格在 SQLite 事务提交（`conn.commit()`）之后触发；出站分发器内置独立异常自愈包装，捕获所有外部异常并记录警告日志，绝不抛出或影响本地执行结果 |
+| **状态回写硬编码导致跨团队不兼容** | Linear 不同团队的工作流状态拥有不同的 UUID，不支持直接传状态名 | **动态工作流状态解析与短效缓存**：通过 GraphQL 动态查询团队状态列表，按 `type == 'started'`（In Progress）与 `type == 'completed'`（Done）自动定位状态 ID，并在客户端本地缓存，避免重复开销 |
+| **页面刷新外部任务卡片消失** | 前端令牌纯内存保存，生命周期与 DOM 紧耦合 | **SessionStorage 安全会话缓存**：前端将解锁令牌安全写入 `sessionStorage`，实现同会话刷新无缝恢复，并在 401 认证失败或主动锁定时自动清理 |
+
+### 操作规范
+
+1. **出站 API 隔离规范**：任何向第三方系统（Linear、GitHub、Jira 等）的状态同步与评论回写，必须通过独立 Dispatcher 执行，且执行时机必须在本地数据库持久化提交之后。
+2. **回环防御规范**：所有支持出站写能力的连接器，必须在 Ingress Normalizer 第一时间部署回环识别拦截，且向第三方回送 200 OK 优雅忽略，防止第三方平台持续重试。
+3. **出站凭据安全规范**：出站 API Token 遵循与 Ingress 签名密钥相同的不可变引用契约（`resolve_api_token`），拒绝缺省 `none`/`default`。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -v tests/test_linear_connector.py -k "echo_loop or sync_dispatcher or lifecycle_hooks"
+pytest -q tests/test_linear_connector.py
+python3 -m compileall -q herdr console tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `herdr/intake/connectors/linear/client.py#LinearClient`
+- `herdr/intake/connectors/linear/normalizer.py#BotEchoIgnoredError`
+- `herdr/intake/connectors/linear/sync.py#LinearSyncDispatcher`
+- `herdr/intake/connectors/linear/credentials.py#resolve_api_token`
+- `herdr/intake/inbox.py#IntakeInbox`
+- `herdr/inbox/store.py#InboxStore`
+- `console/static/console/scripts/intake.js`
+- `tests/test_linear_connector.py`
+

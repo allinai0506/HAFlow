@@ -8,6 +8,21 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-20] feat | Linear Connector V2 双向同步与状态进度回写、回环抑制与控制台凭据体验优化
+
+- 背景：Linear 作为团队全员协作权威系统，在 V1 完成单向流入（Issue -> Webhook -> HAFlow Draft）后，团队需要双向闭环能力（在 HAFlow 内部接手、流转与交付时，实时将状态同步并向 Linear 发表进展评论）。同时，出站调用面临三大工程挑战：
+  1. 回环死循环风险（Echo Loop）：向 Linear 回写状态会触发 Linear 再次广播 Webhook，若未识别 Bot 自发操作会引起无限自触发；
+  2. 旁路隔离要求：外部 Linear API 失败不可阻塞或回滚本地任务流转；
+  3. 控制台前端操作摩擦：操作者每次页面刷新都因内存 Token 丢失需要重新解锁外部任务。
+- 变更：
+  1. `herdr/intake/connectors/linear/client.py`：扩展 LinearClient GraphQL 出站能力，新增 `get_team_workflow_states()` 与状态短效缓存、`resolve_state_id_by_type()`（动态解析 In Progress/Done 对应的 UUID）、`update_issue_state()` 与 `create_comment()`；
+  2. `herdr/intake/connectors/linear/credentials.py`：新增出站 API Token 解析器 `resolve_api_token()`，遵循 canonical auth_ref 不可变契约与 fail-closed 安全策略；
+  3. `herdr/intake/connectors/linear/normalizer.py` & `receiver.py`：新增 `BotEchoIgnoredError`，对 `payload.actor` 匹配 HAFlow Bot 的 Webhook 执行优雅拦截（200 OK + `ignored: True`），有效阻断回环；
+  4. `herdr/intake/connectors/linear/sync.py`：新增独立出站同步编排器 `LinearSyncDispatcher` 与助手函数，提供任务确认（`started` / In Progress）、任务完成（`completed` / Done）与任务失败的弹性出站回写与结构化 Markdown 评论生成；
+  5. `herdr/intake/inbox.py` & `herdr/inbox/store.py`：在任务确认与终态流转完成 SQLite 事务提交后，旁路触发 Linear 出站同步；
+  6. `console/static/console/scripts/intake.js`：前端接入 `sessionStorage` 暂存 `intakeToken`，解决刷新页面重复输入凭据的交互问题；
+  7. `tests/test_linear_connector.py`：新增 6 组自动化测试，完整覆盖 GraphQL 突变、凭据解析、回环抑制、出站分发与生命周期钩子集成。
+
 ## [2026-11-19] fix | Linear Connector V1 安全防线加固、动态授权版本流转与密钥轮换绑定 (PR #426 第三轮复审闭环)
 
 - 背景：PR #426 独立复审指出 4 项关键安全与数据可靠性缺陷（含最新 P1 密钥轮换与授权版本解耦缺陷）：
