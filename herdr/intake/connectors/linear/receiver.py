@@ -38,6 +38,7 @@ def handle_linear_webhook(
     signing_secret: str | None = None,
     *,
     auth_ref: str | None = None,
+    bot_user_ids: tuple[str, ...] | None = None,
     config_revision: int | None = None,
     secret_resolver: Callable[[str], str | None] | None = None,
     now_ms: int | None = None,
@@ -104,6 +105,7 @@ def handle_linear_webhook(
         scope=store.scope,
         organization_id=organization_id,
         signing_secret=effective_secret,
+        bot_user_ids=bot_user_ids,
         config_revision=effective_revision,
     )
 

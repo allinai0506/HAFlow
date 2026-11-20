@@ -97,10 +97,10 @@ class IntakeInbox:
             raise KeyError("Intake task not found")
         return row
 
-    def change(self, link_id, action, revision, changes=None):
+    def change(self, link_id, action, revision, changes=None, *, dispatch=False):
         text(link_id, 64)
         integer(revision, 1)
-        if action not in ("assign", "unassign", "edit", "confirm", "ignore", "reactivate"):
+        if action not in ("assign", "unassign", "edit", "confirm", "dispatch", "ignore", "reactivate"):
             raise ValueError("invalid Intake action")
         if action == "edit":
             changes = _validate_edit(changes)
@@ -113,15 +113,27 @@ class IntakeInbox:
                 item = self._get(db, link_id)
                 if item["revision"] != revision:
                     raise StateConflict("work item changed; refresh before editing")
-                if item["task_status"] not in (None, "DRAFT"):
+                allowed_task_statuses = (None, "DRAFT", "PENDING", "CANCELLED") if action == "reactivate" else (None, "DRAFT", "PENDING")
+                if item["task_status"] not in allowed_task_statuses:
                     raise StateConflict("terminal task")
                 if item["external_status"] != "OPEN" and action not in ("unassign", "ignore"):
                     raise StateConflict("external work item is closed or has conflicting source evidence")
                 store = EventStore(self.path, Scope(self.tenant, item["connection_id"]))
-                self._apply(db, store, item, action, changes)
-                return _project(self._get(db, link_id))
+                self._apply(db, store, item, action, changes, dispatch=dispatch)
+                projected = _project(self._get(db, link_id))
 
-    def _apply(self, db, store, item, action, changes):
+        if action in ("confirm", "dispatch") and ("provider" in item.keys() and item["provider"] == "linear"):
+            try:
+                from .connectors.linear.sync import dispatch_linear_sync_on_confirm
+                dispatch_linear_sync_on_confirm(
+                    self.path, link_id, user_id=self.user, project_id=projected.get("project_id")
+                )
+            except Exception:
+                pass
+
+        return projected
+
+    def _apply(self, db, store, item, action, changes, *, dispatch=False):
         now = store.now()
         task_id = item["task_id"]
         owner = item["user_id"]
@@ -140,19 +152,32 @@ class IntakeInbox:
             state, owner, assignment = "LINKED", self.user, "MANUAL"
             event = "intake_assignment"
         elif action == "unassign" and state == "LINKED":
+            if item["task_status"] in ("CLAIMED", "RUNNING"):
+                raise StateConflict("cannot unassign running or claimed task")
             state, owner, confirmation, assignment = "UNASSIGNED", None, None, "MANUAL"
             event = "intake_assignment"
+            if item["task_status"] == "PENDING" and task_id:
+                db.execute("UPDATE user_inbox_tasks SET status = 'DRAFT', updated_at = ? WHERE id = ?",
+                           (now / 1000, task_id))
         elif action == "ignore" and state != "IGNORED":
+            if item["task_status"] in ("CLAIMED", "RUNNING"):
+                raise StateConflict("cannot ignore running or claimed task")
             state, owner, confirmation = "IGNORED", None, None
             event = "intake_task_ignored"
+            if item["task_status"] == "PENDING" and task_id:
+                db.execute("UPDATE user_inbox_tasks SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+                           (now / 1000, task_id))
         elif action == "reactivate" and state == "IGNORED":
             state, owner, assignment = "UNASSIGNED", None, "MANUAL"
             event = "intake_task_reactivated"
+            if item["task_status"] == "CANCELLED" and task_id:
+                db.execute("UPDATE user_inbox_tasks SET status = 'DRAFT', updated_at = ? WHERE id = ?",
+                           (now / 1000, task_id))
         elif action == "edit" and state == "LINKED":
             project, workspace = changes["project_id"], changes["workspace_id"]
             db.execute("""UPDATE user_inbox_tasks SET title = ?, instruction = ?, project_id = ?,
-                workspace_id = ?, priority = ?, priority_weight = ?, updated_at = ?
-                WHERE id = ? AND user_id = ? AND status = 'DRAFT'""",
+                workspace_id = ?, priority = ?, priority_weight = ?, status = 'DRAFT', updated_at = ?
+                WHERE id = ? AND user_id = ? AND status IN ('DRAFT', 'PENDING')""",
                        (changes["title"], changes["description"], project, workspace,
                         changes["priority"], PRIORITY_WEIGHTS[changes["priority"]],
                         now / 1000, task_id, self.user))
@@ -165,7 +190,7 @@ class IntakeInbox:
                 "description_changed": item["instruction"] != changes["description"],
             }
             event = "intake_task_edited"
-        elif action == "confirm" and state == "LINKED":
+        elif action in ("confirm", "dispatch") and state == "LINKED":
             if not project or not workspace or not valid_scope(project, workspace):
                 raise StateConflict("project/workspace binding required to confirm")
             content = [item["title"], item["instruction"], item["priority"], project, workspace]
@@ -184,6 +209,21 @@ class IntakeInbox:
             WHERE tenant_id = ? AND object_id = ? AND link_id = ?""",
                    (state, task_id, owner, assignment, confirmation, project, workspace, *body_authority, now,
                     self.tenant, item["object_id"], item["link_id"]))
+
+        should_dispatch = dispatch or action == "dispatch"
+        if should_dispatch and task_id and state == "LINKED" and confirmation is not None:
+            cur_ord = db.execute(
+                """SELECT COALESCE(MAX(sort_order), -10) as max_ord
+                   FROM user_inbox_tasks WHERE workspace_id = ? AND priority = ?""",
+                (workspace, item["priority"] or "NORMAL"),
+            ).fetchone()
+            next_sort_order = max(0, int(cur_ord["max_ord"]) + 10) if (cur_ord and cur_ord["max_ord"] is not None) else 0
+
+            db.execute("""UPDATE user_inbox_tasks
+                SET project_id = ?, workspace_id = ?, sort_order = ?, status = 'PENDING', updated_at = ?
+                WHERE id = ? AND user_id = ?""",
+                (project, workspace, next_sort_order, now / 1000, task_id, self.user))
+
         store._audit(db, event, now, origin="MANUAL", actor_ref=self.user, user_id=owner,
                      previous_user_id=item["user_id"], link_id=item["link_id"],
                      task_id=task_id, project_id=project, workspace_id=workspace, **evidence)
@@ -214,10 +254,12 @@ def _project(row):
         status = "SOURCE_CLOSED" if row["external_status"] == "CLOSED" else "SOURCE_CONFLICT"
     elif disposition == "UNASSIGNED" or not row["project_id"] or not row["workspace_id"]:
         status = "PENDING_ASSIGNMENT"
+    elif row["confirmation_json"]:
+        status = "CONFIRMED"
     elif row["task_status"] != "DRAFT":
         status = row["task_status"]
     else:
-        status = "CONFIRMED" if row["confirmation_json"] else "DRAFT"
+        status = "DRAFT"
     result = {key: row[key] for key in (
         "link_id", "task_id", "provider", "external_id", "object_type", "connection_id",
         "display_name", "project_id", "workspace_id", "assignment_source", "created_at", "updated_at",

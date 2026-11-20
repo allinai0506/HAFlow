@@ -1497,3 +1497,710 @@ def test_canonical_auth_ref_prevents_environment_lookup_collision(tmp_path, monk
     status_2, _, body_2 = handle_linear_webhook(raw_2, headers_2, store, ORG_ID, now_ms=now_ms)
     assert status_2 == 401
     assert "NON_CANONICAL_AUTH_REF" in body_2.get("error", "")
+
+
+# =====================================================================
+# V2 Tests: Bidirectional Synchronization, Echo Loop Suppression & Egress
+# =====================================================================
+
+
+def test_linear_client_states_and_mutations():
+    """Verify LinearClient GraphQL state queries, caching, and mutation requests."""
+    from herdr.intake.connectors.linear.client import LinearClient
+
+    client = LinearClient("lin_api_test_secret_token")
+
+    # 1. Mock get_team_workflow_states
+    mock_states_data = {
+        "data": {
+            "team": {
+                "id": "team-eng",
+                "states": {
+                    "nodes": [
+                        {"id": "st-backlog", "name": "Backlog", "type": "backlog", "position": 1},
+                        {"id": "st-started", "name": "In Progress", "type": "started", "position": 2},
+                        {"id": "st-done", "name": "Done", "type": "completed", "position": 3},
+                    ]
+                }
+            }
+        }
+    }
+    with patch.object(client, "_post_graphql", return_value=mock_states_data) as mock_post:
+        states = client.get_team_workflow_states("team-eng")
+        assert len(states) == 3
+        assert mock_post.call_count == 1
+
+        # Verify caching (second call uses cache, no additional HTTP request)
+        states_cached = client.get_team_workflow_states("team-eng")
+        assert states_cached == states
+        assert mock_post.call_count == 1
+
+        # Verify state resolution by type
+        started_id = client.resolve_state_id_by_type("team-eng", "started")
+        assert started_id == "st-started"
+        done_id = client.resolve_state_id_by_type("team-eng", "completed")
+        assert done_id == "st-done"
+        missing_id = client.resolve_state_id_by_type("team-eng", "nonexistent")
+        assert missing_id is None
+
+    # 2. Mock update_issue_state
+    mock_update_data = {
+        "data": {
+            "issueUpdate": {
+                "success": True,
+                "issue": {"id": "issue-123", "state": {"id": "st-started", "name": "In Progress", "type": "started"}}
+            }
+        }
+    }
+    with patch.object(client, "_post_graphql", return_value=mock_update_data) as mock_post:
+        res = client.update_issue_state("issue-123", "st-started")
+        assert res["success"] is True
+        assert res["issue"]["id"] == "issue-123"
+        mock_post.assert_called_once()
+        args = mock_post.call_args[0]
+        assert "mutation IssueUpdate" in args[0]
+        assert args[1] == {"id": "issue-123", "input": {"stateId": "st-started"}}
+
+    # 3. Mock create_comment
+    mock_comment_data = {
+        "data": {
+            "commentCreate": {
+                "success": True,
+                "comment": {"id": "cmt-999", "body": "Hello Linear", "createdAt": "2026-11-20T08:00:00Z"}
+            }
+        }
+    }
+    with patch.object(client, "_post_graphql", return_value=mock_comment_data) as mock_post:
+        res = client.create_comment("issue-123", "Hello Linear")
+        assert res["success"] is True
+        assert res["comment"]["id"] == "cmt-999"
+        mock_post.assert_called_once()
+        args = mock_post.call_args[0]
+        assert "mutation CommentCreate" in args[0]
+        assert args[1] == {"input": {"issueId": "issue-123", "body": "Hello Linear"}}
+
+
+def test_credentials_resolve_api_token(monkeypatch):
+    """Verify Linear API token resolution rules, memory registry, and fail-closed security."""
+    from herdr.intake.connectors.linear.credentials import (
+        SecretResolutionError,
+        clear_token_registry,
+        register_api_token,
+        resolve_api_token,
+        unregister_api_token,
+    )
+
+    clear_token_registry()
+
+    # 1. Rejects invalid auth_ref
+    with pytest.raises(SecretResolutionError, match="DISALLOWED_DEFAULT_AUTH_REF"):
+        resolve_api_token("default")
+
+    # 2. In-memory registry resolution
+    register_api_token("linear-prod-v2", "lin_api_mem_12345")
+    assert resolve_api_token("linear-prod-v2") == "lin_api_mem_12345"
+
+    unregister_api_token("linear-prod-v2")
+    with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
+        resolve_api_token("linear-prod-v2")
+
+    # 3. Environment variable lookup
+    monkeypatch.setenv("HAFLOW_INTAKE_TOKEN_LINEAR_PROD_V2", "lin_api_env_token_456")
+    assert resolve_api_token("linear-prod-v2") == "lin_api_env_token_456"
+
+    # 4. Explicit loaded token with ref check
+    assert resolve_api_token("linear-prod-v2", loaded_token="lin_api_direct", loaded_auth_ref="linear-prod-v2") == "lin_api_direct"
+    with pytest.raises(SecretResolutionError, match="AUTH_REF_MISMATCH"):
+        resolve_api_token("linear-prod-v2", loaded_token="lin_api_direct", loaded_auth_ref="linear-other-ref")
+
+
+def test_echo_loop_detection_and_drop(tmp_path):
+    """Verify Webhooks generated by HAFlow's bot actor are safely dropped with 200 ignored."""
+    from herdr.intake.connectors.linear.connector import register_linear_connection
+    from herdr.intake.connectors.linear.receiver import handle_linear_webhook
+
+    path = tmp_path / "state_echo.db"
+    initialize(path)
+    store = EventStore(path, SCOPE, authorizer=lambda a, s: "admin", verifier=lambda d: d.verified_via == "SIGNATURE")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+
+    now_ms = int(time.time() * 1000)
+    bot_id = "user-bot-haflow-uuid"
+
+    # Normal user payload -> Accepted
+    normal_payload = sample_issue_payload("update", "started", issue_id="echo-test-1", webhook_timestamp=now_ms)
+    normal_payload["actor"] = {"id": "user-human-alice", "type": "user", "name": "Alice"}
+    raw_norm = json.dumps(normal_payload).encode("utf-8")
+    headers_norm = {
+        "Linear-Signature": sign(raw_norm, SECRET),
+        "Linear-Delivery": "delivery-echo-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_norm, _, body_norm = handle_linear_webhook(
+        raw_norm, headers_norm, store, ORG_ID, signing_secret=SECRET, auth_ref="linear-prod-v1",
+        bot_user_ids=(bot_id,), now_ms=now_ms,
+    )
+    assert status_norm == 200
+    assert body_norm.get("outcome") == "ACCEPTED"
+
+    # Bot actor payload -> Safely ignored (echo loop suppressed)
+    bot_payload = sample_issue_payload("update", "started", issue_id="echo-test-1", webhook_timestamp=now_ms)
+    bot_payload["actor"] = {"id": bot_id, "type": "user", "name": "HAFlow Bot"}
+    raw_bot = json.dumps(bot_payload).encode("utf-8")
+    headers_bot = {
+        "Linear-Signature": sign(raw_bot, SECRET),
+        "Linear-Delivery": "delivery-echo-002",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status_bot, _, body_bot = handle_linear_webhook(
+        raw_bot, headers_bot, store, ORG_ID, signing_secret=SECRET, auth_ref="linear-prod-v1",
+        bot_user_ids=(bot_id,), now_ms=now_ms,
+    )
+    assert status_bot == 200
+    assert body_bot.get("ignored") is True
+    assert "BOT_ECHO_IGNORED" in body_bot.get("reason", "")
+
+
+def test_sync_dispatcher_confirm_complete_and_fail(tmp_path):
+    """Verify LinearSyncDispatcher updates state and creates comments on confirm, complete, and fail."""
+    from herdr.intake.connectors.linear.client import LinearClient
+    from herdr.intake.connectors.linear.sync import LinearSyncDispatcher
+
+    db_path = tmp_path / "sync_test.db"
+    initialize(db_path)
+
+    from herdr.intake.schema import initialize_materialization, open_db
+    from contextlib import closing
+    initialize_materialization(db_path)
+    with closing(open_db(db_path)) as db:
+        db.execute(
+            """INSERT INTO intake_connections (tenant_id, connection_id, provider, provider_instance_key, display_name, connector_version, status, config_revision, auth_ref, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("tenant-test", "linear", "linear", ORG_ID, "Linear", "1.0.0", "ACTIVE", 1, "linear-prod-v1", 1000, 1000)
+        )
+        db.execute(
+            """INSERT INTO intake_objects (object_id, tenant_id, provider, provider_instance_key, object_type, external_id, observed_connection_id, version, snapshot_digest, snapshot_json, external_status, last_event_id, first_seen_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("obj-123", "tenant-test", "linear", ORG_ID, "issue", "issue-linear-uuid-456", "linear", "1", "sha256-mock",
+             json.dumps({"title": "Test Issue", "description": "Test Desc", "team": {"id": "team-linear-1"}}), "OPEN", "evt-1", 1000, 1000)
+        )
+        db.execute(
+            """INSERT INTO user_inbox_tasks (id, user_id, title, instruction, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ("inbox_task_abc", "operator", "Test Issue", "Test Desc", "DRAFT", 1000, 1000)
+        )
+        db.execute(
+            """INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, task_id, origin_connection_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("link-123", "tenant-test", "obj-123", "review", "LINKED", "inbox_task_abc", "linear", 1000, 1000)
+        )
+
+    mock_client = MagicMock(spec=LinearClient)
+    mock_client.resolve_state_id_by_type.side_effect = lambda team_id, st_type: f"state-{st_type}"
+    mock_client.update_issue_state.return_value = {"success": True}
+    mock_client.create_comment.return_value = {"success": True, "comment": {"id": "cmt-111"}}
+
+    dispatcher = LinearSyncDispatcher(db_path, client=mock_client)
+
+    # 1. Sync confirm
+    res_confirm = dispatcher.sync_task_confirmed("link-123", user_id="operator", project_id="proj-haflow")
+    assert res_confirm.ok is True
+    assert res_confirm.action == "confirm"
+    assert res_confirm.state_id == "state-started"
+    mock_client.update_issue_state.assert_called_with("issue-linear-uuid-456", "state-started")
+    mock_client.create_comment.assert_called()
+
+    # 2. Sync completed
+    res_complete = dispatcher.sync_task_completed("inbox_task_abc", summary="All PRs passed")
+    assert res_complete.ok is True
+    assert res_complete.action == "complete"
+    assert res_complete.state_id == "state-completed"
+    mock_client.update_issue_state.assert_called_with("issue-linear-uuid-456", "state-completed")
+
+    # 3. Sync failed
+    res_fail = dispatcher.sync_task_failed("inbox_task_abc", error="Build failed")
+    assert res_fail.ok is True
+    assert res_fail.action == "failed"
+    mock_client.create_comment.assert_called()
+
+
+def test_sync_dispatcher_resilient_error_handling(tmp_path):
+    """Verify outbound sync failure never raises or disrupts calling context."""
+    from herdr.intake.connectors.linear.client import LinearClient
+    from herdr.intake.connectors.linear.sync import (
+        dispatch_linear_sync_on_confirm,
+        dispatch_linear_sync_on_task_status,
+    )
+
+    db_path = tmp_path / "sync_fail.db"
+    initialize(db_path)
+
+    # Client that fails with network error
+    failing_client = MagicMock(spec=LinearClient)
+    failing_client.resolve_state_id_by_type.side_effect = RuntimeError("Network timeout to api.linear.app")
+
+    # None of these should raise
+    res1 = dispatch_linear_sync_on_confirm(db_path, "nonexistent-link", client=failing_client)
+    assert res1.ok is False
+
+    res2 = dispatch_linear_sync_on_task_status(db_path, "nonexistent-task", "COMPLETED", client=failing_client)
+    assert res2.ok is False
+
+
+def test_lifecycle_hooks_trigger_linear_sync(tmp_path, monkeypatch):
+    """Verify IntakeInbox.confirm and InboxStore status updates hook into Linear sync."""
+    from herdr.intake.connectors.linear.connector import LinearConnector, register_linear_connection
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.inbox.store import InboxStore
+    from herdr.intake.worker import run_once
+
+    db_path = tmp_path / "hooks_test.db"
+    initialize(db_path)
+
+    registry = {"a": {"project_id": "proj-a", "workspace_id": "ws-a"}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
+
+    store = EventStore(db_path, Scope("tenant-test", "linear"), authorizer=lambda a, s: "admin", verifier=lambda d: d.verified_via == "SIGNATURE")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+    conn = LinearConnector(store.scope, ORG_ID, SECRET)
+
+    now_ms = int(time.time() * 1000)
+    raw = json.dumps(sample_issue_payload("create", "unstarted", issue_id="hook-issue-1", webhook_timestamp=now_ms)).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw, SECRET),
+        "Linear-Delivery": "delivery-hook-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery = conn.process_webhook(raw, headers, now_ms=now_ms)
+    store.accept_event(delivery)
+    run_once(store, materialization={"user_id": "operator", "auto_assign": True, "project_id": "proj-a", "workspace_id": "ws-a"})
+
+    config = {"tenant_id": "tenant-test", "user_id": "operator", "connections": {"linear": {}}}
+    inbox = IntakeInbox(db_path, config)
+    item, = inbox.list_items()
+    assert item["status"] == "DRAFT"
+
+    # 1. Verify confirm triggers dispatch_linear_sync_on_confirm
+    with patch("herdr.intake.connectors.linear.sync.dispatch_linear_sync_on_confirm") as mock_confirm_sync:
+        confirmed_item = inbox.change(item["link_id"], "confirm", item["revision"])
+        assert confirmed_item["status"] == "CONFIRMED"
+        mock_confirm_sync.assert_called_once_with(
+            db_path, item["link_id"], user_id="operator", project_id="proj-a"
+        )
+
+    # 2. Verify InboxStore COMPLETED triggers dispatch_linear_sync_on_task_status
+    with patch("herdr.intake.connectors.linear.sync.dispatch_linear_sync_on_task_status") as mock_status_sync:
+        inbox_store = InboxStore(db_path=Path(db_path))
+        # Insert a standalone active_intake task that can transition through normal workflow lifecycle
+        active_task = inbox_store.create_task(
+            title="Active Task",
+            instruction="Execute task",
+            project_id="proj-a",
+            workspace_id="ws-a",
+            source_type="active_intake",
+            source_id="link-standalone",
+        )
+        tid = active_task["id"]
+        inbox_store.update_task_status(tid, "PENDING")
+        inbox_store.update_task_status(tid, "CLAIMED", worker_id="w-1")
+        inbox_store.update_task_status(tid, "RUNNING", workflow_id="wf-1")
+        inbox_store.update_task_status(tid, "COMPLETED")
+        mock_status_sync.assert_called_once_with(
+            Path(db_path), tid, "COMPLETED", error=None
+        )
+
+
+def test_confirmed_intake_task_dispatch_and_execution_bridge(tmp_path, monkeypatch):
+    """Phase 3: Confirmed intake tasks can be dispatched to PENDING and claimed by InboxDispatcher."""
+    import sqlite3
+    from herdr.inbox.dispatcher import InboxDispatcher
+    from herdr.inbox.store import InboxStore
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.worker import run_once
+    from herdr.intake.schema import initialize, initialize_materialization
+    from herdr.intake.store import EventStore, Scope
+    from herdr.intake.connectors.linear.connector import LinearConnector, register_linear_connection
+
+    db_path = tmp_path / "dispatch_bridge.db"
+    initialize(db_path)
+    initialize_materialization(db_path)
+
+    scope = Scope("tenant-test", "linear")
+    store = EventStore(db_path, scope, clock=lambda: 1000, verifier=lambda d: d.verified_via == "SIGNATURE", authorizer=lambda a, s: "admin")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+    conn_adapter = LinearConnector(store.scope, ORG_ID, SECRET)
+
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": {
+        "p": {"project_id": "proj-a", "workspace_id": "ws-a"}
+    }})
+
+    now_ms = int(time.time() * 1000)
+    raw = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-bridge-001", webhook_timestamp=now_ms)).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw, SECRET),
+        "Linear-Delivery": "del-bridge-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery = conn_adapter.process_webhook(raw, headers, now_ms=now_ms)
+    store.accept_event(delivery)
+
+    policy = {"user_id": "operator", "project_id": "proj-a", "workspace_id": "ws-a", "auto_assign": True}
+    run_once(store, materialization=policy)
+
+    config = {"tenant_id": "tenant-test", "user_id": "operator", "connections": {"linear": {}}}
+    inbox = IntakeInbox(db_path, config)
+    item, = inbox.list_items()
+    task_id = item["task_id"]
+
+    # 1. Unconfirmed task cannot be manually forced to PENDING (Trigger blocks it)
+    conn = sqlite3.connect(db_path)
+    with pytest.raises(sqlite3.IntegrityError, match="active intake task may not be dispatched"):
+        conn.execute("UPDATE user_inbox_tasks SET status = 'PENDING' WHERE id = ?", (task_id,))
+    conn.close()
+
+    # 2. Confirming with dispatch=True moves task to PENDING in user_inbox_tasks
+    item = inbox.change(item["link_id"], "confirm", item["revision"], dispatch=True)
+    assert item["status"] == "CONFIRMED"
+
+    inbox_store = InboxStore(db_path=Path(db_path))
+    task = inbox_store.get_task(task_id)
+    assert task is not None
+    assert task["status"] == "PENDING"
+    assert task["project_id"] == "proj-a"
+    assert task["workspace_id"] == "ws-a"
+
+    # 3. Task is visible in manual_only task queries since it is now PENDING
+    pending_tasks, total = inbox_store.list_tasks(status="PENDING", manual_only=True)
+    assert any(t["id"] == task_id for t in pending_tasks)
+
+    # 4. InboxDispatcher can claim the task
+    dispatcher = InboxDispatcher(store=inbox_store, db_path=db_path, worker_id="test-worker")
+    claimed = dispatcher.claim_next_task("ws-a")
+    assert claimed is not None
+    assert claimed["id"] == task_id
+    assert claimed["status"] == "CLAIMED"
+    assert claimed["worker_id"] is not None
+
+    # 5. Transition to RUNNING and COMPLETED
+    inbox_store.update_task_status(task_id, "RUNNING", workflow_id="wf-bridge-001")
+    running_task = inbox_store.get_task(task_id)
+    assert running_task["status"] == "RUNNING"
+    assert running_task["workflow_id"] == "wf-bridge-001"
+
+    inbox_store.update_task_status(task_id, "COMPLETED")
+    completed_task = inbox_store.get_task(task_id)
+    assert completed_task["status"] == "COMPLETED"
+
+
+def test_unassign_pending_intake_task_reverts_to_draft(tmp_path, monkeypatch):
+    """Unassigning a pending intake task resets status to DRAFT."""
+    from herdr.inbox.store import InboxStore
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.worker import run_once
+    from herdr.intake.schema import initialize, initialize_materialization
+    from herdr.intake.store import EventStore, Scope
+    from herdr.intake.connectors.linear.connector import LinearConnector, register_linear_connection
+
+    db_path = tmp_path / "unassign_revert.db"
+    initialize(db_path)
+    initialize_materialization(db_path)
+
+    scope = Scope("tenant-test", "linear")
+    store = EventStore(db_path, scope, clock=lambda: 1000, verifier=lambda d: d.verified_via == "SIGNATURE", authorizer=lambda a, s: "admin")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+    conn_adapter = LinearConnector(store.scope, ORG_ID, SECRET)
+
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": {
+        "p": {"project_id": "proj-a", "workspace_id": "ws-a"}
+    }})
+
+    now_ms = int(time.time() * 1000)
+    raw = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-unassign-001", webhook_timestamp=now_ms)).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw, SECRET),
+        "Linear-Delivery": "del-unassign-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery = conn_adapter.process_webhook(raw, headers, now_ms=now_ms)
+    store.accept_event(delivery)
+
+    policy = {"user_id": "operator", "project_id": "proj-a", "workspace_id": "ws-a", "auto_assign": True}
+    run_once(store, materialization=policy)
+
+    config = {"tenant_id": "tenant-test", "user_id": "operator", "connections": {"linear": {}}}
+    inbox = IntakeInbox(db_path, config)
+    item, = inbox.list_items()
+    task_id = item["task_id"]
+
+    # Confirm with dispatch
+    item = inbox.change(item["link_id"], "confirm", item["revision"], dispatch=True)
+    inbox_store = InboxStore(db_path=Path(db_path))
+    assert inbox_store.get_task(task_id)["status"] == "PENDING"
+
+    # Unassign reverts task to DRAFT
+    item = inbox.change(item["link_id"], "unassign", item["revision"])
+    assert item["status"] == "PENDING_ASSIGNMENT"
+    assert inbox_store.get_task(task_id)["status"] == "DRAFT"
+
+
+def test_linear_sync_resolves_team_dynamically(tmp_path):
+    """LinearSyncDispatcher resolves team_id dynamically if missing from snapshot."""
+    import sqlite3
+    from herdr.intake.connectors.linear.sync import LinearSyncDispatcher
+    from herdr.intake.schema import initialize, initialize_materialization
+    from unittest.mock import MagicMock
+
+    db_path = tmp_path / "linear_dyn_team.db"
+    initialize(db_path)
+    initialize_materialization(db_path)
+
+    # Insert a link and object with NO team_id in snapshot_json
+    conn = sqlite3.connect(db_path)
+    now = 1000
+    conn.execute(
+        """
+        INSERT INTO intake_connections (tenant_id, connection_id, provider, provider_instance_key, display_name, config_revision, connector_version, status, auth_ref, created_at, updated_at)
+        VALUES ('tenant-test', 'linear', 'linear', 'linear-inst', 'Linear', 1, '2.0.0', 'ACTIVE', 'linear-prod-v1', 1000, 1000)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO intake_objects (tenant_id, object_id, provider, provider_instance_key, external_id, object_type, observed_connection_id, external_status, version, snapshot_digest, snapshot_json, first_seen_at, updated_at, last_event_id)
+        VALUES ('tenant-test', 'obj-1', 'linear', 'linear-inst', 'linear-issue-999', 'issue', 'linear', 'OPEN', 1, 'digest', '{"title": "Test Issue", "description": "Test Desc"}', 1000, 1000, 'ev-1')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, created_at, updated_at, origin_connection_id, authorization_revision, last_event_id, body_connection_id, body_revision, project_id, workspace_id)
+        VALUES ('link-1', 'tenant-test', 'obj-1', 'primary', 'LINKED', 1000, 1000, 'linear', 1, 'ev-1', 'linear', 1, 'proj-1', 'ws-1')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    dispatcher = LinearSyncDispatcher(db_path=db_path)
+    mock_client = MagicMock()
+    mock_client.get_issue_team_id.return_value = "dynamic-team-id"
+    mock_client.resolve_state_id_by_type.return_value = "state-started-123"
+    mock_client.update_issue_state.return_value = {"success": True}
+    mock_client.create_comment.return_value = {"comment": {"id": "c-123"}}
+    dispatcher._resolve_client = MagicMock(return_value=mock_client)
+
+    res = dispatcher.sync_task_confirmed(
+        "link-1",
+        user_id="operator",
+        project_id="proj-1",
+    )
+    assert res.ok is True
+    assert res.issue_id == "linear-issue-999"
+    assert res.state_id == "state-started-123"
+    assert res.comment_id == "c-123"
+    mock_client.get_issue_team_id.assert_called_once_with("linear-issue-999")
+    mock_client.resolve_state_id_by_type.assert_called_once_with("dynamic-team-id", "started")
+    mock_client.update_issue_state.assert_called_once_with("linear-issue-999", "state-started-123")
+
+
+def test_trigger_preserves_lifecycle_when_confirmation_cleared(tmp_path: Path):
+    """P1 regression: If a confirmed task is queued or running and source confirmation
+    is cleared (e.g. Linear sent an event clearing confirmation), heartbeat, claim,
+    and completion updates must not be rejected by intake_inbox_draft_only.
+    """
+    from herdr.intake.schema import initialize, initialize_materialization, open_db
+    from contextlib import closing
+    db_path = tmp_path / "state.db"
+    initialize(db_path)
+    initialize_materialization(db_path)
+
+    with closing(open_db(db_path)) as db:
+        # Create connection first to satisfy foreign key constraints
+        db.execute(
+            """INSERT INTO intake_connections (tenant_id, connection_id, provider, provider_instance_key, display_name, connector_version, status, config_revision, auth_ref, created_at, updated_at)
+               VALUES ('t-1', 'conn-1', 'linear', 'inst-1', 'Linear', '1.0.0', 'ACTIVE', 1, 'linear-prod-v1', 1000, 1000)"""
+        )
+        # Create an unconfirmed draft task linked to an intake link
+        db.execute(
+            """INSERT INTO user_inbox_tasks (id, user_id, title, instruction, status, priority, priority_weight, sort_order, created_at, updated_at)
+               VALUES ('task-1', 'op-1', 'Title', 'Inst', 'DRAFT', 'NORMAL', 2, 10, 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_objects (object_id, tenant_id, provider, provider_instance_key, object_type, external_id, observed_connection_id, snapshot_digest, snapshot_json, external_status, last_event_id, first_seen_at, updated_at)
+               VALUES ('obj-1', 't-1', 'linear', 'inst-1', 'issue', 'ext-1', 'conn-1', 'dig', '{}', 'OPEN', 'ev-1', 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, created_at, updated_at, task_id, user_id, confirmation_json)
+               VALUES ('link-1', 't-1', 'obj-1', 'primary', 'LINKED', 1000, 1000, 'task-1', 'op-1', '{"project_id": "p1"}')"""
+        )
+
+        # 1. Confirmed task can transition DRAFT -> PENDING
+        db.execute("UPDATE user_inbox_tasks SET status = 'PENDING', updated_at = 1010 WHERE id = 'task-1'")
+        row = db.execute("SELECT status FROM user_inbox_tasks WHERE id = 'task-1'").fetchone()
+        assert row["status"] == "PENDING"
+
+        # 2. Linear sends update or clears confirmation while task is queued/running
+        db.execute("UPDATE intake_task_links SET confirmation_json = NULL WHERE link_id = 'link-1'")
+
+        # 3. Task claims, heartbeats, and completes must succeed without IntegrityError
+        db.execute("UPDATE user_inbox_tasks SET status = 'CLAIMED', worker_id = 'w-1', lease_expires_at = 2000, updated_at = 1020 WHERE id = 'task-1'")
+        db.execute("UPDATE user_inbox_tasks SET status = 'RUNNING', heartbeat_at = 1030, updated_at = 1030 WHERE id = 'task-1'")
+        db.execute("UPDATE user_inbox_tasks SET heartbeat_at = 1040, updated_at = 1040 WHERE id = 'task-1'")
+        db.execute("UPDATE user_inbox_tasks SET status = 'COMPLETED', completed_at = 1050, updated_at = 1050 WHERE id = 'task-1'")
+
+        final_row = db.execute("SELECT status, completed_at FROM user_inbox_tasks WHERE id = 'task-1'").fetchone()
+        assert final_row["status"] == "COMPLETED"
+        assert final_row["completed_at"] == 1050
+
+        # 4. But an unconfirmed DRAFT task STILL cannot be dispatched directly
+        db.execute(
+            """INSERT INTO user_inbox_tasks (id, user_id, title, instruction, status, priority, priority_weight, sort_order, created_at, updated_at)
+               VALUES ('task-unconf', 'op-1', 'Draft', 'Inst', 'DRAFT', 'NORMAL', 2, 20, 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, created_at, updated_at, task_id, user_id, confirmation_json)
+               VALUES ('link-unconf', 't-1', 'obj-1', 'secondary', 'LINKED', 1000, 1000, 'task-unconf', 'op-1', NULL)"""
+        )
+        import pytest
+        import sqlite3
+        with pytest.raises(sqlite3.IntegrityError, match="active intake task may not be dispatched or transferred"):
+            db.execute("UPDATE user_inbox_tasks SET status = 'PENDING' WHERE id = 'task-unconf'")
+
+
+def test_sync_rejects_disabled_connection_and_stale_auth_revision(tmp_path: Path):
+    """P1 regression: LinearSyncDispatcher must reject outbound calls when the
+    connection is disabled or when the link has a stale authorization revision.
+    """
+    from herdr.intake.connectors.linear.sync import LinearSyncDispatcher
+    from herdr.intake.schema import initialize, initialize_materialization, open_db
+    from contextlib import closing
+    db_path = tmp_path / "state.db"
+    initialize(db_path)
+    initialize_materialization(db_path)
+
+    with closing(open_db(db_path)) as db:
+        db.execute(
+            """INSERT INTO intake_connections (tenant_id, connection_id, provider, provider_instance_key, display_name, connector_version, status, config_revision, auth_ref, created_at, updated_at)
+               VALUES ('tenant-test', 'linear', 'linear', 'inst-1', 'Linear', '1.0.0', 'ACTIVE', 1, 'linear-prod-v1', 1000, 1000)"""
+        )
+        # user_inbox_tasks must be inserted before intake_task_links due to intake_inbox_no_replace
+        db.execute(
+            """INSERT INTO user_inbox_tasks (id, user_id, title, instruction, status, priority, priority_weight, sort_order, created_at, updated_at)
+               VALUES ('task-99', 'op-1', 'Title', 'Inst', 'RUNNING', 'NORMAL', 2, 10, 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_objects (object_id, tenant_id, provider, provider_instance_key, object_type, external_id, observed_connection_id, snapshot_digest, snapshot_json, external_status, last_event_id, first_seen_at, updated_at)
+               VALUES ('obj-1', 'tenant-test', 'linear', 'inst-1', 'issue', 'issue-99', 'linear', 'dig', '{}', 'OPEN', 'ev-1', 1000, 1000)"""
+        )
+        db.execute(
+            """INSERT INTO intake_task_links (link_id, tenant_id, object_id, purpose_key, disposition, created_at, updated_at, task_id, user_id, origin_connection_id, authorization_revision)
+               VALUES ('link-1', 'tenant-test', 'obj-1', 'primary', 'LINKED', 1000, 1000, 'task-99', 'op-1', 'linear', 1)"""
+        )
+
+    dispatcher = LinearSyncDispatcher(db_path=db_path)
+    mock_client = MagicMock()
+    dispatcher._client = mock_client
+
+    # 1. Active connection with matching revision succeeds
+    res_ok = dispatcher.sync_task_completed("task-99", summary="Delivered")
+    assert res_ok.ok is True
+    assert mock_client.create_comment.called
+
+    # 2. Disable connection -> outbound calls must be rejected
+    mock_client.reset_mock()
+    with closing(open_db(db_path)) as db:
+        db.execute("UPDATE intake_connections SET status = 'DISABLED' WHERE connection_id = 'linear'")
+
+    res_disabled = dispatcher.sync_task_completed("task-99", summary="Delivered")
+    assert res_disabled.ok is False
+    assert "Connection is not active" in res_disabled.error
+    assert not mock_client.create_comment.called
+    assert not mock_client.update_issue_state.called
+
+    res_failed = dispatcher.sync_task_failed("task-99", error="Fatal error")
+    assert res_failed.ok is False
+    assert "Connection is not active" in res_failed.error
+
+    res_confirm = dispatcher.sync_task_confirmed("link-1")
+    assert res_confirm.ok is False
+    assert "Connection is not active" in res_confirm.error
+
+    # 3. Connection is active, but config_revision bumped (stale authorization on link)
+    with closing(open_db(db_path)) as db:
+        db.execute("UPDATE intake_connections SET status = 'ACTIVE', config_revision = 2 WHERE connection_id = 'linear'")
+
+    res_stale = dispatcher.sync_task_completed("task-99", summary="Delivered")
+    assert res_stale.ok is False
+    assert "Stale connection authorization" in res_stale.error
+    assert not mock_client.create_comment.called
+
+
+def test_ignore_queued_task_and_reactivate(tmp_path: Path, monkeypatch):
+    """P2 regression: confirm -> ignore -> reactivate must be reversible.
+    Ignoring a queued PENDING task sets it to CANCELLED, and reactivating it
+    must restore it to DRAFT without raising StateConflict("terminal task").
+    """
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.connectors.linear.connector import LinearConnector, register_linear_connection
+    from herdr.intake.worker import run_once
+    from herdr.intake.protocol import Scope
+    from herdr.intake.schema import initialize, open_db
+    from herdr.intake.store import EventStore
+    from contextlib import closing
+    db_path = tmp_path / "state.db"
+    initialize(db_path)
+
+    scope = Scope("tenant-test", "linear")
+    store = EventStore(db_path, scope, clock=lambda: 1000, verifier=lambda d: d.verified_via == "SIGNATURE", authorizer=lambda a, s: "admin")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+    conn_adapter = LinearConnector(store.scope, ORG_ID, SECRET)
+
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": {
+        "p": {"project_id": "proj-a", "workspace_id": "ws-a"}
+    }})
+
+    now_ms = int(time.time() * 1000)
+    raw = json.dumps(sample_issue_payload("create", "unstarted", issue_id="issue-reactivate-001", webhook_timestamp=now_ms)).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw, SECRET),
+        "Linear-Delivery": "del-reactivate-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery = conn_adapter.process_webhook(raw, headers, now_ms=now_ms)
+    store.accept_event(delivery)
+
+    policy = {"user_id": "operator", "project_id": "proj-a", "workspace_id": "ws-a", "auto_assign": True}
+    run_once(store, materialization=policy)
+
+    config = {"tenant_id": "tenant-test", "user_id": "operator", "connections": {"linear": {}}}
+    inbox = IntakeInbox(db_path, config)
+    item, = inbox.list_items()
+    task_id = item["task_id"]
+
+    # 1. Confirm -> PENDING
+    item_conf = inbox.change(item["link_id"], "confirm", item["revision"], dispatch=True)
+    assert item_conf["status"] == "CONFIRMED"
+    with closing(open_db(db_path)) as db:
+        t_row = db.execute("SELECT status FROM user_inbox_tasks WHERE id = ?", (task_id,)).fetchone()
+        assert t_row["status"] == "PENDING"
+
+    # 2. Ignore queued task -> task becomes CANCELLED, link becomes IGNORED
+    item_ign = inbox.change(item["link_id"], "ignore", item_conf["revision"])
+    assert item_ign["disposition"] == "IGNORED"
+
+    with closing(open_db(db_path)) as db:
+        t_row = db.execute("SELECT status FROM user_inbox_tasks WHERE id = ?", (task_id,)).fetchone()
+        assert t_row["status"] == "CANCELLED"
+
+    # 3. Reactivate ignored task -> must succeed, restoring task to DRAFT and link to UNASSIGNED
+    item_react = inbox.change(item["link_id"], "reactivate", item_ign["revision"])
+    assert item_react["disposition"] == "UNASSIGNED"
+    assert item_react["status"] == "PENDING_ASSIGNMENT"
+
+    with closing(open_db(db_path)) as db:
+        t_row2 = db.execute("SELECT status FROM user_inbox_tasks WHERE id = ?", (task_id,)).fetchone()
+        assert t_row2["status"] == "DRAFT"
+

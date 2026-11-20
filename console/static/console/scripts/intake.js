@@ -15,13 +15,33 @@ var {
   state, api, esc, openModal, closeModal, toast
 }){
 
-let intakeToken = '';
+const INBOX_TOKEN_STORAGE_KEY = 'haflow_intake_token';
+
+function getStoredToken(){
+  try{
+    return sessionStorage.getItem(INBOX_TOKEN_STORAGE_KEY) || '';
+  }catch(_){ return ''; }
+}
+
+function storeToken(token){
+  intakeToken = token || '';
+  try{
+    if(intakeToken){
+      sessionStorage.setItem(INBOX_TOKEN_STORAGE_KEY, intakeToken);
+    }else{
+      sessionStorage.removeItem(INBOX_TOKEN_STORAGE_KEY);
+    }
+  }catch(_){}
+}
+
+let intakeToken = getStoredToken();
 let intakeItems = [];
 let intakeLoad = 0;
 let intakeOffset = 0;
 const intakePageSize = 50;
 const intakeLabels = {
   DRAFT:'外部草稿', PENDING_ASSIGNMENT:'待分配', CONFIRMED:'已确认',
+  PENDING:'排队待执行', RUNNING:'正在执行', COMPLETED:'已完成', FAILED:'执行失败',
   IGNORED:'已忽略', SOURCE_CLOSED:'来源已关闭', SOURCE_CONFLICT:'来源信息冲突',
 };
 
@@ -59,7 +79,7 @@ async function fetchIntakeActiveItems(qParts, view, isReset){
     activeItems = await intakeRequest('?' + intakeQuery).catch(error => ({error:error.message}));
   }
   if(intakeRead !== intakeLoad) return;
-  if(activeItems?.error === 'intake_inbox_authentication_required') intakeToken = '';
+  if(activeItems?.error === 'intake_inbox_authentication_required') storeToken('');
   intakeItems = activeItems?.items || [];
   syncIntakeDetail();
 }
@@ -94,8 +114,12 @@ function renderIntakeCard(item){
   </article>`;
 }
 
-function renderIntakeCards(){
-  return intakeItems.map(renderIntakeCard).join('');
+function renderIntakeCards(existingTasks = []){
+  const existingIds = new Set((existingTasks || []).map(t => t.id));
+  return intakeItems
+    .filter(item => !item.task_id || !existingIds.has(item.task_id))
+    .map(renderIntakeCard)
+    .join('');
 }
 
 function renderIntakePagination(){
@@ -121,7 +145,7 @@ function getIntakeAuthButtonHtml(){
 
 function toggleIntakeAuth(onReload, onRender){
   if(intakeToken){
-    intakeToken = '';
+    storeToken('');
     intakeItems = [];
     closeModal();
     const detail = document.getElementById('intakeDetail');
@@ -147,7 +171,7 @@ function toggleIntakeAuth(onReload, onRender){
     try{
       const credential = field.value;
       await intakeRequest('?limit=1', {}, credential);
-      intakeToken = credential;
+      storeToken(credential);
       field.value = '';
       closeModal();
       if(typeof onReload === 'function') await onReload();
@@ -180,7 +204,9 @@ function showIntakeDetail(linkId, onReload){
     availableActions = [['assign','分配给我'],['ignore','忽略']];
   }else if(isLinked){
     if(item.status === 'DRAFT'){
-      availableActions = [['confirm','确认'],['unassign','撤销归属'],['ignore','忽略']];
+      availableActions = [['confirm','确认并排队'],['unassign','撤销归属'],['ignore','忽略']];
+    }else if(item.status === 'CONFIRMED'){
+      availableActions = [['dispatch','排队执行'],['unassign','撤销归属'],['ignore','忽略']];
     }else{
       availableActions = [['unassign','撤销归属'],['ignore','忽略']];
     }
@@ -227,7 +253,7 @@ function showIntakeDetail(linkId, onReload){
       })});
       closeModal();
       if(typeof onReload === 'function') await onReload();
-      if(action === 'confirm') toast('已确认外部任务');
+      if(action === 'confirm' || action === 'dispatch') toast('已确认外部任务并加入执行队列');
     }catch(error){
       const status = form.querySelector('[role=status]');
       status.textContent = '操作未保存。' + error.message;

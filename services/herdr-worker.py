@@ -116,8 +116,11 @@ def sanitize_clone_sandbox(clone, launch_identity=None):
     exclusions = ["-e", "/.herdr-launch-identity.json"] if launch_identity else []
     subprocess.run(["git", "-C", str(clone), "clean", "-fd",
                     *exclusions], capture_output=True, check=True)
-    from herdr.clone_archive import BYPASS_IGNORED_DIRS
-    for ignored in BYPASS_IGNORED_DIRS:
+    # Only purge out-of-band external indexers/daemons (e.g. .codegraph).
+    # Never delete project dependencies or build caches (node_modules, target, .venv)
+    # which are required for baseline measurement and task execution.
+    SANDBOX_PURGE_DIRS = frozenset({".codegraph"})
+    for ignored in SANDBOX_PURGE_DIRS:
         ignored_path = Path(clone) / ignored
         if ignored_path.is_dir() and not ignored_path.is_symlink():
             shutil.rmtree(ignored_path, ignore_errors=True)
@@ -211,6 +214,15 @@ def create_clone(source, task_id):
             f"[CLONE WARNING] {result.stderr.strip()}",
             file=sys.stderr
         )
+
+    # Ensure package manager dependencies (e.g. node_modules) are accessible in clone
+    source_nm = source / "node_modules"
+    clone_nm = clone / "node_modules"
+    if source_nm.is_dir() and not clone_nm.exists():
+        try:
+            clone_nm.symlink_to(source_nm, target_is_directory=True)
+        except OSError:
+            pass
 
     install_worker_sandbox_push_guard(clone)
     return clone
@@ -484,6 +496,22 @@ def measure_complexity_baseline(clone):
     _herdr_gate = _herdr_repo / "scripts" / "complexity-gate.cjs"
     if not _herdr_gate.is_file():
         return "disabled"
+
+    # Ensure node_modules is present; fallback to symlinking from origin if missing
+    _clone_nm = _herdr_repo / "node_modules"
+    if not _clone_nm.exists():
+        try:
+            origin_res = subprocess.run(
+                ["git", "-C", str(_herdr_repo), "remote", "get-url", "origin"],
+                capture_output=True, text=True
+            )
+            if origin_res.returncode == 0:
+                _src = Path(origin_res.stdout.strip())
+                if _src.is_dir() and (_src / "node_modules").is_dir():
+                    _clone_nm.symlink_to(_src / "node_modules", target_is_directory=True)
+        except Exception:
+            pass
+
     result = subprocess.run(
         [
             "node",

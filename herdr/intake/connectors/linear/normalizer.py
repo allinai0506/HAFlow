@@ -15,6 +15,10 @@ class UnsupportedEventTypeError(ValueError):
     """Raised when the webhook event payload type is not supported by this connector."""
 
 
+class BotEchoIgnoredError(UnsupportedEventTypeError):
+    """Raised when the webhook event was authored by HAFlow's bot user to prevent echo loops."""
+
+
 def _clean_str(value: str | None) -> str:
     if not value:
         return ""
@@ -41,14 +45,30 @@ def _parse_iso_ms(iso_str: str) -> int:
 class LinearNormalizer:
     """Normalizes and defends against external Linear Issue Webhook payload variations."""
 
-    def __init__(self, organization_id: str):
+    def __init__(self, organization_id: str, bot_user_ids: tuple[str, ...] | None = None):
         if not organization_id or not isinstance(organization_id, str):
             raise ValueError("organization_id must be a non-empty string")
         self.organization_id = organization_id
+        self.bot_user_ids = tuple(bot_user_ids or ())
 
     def normalize(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("payload must be a dictionary")
+
+        # Echo-loop detection: check if event actor is HAFlow's bot
+        actor = payload.get("actor")
+        if isinstance(actor, dict):
+            actor_id = str(actor.get("id") or "").strip()
+            actor_name = str(actor.get("name") or "").strip().lower()
+            actor_type = str(actor.get("type") or "").strip().lower()
+            if (
+                (actor_id and actor_id in self.bot_user_ids)
+                or actor_name in ("haflow", "haflow bot", "haflow-bot")
+                or (actor_type == "application" and "haflow" in actor_name)
+            ):
+                raise BotEchoIgnoredError(
+                    f"BOT_ECHO_IGNORED: event authored by bot actor '{actor_id or actor_name}', ignoring to prevent recursive loops"
+                )
 
         payload_type = str(payload.get("type") or "").strip()
         if payload_type != "Issue":

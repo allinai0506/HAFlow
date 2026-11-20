@@ -51,6 +51,7 @@ class LinearConnector:
         signing_secret: str,
         *,
         api_token: str | None = None,
+        bot_user_ids: tuple[str, ...] | None = None,
         max_skew_seconds: int = 60,
         config_revision: int = 1,
     ):
@@ -58,11 +59,12 @@ class LinearConnector:
         self.organization_id = organization_id
         self.signing_secret = signing_secret
         self.api_token = api_token
+        self.bot_user_ids = tuple(bot_user_ids or ())
         self.config_revision = config_revision
 
         self.verifier = LinearVerifier(signing_secret, max_skew_seconds=max_skew_seconds)
-        self.normalizer = LinearNormalizer(organization_id)
-        self.client = LinearClient(api_token) if api_token else None
+        self.normalizer = LinearNormalizer(organization_id, bot_user_ids=self.bot_user_ids)
+        self.client = LinearClient(api_token, bot_user_id=(self.bot_user_ids[0] if self.bot_user_ids else None)) if api_token else None
 
     @classmethod
     def manifest(cls):
