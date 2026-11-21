@@ -18,6 +18,7 @@ Contract under test (herdr/agent_router.choose_agent, requested="auto"):
    existing behavior, including the single-agent graceful fallback.
 """
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -37,6 +38,19 @@ class PreflightHardeningTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="herdr-router-preflight-")
         self.tmp_path = Path(self.tmp.name)
         self.pools_file = self.tmp_path / "agent-pools.json"
+        self.pools_file.write_text(
+            json.dumps({
+                "projects": {
+                    "test-proj": {
+                        "allowed_agents": ["claude", "codex", "grok", "opencode", "pi"],
+                        "disabled_agents": [],
+                        "stage_preferences": {},
+                        "task_type_preferences": {},
+                    }
+                }
+            }),
+            encoding="utf-8",
+        )
         self.reservations_file = self.tmp_path / "agent-reservations.json"
         self.lock_file = self.tmp_path / "agent-router.lock"
         self.db_path = self.tmp_path / "state.db"

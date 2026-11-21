@@ -54,26 +54,26 @@ class RouterRemediationExhausted(RouterRejectionError):
     pass
 
 
-DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok", "kimi"]
+DEFAULT_ALLOWED = ["claude", "codex", "grok"]
 
 DEFAULT_STAGE_PREFERENCES = {
-    "requirements": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
-    "plan": ["claude", "qodercli", "codex", "opencode", "agy", "pi", "grok", "kimi"],
-    "implementation": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
-    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "review": ["claude", "codex", "qodercli", "opencode", "agy", "pi", "grok", "kimi"],
-    "wrapup": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
+    "requirements": ["claude", "codex", "grok"],
+    "plan": ["claude", "codex", "grok"],
+    "implementation": ["claude", "codex", "grok"],
+    "test": ["codex", "claude", "grok"],
+    "review": ["claude", "codex", "grok"],
+    "wrapup": ["claude", "codex", "grok"],
 }
 
 DEFAULT_TASK_TYPE_PREFERENCES = {
-    "feat": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
-    "fix": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
-    "refactor": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "docs": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
-    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "chore": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "perf": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "ci": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
+    "feat": ["claude", "codex", "grok"],
+    "fix": ["claude", "codex", "grok"],
+    "refactor": ["codex", "claude", "grok"],
+    "docs": ["claude", "codex", "grok"],
+    "test": ["codex", "claude", "grok"],
+    "chore": ["codex", "claude", "grok"],
+    "perf": ["codex", "claude", "grok"],
+    "ci": ["codex", "claude", "grok"],
 }
 
 # Preflight 快照保鲜期:超过该秒数的 healthy_agents 名单不再被信任为

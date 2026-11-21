@@ -44,7 +44,7 @@ class TestCodeCraftV1Template(unittest.TestCase):
         policy = test_node.get("agent_policy", {})
         self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertEqual(policy.get("exclude_stage_agents"), ["craft"])
-        self.assertTrue(policy.get("allow_soft_degrade"))
+        self.assertFalse(policy.get("allow_soft_degrade"))
 
     def test_cleanroom_review_node_spec(self):
         review_node = self.node_map["cleanroom_review"]
@@ -57,7 +57,7 @@ class TestCodeCraftV1Template(unittest.TestCase):
         policy = review_node.get("agent_policy", {})
         self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertEqual(policy.get("exclude_stage_agents"), ["craft"])
-        self.assertTrue(policy.get("allow_soft_degrade"))
+        self.assertFalse(policy.get("allow_soft_degrade"))
 
     def test_wrapup_node_spec(self):
         wrapup = self.node_map["wrapup"]

@@ -92,6 +92,7 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertFalse(node.get("parallel"))
         self.assertEqual(policy.get("exclude_stage_agents"), ["implementation", "wrapup"])
+        self.assertIs(policy.get("allow_soft_degrade"), False)
 
     def test_review_stage_exclusion_and_single_pane(self):
         node = self.node_map["review"]
@@ -99,6 +100,7 @@ class TestSoftwareDevelopmentV1Template(unittest.TestCase):
         self.assertEqual(policy.get("max_concurrency"), 1)
         self.assertFalse(node.get("parallel"))
         self.assertEqual(policy.get("exclude_stage_agents"), ["implementation", "wrapup"])
+        self.assertIs(policy.get("allow_soft_degrade"), False)
 
     def test_wrapup_stage_exclusion_and_single_pane(self):
         node = self.node_map["wrapup"]
