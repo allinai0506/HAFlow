@@ -11,6 +11,21 @@ def enqueue_stage_advance(ports, task):
     if workflow_id:
         ports.check_workflow_stage_advance(workflow_id)
 
+def _resolve_candidate_node(workflow_cfg):
+    """Resolve the code-producing node id from workflow_cfg without hardcoding."""
+    if isinstance(workflow_cfg, dict):
+        explicit = str(workflow_cfg.get("candidate_node") or "").strip()
+        if explicit:
+            return explicit
+        nodes = workflow_cfg.get("nodes") or []
+        if any(isinstance(n, dict) and n.get("id") == "implementation" for n in nodes):
+            return "implementation"
+        for n in nodes:
+            if isinstance(n, dict) and n.get("default_integration_mode") == "git" and n.get("id"):
+                return str(n["id"])
+    return "implementation"
+
+
 def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
     """Freeze the current candidate and, on a real rotation, plan re-verification.
 
@@ -35,8 +50,9 @@ def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
     """
     if ports.scheduler_core is None or ports.scheduler_facts_store is None:
         return "", False
-    if not ports.is_node_complete(workflow_id, "implementation"):
-        # Not our business yet: the candidate is frozen when implementation
+    candidate_node = _resolve_candidate_node(workflow_cfg)
+    if not ports.is_node_complete(workflow_id, candidate_node):
+        # Not our business yet: the candidate is frozen when candidate_node
         # completes, not before. Reporting a deferral here would stall a
         # workflow that has not reached the point where a candidate exists.
         return "", False
@@ -47,7 +63,7 @@ def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
         # identity gap, so keep the legacy behaviour rather than deadlocking.
         return "", False
     frozen_sha = ports._scheduler_freeze_candidate(
-        workflow_id, project_root, "implementation", ["implementation"])
+        workflow_id, project_root, candidate_node, [candidate_node])
     if not frozen_sha:
         return "", True
     rotated_from = ports._scheduler_previous_candidate_sha(workflow_id)

@@ -1293,6 +1293,19 @@ def _record_canary_error_best_effort(shadow_ctx, decided_at, error, selected):
         pass
 
 
+def has_heterogeneous_candidates(workflow_cfg, project_id, healthy_agents=None):
+    """Return (ok, reason) verifying at least 2 distinct agent families exist before launch (W6)."""
+    if not isinstance(workflow_cfg, dict) or not workflow_cfg.get("require_heterogeneous"):
+        return True, ""
+    pool = load_pools().get("projects", {}).get(project_id) or default_pool()
+    allowed = set(pool.get("allowed_agents") or DEFAULT_ALLOWED) - set(pool.get("disabled_agents") or [])
+    if healthy_agents is not None:
+        allowed &= set(healthy_agents)
+    if len(allowed) < 2:
+        return False, f"异构预检失败：需要至少 2 个可用 Agent，当前仅剩 {sorted(allowed)}"
+    return True, ""
+
+
 def choose_agent(
     workflow_id,
     stage,

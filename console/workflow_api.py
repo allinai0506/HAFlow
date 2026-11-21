@@ -45,7 +45,7 @@ def _derive_template_category(tid: str, data: dict):
         if not slug or len(slug) < 2:
             slug = 'cat_' + hashlib.md5(cat_raw.encode('utf-8')).hexdigest()[:8]
         return slug, cat_raw
-    if tid in ('software-development-v1', 'code-craft-v1'):
+    if tid in ('software-development-v1', 'code-craft-v1', 'triad-dev-v1'):
         return 'eng', '💻 软件研发'
     if tid in ('bidding', 'business-research-v1'):
         return 'biz', '📊 商务咨询'
