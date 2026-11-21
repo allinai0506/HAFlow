@@ -83,6 +83,8 @@ class TestTriadDevV1Engine(unittest.TestCase):
             self.assertEqual(saved["stage_verdict"], "pass")
             self.assertEqual(saved["role"], "test")
             self.assertEqual(saved["candidate_sha"], sha)
+            from herdr.business_gate import business_gates_blockers
+            self.assertEqual(business_gates_blockers(store, store.get_workflow("wf-tool-1"), [saved], {"gate"}), [])
 
     def test_stage_delivery_dispatches_tool_node_without_blocking(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -189,7 +189,6 @@ def run_tool_gate(
         "dispatch_role": "test",
         "agent": "tool",
         "status": "completed",
-        "completion_protocol": "receipt-v1",
         "candidate_sha": candidate_sha,
         "verified_candidate_sha": candidate_sha,
         "execution_id": workflow.get("execution_id"),
