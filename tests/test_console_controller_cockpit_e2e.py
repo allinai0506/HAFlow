@@ -146,6 +146,8 @@ def browser(script, *, page_label):
             or "CdpRequestTimeoutError" in output
             or "PageNavigationTimeoutError" in output
             or "page.goto timed out" in output
+            or "waitForFunction timed out" in output
+            or "waitForFunctionTimeoutError" in output
         ) and attempt < 2:
             time.sleep(1.0)
             continue
@@ -235,13 +237,14 @@ def cockpit(tmp_path, monkeypatch):
         yield SimpleNamespace(store=store, url=url, read=read, effects=effects, artifacts=tmp_path,
                               browser=lambda script: browser(script, page_label=page_label))
     finally:
-        try:
-            if page_label is not None:
+        if page_label is not None:
+            try:
                 browser("await page.close();", page_label=page_label)
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
+            except Exception:
+                pass
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def open_cockpit(fixture, wid="wf-e2e"):
@@ -550,6 +553,7 @@ def test_force_pass_advance_failure_is_durable_partial_without_repeat(cockpit):
             return await response.json();
         }},{json.dumps(request)})));
         await page.evaluate(()=>loadControllerCockpit({json.dumps(wid)}));
+        await page.waitForFunction(()=>document.getElementById('controllerTabView')?.innerText?.includes('部分生效'),undefined,{{timeout:15000}});
         console.log(await page.evaluate(()=>document.getElementById('controllerTabView').innerText));
     """)
     assert '"status":"partial"' in out
