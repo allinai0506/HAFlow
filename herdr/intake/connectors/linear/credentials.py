@@ -161,13 +161,10 @@ def resolve_signing_secret(
             f"AUTH_REF_MISMATCH: connection requires authorized auth_ref '{auth_ref}', but loaded credential has no matching reference"
         )
 
-    # 6. Protected credentials file fallback
+    # 6. Protected credentials file fallback (strictly bound to auth_ref)
     for fname in (
         f"linear_webhook_{sanitized_ref.lower()}.secret",
-        f"linear_{sanitized_ref.lower()}.secret",
         f"linear_webhook_{auth_ref.lower()}.secret",
-        f"linear_{auth_ref.lower()}.secret",
-        "linear_webhook_secret",
     ):
         file_val = _read_credentials_file(fname)
         if file_val:
@@ -232,14 +229,12 @@ def resolve_api_token(
             f"AUTH_REF_MISMATCH: connection requires authorized auth_ref '{auth_ref}', but loaded token has no matching reference"
         )
 
-    # Protected credentials file fallback
+    # Protected credentials file fallback (strictly bound to auth_ref)
     for fname in (
         f"linear_{sanitized_ref.lower()}.token",
         f"linear_{sanitized_ref.lower()}.key",
         f"linear_{auth_ref.lower()}.token",
         f"linear_{auth_ref.lower()}.key",
-        "linear_api_token",
-        "linear_api_key",
     ):
         file_val = _read_credentials_file(fname)
         if file_val:

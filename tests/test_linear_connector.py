@@ -1629,9 +1629,15 @@ def test_credentials_resolve_api_token(monkeypatch, tmp_path):
     assert resolve_api_token("linear-prod-v2") == "lin_api_generic_key_999"
     monkeypatch.delenv("LINEAR_API_KEY")
 
-    # 3c. Protected credentials file resolution
+    # 3c. Protected credentials file resolution (must be qualified by auth_ref)
     cred_dir = tmp_path / "herdr-controller" / "credentials"
     cred_dir.mkdir(parents=True, exist_ok=True)
+    # Unqualified token file must NOT resolve
+    (cred_dir / "linear_api_token").write_text("lin_api_unqualified_777\n")
+    with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
+        resolve_api_token("linear-prod-v2")
+    (cred_dir / "linear_api_token").unlink()
+
     (cred_dir / "linear_linear_prod_v2.token").write_text("lin_api_file_token_333\n")
     assert resolve_api_token("linear-prod-v2") == "lin_api_file_token_333"
     (cred_dir / "linear_linear_prod_v2.token").unlink()
@@ -1640,6 +1646,44 @@ def test_credentials_resolve_api_token(monkeypatch, tmp_path):
     assert resolve_api_token("linear-prod-v2", loaded_token="lin_api_direct", loaded_auth_ref="linear-prod-v2") == "lin_api_direct"
     with pytest.raises(SecretResolutionError, match="AUTH_REF_MISMATCH"):
         resolve_api_token("linear-prod-v2", loaded_token="lin_api_direct", loaded_auth_ref="linear-other-ref")
+
+
+def test_credentials_signing_secret_file_bound_to_auth_ref(monkeypatch, tmp_path):
+    """Verify that protected credentials secret file is strictly bound to auth_ref (P1)."""
+    from herdr.intake.connectors.linear.credentials import (
+        SecretResolutionError,
+        clear_secret_registry,
+        resolve_signing_secret,
+    )
+
+    clear_secret_registry()
+    monkeypatch.setenv("HERDR_CONTROLLER_DIR", str(tmp_path / "herdr-controller"))
+    for k in (
+        "HAFLOW_INTAKE_SECRET_LINEAR_NEW_V3",
+        "LINEAR_WEBHOOK_SECRET_LINEAR_NEW_V3",
+        "LINEAR_WEBHOOK_SECRET",
+        "LINEAR_WEBHOOK_SECRET_REF",
+    ):
+        monkeypatch.delenv(k, raising=False)
+
+    cred_dir = tmp_path / "herdr-controller" / "credentials"
+    cred_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Unqualified secret file must NOT resolve for linear-new-v3 (Fail closed)
+    (cred_dir / "linear_webhook_secret").write_text("old-unqualified-secret\n")
+    with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
+        resolve_signing_secret("linear-new-v3")
+    (cred_dir / "linear_webhook_secret").unlink()
+
+    # 2. Secret file for another ref (linear-prod-v1) must NOT resolve for linear-new-v3
+    (cred_dir / "linear_webhook_linear_prod_v1.secret").write_text("v1-secret\n")
+    with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
+        resolve_signing_secret("linear-new-v3")
+    (cred_dir / "linear_webhook_linear_prod_v1.secret").unlink()
+
+    # 3. Explicit matching secret file resolves successfully
+    (cred_dir / "linear_webhook_linear_new_v3.secret").write_text("v3-secret\n")
+    assert resolve_signing_secret("linear-new-v3") == "v3-secret"
 
 
 def test_echo_loop_detection_and_drop(tmp_path):

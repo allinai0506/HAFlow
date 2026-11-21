@@ -193,3 +193,69 @@ def test_close_unknown_workflow_exits_before_resource_operations():
         )
     assert error.value.code == 1
     assert calls == []
+
+
+def test_close_workflow_owned_dry_run_skips_inbox_reconciliation(monkeypatch):
+    """Verify that dry_run close (both empty and non-empty tasks) never triggers inbox reconciliation (P2)."""
+    from unittest.mock import MagicMock
+    from herdr.task_cli_workflow_close import close_workflow_owned
+
+    mock_reconcile = MagicMock()
+    monkeypatch.setattr(
+        "herdr.inbox.dispatcher.InboxDispatcher.reconcile_running_tasks",
+        mock_reconcile,
+    )
+
+    class MockStore:
+        db_path = "/tmp/fake.db"
+
+        def get_workflow(self, wid):
+            return {"status": "running"}
+
+    store = MockStore()
+
+    # 1. Empty tasks + dry_run=True -> must NOT call reconcile_running_tasks
+    rep_empty = close_workflow_owned(
+        "wf-empty",
+        dry_run=True,
+        load_tasks=lambda: {"tasks": []},
+        load_workflow_entry=lambda wid: ({"status": "running"}, []),
+        get_store=lambda: store,
+        finalize_one=lambda *a, **k: None,
+        close_pane=lambda *a: None,
+        stage_reset=lambda *a: None,
+        mark_workflow_completed=lambda *a, **k: None,
+        workflow_stage_tabs=lambda *a: [],
+        live_workspace_panes=lambda *a: [],
+        foreign_panes_in_tab=lambda *a: [],
+        close_owned_pane=lambda *a: False,
+        teardown_output_guard=lambda *a: {},
+        record_output_retention=lambda *a, **k: None,
+        clone_root="/tmp",
+        teardown_blocking_statuses=set(),
+    )
+    assert rep_empty["dry_run"] is True
+    assert mock_reconcile.call_count == 0
+
+    # 2. Empty tasks + dry_run=False -> MUST call reconcile_running_tasks
+    rep_real = close_workflow_owned(
+        "wf-empty",
+        dry_run=False,
+        load_tasks=lambda: {"tasks": []},
+        load_workflow_entry=lambda wid: ({"status": "running"}, []),
+        get_store=lambda: store,
+        finalize_one=lambda *a, **k: None,
+        close_pane=lambda *a: None,
+        stage_reset=lambda *a: None,
+        mark_workflow_completed=lambda *a, **k: None,
+        workflow_stage_tabs=lambda *a: [],
+        live_workspace_panes=lambda *a: [],
+        foreign_panes_in_tab=lambda *a: [],
+        close_owned_pane=lambda *a: False,
+        teardown_output_guard=lambda *a: {},
+        record_output_retention=lambda *a, **k: None,
+        clone_root="/tmp",
+        teardown_blocking_statuses=set(),
+    )
+    assert rep_real["dry_run"] is False
+    assert mock_reconcile.call_count == 1
