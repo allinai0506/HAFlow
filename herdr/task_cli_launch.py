@@ -390,6 +390,7 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
         "failure_detail": detail,
         "actionable": True,
         "pane_dispatched": False,
+        "launch_not_started": True,
         "created_at": timestamp,
         "updated_at": timestamp,
         "status_history": [{
@@ -450,6 +451,7 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
         ),
         "actionable": True,
         "pane_dispatched": False,
+        "launch_not_started": True,
         "remediation": remediation or (
             "add an eligible Agent or explicitly opt out with "
             "--allow-reuse-implementation-agents --reuse-reason"
