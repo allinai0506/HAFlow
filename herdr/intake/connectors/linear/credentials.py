@@ -2,6 +2,7 @@
 
 import os
 import re
+from pathlib import Path
 from typing import Callable
 
 CANONICAL_AUTH_REF_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -24,6 +25,21 @@ def validate_canonical_auth_ref(auth_ref: str) -> str:
 
 class SecretResolutionError(ValueError):
     """Raised when the webhook signing secret for an authorized auth_ref cannot be resolved or is mismatched."""
+
+
+def _read_credentials_file(filename: str) -> str | None:
+    """Read a credential token/secret from the protected credentials directory."""
+    try:
+        base = os.environ.get("HERDR_CONTROLLER_DIR")
+        cred_dir = Path(base) / "credentials" if base else (Path.home() / ".herdr-controller" / "credentials")
+        path = cred_dir / filename
+        if path.is_file():
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                return content
+    except Exception:
+        pass
+    return None
 
 
 # In-memory registry for programmatic secret injection and testing
@@ -145,6 +161,15 @@ def resolve_signing_secret(
             f"AUTH_REF_MISMATCH: connection requires authorized auth_ref '{auth_ref}', but loaded credential has no matching reference"
         )
 
+    # 6. Protected credentials file fallback (strictly bound to auth_ref)
+    for fname in (
+        f"linear_webhook_{sanitized_ref.lower()}.secret",
+        f"linear_webhook_{auth_ref.lower()}.secret",
+    ):
+        file_val = _read_credentials_file(fname)
+        if file_val:
+            return file_val
+
     raise SecretResolutionError(
         f"CREDENTIAL_UNRESOLVED: cannot resolve signing secret for auth_ref '{auth_ref}'"
     )
@@ -182,8 +207,10 @@ def resolve_api_token(
     env_keys = [
         f"HAFLOW_INTAKE_TOKEN_{sanitized_ref}",
         f"LINEAR_API_TOKEN_{sanitized_ref}",
+        f"LINEAR_API_KEY_{sanitized_ref}",
         "HAFLOW_LINEAR_API_TOKEN",
         "LINEAR_API_TOKEN",
+        "LINEAR_API_KEY",
     ]
     for key in env_keys:
         val = os.environ.get(key)
@@ -201,6 +228,17 @@ def resolve_api_token(
         raise SecretResolutionError(
             f"AUTH_REF_MISMATCH: connection requires authorized auth_ref '{auth_ref}', but loaded token has no matching reference"
         )
+
+    # Protected credentials file fallback (strictly bound to auth_ref)
+    for fname in (
+        f"linear_{sanitized_ref.lower()}.token",
+        f"linear_{sanitized_ref.lower()}.key",
+        f"linear_{auth_ref.lower()}.token",
+        f"linear_{auth_ref.lower()}.key",
+    ):
+        file_val = _read_credentials_file(fname)
+        if file_val:
+            return file_val
 
     raise SecretResolutionError(
         f"CREDENTIAL_UNRESOLVED: cannot resolve Linear API token for auth_ref '{auth_ref}'"

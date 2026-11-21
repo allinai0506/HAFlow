@@ -312,6 +312,7 @@ class InboxStore:
         workflow_id: Optional[str] = None,
         worker_id: Optional[str] = None,
         lease_expires_at: Optional[float] = None,
+        summary: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Atomically transition task status with strict validation."""
         target = str(new_status).upper()
@@ -364,7 +365,10 @@ class InboxStore:
             if target in ("COMPLETED", "FAILED") and row["source_type"] == "active_intake":
                 try:
                     from herdr.intake.connectors.linear.sync import dispatch_linear_sync_on_task_status
-                    dispatch_linear_sync_on_task_status(Path(self.db_path), task_id, target, error=error)
+                    kwargs: Dict[str, Any] = {"error": error}
+                    if summary is not None:
+                        kwargs["summary"] = summary
+                    dispatch_linear_sync_on_task_status(Path(self.db_path), task_id, target, **kwargs)
                 except Exception:
                     pass
             return res_task

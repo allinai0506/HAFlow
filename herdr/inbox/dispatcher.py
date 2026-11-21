@@ -645,6 +645,12 @@ class InboxDispatcher:
                                     (new_st, target_workflow_id, err, now, now, task_id, fencing_token),
                                 )
                                 conn.commit()
+                                if cur.rowcount > 0 and t.get("source_type") == "active_intake":
+                                    try:
+                                        from herdr.intake.connectors.linear.sync import dispatch_linear_sync_on_task_status
+                                        dispatch_linear_sync_on_task_status(Path(self.db_path), task_id, new_st, error=err)
+                                    except Exception:
+                                        pass
                                 return self.store.get_task(task_id)
 
                         # Workflow was never registered in DB: true startup failure, requeue or fail
@@ -660,6 +666,13 @@ class InboxDispatcher:
                                 """,
                                 (f"Launch failed permanently ({current_attempts}/{max_attempts}): {err_msg}", now, now, task_id, fencing_token),
                             )
+                            conn.commit()
+                            if t.get("source_type") == "active_intake":
+                                try:
+                                    from herdr.intake.connectors.linear.sync import dispatch_linear_sync_on_task_status
+                                    dispatch_linear_sync_on_task_status(Path(self.db_path), task_id, "FAILED", error=f"Launch failed permanently ({current_attempts}/{max_attempts}): {err_msg}")
+                                except Exception:
+                                    pass
                         else:
                             conn.execute(
                                 """
@@ -760,11 +773,24 @@ class InboxDispatcher:
                     )
                     reconciled.append(updated)
                 else:
+                    summary_text = None
+                    if wf:
+                        summary_text = wf.get("summary") or wf.get("delivery_summary")
+                        if not summary_text:
+                            meta = wf.get("metadata") or {}
+                            if isinstance(meta, str):
+                                try:
+                                    meta = json.loads(meta)
+                                except Exception:
+                                    meta = {}
+                            if isinstance(meta, dict):
+                                summary_text = meta.get("summary") or meta.get("delivery_summary")
                     # Workflow verified complete and successful -> update inbox task to COMPLETED
                     updated = self.store.update_task_status(
                         task_id=t["id"],
                         new_status="COMPLETED",
                         expected_status=cur_status,
+                        summary=summary_text,
                     )
                     reconciled.append(updated)
             elif wf_status in ("failed", "cancelled", "halted", "abandoned"):
@@ -816,6 +842,7 @@ class InboxDispatcher:
         workflow rather than resetting to PENDING and causing duplicate runs (P1-02).
         """
         recovered_ids = []
+        outbound_syncs: List[Tuple[str, str, Optional[str]]] = []
         now = time.time()
         from herdr.state_db import get_workflow
         conn = self._conn()
@@ -880,6 +907,8 @@ class InboxDispatcher:
                             (new_st, err, now, now, tid),
                         )
                         recovered_ids.append(tid)
+                        if r.get("source_type") == "active_intake":
+                            outbound_syncs.append((tid, new_st, err))
                         continue
 
                 # Workflow not created yet in DB: worker crashed before launching
@@ -893,6 +922,8 @@ class InboxDispatcher:
                         """,
                         (now, now, tid),
                     )
+                    if r.get("source_type") == "active_intake":
+                        outbound_syncs.append((tid, "FAILED", "Claim lease expired after maximum retries"))
                 else:
                     conn.execute(
                         """
@@ -911,6 +942,13 @@ class InboxDispatcher:
             raise
         finally:
             conn.close()
+
+        for tid, st, err in outbound_syncs:
+            try:
+                from herdr.intake.connectors.linear.sync import dispatch_linear_sync_on_task_status
+                dispatch_linear_sync_on_task_status(Path(self.db_path), tid, st, error=err)
+            except Exception:
+                pass
 
         recovered = []
         for tid in recovered_ids:

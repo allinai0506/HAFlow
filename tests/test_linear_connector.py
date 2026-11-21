@@ -1580,7 +1580,7 @@ def test_linear_client_states_and_mutations():
         assert args[1] == {"input": {"issueId": "issue-123", "body": "Hello Linear"}}
 
 
-def test_credentials_resolve_api_token(monkeypatch):
+def test_credentials_resolve_api_token(monkeypatch, tmp_path):
     """Verify Linear API token resolution rules, memory registry, and fail-closed security."""
     from herdr.intake.connectors.linear.credentials import (
         SecretResolutionError,
@@ -1591,6 +1591,17 @@ def test_credentials_resolve_api_token(monkeypatch):
     )
 
     clear_token_registry()
+    monkeypatch.setenv("HERDR_CONTROLLER_DIR", str(tmp_path / "herdr-controller"))
+    for k in (
+        "HAFLOW_INTAKE_TOKEN_LINEAR_PROD_V2",
+        "LINEAR_API_TOKEN_LINEAR_PROD_V2",
+        "LINEAR_API_KEY_LINEAR_PROD_V2",
+        "HAFLOW_LINEAR_API_TOKEN",
+        "LINEAR_API_TOKEN",
+        "LINEAR_API_KEY",
+        "LINEAR_API_TOKEN_REF",
+    ):
+        monkeypatch.delenv(k, raising=False)
 
     # 1. Rejects invalid auth_ref
     with pytest.raises(SecretResolutionError, match="DISALLOWED_DEFAULT_AUTH_REF"):
@@ -1604,14 +1615,75 @@ def test_credentials_resolve_api_token(monkeypatch):
     with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
         resolve_api_token("linear-prod-v2")
 
-    # 3. Environment variable lookup
+    # 3. Environment variable lookup (auth_ref specific token)
     monkeypatch.setenv("HAFLOW_INTAKE_TOKEN_LINEAR_PROD_V2", "lin_api_env_token_456")
     assert resolve_api_token("linear-prod-v2") == "lin_api_env_token_456"
+    monkeypatch.delenv("HAFLOW_INTAKE_TOKEN_LINEAR_PROD_V2")
+
+    # 3b. Environment variable lookup (auth_ref specific key and generic key)
+    monkeypatch.setenv("LINEAR_API_KEY_LINEAR_PROD_V2", "lin_api_specific_key_789")
+    assert resolve_api_token("linear-prod-v2") == "lin_api_specific_key_789"
+    monkeypatch.delenv("LINEAR_API_KEY_LINEAR_PROD_V2")
+
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_generic_key_999")
+    assert resolve_api_token("linear-prod-v2") == "lin_api_generic_key_999"
+    monkeypatch.delenv("LINEAR_API_KEY")
+
+    # 3c. Protected credentials file resolution (must be qualified by auth_ref)
+    cred_dir = tmp_path / "herdr-controller" / "credentials"
+    cred_dir.mkdir(parents=True, exist_ok=True)
+    # Unqualified token file must NOT resolve
+    (cred_dir / "linear_api_token").write_text("lin_api_unqualified_777\n")
+    with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
+        resolve_api_token("linear-prod-v2")
+    (cred_dir / "linear_api_token").unlink()
+
+    (cred_dir / "linear_linear_prod_v2.token").write_text("lin_api_file_token_333\n")
+    assert resolve_api_token("linear-prod-v2") == "lin_api_file_token_333"
+    (cred_dir / "linear_linear_prod_v2.token").unlink()
 
     # 4. Explicit loaded token with ref check
     assert resolve_api_token("linear-prod-v2", loaded_token="lin_api_direct", loaded_auth_ref="linear-prod-v2") == "lin_api_direct"
     with pytest.raises(SecretResolutionError, match="AUTH_REF_MISMATCH"):
         resolve_api_token("linear-prod-v2", loaded_token="lin_api_direct", loaded_auth_ref="linear-other-ref")
+
+
+def test_credentials_signing_secret_file_bound_to_auth_ref(monkeypatch, tmp_path):
+    """Verify that protected credentials secret file is strictly bound to auth_ref (P1)."""
+    from herdr.intake.connectors.linear.credentials import (
+        SecretResolutionError,
+        clear_secret_registry,
+        resolve_signing_secret,
+    )
+
+    clear_secret_registry()
+    monkeypatch.setenv("HERDR_CONTROLLER_DIR", str(tmp_path / "herdr-controller"))
+    for k in (
+        "HAFLOW_INTAKE_SECRET_LINEAR_NEW_V3",
+        "LINEAR_WEBHOOK_SECRET_LINEAR_NEW_V3",
+        "LINEAR_WEBHOOK_SECRET",
+        "LINEAR_WEBHOOK_SECRET_REF",
+    ):
+        monkeypatch.delenv(k, raising=False)
+
+    cred_dir = tmp_path / "herdr-controller" / "credentials"
+    cred_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Unqualified secret file must NOT resolve for linear-new-v3 (Fail closed)
+    (cred_dir / "linear_webhook_secret").write_text("old-unqualified-secret\n")
+    with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
+        resolve_signing_secret("linear-new-v3")
+    (cred_dir / "linear_webhook_secret").unlink()
+
+    # 2. Secret file for another ref (linear-prod-v1) must NOT resolve for linear-new-v3
+    (cred_dir / "linear_webhook_linear_prod_v1.secret").write_text("v1-secret\n")
+    with pytest.raises(SecretResolutionError, match="CREDENTIAL_UNRESOLVED"):
+        resolve_signing_secret("linear-new-v3")
+    (cred_dir / "linear_webhook_linear_prod_v1.secret").unlink()
+
+    # 3. Explicit matching secret file resolves successfully
+    (cred_dir / "linear_webhook_linear_new_v3.secret").write_text("v3-secret\n")
+    assert resolve_signing_secret("linear-new-v3") == "v3-secret"
 
 
 def test_echo_loop_detection_and_drop(tmp_path):
@@ -1811,8 +1883,6 @@ def test_lifecycle_hooks_trigger_linear_sync(tmp_path, monkeypatch):
         mock_status_sync.assert_called_once_with(
             Path(db_path), tid, "COMPLETED", error=None
         )
-
-
 def test_confirmed_intake_task_dispatch_and_execution_bridge(tmp_path, monkeypatch):
     """Phase 3: Confirmed intake tasks can be dispatched to PENDING and claimed by InboxDispatcher."""
     import sqlite3
@@ -2204,3 +2274,132 @@ def test_ignore_queued_task_and_reactivate(tmp_path: Path, monkeypatch):
         t_row2 = db.execute("SELECT status FROM user_inbox_tasks WHERE id = ?", (task_id,)).fetchone()
         assert t_row2["status"] == "DRAFT"
 
+
+def test_workflow_close_triggers_inbox_reconciliation_and_linear_sync(tmp_path, monkeypatch):
+    """Verify that completing a workflow immediately reconciles RUNNING intake tasks and triggers Linear sync."""
+    from herdr.intake.connectors.linear.connector import LinearConnector, register_linear_connection
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.inbox.store import InboxStore
+    from herdr.state_store import SQLiteStateStore
+    from herdr.intake.worker import run_once
+    from herdr.task_cli_workflow_close import mark_workflow_completed
+
+    db_path = tmp_path / "wf_close_sync.db"
+    initialize(db_path)
+
+    registry = {"a": {"project_id": "proj-a", "workspace_id": "ws-a"}}
+    monkeypatch.setattr("herdr.intake.materializer.load_projects", lambda: {"projects": registry})
+
+    store = EventStore(db_path, Scope("tenant-test", "linear"), authorizer=lambda a, s: "admin", verifier=lambda d: d.verified_via == "SIGNATURE")
+    register_linear_connection(store, instance=ORG_ID, auth_ref="linear-prod-v1")
+    conn = LinearConnector(store.scope, ORG_ID, SECRET)
+
+    now_ms = int(time.time() * 1000)
+    raw = json.dumps(sample_issue_payload("create", "unstarted", issue_id="hook-issue-wf-1", webhook_timestamp=now_ms)).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw, SECRET),
+        "Linear-Delivery": "delivery-hook-wf-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    delivery = conn.process_webhook(raw, headers, now_ms=now_ms)
+    store.accept_event(delivery)
+    run_once(store, materialization={"user_id": "operator", "auto_assign": True, "project_id": "proj-a", "workspace_id": "ws-a"})
+
+    config = {"tenant_id": "tenant-test", "user_id": "operator", "connections": {"linear": {}}}
+    inbox = IntakeInbox(db_path, config)
+    item, = inbox.list_items()
+
+    # Confirm item with dispatch=True to transition inbox task to PENDING
+    inbox.change(item["link_id"], "confirm", item["revision"], dispatch=True)
+
+    # Create underlying state store and workflow
+    state_store = SQLiteStateStore(db_path)
+    wf_id = "wf_ibx_test_close"
+    state_store.register_workflow({
+        "workflow_id": wf_id,
+        "project_id": "proj-a",
+        "workspace_id": "ws-a",
+        "config": {"name": "test-wf"},
+        "status": "running",
+    })
+
+    inbox_store = InboxStore(db_path=Path(db_path))
+    tid = item["task_id"]
+    inbox_store.update_task_status(tid, "CLAIMED", worker_id="w-1")
+    inbox_store.update_task_status(tid, "RUNNING", workflow_id=wf_id)
+
+    # Mock dispatch_linear_sync_on_task_status
+    with patch("herdr.intake.connectors.linear.sync.dispatch_linear_sync_on_task_status") as mock_status_sync:
+        # Mark workflow completed via close deps
+        deps = {
+            "get_store": lambda: state_store,
+            "load_workflow_entry": lambda wid: (state_store.get_workflow(wid), None),
+            "now": lambda: "2026-11-21T12:00:00Z",
+            "sync_workflows_projection": lambda **kw: None,
+            "workflows_file": None,
+        }
+        mark_workflow_completed(wf_id, outcome="delivered", force=False, deps=deps)
+
+        # Verify task transitioned to COMPLETED
+        updated_task = inbox_store.get_task(tid)
+        assert updated_task["status"] == "COMPLETED"
+
+        # Verify Linear status sync was triggered
+        mock_status_sync.assert_called_once_with(
+            Path(db_path), tid, "COMPLETED", error=None
+        )
+
+
+def test_reconcile_running_tasks_forwards_decoded_workflow_summary(tmp_path):
+    """Verify that reconcile_running_tasks reads summary from decoded workflow fields and forwards to Linear sync (P2)."""
+    from herdr.state_store import SQLiteStateStore
+    from herdr.inbox.store import InboxStore
+    from herdr.inbox.dispatcher import InboxDispatcher
+
+    db_path = tmp_path / "summary_test.db"
+    initialize(db_path)
+
+    state_store = SQLiteStateStore(db_path)
+    wf_id = "wf_sum_001"
+    state_store.register_workflow({
+        "workflow_id": wf_id,
+        "project_id": "proj-a",
+        "workspace_id": "ws-a",
+        "config": {"name": "sum-wf"},
+        "status": "running",
+    })
+
+    inbox_store = InboxStore(db_path=Path(db_path))
+    task = inbox_store.create_task(
+        title="Active Intake Task",
+        instruction="Do something",
+        project_id="proj-a",
+        workspace_id="ws-a",
+        source_type="active_intake",
+        source_id="link-123",
+    )
+    tid = task["id"]
+    inbox_store.update_task_status(tid, "PENDING")
+    inbox_store.update_task_status(tid, "CLAIMED", worker_id="w-1")
+    inbox_store.update_task_status(tid, "RUNNING", workflow_id=wf_id)
+
+    # Persist workflow completion with summary in real SQLiteStateStore
+    state_store.save_workflow({
+        "workflow_id": wf_id,
+        "status": "completed",
+        "outcome": "delivered",
+        "summary": "Actual delivery report from test",
+    })
+
+    with patch("herdr.intake.connectors.linear.sync.dispatch_linear_sync_on_task_status") as mock_status_sync:
+        dispatcher = InboxDispatcher(db_path=Path(db_path))
+        reconciled = dispatcher.reconcile_running_tasks()
+
+        assert len(reconciled) == 1
+        assert reconciled[0]["id"] == tid
+        assert reconciled[0]["status"] == "COMPLETED"
+
+        mock_status_sync.assert_called_once_with(
+            Path(db_path), tid, "COMPLETED", error=None, summary="Actual delivery report from test"
+        )
