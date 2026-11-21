@@ -735,7 +735,11 @@ def _choose_agent_locked(
     disabled = set(pool.get("disabled_agents", []))
     workflow_override = record.get("agent_override", "auto")
 
-    if workflow_override and workflow_override != "auto":
+    if (
+        workflow_override
+        and workflow_override != "auto"
+        and not ((is_verifier or exclude_stages) and workflow_override in stage_used_agents)
+    ):
         selected = workflow_override
     elif requested and requested != "auto":
         selected = requested

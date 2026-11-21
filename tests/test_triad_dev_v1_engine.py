@@ -131,6 +131,44 @@ class TestTriadDevV1Engine(unittest.TestCase):
             )
             self.assertEqual(res["verdict"], "blocked")
 
+    def test_workflow_agent_override_yields_to_heterogeneous_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteStateStore(root / "state.db")
+            pools_file = root / "pools.json"
+            pools_file.write_text(json.dumps({
+                "projects": {
+                    "p-ov": {
+                        "allowed_agents": ["agy", "codex", "grok"],
+                        "disabled_agents": [],
+                    }
+                }
+            }), encoding="utf-8")
+            store.save_workflow({
+                "workflow_id": "wf-ov",
+                "project_id": "p-ov",
+                "status": "running",
+                "agent_override": "agy",
+                "healthy_agents": ["agy", "codex", "grok"],
+            })
+            store.save_task({
+                "task_id": "wf-ov-exec",
+                "workflow_id": "wf-ov",
+                "node": "executor",
+                "stage": "executor",
+                "agent": "agy",
+                "status": "cleaned",
+            })
+            wf_cfg = load_template(str(Path(__file__).resolve().parents[1] / "workflow_templates" / "triad-dev-v1.yaml"))
+            with patch.object(agent_router, "_get_store", return_value=store), \
+                 patch.object(agent_router, "workflow_config_for", return_value=wf_cfg), \
+                 patch.object(agent_router, "POOLS_FILE", pools_file), \
+                 patch.object(agent_router, "RESERVATIONS_FILE", root / "res.json"), \
+                 patch.object(agent_router, "ROUTER_LOCK_FILE", root / "router.lock"):
+                picked = agent_router.choose_agent("wf-ov", "review", "test", requested="auto")
+            self.assertIn(picked, ("codex", "grok"))
+            self.assertNotEqual(picked, "agy")
+
     def test_publish_direct_workflow_pr_requires_heterogeneous_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
