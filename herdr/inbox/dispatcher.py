@@ -775,14 +775,16 @@ class InboxDispatcher:
                 else:
                     summary_text = None
                     if wf:
-                        meta = wf.get("metadata") or {}
-                        if isinstance(meta, str):
-                            try:
-                                meta = json.loads(meta)
-                            except Exception:
-                                meta = {}
-                        if isinstance(meta, dict):
-                            summary_text = meta.get("summary") or meta.get("delivery_summary")
+                        summary_text = wf.get("summary") or wf.get("delivery_summary")
+                        if not summary_text:
+                            meta = wf.get("metadata") or {}
+                            if isinstance(meta, str):
+                                try:
+                                    meta = json.loads(meta)
+                                except Exception:
+                                    meta = {}
+                            if isinstance(meta, dict):
+                                summary_text = meta.get("summary") or meta.get("delivery_summary")
                     # Workflow verified complete and successful -> update inbox task to COMPLETED
                     updated = self.store.update_task_status(
                         task_id=t["id"],

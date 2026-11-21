@@ -2349,3 +2349,57 @@ def test_workflow_close_triggers_inbox_reconciliation_and_linear_sync(tmp_path, 
         mock_status_sync.assert_called_once_with(
             Path(db_path), tid, "COMPLETED", error=None
         )
+
+
+def test_reconcile_running_tasks_forwards_decoded_workflow_summary(tmp_path):
+    """Verify that reconcile_running_tasks reads summary from decoded workflow fields and forwards to Linear sync (P2)."""
+    from herdr.state_store import SQLiteStateStore
+    from herdr.inbox.store import InboxStore
+    from herdr.inbox.dispatcher import InboxDispatcher
+
+    db_path = tmp_path / "summary_test.db"
+    initialize(db_path)
+
+    state_store = SQLiteStateStore(db_path)
+    wf_id = "wf_sum_001"
+    state_store.register_workflow({
+        "workflow_id": wf_id,
+        "project_id": "proj-a",
+        "workspace_id": "ws-a",
+        "config": {"name": "sum-wf"},
+        "status": "running",
+    })
+
+    inbox_store = InboxStore(db_path=Path(db_path))
+    task = inbox_store.create_task(
+        title="Active Intake Task",
+        instruction="Do something",
+        project_id="proj-a",
+        workspace_id="ws-a",
+        source_type="active_intake",
+        source_id="link-123",
+    )
+    tid = task["id"]
+    inbox_store.update_task_status(tid, "PENDING")
+    inbox_store.update_task_status(tid, "CLAIMED", worker_id="w-1")
+    inbox_store.update_task_status(tid, "RUNNING", workflow_id=wf_id)
+
+    # Persist workflow completion with summary in real SQLiteStateStore
+    state_store.save_workflow({
+        "workflow_id": wf_id,
+        "status": "completed",
+        "outcome": "delivered",
+        "summary": "Actual delivery report from test",
+    })
+
+    with patch("herdr.intake.connectors.linear.sync.dispatch_linear_sync_on_task_status") as mock_status_sync:
+        dispatcher = InboxDispatcher(db_path=Path(db_path))
+        reconciled = dispatcher.reconcile_running_tasks()
+
+        assert len(reconciled) == 1
+        assert reconciled[0]["id"] == tid
+        assert reconciled[0]["status"] == "COMPLETED"
+
+        mock_status_sync.assert_called_once_with(
+            Path(db_path), tid, "COMPLETED", error=None, summary="Actual delivery report from test"
+        )
