@@ -251,24 +251,28 @@ def api_workflow_decide_raise(b):
 
 def _clear_fix_loop_blockers(wid, decision):
     """Clear fix_loop_exhausted attention and pending_redo latches after human ruling (W5)."""
-    from herdr.kernel import CONTROLLER_DIR, stage_state_file
+    from herdr.kernel import CONTROLLER_DIR, get_stage_state_file
     from pathlib import Path
     import json as _json
 
     att_file = Path(CONTROLLER_DIR) / "attention.json"
     if att_file.exists():
         try:
-            episodes = _json.loads(att_file.read_text(encoding="utf-8"))
+            raw = _json.loads(att_file.read_text(encoding="utf-8"))
+            episodes = raw.get("episodes") if isinstance(raw, dict) and isinstance(raw.get("episodes"), dict) else raw
             if isinstance(episodes, dict):
                 prefix = f"{wid}:fix_loop_exhausted:"
                 filtered = {k: v for k, v in episodes.items() if not k.startswith(prefix)}
                 if len(filtered) != len(episodes):
-                    att_file.write_text(_json.dumps(filtered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    out = dict(raw, episodes=filtered) if (isinstance(raw, dict) and "episodes" in raw) else filtered
+                    tmp = att_file.with_suffix(".json.tmp")
+                    tmp.write_text(_json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    tmp.replace(att_file)
         except Exception:
             pass
 
     if str(decision).strip().lower() in ("rework", "retry"):
-        st_file = Path(stage_state_file())
+        st_file = Path(get_stage_state_file())
         if st_file.exists():
             try:
                 state = _json.loads(st_file.read_text(encoding="utf-8"))
@@ -279,7 +283,9 @@ def _clear_fix_loop_blockers(wid, decision):
                         if not (k.startswith(prefix) and k.endswith("|pending_redo"))
                     }
                     if len(filtered) != len(state):
-                        st_file.write_text(_json.dumps(filtered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                        tmp = st_file.with_suffix(".json.tmp")
+                        tmp.write_text(_json.dumps(filtered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                        tmp.replace(st_file)
             except Exception:
                 pass
 

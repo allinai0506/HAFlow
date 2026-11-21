@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 from herdr import agent_router, pr_delivery, tool_gate
 from herdr.stage_skills import is_staged_dev_flow_workflow
 from herdr.state_store import SQLiteStateStore
-from herdr.workflow import load_template, validate_workflow_dag
+from herdr.workflow import load_template, resolve_candidate_node, validate_workflow_dag
 from services.controller import advancement, stage_delivery
 
 
@@ -24,12 +24,12 @@ class TestTriadDevV1Engine(unittest.TestCase):
         self.assertEqual(tmpl.get("candidate_node"), "executor")
         self.assertTrue(tmpl.get("direct_pr_delivery"))
         self.assertTrue(tmpl.get("require_heterogeneous"))
-        self.assertEqual(advancement._resolve_candidate_node(tmpl), "executor")
+        self.assertEqual(resolve_candidate_node(tmpl), "executor")
 
     def test_resolve_candidate_node_backwards_compatible(self):
-        self.assertEqual(advancement._resolve_candidate_node({"nodes": [{"id": "implementation"}]}), "implementation")
+        self.assertEqual(resolve_candidate_node({"nodes": [{"id": "implementation"}]}), "implementation")
         self.assertEqual(
-            advancement._resolve_candidate_node({"nodes": [{"id": "craft", "default_integration_mode": "git"}]}),
+            resolve_candidate_node({"nodes": [{"id": "craft", "default_integration_mode": "git"}]}),
             "craft",
         )
 
@@ -103,6 +103,33 @@ class TestTriadDevV1Engine(unittest.TestCase):
             mock_gate.assert_called_once()
             ports.clear_stage_advance.assert_called_once_with("wf-tool-2", "gate")
             ports.check_workflow_stage_advance.assert_called_once_with("wf-tool-2")
+
+    def test_clear_fix_loop_blockers_uses_valid_kernel_api(self):
+        from console import control_api
+        with tempfile.TemporaryDirectory() as tmp:
+            att = Path(tmp) / "attention.json"
+            st = Path(tmp) / "stage-state.json"
+            att.write_text(json.dumps({"episodes": {"wf-1:fix_loop_exhausted:gate": {"attempts": 2}, "other": {}}}), encoding="utf-8")
+            st.write_text(json.dumps({"wf-1|fixloop|executor|pending_redo": 123, "other": 1}), encoding="utf-8")
+            with patch("herdr.kernel.CONTROLLER_DIR", Path(tmp)), \
+                 patch("herdr.kernel.get_stage_state_file", return_value=st):
+                control_api._clear_fix_loop_blockers("wf-1", "rework")
+            self.assertNotIn("wf-1:fix_loop_exhausted:gate", json.loads(att.read_text())["episodes"])
+            self.assertNotIn("wf-1|fixloop|executor|pending_redo", json.loads(st.read_text()))
+
+    def test_tool_gate_handles_missing_repo_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStateStore(Path(tmp) / "state.db")
+            store.save_workflow({"workflow_id": "wf-missing", "project_id": "p1", "status": "running"})
+            res = tool_gate.run_tool_gate(
+                store,
+                "wf-missing",
+                {"id": "gate"},
+                project_root="/nonexistent/path/xyz",
+                candidate_sha="a" * 40,
+                verify_commands=["echo hi"],
+            )
+            self.assertEqual(res["verdict"], "blocked")
 
     def test_publish_direct_workflow_pr_requires_heterogeneous_pass(self):
         with tempfile.TemporaryDirectory() as tmp:

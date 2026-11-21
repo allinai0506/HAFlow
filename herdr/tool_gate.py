@@ -144,20 +144,24 @@ def run_tool_gate(
 
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    for cmd in verify_commands or []:
-        res = subprocess.run(
-            cmd,
-            cwd=str(repo),
-            shell=True,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=300,
-        )
-        tail = (res.stdout + "\n" + res.stderr).strip()[-1000:]
-        cmd_outputs.append(f"$ {cmd} -> exit={res.returncode}\n{tail}")
-        if res.returncode != 0:
-            errors.append(f"验证命令失败 (exit={res.returncode}): {cmd}")
+    if repo.is_dir() and candidate_sha:
+        for cmd in verify_commands or []:
+            try:
+                res = subprocess.run(
+                    cmd,
+                    cwd=str(repo),
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=300,
+                )
+                tail = (res.stdout + "\n" + res.stderr).strip()[-1000:]
+                cmd_outputs.append(f"$ {cmd} -> exit={res.returncode}\n{tail}")
+                if res.returncode != 0:
+                    errors.append(f"验证命令失败 (exit={res.returncode}): {cmd}")
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                errors.append(f"验证命令执行异常 ({type(exc).__name__}): {cmd}")
 
     verdict = "pass" if not errors else "blocked"
     note_lines = [

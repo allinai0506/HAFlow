@@ -4,27 +4,13 @@ Dependencies are explicit inputs; importing this module creates no runtime state
 """
 
 from herdr.log_throttle import startup_wait_closed, startup_wait_hold
+from herdr.workflow import resolve_candidate_node
 
 
 def enqueue_stage_advance(ports, task):
     workflow_id = task.get("workflow_id")
     if workflow_id:
         ports.check_workflow_stage_advance(workflow_id)
-
-def _resolve_candidate_node(workflow_cfg):
-    """Resolve the code-producing node id from workflow_cfg without hardcoding."""
-    if isinstance(workflow_cfg, dict):
-        explicit = str(workflow_cfg.get("candidate_node") or "").strip()
-        if explicit:
-            return explicit
-        nodes = workflow_cfg.get("nodes") or []
-        if any(isinstance(n, dict) and n.get("id") == "implementation" for n in nodes):
-            return "implementation"
-        for n in nodes:
-            if isinstance(n, dict) and n.get("default_integration_mode") == "git" and n.get("id"):
-                return str(n["id"])
-    return "implementation"
-
 
 def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
     """Freeze the current candidate and, on a real rotation, plan re-verification.
@@ -50,7 +36,7 @@ def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
     """
     if ports.scheduler_core is None or ports.scheduler_facts_store is None:
         return "", False
-    candidate_node = _resolve_candidate_node(workflow_cfg)
+    candidate_node = resolve_candidate_node(workflow_cfg)
     if not ports.is_node_complete(workflow_id, candidate_node):
         # Not our business yet: the candidate is frozen when candidate_node
         # completes, not before. Reporting a deferral here would stall a

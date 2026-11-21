@@ -147,10 +147,11 @@ def maybe_close_completed_workflow(ports, workflow_id):
     def _run():
         try:
             try:
-                wf_cfg = ports.workflow_config_for(workflow_id) or {}
-                if wf_cfg.get("direct_pr_delivery") and entry.get("delivery_ceiling") != "workspace":
-                    from herdr.pr_delivery import publish_direct_workflow_pr
-                    publish_direct_workflow_pr(ports._get_store(), workflow_id)
+                if hasattr(ports, "workflow_config_for") and hasattr(ports, "_get_store"):
+                    wf_cfg = ports.workflow_config_for(workflow_id) or {}
+                    if wf_cfg.get("direct_pr_delivery") and entry.get("delivery_ceiling") != "workspace":
+                        from herdr.pr_delivery import publish_direct_workflow_pr
+                        publish_direct_workflow_pr(ports._get_store(), workflow_id)
                 task_count = 0
                 if hasattr(ports, "load_tasks"):
                     try:
@@ -198,10 +199,11 @@ DEPENDENCIES = {'git_finalize_pending_tasks': ('load_tasks',),
  'close_retry_interval': (),
  '_note_close_backoff': ('attention_get', 'attention_note', 'attention_throttle',
                          'close_retry_interval'),
- 'maybe_close_completed_workflow': ('TASK_MANAGER', '_close_deferred_logged', '_note_close_backoff',
-                                    '_workflow_close_inflight', '_workflow_entry',
-                                    'attention_blocks_retry', 'attention_clear',
+ 'maybe_close_completed_workflow': ('TASK_MANAGER', '_close_deferred_logged', '_get_store',
+                                    '_note_close_backoff', '_workflow_close_inflight',
+                                    '_workflow_entry', 'attention_blocks_retry', 'attention_clear',
                                     'git_escalated_tasks', 'git_finalize_pending_tasks', 'liveness',
-                                    'load_tasks', 'subprocess', 'threading')}
+                                    'load_tasks', 'subprocess', 'threading',
+                                    'workflow_config_for')}
 
 __all__ = tuple(DEPENDENCIES)
