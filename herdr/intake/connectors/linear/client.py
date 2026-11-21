@@ -1,10 +1,13 @@
 """Linear GraphQL API client for connection preflight and health checks."""
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -236,7 +239,7 @@ class LinearClient:
             res = self._post_graphql(query, {"id": issue_id})
             return res.get("data", {}).get("issue", {}).get("team", {}).get("id")
         except Exception as exc:
-            logger.warning("Failed to query team for issue %s: %s", issue_id, exc)
+            LOG.warning("Failed to query team for issue %s: %s", issue_id, exc)
             return None
 
     def update_issue_state(self, issue_id: str, state_id: str) -> dict[str, Any]:

@@ -198,6 +198,12 @@ def close_workflow_owned(
                     force=force,
                 )
             stage_reset(workflow_id)
+        try:
+            from herdr.inbox.dispatcher import InboxDispatcher
+            dispatcher = InboxDispatcher(db_path=Path(get_store().db_path))
+            dispatcher.reconcile_running_tasks()
+        except Exception:
+            pass
             print(f"[WORKFLOW CLOSED] {workflow_id}")
         else:
             print("[DRY RUN] no changes were made")
@@ -593,6 +599,12 @@ def close_workflow_owned(
                 force=force,
             )
         stage_reset(workflow_id)
+        try:
+            from herdr.inbox.dispatcher import InboxDispatcher
+            dispatcher = InboxDispatcher(db_path=Path(get_store().db_path))
+            dispatcher.reconcile_running_tasks()
+        except Exception:
+            pass
 
     coordinator_pane = topo.get("coordinator_pane") or (entry or {}).get(
         "coordinator_pane_id"
@@ -696,6 +708,12 @@ def mark_workflow_completed(workflow_id, outcome="delivered", force=False, *, de
             node_dispatch_store.reconcile_workflow(
                 store.db_path, workflow_id, discover=False
             )
+        except Exception:
+            pass
+        try:
+            from herdr.inbox.dispatcher import InboxDispatcher
+            dispatcher = InboxDispatcher(db_path=Path(store.db_path))
+            dispatcher.reconcile_running_tasks()
         except Exception:
             pass
     except Exception as exc:
