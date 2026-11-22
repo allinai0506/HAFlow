@@ -249,6 +249,43 @@ def api_workflow_decide_raise(b):
     )
     return {'ok':True,'note_id':record.get('note_id'),'decision_id':did}
 
+def _clear_fix_loop_blockers(wid, decision):
+    """Clear fix_loop_exhausted attention and pending_redo latches after human ruling (W5)."""
+    from herdr.kernel import CONTROLLER_DIR, get_stage_state_file
+    from herdr.liveness import EpisodeStore
+    from pathlib import Path
+    import json as _json
+
+    att_file = Path(CONTROLLER_DIR) / "attention.json"
+    if att_file.exists():
+        try:
+            ep_store = EpisodeStore(att_file)
+            prefix = f"{wid}:fix_loop_exhausted:"
+            with ep_store.transaction() as episodes:
+                for key in [k for k in episodes if k.startswith(prefix)]:
+                    episodes.pop(key, None)
+        except Exception:
+            pass
+
+    if str(decision).strip().lower() in ("rework", "retry"):
+        st_file = Path(get_stage_state_file())
+        if st_file.exists():
+            try:
+                state = _json.loads(st_file.read_text(encoding="utf-8"))
+                if isinstance(state, dict):
+                    prefix = f"{wid}|fixloop|"
+                    filtered = {
+                        k: v for k, v in state.items()
+                        if not (k.startswith(prefix) and k.endswith("|pending_redo"))
+                    }
+                    if len(filtered) != len(state):
+                        tmp = st_file.with_suffix(".json.tmp")
+                        tmp.write_text(_json.dumps(filtered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                        tmp.replace(st_file)
+            except Exception:
+                pass
+
+
 def api_workflow_decide_resolve(b):
     """Record the human ruling; the ask leaves the pending list."""
     wid=str(b.get('workflow_id') or '').strip()
@@ -267,6 +304,7 @@ def api_workflow_decide_resolve(b):
         wid, fields, f'{did} 裁决', decision,
         node=prior.get('node') or None, task_id=prior.get('task_id') or None,
     )
+    _clear_fix_loop_blockers(wid, decision)
     return {'ok':True,'note_id':record.get('note_id'),'decision_id':did,
             'decision':decision}
 

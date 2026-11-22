@@ -344,7 +344,7 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
             if started_cands:
                 expected_round = len(started_cands) + 1
                 raise ValueError(f'candidate round mismatch: expected {expected_round}, got {dispatch_round}')
-        elif old.get('launch_not_started'):
+        elif old.get('launch_not_started') or old.get('pane_dispatched') is False:
             expected = int(old.get('dispatch_round') or 1)
             if dispatch_round != expected and dispatch_round != expected + 1:
                 raise ValueError('relaunch after unstarted predecessor must preserve or advance round')

@@ -94,34 +94,40 @@ def ensure_agy_workspace_trust(repo_path: Path | str) -> bool:
     """
     try:
         canonical = _exact_case_path(os.path.realpath(str(Path(repo_path).expanduser().absolute())))
-        config = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
-        try:
-            config.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            alt = Path("/Users/user/Library/Application Support/Antigravity CLI Isolated/home/.gemini/antigravity-cli/settings.json")
-            if alt.exists():
-                config = alt
-                config.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                raise
+        configs = []
+        isolated = Path.home() / "Library/Application Support/Antigravity CLI Isolated/home/.gemini/antigravity-cli/settings.json"
+        if isolated.exists():
+            configs.append(isolated)
+        std = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+        if std not in configs:
+            configs.append(std)
+
         import fcntl
         # Different workflows launch concurrently and the controller only
         # serializes within one workflow: serialize the whole read-modify-
         # write across processes (PR #259 review P1).
-        with open(config.parent / (config.name + ".lock"), "a+") as lock:
-            deadline = time.monotonic() + _AGY_SETTINGS_LOCK_TIMEOUT
-            while True:
-                try:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        raise ValueError("agy settings lock timeout; original file preserved")
-                    time.sleep(0.05)
+        written_any = False
+        for config in configs:
             try:
-                return _agy_trust_write_locked(config, canonical)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                config.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
+            with open(config.parent / (config.name + ".lock"), "a+") as lock:
+                deadline = time.monotonic() + _AGY_SETTINGS_LOCK_TIMEOUT
+                while True:
+                    try:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise ValueError(f"agy settings lock timeout on {config}; original file preserved")
+                        time.sleep(0.05)
+                try:
+                    if _agy_trust_write_locked(config, canonical):
+                        written_any = True
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return written_any
     except (OSError, ValueError, TypeError) as exc:
         print(f"[WORKSPACE TRUST WARN] agy trust failed for {repo_path}: {exc}", file=sys.stderr)
         return False

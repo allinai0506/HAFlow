@@ -4,6 +4,7 @@ Dependencies are explicit inputs; importing this module creates no runtime state
 """
 
 from herdr.log_throttle import startup_wait_closed, startup_wait_hold
+from herdr.workflow import resolve_candidate_node
 
 
 def enqueue_stage_advance(ports, task):
@@ -35,8 +36,9 @@ def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
     """
     if ports.scheduler_core is None or ports.scheduler_facts_store is None:
         return "", False
-    if not ports.is_node_complete(workflow_id, "implementation"):
-        # Not our business yet: the candidate is frozen when implementation
+    candidate_node = resolve_candidate_node(workflow_cfg)
+    if not ports.is_node_complete(workflow_id, candidate_node):
+        # Not our business yet: the candidate is frozen when candidate_node
         # completes, not before. Reporting a deferral here would stall a
         # workflow that has not reached the point where a candidate exists.
         return "", False
@@ -47,7 +49,7 @@ def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
         # identity gap, so keep the legacy behaviour rather than deadlocking.
         return "", False
     frozen_sha = ports._scheduler_freeze_candidate(
-        workflow_id, project_root, "implementation", ["implementation"])
+        workflow_id, project_root, candidate_node, [candidate_node])
     if not frozen_sha:
         return "", True
     rotated_from = ports._scheduler_previous_candidate_sha(workflow_id)

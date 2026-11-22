@@ -801,7 +801,7 @@ def create_pane(parent_pane, clone, launch_identity=None):
 
 
 def _create_pane(parent_pane, clone, launch_identity=None, task_id=None):
-    data = run_json([
+    split_cmd = [
         "herdr",
         "pane",
         "split",
@@ -810,20 +810,13 @@ def _create_pane(parent_pane, clone, launch_identity=None, task_id=None):
         "right",
         "--cwd",
         str(clone),
-        "--no-focus"
-    ])
+        "--no-focus",
+    ]
+    if task_id:
+        split_cmd.extend(["--env", f"HERDR_TASK_ID={task_id}"])
+    data = run_json(split_cmd)
 
     pane = data["result"]["pane"]
-    if task_id:
-        try:
-            subprocess.run(
-                ["herdr", "pane", "run", pane['pane_id'], f"export HERDR_TASK_ID={shlex.quote(str(task_id))}"],
-                text=True,
-                capture_output=True,
-                timeout=10,
-            )
-        except Exception:
-            pass
     if launch_identity is not None:
         launch_identity.update(pane_id=pane['pane_id'], pane_source='dynamic',
                                terminal_id=pane.get('terminal_id'), phase='pane_allocated')
@@ -868,9 +861,13 @@ def _agent_on_pane(pane_id):
         )
     except (OSError, subprocess.TimeoutExpired):
         return _UNKNOWN_AGENT
-    if result.returncode != 0 or not (result.stdout or "").strip():
+    from herdr.observer.live import _agent_payload, _error_code
+    if result.returncode != 0:
+        if (_error_code(result.stdout or "") or _error_code(result.stderr or "")) == "agent_not_found":
+            return None
         return _UNKNOWN_AGENT
-    from herdr.observer.live import _agent_payload
+    if not (result.stdout or "").strip():
+        return _UNKNOWN_AGENT
     valid, agent, explicit_empty = _agent_payload(result.stdout)
     if not valid:
         return _UNKNOWN_AGENT
@@ -945,6 +942,7 @@ def allocate_task_pane(parent_pane, clone, launch_identity=None, task_id=None):
                         capture_output=True,
                         timeout=10,
                     )
+                    time.sleep(0.5)
                 except Exception:
                     pass
         except Exception:
@@ -998,7 +996,7 @@ def unique_agent_name(task_id, pane_id, attempt=0):
     return f"{base[:max_base]}-{suffix}"
 
 
-def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
+def start_agent(task_id, agent_kind, pane_id, retries=15, delay=0.5):
     if agent_kind == "opencode" and (Path.home() / ".herdr-controller" / "opencode-disabled").exists():
         raise RuntimeError("opencode disabled locally; reroute before worker launch")
     last_err = None

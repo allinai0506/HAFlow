@@ -206,7 +206,12 @@ class RouterZeroWorkExemptionTest(unittest.TestCase):
     def setUp(self):
         import tempfile
 
+        from herdr import agent_router
         from herdr.state_store import get_state_store
+
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp.name) / "state.db"

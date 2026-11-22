@@ -1,0 +1,93 @@
+name: triad-dev-v1
+label: 三角色对抗研发流程
+version: "1.0"
+category: eng
+coordinator_required: false
+candidate_node: executor
+direct_pr_delivery: true
+require_heterogeneous: true
+delivery_ceiling_default: pr
+description: 极简三角色对抗研发流程 (执行者 -> 确定性程序门禁 -> 异构对抗审核者 -> 平台直接建 PR)。通过单会话完整实现 + 确定性门禁 + 异构信息隔离审核，降低单 Agent 幻觉与需求漂移。
+
+reverification:
+  version: selective-reverification-v1
+  gate:
+    reusable_only_if_changes_within: []
+  review:
+    reusable_only_if_changes_within: []
+
+selective_replan:
+  version: selective-replan-v1
+  mode: explicit_task_targets
+  retry_node: executor
+
+nodes:
+  - id: executor
+    max_tasks_per_node: 4
+    label: 1执行者
+    node_type: agent
+    depends_on: []
+    parallel: false
+    purpose: 在单一隔离工作区内闭环完成需求澄清、最小验收契约对齐、TDD 实现、自测与提交。
+    skills: [test-driven-development, verification-before-completion, ai-slop-cleaner]
+    default_integration_mode: git
+    default_task_type: feat
+    agent_policy:
+      preferred: [claude, codex, grok]
+      max_concurrency: 1
+      parallel: false
+      allow_soft_degrade: false
+    required_outputs:
+      - 最小验收契约（目标、非目标、允许修改范围、先红后绿验收命令）
+      - 代码实现与测试修改
+      - 本地新鲜验证输出（命令与退出码）
+      - 交付基线核验记录（verify-baseline）
+    rules:
+      - "单工位闭环执行（严格限定 1 个 Task / 1 个 Pane）：在同一工作区内完成分析、编码、写测试、自测与 commit，严禁拆分子任务。"
+      - "先红后绿（TDD）：先确认验收命令在基线上失败，再做最小实现使其通过；严禁删减既有断言或新增 skip/xfail 绕过测试。"
+      - "严禁擅自 git push 或创建 PR，由平台在门禁与审核双通过后统一交付。"
+      - "创建 Task 时默认使用 --agent auto。"
+
+  - id: gate
+    max_tasks_per_node: 4
+    label: 2确定性门禁
+    node_type: tool
+    depends_on: [executor]
+    parallel: false
+    purpose: 纯程序确定性门禁（0 LLM）：检查基线、改动范围、测试篡改扫描与项目验证命令。
+    default_integration_mode: none
+    default_task_type: test
+    gate:
+      retry_node: executor
+    required_outputs:
+      - "门禁结论（HERDR_GATE_VERDICT: pass / blocked）"
+      - 改动文件清单与测试篡改扫描结果
+
+  - id: review
+    max_tasks_per_node: 4
+    label: 3对抗审核者
+    node_type: agent
+    depends_on: [gate]
+    parallel: false
+    purpose: 异构只读对抗审核：对照需求契约、git diff 与确定性门禁原始输出，检查 P0 阻断缺陷、需求漂移与测试作弊。
+    skills: [google-code-review, code-review]
+    default_integration_mode: none
+    default_task_type: test
+    agent_policy:
+      preferred: [codex, claude, grok]
+      max_concurrency: 1
+      parallel: false
+      exclude_stage_agents: [executor]
+      allow_soft_degrade: false
+      max_remediation_rounds: 2
+    gate:
+      retry_node: executor
+    required_outputs:
+      - P0/P1/P2 证据化问题清单（P0 必须附 file:line 与证据）
+      - "门禁评审结论（HERDR_GATE_VERDICT: pass / blocked）"
+    rules:
+      - "异构物理隔离（禁止同模型自审）：必须排除 executor 阶段所用 Agent，allow_soft_degrade: false。"
+      - "只读审核，严禁修改代码或产生新 commit。"
+      - "反锚定原则：仅以需求契约、git diff 与确定性门禁输出为依据，不盲从执行者自我总结。"
+      - "仅 P0 阻断合并，且每条 P0 必须给出具体 file:line 与证据；第 2 轮复审仅核验第 1 轮 P0 修复及是否引入新 P0。"
+      - "门禁结论契约：输出 HERDR_GATE_VERDICT: pass 或 blocked。"

@@ -39,7 +39,39 @@ def _handle_stage_advance_item(ports, item):
             node = ports.find_node(config, target_node_id)
     if node:
         item = dict(item, node=node)
-        if node.get("node_type", "agent") != "agent":
+        node_type = node.get("node_type", "agent")
+        if node_type == "tool":
+            workflow_id = item["workflow_id"]
+            store = ports._get_store()
+            workflow = store.get_workflow(workflow_id) or {}
+            project_ctx = ports.project_for_workflow(workflow_id) or {}
+            candidate_sha = str(workflow.get("candidate_sha") or "").strip()
+            tasks = store.list_tasks(workflow_id=workflow_id)
+            work_dir = None
+            for t in reversed(tasks):
+                if t.get("integrated_commit") and not t.get("superseded_by"):
+                    candidate_sha = candidate_sha or str(t.get("integrated_commit") or "")
+                    work_dir = t.get("clone_path") or work_dir
+                    break
+            from herdr.tool_gate import run_tool_gate
+            result = run_tool_gate(
+                store,
+                workflow_id,
+                node,
+                project_root=str(project_ctx.get("project_root") or ""),
+                candidate_sha=candidate_sha,
+                base_branch=str(project_ctx.get("base_branch") or workflow.get("base_branch") or "main"),
+                verify_commands=project_ctx.get("verify_commands") or node.get("verify_commands"),
+                work_dir=work_dir,
+            )
+            ports.clear_stage_advance(workflow_id, target_node_id)
+            print(
+                f"[TOOL GATE] workflow={workflow_id} node={target_node_id} "
+                f"verdict={result['verdict']} task={result['task_id']}"
+            )
+            ports.check_workflow_stage_advance(workflow_id)
+            return
+        if node_type != "agent":
             workflow_id = item["workflow_id"]
             key = f"{workflow_id}:stage_advance:{target_node_id}"
             episode = ports.attention_get(key) or {}
@@ -405,6 +437,7 @@ DEPENDENCIES = {'_stage_advance_next_attempts': ('liveness', 'time'),
                                 '_scheduler_join_gate_allows', '_stage_advance_next_attempts',
                                 '_startup_wait_log',
                                 'attention_get', 'attention_note', 'build_stage_advance_message',
+                                'check_workflow_stage_advance',
                                 'clear_stage_advance', 'coordinator_intake_enabled',
                                 'coordinator_pane_for_workflow', 'coordinator_status', 'find_node',
                                 'get_stage_policy', 'liveness', 'load_tasks',

@@ -755,7 +755,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         self.assertEqual(self.notified, [])
 
     def test_non_agent_stage_event_blocks_all_agent_paths(self):
-        for node_type in ("human", "tool", "gate", "unknown"):
+        for node_type in ("human", "gate", "unknown"):
             for enabled in ("0", "1"):
                 with self.subTest(node_type=node_type, enabled=enabled), \
                      patch.dict(os.environ, {"HERDR_DIRECT_STAGE_DISPATCH": enabled}), \

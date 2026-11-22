@@ -2,7 +2,7 @@ name: software-development-v1
 label: 软件开发标准流程
 version: "1.2"
 coordinator_required: false
-description: 标准 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)。按 unified-dev-flow 的阶段思想执行：HAFlow 是唯一主控，各节点只调用对应技能。需求由一人起草；计划保留一次方案对抗；实现完成自测与删除式清理；测试按计划验证并出具证据；评审在测试完成后核验需求、代码与测试证据；收尾按授权交付并核对同一候选结论。默认交付 PR，合并和部署要另有授权。
+description: "[FROZEN] 已冻结（仅接受阻断级修复，不再新增功能）。标准 6 阶段软件开发与评审流程 (需求分析 -> 计划 -> 实现 -> 测试 -> 评审 -> 收尾)。按 unified-dev-flow 的阶段思想执行：HAFlow 是唯一主控，各节点只调用对应技能。需求由一人起草；计划保留一次方案对抗；实现完成自测与删除式清理；测试按计划验证并出具证据；评审在测试完成后核验需求、代码与测试证据；收尾按授权交付并核对同一候选结论。默认交付 PR，合并和部署要另有授权。"
 delivery_ceiling_default: pr
 
 # 统一开发流程映射。不在节点里再启动 speckit-chain、executing-plans、
@@ -180,9 +180,10 @@ nodes:
     default_integration_mode: none
     default_task_type: test
     agent_policy:
-      preferred: [codex, opencode, qodercli, claude, agy, pi, grok, kimi]
+      preferred: [codex, claude, grok]
       max_concurrency: 1
       exclude_stage_agents: [implementation, wrapup]
+      allow_soft_degrade: false
     required_outputs:
       - 测试执行记录
       - 缺陷清单
@@ -220,9 +221,10 @@ nodes:
     default_integration_mode: none
     default_task_type: test
     agent_policy:
-      preferred: [claude, codex, qodercli, opencode, agy, pi, grok, kimi]
+      preferred: [claude, codex, grok]
       max_concurrency: 1
       exclude_stage_agents: [implementation, wrapup]
+      allow_soft_degrade: false
     required_outputs:
       - 代码规范审查结论
       - 架构合理性评估

@@ -31,6 +31,7 @@ MAX_SECONDS = 120
 # "side-channel diagnostics must not alter execution status" (AGENTS.md §4.10).
 BYPASS_IGNORED_DIRS = frozenset({
     ".codegraph",  # CodeGraph MCP / local index daemon runtime artifacts (db, pid, logs)
+    ".omc",  # External AI assistant workspace state / upgrade backups
     "node_modules",  # JavaScript / TypeScript package dependencies
     "dist",  # Frontend / TypeScript build outputs
     "dist-release",  # Release build outputs

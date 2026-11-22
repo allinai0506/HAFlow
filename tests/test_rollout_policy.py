@@ -1306,6 +1306,10 @@ class TestRolloutRouterIntegration(unittest.TestCase):
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        from herdr import agent_router as _ar
+        allowed_patch = patch.object(_ar, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        allowed_patch.start()
+        self.addCleanup(allowed_patch.stop)
         self.store = get_state_store(self.tmp_path / "state.db")
         self.db_path = self.tmp_path / "state.db"
         self.patchers = [

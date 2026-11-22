@@ -225,6 +225,75 @@ def _matching_pr(rows, branch, base, sha):
     return matches[0] if matches else None
 
 
+def _publish_verified_candidate(store, task, workflow, sha, branch, base, *, title, body='', draft=False, client=None, revalidate=None):
+    repo = Path(task.get('source_repo') or '').expanduser()
+    if not repo.is_dir():
+        raise ValueError('integrated source repository missing')
+    task_commit = task.get('integrated_commit') or sha
+    for ref in (branch, task.get('integration_ref')):
+        if not ref:
+            raise ValueError('integrated ref differs from recorded candidate')
+        ref_commit = _git(repo, 'rev-parse', '--verify', f'{ref}^{{commit}}')
+        if ref_commit not in {sha, task_commit}:
+            raise ValueError('integrated ref differs from recorded candidate')
+    _git(repo, 'check-ref-format', f'refs/heads/{branch}')
+    _git(repo, 'check-ref-format', f'refs/heads/{base}')
+    identity = repository_identity(_git(repo, 'remote', 'get-url', 'origin'))
+    push_urls = _git(repo, 'remote', 'get-url', '--push', '--all', 'origin').splitlines()
+    if len(push_urls) != 1 or repository_identity(push_urls[0]) != identity:
+        raise ValueError('origin push repository differs from PR provider repository or has multiple targets')
+    push_url = push_urls[0]
+    client = client or PullRequestClient(*identity)
+    rows = client.list_open(branch, base)
+    existing = _matching_pr(rows, branch, base, sha)
+    remote = _git(repo, 'ls-remote', push_url, f'refs/heads/{branch}')
+    if remote and remote.split()[0] != sha:
+        raise ValueError('remote branch differs from integrated candidate')
+    store.record_event(
+        'pull_request_intent',
+        {'candidate_sha': sha, 'branch': branch, 'base': base, 'provider': identity[0], 'repository': '/'.join(identity[1:])},
+        task_id=task['task_id'],
+        workflow_id=task['workflow_id'],
+        source='herdr-task',
+    )
+    if not remote:
+        _git(repo, 'push', f'--force-with-lease=refs/heads/{branch}:', push_url, f'{sha}:refs/heads/{branch}')
+    fresh = store.get_task(task['task_id'])
+    if fresh.get('version') != task.get('version') or (revalidate and revalidate(fresh) != (sha, branch, base)):
+        raise ValueError('delivery changed during publication; PR creation withheld')
+    row = existing or client.create(branch, base, title, body, draft)
+    verified = _matching_pr([row], branch, base, sha)
+    if not verified or not verified.get('number') or not verified.get('html_url'):
+        raise ValueError('provider did not attest an open PR for the candidate')
+    final_task = store.get_task(task['task_id']) or {}
+    if final_task.get('version') != task.get('version'):
+        raise ValueError('delivery changed during publication; reconcile the external result')
+    previous = store.list_events(workflow_id=task['workflow_id'], event_type='pull_request_created', desc=True, limit=1)
+    replaced = (previous[0].get('payload') or {}).get('url') if previous else None
+    receipt = {
+        'execution_id': workflow.get('execution_id'),
+        'candidate_episode_id': workflow.get('candidate_episode_id'),
+        'replaces_pr_url': replaced if replaced != verified['html_url'] else None,
+        'number': verified['number'],
+        'url': verified['html_url'],
+        'candidate_sha': sha,
+        'branch': branch,
+        'base': base,
+        'state': 'open',
+        'provider': identity[0],
+    }
+    if previous:
+        old = previous[0].get('payload') or {}
+        if all(old.get(key) == receipt.get(key) for key in ('candidate_sha', 'branch', 'base', 'url', 'execution_id', 'candidate_episode_id')):
+            return old
+    if task.get('wrapup_delivery'):
+        from .wrapup_delivery import record_pr_receipt
+        record_pr_receipt(store, task, workflow, receipt)
+    else:
+        store.record_event('pull_request_created', receipt, task_id=task['task_id'], workflow_id=task['workflow_id'], source='herdr-task')
+    return receipt
+
+
 def create_task_pr(store, task_id, *, title, body='', draft=False, client=None):
     if not title.strip() or len(title) > 256 or len(body.encode()) > 65536:
         raise ValueError('PR title/body exceeds publication budget')
@@ -240,65 +309,49 @@ def create_task_pr(store, task_id, *, title, body='', draft=False, client=None):
                 _git(task['clone_path'], 'rev-parse', 'HEAD') != sha
                 or has_worktree_output(task)):
             raise ValueError('wrapup clone advanced after certification; register a new candidate')
-        repo = Path(task.get('source_repo') or '').expanduser()
-        if not repo.is_dir():
-            raise ValueError('integrated source repository missing')
-        task_commit = task.get('integrated_commit') or sha
-        for ref in (branch, task.get('integration_ref')):
-            if not ref:
-                raise ValueError('integrated ref differs from recorded candidate')
-            ref_commit = _git(repo, 'rev-parse', '--verify', f'{ref}^{{commit}}')
-            if ref_commit not in {sha, task_commit}:
-                raise ValueError('integrated ref differs from recorded candidate')
-        _git(repo,'check-ref-format',f'refs/heads/{branch}')
-        _git(repo,'check-ref-format',f'refs/heads/{base}')
-        identity = repository_identity(_git(repo,'remote','get-url','origin'))
-        push_urls = _git(repo,'remote','get-url','--push','--all','origin').splitlines()
-        if len(push_urls) != 1 or repository_identity(push_urls[0]) != identity:
-            raise ValueError('origin push repository differs from PR provider repository or has multiple targets')
-        push_url = push_urls[0]
-        client = client or PullRequestClient(*identity)
-        rows = client.list_open(branch,base)
-        existing = _matching_pr(rows,branch,base,sha)
-        remote = _git(repo,'ls-remote',push_url,f'refs/heads/{branch}')
-        if remote and remote.split()[0] != sha:
-            raise ValueError('remote branch differs from integrated candidate')
-        store.record_event('pull_request_intent', {'candidate_sha':sha,'branch':branch,'base':base,
-            'provider':identity[0],'repository':'/'.join(identity[1:])},task_id=task_id,
-            workflow_id=task['workflow_id'],source='herdr-task')
-        if not remote:
-            # Empty lease makes a concurrent remote branch creation fail safely.
-            _git(repo,'push',f'--force-with-lease=refs/heads/{branch}:',push_url,f'{sha}:refs/heads/{branch}')
-        fresh = store.get_task(task_id)
-        if (fresh.get('version') != task.get('version') or
-                _publication(fresh, wd.load_notes(task['workflow_id']), store) != (sha,branch,base)):
-            raise ValueError('delivery changed during publication; PR creation withheld')
-        row = existing or client.create(branch,base,title,body,draft)
-        verified = _matching_pr([row],branch,base,sha)
-        if not verified or not verified.get('number') or not verified.get('html_url'):
-            raise ValueError('provider did not attest an open PR for the candidate')
-        final_task = store.get_task(task_id) or {}
-        if final_task.get('version') != task.get('version'):
-            raise ValueError('delivery changed during publication; reconcile the external result')
-        workflow = publication_workflow
-        previous = store.list_events(workflow_id=task['workflow_id'], event_type='pull_request_created', desc=True, limit=1)
-        replaced = (previous[0].get('payload') or {}).get('url') if previous else None
-        receipt = {'execution_id': workflow.get('execution_id'), 'candidate_episode_id': workflow.get('candidate_episode_id'),
-                   'replaces_pr_url': replaced if replaced != verified['html_url'] else None,
-                   'number':verified['number'],'url':verified['html_url'],'candidate_sha':sha,
-                   'branch':branch,'base':base,'state':'open','provider':identity[0]}
-        if previous:
-            old = previous[0].get('payload') or {}
-            if all(old.get(key) == receipt.get(key) for key in
-                   ('candidate_sha', 'branch', 'base', 'url', 'execution_id', 'candidate_episode_id')):
-                return old
-        if task.get('wrapup_delivery'):
-            from .wrapup_delivery import record_pr_receipt
-            record_pr_receipt(store, task, workflow, receipt)
-        else:
-            store.record_event('pull_request_created',receipt,task_id=task_id,
-                               workflow_id=task['workflow_id'],source='herdr-task')
-        return receipt
+        return _publish_verified_candidate(
+            store, task, publication_workflow, sha, branch, base,
+            title=title, body=body, draft=draft, client=client,
+            revalidate=lambda fresh: _publication(fresh, wd.load_notes(task['workflow_id']), store),
+        )
+
+
+def publish_direct_workflow_pr(store, workflow_id, *, title=None, body='', draft=False, client=None):
+    """Create or reuse PR directly after deterministic gate + heterogeneous review pass (W4)."""
+    with workflow_launch_lock(store.db_path, f"pr:{workflow_id}"):
+        workflow = store.get_workflow(workflow_id) or {}
+        tasks = [t for t in store.list_tasks(workflow_id=workflow_id) if not t.get('superseded_by') and t.get('status') != 'superseded']
+        candidate_node = str((workflow.get('config') or {}).get('candidate_node') or 'executor')
+        candidate_task = next(
+            (t for t in reversed(tasks) if (t.get('node') or t.get('stage')) == candidate_node and t.get('integrated_commit')),
+            None,
+        )
+        if not candidate_task:
+            raise ValueError('no integrated candidate task found for direct PR delivery')
+        sha = str(candidate_task.get('integrated_commit') or '').strip()
+        branch = str(candidate_task.get('integration_branch') or '').strip()
+        base = str(candidate_task.get('base_branch') or workflow.get('base_branch') or 'main').strip()
+        if not re.fullmatch(r'[0-9a-f]{40}', sha) or not branch:
+            raise ValueError('candidate task missing valid integrated commit or branch')
+        gate_task = next(
+            (t for t in reversed(tasks) if (t.get('node') or t.get('stage')) in ('gate', 'test', 'cleanroom_test')
+             and t.get('stage_verdict') == 'pass' and t.get('candidate_sha') == sha),
+            None,
+        )
+        review_task = next(
+            (t for t in reversed(tasks) if (t.get('node') or t.get('stage')) in ('review', 'cleanroom_review')
+             and t.get('stage_verdict') == 'pass' and t.get('candidate_sha') == sha),
+            None,
+        )
+        if not gate_task or not review_task:
+            raise ValueError('direct PR delivery requires both gate and review pass on candidate_sha')
+        if not review_task.get('agent') or review_task.get('agent') == candidate_task.get('agent'):
+            raise ValueError('direct PR delivery requires heterogeneous review agent')
+        pr_title = (title or workflow.get('title') or f"triad: {workflow_id}")[:256]
+        return _publish_verified_candidate(
+            store, candidate_task, workflow, sha, branch, base,
+            title=pr_title, body=body, draft=draft, client=client,
+        )
 
 
 def merge_task_pr(store, task_id, *, pr_number=None, client=None, merge_method='merge'):

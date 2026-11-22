@@ -119,6 +119,9 @@ def _settle(db_path, task_id, *, at=None):
 class OutcomeSettlementTest(unittest.TestCase):
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_case1_success_creates_qualified_outcome(self):
         _save_task(self.store, "t-1", "run-1", "codex")
@@ -311,6 +314,9 @@ class OutcomeSettlementTest(unittest.TestCase):
 class OutcomeReadinessTest(unittest.TestCase):
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_finalization_picks_latest_owned_eval_before_cutoff(self):
         # Write-time freezing: finalizing at T sees rev1; a later rev2
@@ -363,6 +369,9 @@ class OutcomeIdentityHotfixTest(unittest.TestCase):
 
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_outcome_id_binds_task_and_run(self):
         _save_task(self.store, "t-hf1", "run-hf1a", "codex")
@@ -455,6 +464,9 @@ class OutcomeIdentityHotfixTest(unittest.TestCase):
 class OutcomeIndexTest(unittest.TestCase):
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_bucket_index_serves_router_query(self):
         import sqlite3
@@ -487,6 +499,9 @@ class OutcomeHookTest(unittest.TestCase):
 
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def _enable_hooks(self):
         hook_patch = patch.dict(
@@ -570,6 +585,9 @@ class OutcomeShadowInvariantTest(unittest.TestCase):
 
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
         self.wf_id = "wf-shadow-outcome"
         self.store.save_workflow({
             "workflow_id": self.wf_id,

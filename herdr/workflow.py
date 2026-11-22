@@ -43,6 +43,21 @@ def _load_file(path: Path) -> Dict[str, Any]:
 DEFAULT_TEMPLATE_NAME = "software-development-v1"
 
 
+def resolve_candidate_node(workflow_cfg: Any) -> str:
+    """Resolve the code-producing node id from workflow_cfg without hardcoding."""
+    if isinstance(workflow_cfg, dict):
+        explicit = str(workflow_cfg.get("candidate_node") or "").strip()
+        if explicit:
+            return explicit
+        nodes = workflow_cfg.get("nodes") or []
+        if any(isinstance(n, dict) and n.get("id") == "implementation" for n in nodes):
+            return "implementation"
+        for n in nodes:
+            if isinstance(n, dict) and n.get("default_integration_mode") == "git" and n.get("id"):
+                return str(n["id"])
+    return "implementation"
+
+
 def _parse_template_version(ver_val: Any) -> Tuple[int, ...]:
     try:
         parts = re.findall(r"\d+", str(ver_val or "0"))

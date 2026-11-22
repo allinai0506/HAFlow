@@ -54,26 +54,26 @@ class RouterRemediationExhausted(RouterRejectionError):
     pass
 
 
-DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi", "grok", "kimi"]
+DEFAULT_ALLOWED = ["claude", "codex", "grok"]
 
 DEFAULT_STAGE_PREFERENCES = {
-    "requirements": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
-    "plan": ["claude", "qodercli", "codex", "opencode", "agy", "pi", "grok", "kimi"],
-    "implementation": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
-    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "review": ["claude", "codex", "qodercli", "opencode", "agy", "pi", "grok", "kimi"],
-    "wrapup": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
+    "requirements": ["claude", "codex", "grok"],
+    "plan": ["claude", "codex", "grok"],
+    "implementation": ["claude", "codex", "grok"],
+    "test": ["codex", "claude", "grok"],
+    "review": ["claude", "codex", "grok"],
+    "wrapup": ["claude", "codex", "grok"],
 }
 
 DEFAULT_TASK_TYPE_PREFERENCES = {
-    "feat": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
-    "fix": ["opencode", "codex", "qodercli", "agy", "claude", "pi", "grok", "kimi"],
-    "refactor": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "docs": ["claude", "qodercli", "opencode", "codex", "agy", "pi", "grok", "kimi"],
-    "test": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "chore": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "perf": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
-    "ci": ["codex", "opencode", "qodercli", "claude", "agy", "pi", "grok", "kimi"],
+    "feat": ["claude", "codex", "grok"],
+    "fix": ["claude", "codex", "grok"],
+    "refactor": ["codex", "claude", "grok"],
+    "docs": ["claude", "codex", "grok"],
+    "test": ["codex", "claude", "grok"],
+    "chore": ["codex", "claude", "grok"],
+    "perf": ["codex", "claude", "grok"],
+    "ci": ["codex", "claude", "grok"],
 }
 
 # Preflight 快照保鲜期:超过该秒数的 healthy_agents 名单不再被信任为
@@ -735,7 +735,11 @@ def _choose_agent_locked(
     disabled = set(pool.get("disabled_agents", []))
     workflow_override = record.get("agent_override", "auto")
 
-    if workflow_override and workflow_override != "auto":
+    if (
+        workflow_override
+        and workflow_override != "auto"
+        and not ((is_verifier or exclude_stages) and workflow_override in stage_used_agents)
+    ):
         selected = workflow_override
     elif requested and requested != "auto":
         selected = requested
@@ -1291,6 +1295,19 @@ def _record_canary_error_best_effort(shadow_ctx, decided_at, error, selected):
         )
     except Exception:
         pass
+
+
+def has_heterogeneous_candidates(workflow_cfg, project_id, healthy_agents=None):
+    """Return (ok, reason) verifying at least 2 distinct agent families exist before launch (W6)."""
+    if not isinstance(workflow_cfg, dict) or not workflow_cfg.get("require_heterogeneous"):
+        return True, ""
+    pool = load_pools().get("projects", {}).get(project_id) or default_pool()
+    allowed = set(pool.get("allowed_agents") or DEFAULT_ALLOWED) - set(pool.get("disabled_agents") or [])
+    if healthy_agents is not None:
+        allowed &= set(healthy_agents)
+    if len(allowed) < 2:
+        return False, f"异构预检失败：需要至少 2 个可用 Agent，当前仅剩 {sorted(allowed)}"
+    return True, ""
 
 
 def choose_agent(

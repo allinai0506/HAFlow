@@ -123,6 +123,9 @@ def _rank(db_path, candidates, **kwargs):
 class AdaptiveRankingTest(unittest.TestCase):
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_case1_high_success_beats_fast_rework(self):
         for i in range(20):
@@ -268,6 +271,9 @@ class LaunchPathIntegrationTest(unittest.TestCase):
 
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     @staticmethod
     def _load_module(name):
@@ -398,6 +404,9 @@ class ShadowIntegrationTest(unittest.TestCase):
 
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
         self.wf_id = "wf-shadow-int"
         self.store.save_workflow({
             "workflow_id": self.wf_id,
@@ -456,6 +465,9 @@ class ShadowIntegrationTest(unittest.TestCase):
 class HistoryBoundsTest(unittest.TestCase):
     def setUp(self):
         self.store, self.db_path = _make_env(self)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_history_read_is_bounded(self):
         for i in range(30):
