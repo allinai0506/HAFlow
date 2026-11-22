@@ -507,6 +507,30 @@ def checkout_onto_branch(clone, onto_branch, *, candidate_sha=None, launch_ident
     return onto_branch
 
 
+def _complexity_cache_path():
+    raw = os.environ.get("HERDR_COMPLEXITY_BASELINE_CACHE")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".herdr-controller" / "tmp" / "complexity-baseline-cache.json"
+
+
+def _complexity_cache_key(repo, gate_script):
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head.returncode != 0 or not head.stdout.strip():
+        return None
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True,
+    )
+    if status.returncode != 0 or status.stdout.strip():
+        return None
+    gate_sha = hashlib.sha256(gate_script.read_bytes()).hexdigest()[:16]
+    return f"{head.stdout.strip()}:{gate_sha}"
+
+
 def measure_complexity_baseline(clone):
     # HERDR_OPTIONAL_COMPLEXITY_GATE
     # Complexity gate is a per-repository capability, not a Herdr requirement.
@@ -514,6 +538,16 @@ def measure_complexity_baseline(clone):
     _herdr_gate = _herdr_repo / "scripts" / "complexity-gate.cjs"
     if not _herdr_gate.is_file():
         return "disabled"
+
+    cache_key = _complexity_cache_key(_herdr_repo, _herdr_gate)
+    cache_path = _complexity_cache_path()
+    if cache_key and cache_path.is_file():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and isinstance(cached.get(cache_key), int):
+                return cached[cache_key]
+        except Exception:
+            pass
 
     # Ensure node_modules is present; fallback to symlinking from origin if missing
     _clone_nm = _herdr_repo / "node_modules"
@@ -530,22 +564,29 @@ def measure_complexity_baseline(clone):
         except Exception:
             pass
 
-    result = subprocess.run(
-        [
-            "node",
-            str(Path(clone) / "scripts" / "complexity-gate.cjs"),
-            "--baseline-total",
-            "999999",
-            "--ignore-head-snapshot"
-        ],
-        cwd=str(clone),
-        text=True,
-        capture_output=True
-    )
+    timeout_sec = int(os.environ.get("HERDR_COMPLEXITY_BASELINE_TIMEOUT", "90") or "90")
+    try:
+        result = subprocess.run(
+            [
+                "node",
+                str(Path(clone) / "scripts" / "complexity-gate.cjs"),
+                "--baseline-total",
+                "999999",
+                "--ignore-head-snapshot"
+            ],
+            cwd=str(clone),
+            text=True,
+            capture_output=True,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"[COMPLEXITY BASELINE TIMEOUT] exceeded {timeout_sec}s in {clone}; degrading to disabled",
+            file=sys.stderr,
+        )
+        return "disabled"
 
     output = result.stdout + "\n" + result.stderr
-
-    import re
 
     match = re.search(
         r"当前实测:\s*(\d+)\s*条",
@@ -558,7 +599,22 @@ def measure_complexity_baseline(clone):
             + output[-2000:]
         )
 
-    return int(match.group(1))
+    baseline = int(match.group(1))
+    if cache_key:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            data = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.is_file() else {}
+            if not isinstance(data, dict):
+                data = {}
+            data[cache_key] = baseline
+            if len(data) > 128:
+                for old_key in list(data.keys())[:-128]:
+                    data.pop(old_key, None)
+            cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    return baseline
 
 
 def file_fingerprint(repo, relpath):

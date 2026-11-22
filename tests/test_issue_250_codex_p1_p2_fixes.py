@@ -2067,6 +2067,25 @@ class CodexReviewP1P2FixesTest(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(auth[0], "pass")
 
+    def test_gate_verdict_reconciliations_skips_terminal_tasks_before_node_is_gate(self):
+        from types import SimpleNamespace
+        from services.controller.auto_verdict import process_gate_verdict_reconciliations
+
+        called = []
+        tasks = [
+            {"task_id": "t-cleaned", "workflow_id": "wf-1", "node": "cleanroom_test", "status": "cleaned"},
+            {"task_id": "t-superseded", "workflow_id": "wf-1", "node": "cleanroom_review", "status": "superseded"},
+            {"task_id": "t-completed", "workflow_id": "wf-1", "node": "cleanroom_test", "status": "completed"},
+            {"task_id": "t-failed-other", "workflow_id": "wf-1", "node": "cleanroom_test", "status": "failed", "failure_reason": "other"},
+            {"task_id": "t-working", "workflow_id": "wf-1", "node": "cleanroom_test", "status": "working"},
+        ]
+        ports = SimpleNamespace(
+            load_tasks=lambda: tasks,
+            node_is_gate=lambda wf, node: (called.append((wf, node)), False)[1],
+        )
+        self.assertEqual(process_gate_verdict_reconciliations(ports), 0)
+        self.assertEqual(called, [("wf-1", "cleanroom_test")])
+
 
 if __name__ == "__main__":
     unittest.main()
