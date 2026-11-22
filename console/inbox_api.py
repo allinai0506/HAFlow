@@ -93,7 +93,7 @@ def sync_linear_issues(force: bool = False, limit: int = 20) -> int:
         for issue in nodes:
             try:
                 payload = {
-                    "action": "update",
+                    "action": "create",
                     "type": "Issue",
                     "createdAt": issue.get("createdAt"),
                     "updatedAt": issue.get("updatedAt"),
