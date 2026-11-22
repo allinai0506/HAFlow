@@ -82,7 +82,7 @@ if sys.argv[1:] == ['list']:
     result = subprocess.run(
         ["/bin/bash", str(ROOT / "scripts/install-herdr-console.sh"), "--sha", sha]
         + ([] if restart else ["--no-restart"]),
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=45,
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=90,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []

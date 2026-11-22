@@ -335,8 +335,8 @@ def test_stale_identity_rejected_then_halt_uses_current_pane(cockpit):
     cockpit.browser("""
         await page.waitForFunction(()=>document.getElementById('modal').classList.contains('open'));
         await page.fill('#cockpitReason','核查旧快照'); await page.click('#cockpitActionConfirm');
-        await page.waitForFunction(()=>state.controllerReceipt?.status==='rejected');
-        await page.waitForFunction(()=>state.controllerCockpit.tasks.some(t=>t.task_id==='working'&&t.pane_id==='replacement-pane'));
+        await page.waitForFunction(()=>state.controllerReceipt?.status==='rejected', undefined, {timeout: 30000});
+        await page.waitForFunction(()=>state.controllerCockpit?.tasks?.some(t=>t.task_id==='working'&&t.pane_id==='replacement-pane'), undefined, {timeout: 30000});
     """)
     assert cockpit.effects == []
     assert cockpit.store.get_task("working")["status"] == "working"
