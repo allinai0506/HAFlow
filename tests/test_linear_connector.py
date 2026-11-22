@@ -2403,3 +2403,133 @@ def test_reconcile_running_tasks_forwards_decoded_workflow_summary(tmp_path):
         mock_status_sync.assert_called_once_with(
             Path(db_path), tid, "COMPLETED", error=None, summary="Actual delivery report from test"
         )
+
+
+def test_sync_linear_issues_materializes_unseen_open_issue_without_conflict(intake_env, monkeypatch):
+    """Verify polling materializes newly discovered open issues and doesn't conflict with later create webhooks."""
+    path, store = intake_env
+    from console.inbox_api import sync_linear_issues, api_linear_webhook
+    from herdr.intake.inbox import IntakeInbox
+
+    config = {
+        "tenant_id": SCOPE.tenant_id,
+        "user_id": "operator",
+        "connections": {SCOPE.connection_id: {"auto_assign": False}},
+    }
+    monkeypatch.setenv("HAFLOW_INTAKE_INBOX_CONFIG", json.dumps(config))
+    monkeypatch.setenv("HAFLOW_INTAKE_INBOX_TOKEN", "a" * 40)
+    monkeypatch.setenv("LINEAR_ORGANIZATION_ID", ORG_ID)
+    monkeypatch.setenv("LINEAR_API_TOKEN", "fake-token")
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", SECRET)
+    monkeypatch.setenv("HAFLOW_INTAKE_TENANT", SCOPE.tenant_id)
+    monkeypatch.setenv("HAFLOW_LINEAR_CONNECTION", SCOPE.connection_id)
+    monkeypatch.setattr("herdr.state_db.get_default_db_path", lambda: str(path))
+    monkeypatch.setattr("console.inbox_api.get_inbox_store", lambda: MagicMock(db_path=str(path)))
+
+    issue_data = {
+        "id": "iss-unseen-001",
+        "identifier": "CO-999",
+        "title": "Unseen open issue from polling",
+        "description": "Discovered via Linear GraphQL API poll",
+        "state": {"name": "Todo", "type": "unstarted"},
+        "assignee": {"id": "u-1", "name": "Bob"},
+        "createdAt": "2026-11-22T08:00:00.000Z",
+        "updatedAt": "2026-11-22T08:00:00.000Z",
+    }
+    mock_res = {"data": {"issues": {"nodes": [issue_data]}}}
+
+    with patch("herdr.intake.connectors.linear.client.LinearClient._post_graphql", return_value=mock_res):
+        synced = sync_linear_issues(force=True)
+        assert synced == 1
+
+    inbox = IntakeInbox(path, config)
+    items = inbox.list_items(view="ALL")
+    assert len(items) == 1
+    assert items[0]["external_id"] == "iss-unseen-001"
+    assert items[0]["title"] == "[CO-999] Unseen open issue from polling"
+    assert items[0]["status"] != "SOURCE_CONFLICT"
+
+    # Now deliver the real create webhook at the same version
+    now_ms = int(time.time() * 1000)
+    real_create_payload = sample_issue_payload(
+        "create",
+        "unstarted",
+        issue_id="iss-unseen-001",
+        identifier="CO-999",
+        title="Unseen open issue from polling",
+        description="Discovered via Linear GraphQL API poll",
+        created_at="2026-11-22T08:00:00.000Z",
+        updated_at="2026-11-22T08:00:00.000Z",
+        assignee_name="Bob",
+        webhook_timestamp=now_ms,
+    )
+    raw_body = json.dumps(real_create_payload).encode("utf-8")
+    headers = {
+        "Linear-Signature": sign(raw_body),
+        "Linear-Delivery": "delivery-real-create-001",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status, res = api_linear_webhook(headers, raw_body)
+    assert status == 200
+
+    # Must NOT become SOURCE_CONFLICT!
+    items_after = inbox.list_items(view="ALL")
+    assert len(items_after) == 1
+    assert items_after[0]["external_id"] == "iss-unseen-001"
+    assert items_after[0]["status"] != "SOURCE_CONFLICT"
+
+
+def test_drain_intake_events_recovers_expired_processing_claims(intake_env, monkeypatch):
+    """Verify _drain_intake_events recovers expired PROCESSING claims without a separately running worker."""
+    path, store = intake_env
+    from console.inbox_api import _drain_intake_events
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.schema import open_db
+    from contextlib import closing
+
+    config = {
+        "tenant_id": SCOPE.tenant_id,
+        "user_id": "operator",
+        "connections": {SCOPE.connection_id: {"auto_assign": False}},
+    }
+    monkeypatch.setenv("HAFLOW_INTAKE_INBOX_CONFIG", json.dumps(config))
+    monkeypatch.setenv("LINEAR_ORGANIZATION_ID", ORG_ID)
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", SECRET)
+    monkeypatch.setenv("HAFLOW_INTAKE_TENANT", SCOPE.tenant_id)
+    monkeypatch.setenv("HAFLOW_LINEAR_CONNECTION", SCOPE.connection_id)
+    monkeypatch.setattr("herdr.state_db.get_default_db_path", lambda: str(path))
+    monkeypatch.setattr("console.inbox_api.get_inbox_store", lambda: MagicMock(db_path=str(path)))
+
+    # Ingest a work event using handle_linear_webhook (without auto-drain)
+    now_ms = int(time.time() * 1000)
+    raw_body = json.dumps(sample_issue_payload("create", "unstarted", issue_id="iss-abandoned-01", identifier="CO-888", webhook_timestamp=now_ms)).encode("utf-8")
+    from herdr.intake.connectors.linear.receiver import handle_linear_webhook
+    headers = {
+        "Linear-Signature": sign(raw_body),
+        "Linear-Delivery": "del-abandoned-01",
+        "Linear-Timestamp": str(now_ms),
+        "Linear-Event": "Issue",
+    }
+    status, _, body = handle_linear_webhook(raw_body, headers, store, ORG_ID, SECRET, now_ms=now_ms)
+    assert status == 200
+    assert body.get("outcome") == "ACCEPTED"
+
+    # Claim the event (moves it to PROCESSING)
+    claim = store.claim_next_event()
+    assert claim is not None
+    assert claim.event_id is not None
+
+    # Advance time past lease_until to expire the lease
+    monkeypatch.setattr(time, "time_ns", lambda: (claim.lease_until + 10_000) * 1_000_000)
+    store.recover_expired()
+
+    # Advance time past retry backoff delay (base delay is 5000ms)
+    monkeypatch.setattr(time, "time_ns", lambda: (claim.lease_until + 20_000) * 1_000_000)
+
+    # Draining intake events must claim and materialize the recovered event
+    _drain_intake_events(SCOPE.tenant_id, SCOPE.connection_id)
+
+    inbox = IntakeInbox(path, config)
+    items = inbox.list_items(view="ALL")
+    assert any(it["external_id"] == "iss-abandoned-01" for it in items)

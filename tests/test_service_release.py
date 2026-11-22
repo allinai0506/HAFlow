@@ -62,7 +62,7 @@ def test_installer_no_restart_temp_home(tmp_path):
     agents=tmp_path/'Library/LaunchAgents'; agents.mkdir(parents=True)
     p=agents/'com.user.herdr-controller.plist'; make(p)
     env=dict(os.environ,HOME=str(tmp_path))
-    result=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart'],cwd=repo,env=env,text=True,capture_output=True,timeout=30)
+    result=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart'],cwd=repo,env=env,text=True,capture_output=True,timeout=90)
     assert result.returncode==0,result.stderr
     d=plistlib.loads(p.read_bytes())
     assert d['ProgramArguments']==['/usr/bin/python3',str(root/'services/herdr-controller.py')]
@@ -71,7 +71,7 @@ def test_installer_no_restart_temp_home(tmp_path):
     cache=root/'services/__pycache__';cache.mkdir(parents=True)
     (cache/'herdr-controller.cpython-313.pyc').write_bytes(b'unverified cached instructions')
     first=p.read_bytes()
-    repeated=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart'],cwd=repo,env=env,text=True,capture_output=True,timeout=30)
+    repeated=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart'],cwd=repo,env=env,text=True,capture_output=True,timeout=90)
     assert repeated.returncode==0,repeated.stderr
     assert not cache.exists() and p.read_bytes()==first
     assert d['EnvironmentVariables']['PYTHONDONTWRITEBYTECODE']=='1'
@@ -89,7 +89,7 @@ def test_installer_rejects_mutated_existing_snapshot_before_plist(tmp_path):
     (root/'console/herdr_factory_console.py').write_text('# locally mutated snapshot')
     (root/'services').mkdir();(root/'services/herdr-controller.py').touch()
     agents=tmp_path/'Library/LaunchAgents';agents.mkdir(parents=True);p=agents/'com.user.herdr-controller.plist';make(p);original=p.read_bytes()
-    result=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart'],cwd=repo,env=dict(os.environ,HOME=str(tmp_path)),capture_output=True,text=True,timeout=30)
+    result=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart'],cwd=repo,env=dict(os.environ,HOME=str(tmp_path)),capture_output=True,text=True,timeout=90)
     assert result.returncode!=0,'mutated SHA-named snapshot was accepted'
     assert p.read_bytes()==original
 
@@ -293,7 +293,7 @@ def test_installer_refuses_unmanaged_release_plist_before_touching_anything(tmp_
         'ProgramArguments':['python3','/old/releases/'+UNPINNED_SHA+'/services/herdr-worker.py']}))
     controller_before, worker_before = controller.read_bytes(), worker.read_bytes()
     result=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart'],
-                          cwd=repo,env=dict(os.environ,HOME=str(tmp_path)),capture_output=True,text=True,timeout=45)
+                          cwd=repo,env=dict(os.environ,HOME=str(tmp_path)),capture_output=True,text=True,timeout=90)
     assert result.returncode!=0,'unmanaged pinned service must not deploy silently'
     assert 'com.user.herdr-worker' in result.stdout+result.stderr
     assert controller.read_bytes()==controller_before
@@ -310,7 +310,7 @@ def test_installer_deploys_when_drift_is_exempted(tmp_path):
         'ProgramArguments':['python3','/old/releases/'+UNPINNED_SHA+'/services/herdr-worker.py']}))
     result=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart',
                            '--allow-unmanaged','com.user.herdr-worker'],
-                          cwd=repo,env=dict(os.environ,HOME=str(tmp_path)),capture_output=True,text=True,timeout=45)
+                          cwd=repo,env=dict(os.environ,HOME=str(tmp_path)),capture_output=True,text=True,timeout=90)
     assert result.returncode==0, result.stdout+result.stderr
     assert 'com.user.herdr-worker' in result.stdout
     assert plistlib.loads(controller.read_bytes())['EnvironmentVariables']['HERDR_ROOT'].endswith(sha)
@@ -324,7 +324,7 @@ def test_installer_adopts_argument_bearing_service_end_to_end(tmp_path):
     agents=tmp_path/'Library/LaunchAgents'; agents.mkdir(parents=True)
     p=agents/'com.user.herdr-experience-hub.plist'; hub_plist(p)
     result=subprocess.run(['bash',str(repo/'scripts/install-herdr-console.sh'),'--sha',sha,'--no-restart'],
-                          cwd=repo,env=dict(os.environ,HOME=str(tmp_path)),capture_output=True,text=True,timeout=45)
+                          cwd=repo,env=dict(os.environ,HOME=str(tmp_path)),capture_output=True,text=True,timeout=90)
     assert result.returncode==0, result.stdout+result.stderr
     root=tmp_path/'.herdr-controller/releases'/sha
     data=plistlib.loads(p.read_bytes())

@@ -721,3 +721,59 @@ def test_assign_unassign_reassign_cycle_reuses_task_and_updates_audit(store, mon
     assert audits[1]["previous_user_id"] is None
     assert audits[2]["previous_user_id"] == "operator"
     assert audits[3]["previous_user_id"] is None
+
+
+def test_equal_version_action_difference_does_not_trigger_source_conflict(store, clock):
+    from contextlib import closing
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.protocol import digest
+    from herdr.intake.schema import open_db
+    from herdr.intake.worker import run_once
+
+    config = {"tenant_id": "tenant", "user_id": "operator", "connections": {
+        "one": {"project_id": "haflow-1de29d2d", "workspace_id": "w1H"},
+    }}
+    settings = {"user_id": "operator", "project_id": "haflow-1de29d2d", "workspace_id": "w1H"}
+    inbox = IntakeInbox(store.path, config)
+
+    # 1. Initial "work" event materializes an OPEN item; simulate legacy digest (including "action").
+    store.accept_event(fact("ev-work", external_id="EXT-ACT-1", version=4, action="work"))
+    run_once(store, materialization=settings)
+    with closing(open_db(store.path)) as db:
+        row = db.execute(
+            "SELECT object_id, snapshot_json FROM intake_objects WHERE external_id = ?",
+            ("EXT-ACT-1",),
+        ).fetchone()
+        legacy_digest = digest(row["snapshot_json"].encode("utf-8"))
+        db.execute(
+            "UPDATE intake_objects SET snapshot_digest = ? WHERE object_id = ?",
+            (legacy_digest, row["object_id"]),
+        )
+        db.commit()
+
+    # 2. Same version & identical content with action="update" must NOT trigger SOURCE_CONFLICT.
+    clock[0] += 1
+    store.accept_event(fact("ev-update", external_id="EXT-ACT-1", version=4, action="update"))
+    run_once(store, materialization=settings)
+    item = [i for i in inbox.list_items() if i["external_id"] == "EXT-ACT-1"][0]
+    assert item["status"] == "DRAFT"
+
+    # 3. Reverse order: "update" arrives first (OPEN, no link), then "work" at same version creates link.
+    clock[0] += 1
+    store.accept_event(fact("ev-upd-first", external_id="EXT-ACT-2", version=7, action="update"))
+    run_once(store, materialization=settings)
+    assert [i for i in inbox.list_items() if i["external_id"] == "EXT-ACT-2"] == []
+
+    clock[0] += 1
+    store.accept_event(fact("ev-work-second", external_id="EXT-ACT-2", version=7, action="work"))
+    run_once(store, materialization=settings)
+    item2 = [i for i in inbox.list_items() if i["external_id"] == "EXT-ACT-2"][0]
+    assert item2["status"] == "DRAFT"
+
+    # 4. Real content divergence at the same version still triggers SOURCE_CONFLICT.
+    clock[0] += 1
+    store.accept_event(fact("ev-real-conflict", external_id="EXT-ACT-1", version=4, action="update",
+                            title="Divergent title"))
+    run_once(store, materialization=settings)
+    item_after = [i for i in inbox.list_items() if i["external_id"] == "EXT-ACT-1"][0]
+    assert item_after["status"] == "SOURCE_CONFLICT"

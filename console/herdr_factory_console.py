@@ -54,6 +54,11 @@ def main():
     print('HERDR_RUNTIME_FINGERPRINT='+json.dumps({'service':'com.user.herdr-factory-console','pid':os.getpid(),**fingerprint},sort_keys=True),flush=True)
     ROOT.mkdir(parents=True,exist_ok=True)
     print(f'{PRODUCT_NAME}控制台: http://{HOST}:{PORT}',flush=True)
+    try:
+        from console import inbox_api
+        inbox_api.start_linear_poller()
+    except Exception:
+        pass
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
 
 if __name__=='__main__':

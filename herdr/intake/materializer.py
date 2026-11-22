@@ -131,6 +131,21 @@ def materialize(store, claim, policy):
         return store._finish(db, event, finish_at, outcome, reason)
 
 
+def _content_digest(observation):
+    content = {key: value for key, value in observation.items() if key != "action"}
+    return digest(canonical_json(content).encode("utf-8"))
+
+
+def _existing_content_digest(obj):
+    try:
+        existing = json.loads(obj["snapshot_json"])
+        if isinstance(existing, dict):
+            return _content_digest(existing)
+    except (TypeError, ValueError):
+        pass
+    return obj["snapshot_digest"]
+
+
 def _apply(db, store, event, now, incoming, user, auto_assign, project, workspace, allowed):
     connection = store._connection(db)
     tenant, connection_id = store.scope.keys
@@ -146,7 +161,7 @@ def _apply(db, store, event, now, incoming, user, auto_assign, project, workspac
         raise ScopeDenied("event association cannot be redirected")
 
     snapshot = canonical_json(incoming)
-    snapshot_digest = digest(snapshot.encode("utf-8"))
+    snapshot_digest = _content_digest(incoming)
     previous = None
     if obj:
         previous = db.execute("""SELECT c.status, c.config_revision, e.config_revision AS observed_revision
@@ -159,7 +174,7 @@ def _apply(db, store, event, now, incoming, user, auto_assign, project, workspac
             return "IGNORED", "OBJECT_CONNECTION_NOT_AUTHORIZED"
     if obj and incoming["version"] <= int(obj["version"]):
         conflict = (incoming["version"] == int(obj["version"])
-                    and snapshot_digest != obj["snapshot_digest"])
+                    and snapshot_digest != _existing_content_digest(obj))
         if incoming["action"] == "closed" or conflict:
             status = ("CLOSED" if incoming["action"] == "closed" or obj["external_status"] == "CLOSED"
                       else "CONFLICT")

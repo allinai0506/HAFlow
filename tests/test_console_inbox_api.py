@@ -1050,3 +1050,78 @@ def test_intake_js_assign_unassign_assign_lifecycle():
     """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, f"Node script failed:\\nSTDOUT:\\n{result.stdout}\\nSTDERR:\\n{result.stderr}"
+
+
+def test_sync_linear_issues_materializes_open_issues_without_conflict(setup_inbox_test_db, monkeypatch):
+    from console import inbox_api
+    from herdr.intake.connectors.linear.client import LinearClient
+    from herdr.intake.connectors.linear.connector import register_linear_connection
+    from herdr.intake.inbox import IntakeInbox
+    from herdr.intake.protocol import Scope
+    from herdr.intake.schema import initialize, initialize_materialization
+    from herdr.intake.store import EventStore
+
+    db_path = Path(setup_inbox_test_db.db_path)
+    initialize(db_path)
+    initialize_materialization(db_path)
+    monkeypatch.setattr(inbox_api, "_LAST_LINEAR_SYNC_TIME", 0.0)
+
+    org_id = "org-linear-sync-test"
+    secret = "linear-sync-test-secret-0123456789"
+    intake_config = {
+        "tenant_id": "tenant",
+        "user_id": "operator",
+        "connections": {"linear": {"auto_assign": False}},
+    }
+    monkeypatch.setenv("LINEAR_ORGANIZATION_ID", org_id)
+    monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test_token")
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET", secret)
+    monkeypatch.setenv("LINEAR_WEBHOOK_SECRET_REF", "linear-sync-test")
+    monkeypatch.setenv("HAFLOW_INTAKE_INBOX_CONFIG", json.dumps(intake_config))
+
+    ev_store = EventStore(db_path, Scope("tenant", "linear"), authorizer=lambda _a, _s: "admin")
+    register_linear_connection(ev_store, instance=org_id, auth_ref="linear-sync-test", display_name="Linear")
+
+    issues_payload = {
+        "data": {
+            "issues": {
+                "nodes": [
+                    {
+                        "id": "issue-open-1",
+                        "identifier": "CO-901",
+                        "title": "Open issue pulled via API",
+                        "description": "Needs workflow",
+                        "state": {"name": "Todo", "type": "unstarted"},
+                        "assignee": {"id": "u1", "name": "Alice"},
+                        "createdAt": "2026-11-22T02:00:00.000Z",
+                        "updatedAt": "2026-11-22T02:10:00.000Z",
+                    },
+                    {
+                        "id": "issue-closed-1",
+                        "identifier": "CO-902",
+                        "title": "Already done issue",
+                        "description": "Done",
+                        "state": {"name": "Done", "type": "completed"},
+                        "assignee": None,
+                        "createdAt": "2026-11-22T01:00:00.000Z",
+                        "updatedAt": "2026-11-22T01:30:00.000Z",
+                    },
+                ]
+            }
+        }
+    }
+    monkeypatch.setattr(LinearClient, "_post_graphql", lambda self, q, v=None: issues_payload)
+
+    # First pull: OPEN issue must materialize into Inbox, CLOSED issue must not create a link.
+    assert inbox_api.sync_linear_issues(force=True) == 2
+    inbox = IntakeInbox(db_path, intake_config)
+    items = inbox.list_items()
+    assert len(items) == 1
+    assert items[0]["external_id"] == "issue-open-1"
+    assert items[0]["status"] == "PENDING_ASSIGNMENT"
+
+    # Second pull with identical updatedAt: must remain healthy (not SOURCE_CONFLICT).
+    assert inbox_api.sync_linear_issues(force=True) == 2
+    items_after = inbox.list_items()
+    assert len(items_after) == 1
+    assert items_after[0]["status"] == "PENDING_ASSIGNMENT"
