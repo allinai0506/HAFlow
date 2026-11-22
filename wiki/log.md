@@ -8,6 +8,21 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-22] feat | 控制台向导式解阻治理、恢复待办安全闭环与前端卡点交互优化
+
+- 背景：
+  1. 用户在 Controller 控制台遇到 `⚠️ 2 项恢复待办：· 需处理; review · 需处理`，点击进入后看到冷冰冰的内部技术英文报错 `Resolve identity_unknown...`，点击自带的 `[ 前置问题已处理，重试 ]` 按钮被后台 Fail-Closed 策略拒绝（抛出 `ValueError('retry prerequisites unknown; delivery must be verified')`），陷入无法在前端自愈的死循环；
+  2. 针对确定性门禁与自动化审核节点，任务列表将其空 `pane_id` 标记为警示性的 `工位 未确认`，制造虚假故障焦虑；
+  3. 对抗审核阶段产出的并发/事务多项 P0 阻断结论在前端任务详情中混成一大坨无格式纯文本，难以速读定位根因。
+- 变更：
+  1. `console/static/console/scripts/flow-canvas.js`：节点标签解析增强，为动态 `fix_loop` 与门禁 `review` 提供清晰的人性化中文名称映射（如「返工修复」），顶部黄条按钮升级为「查看卡点并处理 ➔」；
+  2. `console/static/console/scripts/controller-cockpit.js`：
+     - 在待办区顶部引入「💡 怎么解决当前卡点？」向导式引导卡片（Next Best Action），明确告知操作者返工修复或查看现场的途径；
+     - 终结 dead-end 重试按钮：当卡点处于返工循环或 `identity_unknown` 时，将原本抛错的无效重试按钮替换为可直接调用的主操作 `[ ↺ 回溯至执行者重新修复 ]`，前端一键触发回溯至执行者安全作废未通过分支并允许重新派发；
+     - 清理左侧任务状态干扰，针对非工位任务将 `未确认` 规范化为 `免工位` 或 `—`；对具有活动工位的任务提供直达工位的 `[ 💻 工位 ]` 按钮；
+  3. `console/static/console/scripts/task-detail.js`：重构审查结论解析，自动将 `[P0]` 阻断缺陷结构化提炼为带 `[P0 阻断]` 警告徽章的独立卡片；
+  4. `tests/test_console_ui_modules.py`：对重构的 `renderTaskDrawer`、`renderTaskOverview`、`recoveryCard` 注册合规扩展，全量 538 项控制台测试全部 PASS，严格维持所有前端资源 <= 500 行及 4px 栅格间距。
+
 ## [2026-11-20] feat | Linear Connector V2 双向同步与状态进度回写、回环抑制与控制台凭据体验优化
 
 - 背景：Linear 作为团队全员协作权威系统，在 V1 完成单向流入（Issue -> Webhook -> HAFlow Draft）后，团队需要双向闭环能力（在 HAFlow 内部接手、流转与交付时，实时将状态同步并向 Linear 发表进展评论）。同时，出站调用面临三大工程挑战：
