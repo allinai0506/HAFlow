@@ -313,6 +313,18 @@ class TestCleanSandbox(unittest.TestCase):
             subprocess.run(["git", "add", "foo.txt"], cwd=first, check=True)
             self.assertEqual(subprocess.check_output(["git", "diff", "--cached"], cwd=second), b"")
 
+    def test_create_clone_skips_codegraph_and_symlinks_node_modules(self):
+        worker = load_worker()
+        (self.source_repo / "node_modules" / "pkg").mkdir(parents=True)
+        (self.source_repo / "node_modules" / "pkg" / "index.js").write_text("module.exports = 1;\n")
+        (self.source_repo / ".codegraph").mkdir()
+        (self.source_repo / ".codegraph" / "index.db").write_text("huge")
+        with patch.object(worker, "CLONE_ROOT", Path(self.temp_dir) / "clones"):
+            clone = worker.create_clone(self.source_repo, "skip-heavy-dirs")
+            self.assertTrue((clone / "node_modules").is_symlink())
+            self.assertEqual((clone / "node_modules").resolve(), (self.source_repo / "node_modules").resolve())
+            self.assertFalse((clone / ".codegraph").exists())
+
     def test_create_task_branch_with_dirty_source(self):
         worker = load_worker()
         clone_root = Path(self.temp_dir) / "clones"

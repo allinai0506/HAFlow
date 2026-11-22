@@ -10,7 +10,6 @@ import subprocess
 import shlex
 import sys
 import time
-import tempfile
 from pathlib import Path
 
 HERDR_ROOT = Path(__file__).resolve().parent.parent
@@ -132,6 +131,58 @@ def sanitize_clone_sandbox(clone, launch_identity=None):
         write_worker_launch_identity(clone, launch_identity)
 
 
+CLONE_SKIP_ENTRIES = frozenset({"node_modules", ".codegraph"})
+WORKTREE_GIT_SKIP = frozenset({
+    "worktrees", "HEAD", "index", "logs",
+    "COMMIT_EDITMSG", "ORIG_HEAD", "FETCH_HEAD",
+    "MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+})
+
+
+def _resolve_git_path(source, flag):
+    raw = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", flag],
+        text=True,
+    ).strip()
+    path = Path(raw)
+    return path if path.is_absolute() else (source / path).resolve()
+
+
+def _materialize_worktree_git_dir(source, clone):
+    """Materialize an independent .git directory from a linked worktree using APFS CoW."""
+    common_dir = _resolve_git_path(source, "--git-common-dir")
+    git_dir = _resolve_git_path(source, "--git-dir")
+    target_git = clone / ".git"
+    if target_git.is_file() or target_git.is_symlink():
+        target_git.unlink()
+    elif target_git.is_dir():
+        shutil.rmtree(target_git)
+    target_git.mkdir(parents=True, exist_ok=True)
+
+    common_entries = [str(e) for e in common_dir.iterdir() if e.name not in WORKTREE_GIT_SKIP]
+    if common_entries:
+        subprocess.run(
+            ["cp", "-cR", *common_entries, str(target_git)],
+            check=True, capture_output=True, text=True,
+        )
+    for fname in ("HEAD", "index", "config.worktree"):
+        src_file = git_dir / fname
+        if src_file.is_file():
+            subprocess.run(
+                ["cp", "-c", str(src_file), str(target_git / fname)],
+                check=True, capture_output=True, text=True,
+            )
+    # Ensure the materialized clone is a standalone non-bare repo even if source worktree came from a bare repo.
+    subprocess.run(
+        ["git", "-C", str(clone), "config", "--bool", "core.bare", "false"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(clone), "config", "--unset", "core.worktree"],
+        capture_output=True, text=True,
+    )
+
+
 def create_clone(source, task_id):
     source = Path(source).expanduser().resolve()
     clone = CLONE_ROOT / task_id
@@ -153,16 +204,20 @@ def create_clone(source, task_id):
         exist_ok=True
     )
 
+    is_linked_worktree = (source / ".git").is_file()
+    skip_names = CLONE_SKIP_ENTRIES | ({".git"} if is_linked_worktree else set())
+    clone.mkdir(parents=True, exist_ok=True)
+    entries = [str(e) for e in source.iterdir() if e.name not in skip_names]
     result = subprocess.run(
-        [
-            "cp",
-            "-cR",
-            str(source),
-            str(clone)
-        ],
+        ["cp", "-cR", *entries, str(clone)] if entries else ["true"],
         text=True,
-        capture_output=True
+        capture_output=True,
     )
+
+    # A linked worktree's .git file points back to the source HEAD/index.
+    # Materialize independent metadata via APFS CoW before any reset or branch operation.
+    if is_linked_worktree:
+        _materialize_worktree_git_dir(source, clone)
 
     # macOS cp 可能因为 repo 内的 socket 给出警告，
     # 但真正的仓库 Clone 已经成功创建。
@@ -171,43 +226,6 @@ def create_clone(source, task_id):
             result.stderr.strip()
             or "Clone failed"
         )
-
-    # A linked worktree's .git file points back to the source HEAD/index.
-    # Materialize independent metadata before any reset or branch operation.
-    if (clone / ".git").is_file():
-        with tempfile.TemporaryDirectory(prefix="herdr-git-") as temporary:
-            independent = Path(temporary) / "repo"
-            subprocess.run(
-                ["git", "clone", "--no-hardlinks", "--no-checkout", str(source), str(independent)],
-                check=True, capture_output=True, text=True,
-            )
-            # Keep source local branch identities (e.g. a pinned dev baseline).
-            # clone otherwise maps every non-current local branch to origin/*.
-            subprocess.run(
-                ["git", "-C", str(independent), "fetch", "--update-head-ok", "--no-tags", str(source),
-                 "refs/heads/*:refs/heads/*"],
-                check=True, capture_output=True, text=True,
-            )
-            origin = subprocess.run(
-                ["git", "-C", str(source), "remote", "get-url", "origin"],
-                capture_output=True, text=True,
-            )
-            if origin.returncode == 0:
-                subprocess.run(
-                    ["git", "-C", str(independent), "remote", "set-url", "origin", origin.stdout.strip()],
-                    check=True, capture_output=True, text=True,
-                )
-            hooks = subprocess.run(
-                ["git", "-C", str(source), "config", "--get", "core.hooksPath"],
-                capture_output=True, text=True,
-            )
-            if hooks.returncode == 0:
-                subprocess.run(
-                    ["git", "-C", str(independent), "config", "core.hooksPath", hooks.stdout.strip()],
-                    check=True, capture_output=True, text=True,
-                )
-            (clone / ".git").unlink()
-            shutil.move(str(independent / ".git"), str(clone / ".git"))
 
     if result.stderr.strip():
         print(
