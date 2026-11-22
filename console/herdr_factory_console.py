@@ -44,6 +44,20 @@ def execute_controller_action(payload):
 def resolve_controller_action(workflow_id, action_id, *, snapshot=None):
     return control_api.resolve_controller_action(workflow_id, action_id, snapshot=snapshot)
 
+def _start_linear_poller():
+    import threading, time
+    from console.inbox_api import sync_linear_issues
+    def _loop():
+        time.sleep(2)
+        while True:
+            try:
+                sync_linear_issues(force=True)
+            except Exception:
+                pass
+            time.sleep(30)
+    t = threading.Thread(target=_loop, name="linear_issue_poller", daemon=True)
+    t.start()
+
 def main():
     try:
         from herdr import service_release
@@ -54,6 +68,7 @@ def main():
     print('HERDR_RUNTIME_FINGERPRINT='+json.dumps({'service':'com.user.herdr-factory-console','pid':os.getpid(),**fingerprint},sort_keys=True),flush=True)
     ROOT.mkdir(parents=True,exist_ok=True)
     print(f'{PRODUCT_NAME}控制台: http://{HOST}:{PORT}',flush=True)
+    _start_linear_poller()
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
 
 if __name__=='__main__':

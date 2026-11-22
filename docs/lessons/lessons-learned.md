@@ -10173,3 +10173,43 @@ git diff --check
 - `console/static/console/scripts/flow-canvas.js`
 - `console/static/console/scripts/task-detail.js`
 - `tests/test_console_ui_modules.py`
+
+
+## 240. 外部待办自动拉取断链根因、事件自动物化管道与凭据持久化（Active Intake Auto-Sync & Inbox Credential Persistence）（2026-11-22）
+
+### 问题背景
+
+在控制台服务重启或浏览器新会话打开后，用户反映无法接收 Linear 最新的待办任务（如 CO-665、CO-666），且界面弹出「解锁外部任务」要求输入 32 位凭据。排查发现存在以下断链与体验卡点：
+1. **Webhook 被动推送与隧道断开导致断链**：外部 Issue 接入原本完全依赖云端 Webhook 主动推送。因开发环境使用临时 Cloudflare 隧道，隧道关闭后 Linear 多次投递失败自动将该 Webhook 停用（`enabled: false`），云端新任务无法主动推送；
+2. **事件物化依赖终端独立进程**：系统设计将 Webhook 接收与事件物化解耦，必须由用户在终端运行常驻命令 `python3 services/herdr-intake.py` 才能将外部事件物化为待办任务，而纯 Web 控制台环境下用户无外部终端执行入口；
+3. **前端凭据仅保存在 sessionStorage**：前端代码原先仅使用 `sessionStorage` 暂存 `HAFLOW_INTAKE_INBOX_TOKEN`，每次重启浏览器或新建标签页均强制弹窗，且未给用户提供默认凭据提示或一键填充能力。
+
+### 经验教训
+
+| 问题现象 | 根因分析 | 治理原则与规范 |
+| :--- | :--- | :--- |
+| **重启后新 Issue 无法送达** | 依赖脆弱公网反向隧道与被动 Webhook，无主动同步保障 | **主动轮询兜底与常驻守护**：在控制台后端内置 30s 自动轮询守护线程（`_start_linear_poller`），直接调用 Linear GraphQL API 主动拉取最新 Issue，并在页面加载与「调度扫描」时即时触发 |
+| **事件入库后待办箱为空** | 缺少自动消费驱动，原设计要求在终端手动挂载脚本 | **就地物化驱动（In-process Materialization Drain）**：在 Webhook 接收、待办列表拉取、扫描调度等关键入口就地排空并物化未处理事件（`_drain_intake_events`），消除对外部终端命令的依赖 |
+| **频繁弹窗索取 32 位凭据** | 凭据只保存在临时会话，未做本地持久化与单机向导 | **凭据本地持久化与智能填充**：采用 `localStorage` + `sessionStorage` 双重记忆；弹窗内增加单机环境默认凭据提示与一键填入按钮，避免无谓输入 |
+
+### 操作规范
+
+1. **外部事件流转闭环**：凡涉及外部事件接收（如 Webhook 或 API Sync），必须配套内置物化管道（drainer），不得强依赖人工终端操作。
+2. **主动拉取频率控制**：后台同步必须设立进程级单飞锁（`_LINEAR_SYNC_LOCK`）与防抖节流阈值（如 20s 最小拉取间隔），防止高频请求冲击第三方 API 触发 429 限流。
+3. **单机环境无痛体验**：本地开发与单机使用时，配置了全局环境变量的凭据应在前端提供友好预填与长期持久化记忆。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_linear_connector.py tests/test_console_inbox_api.py tests/test_intake_materialization.py tests/test_intake_worker.py
+python3 -m compileall -q herdr services console tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `console/herdr_factory_console.py`
+- `console/inbox_api.py`
+- `console/static/console/scripts/intake.js`
+- `tests/test_console_inbox_api.py`
+- `tests/test_intake_materialization.py`

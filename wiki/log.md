@@ -8,6 +8,22 @@
 > 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
+## [2026-11-22] feat | Active Intake 外部待办自动轮询拉取、事件自动物化管道与控制台凭据持久化
+
+- 背景：
+  1. 重启控制台服务后，外部待办（Linear Issue）无法自动同步至控制台待办箱。排查确认原系统单向流入完全依赖云端 Webhook，但开发环境的临时 Cloudflare 隧道中断后云端 Linear 自动禁用了该 Webhook（`enabled: false`）；
+  2. 原设计要求用户在终端手动常驻运行 `python3 services/herdr-intake.py` 才能将外部事件物化为待办任务，纯 Web 控制台环境下用户无外部终端运行能力；
+  3. 前端对外部任务解锁凭据仅存放在 `sessionStorage`，新会话或重启浏览器后强制弹窗且无提示，造成体验阻断。
+- 变更：
+  1. `console/herdr_factory_console.py`：在控制台主进程启动 `_start_linear_poller()` 守护线程，后台每 30 秒自动调用 Linear GraphQL API 主动拉取最新 Issue；
+  2. `console/inbox_api.py`：
+     - 实现 `sync_linear_issues()`，基于环境变量凭据主动拉取 Linear Issues，构造签名并走标准验签流水线入库，配置防抖节流与并发单飞锁；
+     - 实现 `_drain_intake_events()`，在 Webhook 投递、待办拉取、扫描调度等入口就地排空并物化未处理事件，移除对独立命令行消费进程的依赖；
+  3. `console/static/console/scripts/intake.js`：
+     - 将凭据存储由单级 `sessionStorage` 升级为 `localStorage` + `sessionStorage` 双重持久化；
+     - 解锁弹窗增加单机环境默认凭据友好提示与「填入默认」快捷填充能力；
+  4. `docs/lessons/lessons-learned.md`：沉淀教训 §240。
+
 ## [2026-11-22] feat | 控制台向导式解阻治理、恢复待办安全闭环与前端卡点交互优化
 
 - 背景：

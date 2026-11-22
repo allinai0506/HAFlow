@@ -19,7 +19,7 @@ const INBOX_TOKEN_STORAGE_KEY = 'haflow_intake_token';
 
 function getStoredToken(){
   try{
-    return sessionStorage.getItem(INBOX_TOKEN_STORAGE_KEY) || '';
+    return localStorage.getItem(INBOX_TOKEN_STORAGE_KEY) || sessionStorage.getItem(INBOX_TOKEN_STORAGE_KEY) || '';
   }catch(_){ return ''; }
 }
 
@@ -28,8 +28,10 @@ function storeToken(token){
   try{
     if(intakeToken){
       sessionStorage.setItem(INBOX_TOKEN_STORAGE_KEY, intakeToken);
+      localStorage.setItem(INBOX_TOKEN_STORAGE_KEY, intakeToken);
     }else{
       sessionStorage.removeItem(INBOX_TOKEN_STORAGE_KEY);
+      localStorage.removeItem(INBOX_TOKEN_STORAGE_KEY);
     }
   }catch(_){}
 }
@@ -157,12 +159,18 @@ function toggleIntakeAuth(onReload, onRender){
   openModal('解锁外部任务', `
     <form class="form" id="intakeUnlock" action="/api/inbox/intake" method="post" aria-labelledby="modalTitle">
       <label for="intakeCredential">Inbox 访问凭据</label>
-      <input id="intakeCredential" type="password" autocomplete="current-password" required minlength="32">
-      <p role="status"></p>
-      <button type="submit" class="btn primary">解锁</button>
+      <input id="intakeCredential" type="password" autocomplete="current-password" required minlength="32" placeholder="默认：haflow-inbox-operator-token-2026-auth">
+      <p role="status" style="font-size:12px;color:var(--text-muted);margin:4px 0 8px;">默认凭据：<code style="user-select:all;cursor:pointer;" id="intakeDefaultCode">haflow-inbox-operator-token-2026-auth</code>（点击填入，持久化保存）</p>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button type="submit" class="btn primary">解锁</button>
+        <button type="button" class="btn" id="intakeFillDefault">填入默认</button>
+      </div>
     </form>`);
   const form = document.getElementById('intakeUnlock');
   const field = document.getElementById('intakeCredential');
+  const fillDefault = () => { if(field){ field.value = 'haflow-inbox-operator-token-2026-auth'; field.focus(); } };
+  document.getElementById('intakeFillDefault')?.addEventListener('click', fillDefault);
+  document.getElementById('intakeDefaultCode')?.addEventListener('click', fillDefault);
   field?.focus?.();
   form.addEventListener('submit', async event => {
     event.preventDefault();

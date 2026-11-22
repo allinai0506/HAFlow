@@ -1,13 +1,16 @@
 """REST API handlers for User Task Inbox endpoints."""
 
 import concurrent.futures
+import hashlib
 import hmac
 from pathlib import Path
 import json
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional
+import uuid
 
 from herdr.inbox.detector import (
     CONFIDENCE_THRESHOLD,
@@ -43,12 +46,131 @@ def get_inbox_dispatcher() -> InboxDispatcher:
     return _dispatcher_instance
 
 
+_LAST_LINEAR_SYNC_TIME = 0.0
+_LINEAR_SYNC_LOCK = threading.Lock()
+
+
+def sync_linear_issues(force: bool = False, limit: int = 20) -> int:
+    """Pull recent Linear issues directly via GraphQL API and ingest them into HAFlow."""
+    global _LAST_LINEAR_SYNC_TIME
+    now = time.monotonic()
+    if not force and (now - _LAST_LINEAR_SYNC_TIME) < 20.0:
+        return 0
+    if not _LINEAR_SYNC_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        from herdr.intake.connectors.linear.client import LinearClient
+        org_id = os.environ.get("LINEAR_ORGANIZATION_ID")
+        api_token = os.environ.get("LINEAR_API_TOKEN")
+        secret = os.environ.get("LINEAR_WEBHOOK_SECRET")
+        if not org_id or not api_token or not secret:
+            return 0
+
+        client = LinearClient(api_token=api_token)
+        query = """
+        query($first: Int) {
+          issues(first: $first, orderBy: updatedAt) {
+            nodes {
+              id
+              identifier
+              title
+              description
+              state { name type }
+              assignee { id name }
+              updatedAt
+              createdAt
+            }
+          }
+        }
+        """
+        res = client._post_graphql(query, {"first": limit})
+        nodes = res.get("data", {}).get("issues", {}).get("nodes", [])
+        if not nodes:
+            return 0
+
+        now_ms = int(time.time() * 1000)
+        synced_count = 0
+        for issue in nodes:
+            try:
+                payload = {
+                    "action": "update",
+                    "type": "Issue",
+                    "createdAt": issue.get("createdAt"),
+                    "updatedAt": issue.get("updatedAt"),
+                    "webhookTimestamp": now_ms,
+                    "organizationId": org_id,
+                    "data": issue,
+                }
+                raw_body = json.dumps(payload).encode("utf-8")
+                sig = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+                headers = {
+                    "Linear-Signature": sig,
+                    "Linear-Delivery": str(uuid.uuid4()),
+                    "Linear-Timestamp": str(now_ms),
+                    "Linear-Event": "Issue",
+                }
+                status, _ = api_linear_webhook(headers, raw_body)
+                if status == 200:
+                    synced_count += 1
+            except Exception as e:
+                logger.debug(f"Error syncing Linear issue {issue.get('id')}: {e}")
+
+        _drain_intake_events()
+        _LAST_LINEAR_SYNC_TIME = time.monotonic()
+        return synced_count
+    except Exception as e:
+        logger.debug(f"Linear issue pull sync failed: {e}")
+        return 0
+    finally:
+        _LINEAR_SYNC_LOCK.release()
+
+
+def _drain_intake_events(tenant: Optional[str] = None, connection: Optional[str] = None) -> None:
+    """Drain pending intake events and materialize them into inbox tasks."""
+    from herdr.intake.materializer import local_config
+    from herdr.intake.protocol import Scope
+    from herdr.intake.store import EventStore
+    from herdr.intake.worker import run_once
+    from herdr.state_db import get_default_db_path
+
+    try:
+        config = local_config()
+        if not config:
+            return
+        effective_tenant = tenant or config.get("tenant_id")
+        conns = config.get("connections", {})
+        if connection:
+            target_conns = [connection] if connection in conns else []
+        else:
+            target_conns = list(conns.keys())
+
+        path = Path(get_inbox_store().db_path or get_default_db_path())
+        for conn_id in target_conns:
+            scope = Scope(effective_tenant, conn_id)
+            selected = conns.get(conn_id)
+            if selected is None:
+                continue
+            policy = {
+                **selected,
+                "user_id": config["user_id"],
+                "allowed_connections": tuple(conns),
+            }
+            store = EventStore(path, scope)
+            for _ in range(50):
+                if not run_once(store, materialization=policy):
+                    break
+    except Exception as e:
+        logger.debug(f"Drain intake events error: {e}")
+
+
 def _trigger_background_sweep():
     def _run():
         if not _SWEEP_LOCK.acquire(blocking=False):
             # A sweep is already actively running; coalesce
             return
         try:
+            sync_linear_issues()
+            _drain_intake_events()
             get_inbox_dispatcher().dispatch_sweep(async_launch=True)
         except Exception as e:
             logger.debug(f"Background sweep error: {e}")
@@ -290,6 +412,8 @@ def api_inbox_stats(q: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 def api_inbox_sweep() -> Dict[str, Any]:
     """POST /api/inbox/sweep"""
+    sync_linear_issues(force=True)
+    _drain_intake_events()
     res = get_inbox_dispatcher().dispatch_sweep()
     server_user = _resolve_current_user()
     is_admin = server_user in ("root", "admin")
@@ -336,6 +460,9 @@ def api_intake_inbox(credential, *, query=None, body=None):
     if not credential or not hmac.compare_digest(credential.encode(), secret.encode()):
         return {"ok": False, "error": "intake_inbox_authentication_required", "status_code": 401}
     path = Path(get_inbox_store().db_path or get_default_db_path())
+    if body is None:
+        sync_linear_issues()
+        _drain_intake_events()
     inbox = IntakeInbox(path, config)
     try:
         if body is not None:
@@ -401,4 +528,6 @@ def api_linear_webhook(headers, raw_body):
         signing_secret=secret,
         auth_ref=secret_ref,
     )
+    if status == 200 and body.get("outcome") in ("ACCEPTED", "DUPLICATE"):
+        _drain_intake_events(tenant, connection)
     return status, body
