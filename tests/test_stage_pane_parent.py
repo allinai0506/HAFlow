@@ -272,3 +272,70 @@ def test_prebuilt_identity_write_failure_restores_the_borrowed_pane():
     )
     assert "pane_id" not in identity
     assert identity.get("borrowed_pane_restored") is True
+
+
+def test_agent_not_found_error_reuses_idle_parent_and_merges_task_env():
+    worker = load_worker("worker_reuse_agent_not_found")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:3] == ["agent", "get"]:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                '{"error":{"code":"agent_not_found","message":"agent target parent not found"},"id":"cli:agent:get"}',
+                "",
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def run_json(argv, timeout=125):
+        if argv[1:3] == ["pane", "get"]:
+            return {"result": {"pane": {"pane_id": "parent", "label": "3对抗审核者"}}}
+        raise AssertionError(argv)
+
+    with patch.object(worker, "run_json", side_effect=run_json), \
+            patch.object(worker.subprocess, "run", side_effect=run), \
+            patch.object(worker.time, "sleep"), \
+            patch("herdr.task_resources.workflow_launch_lock", lambda *a, **k: nullcontext()), \
+            patch("herdr.state_store.get_state_store", lambda: type("S", (), {"db_path": "db"})()):
+        pane_id, source = worker.allocate_task_pane("parent", "/clone", None, "task-review")
+
+    assert pane_id == "parent" and source == "prebuilt"
+    assert not any(cmd[1:3] == ["pane", "split"] for cmd in calls)
+    pane_runs = [cmd for cmd in calls if cmd[1:3] == ["pane", "run"]]
+    assert any("HERDR_TASK_ID=task-review" in cmd[-1] for cmd in pane_runs)
+
+
+def test_dynamic_split_passes_task_id_via_env_without_extra_pane_run():
+    worker = load_worker("worker_split_env")
+    calls = []
+    split_cmds = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:3] == ["agent", "get"]:
+            return subprocess.CompletedProcess(
+                argv, 0, '{"result":{"agent":{"name":"codex"}}}', "",
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def run_json(argv, timeout=125):
+        if argv[1:3] == ["pane", "get"]:
+            return {"result": {"pane": {"pane_id": "parent", "label": "Anchor"}}}
+        if argv[1:3] == ["pane", "split"]:
+            split_cmds.append(argv)
+            return {"result": {"pane": {"pane_id": "child"}}}
+        raise AssertionError(argv)
+
+    with patch.object(worker, "run_json", side_effect=run_json), \
+            patch.object(worker.subprocess, "run", side_effect=run), \
+            patch("herdr.task_resources.workflow_launch_lock", lambda *a, **k: nullcontext()), \
+            patch("herdr.state_store.get_state_store", lambda: type("S", (), {"db_path": "db"})()):
+        pane_id, source = worker.allocate_task_pane("parent", "/clone", None, "task-dyn")
+
+    assert pane_id == "child" and source == "dynamic"
+    assert len(split_cmds) == 1
+    assert "--env" in split_cmds[0]
+    assert "HERDR_TASK_ID=task-dyn" in split_cmds[0]
+    assert not any(cmd[1:3] == ["pane", "run"] for cmd in calls)
