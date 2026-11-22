@@ -243,20 +243,19 @@ function renderControllerHeader(data){
 }
 function renderControllerJudgment(data){
   const j=data.judgment||{};
-  return '<section class="controller-cockpit-judgment" aria-label="当前判断">'+[['现在',j.now],['阻塞原因',j.blocked_reason||'无'],['下一步',j.next]].map(([label,value])=>'<div><span class="muted">'+label+'</span><strong>'+esc(value||'未确认')+'</strong></div>').join('')+'<p class="muted">'+(data.read_state!=='confirmed'?'当前判断未确认，请刷新核验':j.requires_user?'需要人工确认':'按服务端判断推进')+'</p></section>';
+  return '<section class="controller-cockpit-judgment" aria-label="当前判断">'+[['现在',j.now],['阻塞原因',j.blocked_reason||'无'],['下一步',j.next]].map(([l,v])=>'<div><span class="muted">'+l+'</span><strong>'+esc(v||'未确认')+'</strong></div>').join('')+'<p class="muted">'+(data.read_state!=='confirmed'?'当前判断未确认，请刷新核验':j.requires_user?'需要人工确认':'按服务端判断推进')+'</p></section>';
 }
 function controllerTaskMatches(task,target){
-  const fields=[['taskId',task.task_id],['runId',task.run_id],['paneId',task.pane_id||task.runtime?.pane_id]];
-  return fields.some(([key])=>target[key])&&fields.every(([key,value])=>!target[key]||target[key]===value);
+  const f=[['taskId',task.task_id],['runId',task.run_id],['paneId',task.pane_id||task.runtime?.pane_id]];
+  return f.some(([k])=>target[k])&&f.every(([k,v])=>!target[k]||target[k]===v);
 }
 function controllerActionMatches(action,target){
   if(target.operationId!=null&&(action.api_payload?.type!=='confirm_dispatch'||String(target.operationId)!==String(action.target?.operation_id)))return false;
-  const fields=[['nodeId','node_id'],['taskId','task_id'],['runId','run_id'],['paneId','pane_id']];
-  return fields.every(([key,field])=>!target[key]||target[key]===action.target?.[field]);
+  return [['nodeId','node_id'],['taskId','task_id'],['runId','run_id'],['paneId','pane_id']].every(([k,f])=>!target[k]||target[k]===action.target?.[f]);
 }
 function controllerRecoveryMatches(operation,target){
   if(target.operationId!=null&&String(target.operationId)!==String(operation.id))return false;
-  return [['nodeId','node_id'],['taskId','task_id'],['runId','run_id'],['paneId','pane_id']].every(([key,field])=>!target[key]||target[key]===operation.payload?.[field]);
+  return [['nodeId','node_id'],['taskId','task_id'],['runId','run_id'],['paneId','pane_id']].every(([k,f])=>!target[k]||target[k]===operation.payload?.[f]);
 }
 function renderControllerTarget(data,target){
   const fields=['nodeId','taskId','runId','paneId','operationId'].filter(key=>target[key]!=null&&target[key]!=='');
@@ -265,7 +264,7 @@ function renderControllerTarget(data,target){
   return '<section class="controller-cockpit-target-context" tabindex="-1" role="status"><strong>'+(!available||data.read_state!=='confirmed'?'只读定位':'当前定位')+'</strong><p>'+fields.map(key=>esc(target[key])).join(' · ')+'</p>'+(!available?'<p>'+(data.read_state!=='confirmed'?'读取未确认，无法确认当前操作。':'当前投影中没有匹配的操作；该对象可能来自历史记录或未包含在本次投影中。')+'</p>':'')+'</section>';
 }
 function renderControllerNodes(data,target){
-  return '<section class="controller-cockpit-section"><h3>节点与任务</h3><div class="controller-cockpit-nodes">'+(data.nodes||[]).map(n=>'<article class="controller-cockpit-node'+(target.nodeId===n.id?' is-target':'')+'"><div class="controller-cockpit-row"><strong>'+esc(n.label||n.id)+'</strong><span>'+esc(humanStatus(n.status)||n.status||'未确认')+'</span></div>'+((n.tasks||[]).map(t=>'<div class="controller-cockpit-task'+(controllerTaskMatches(t,target)?' is-target':'')+'"><button class="mini" onclick="locateControllerTask('+cockpitArg(t.task_id)+')">'+esc(t.task_id)+'</button><div>'+esc(humanStatus(t.status)||t.status||'未确认')+'</div><dl><dt>运行</dt><dd>'+esc(t.run_id||'未确认')+'</dd><dt>工位</dt><dd>'+esc(t.pane_id||t.runtime?.pane_id||'未确认')+'</dd><dt>执行身份</dt><dd>'+esc(t.execution_id||'未确认')+'</dd></dl></div>').join('')||'<p class="muted">未登记任务</p>')+'</article>').join('')+'</div>'+(data.nodes_truncated||data.tasks_truncated?'<p class="muted">仅显示服务端返回的部分节点 / 任务。</p>':'')+'</section>';
+  return '<section class="controller-cockpit-section"><h3>节点与任务</h3><div class="controller-cockpit-nodes">'+(data.nodes||[]).map(n=>'<article class="controller-cockpit-node'+(target.nodeId===n.id?' is-target':'')+'"><div class="controller-cockpit-row"><strong>'+esc(n.label||n.id)+'</strong><span>'+esc(humanStatus(n.status)||n.status||'未确认')+'</span></div>'+((n.tasks||[]).map(t=>{const p=t.pane_id||t.runtime?.pane_id;const pHtml=p?'<button class="mini" onclick="showPane('+cockpitArg(p)+')">💻 '+esc(p)+'</button>':'免工位';return '<div class="controller-cockpit-task'+(controllerTaskMatches(t,target)?' is-target':'')+'"><button class="mini" onclick="locateControllerTask('+cockpitArg(t.task_id)+')">'+esc(t.task_id)+'</button><div>'+esc(humanStatus(t.status)||t.status||'未确认')+'</div><dl><dt>运行</dt><dd>'+esc(t.run_id||'—')+'</dd><dt>工位</dt><dd>'+pHtml+'</dd><dt>执行身份</dt><dd>'+esc(t.execution_id||'未确认')+'</dd></dl></div>';}).join('')||'<p class="muted">未登记任务</p>')+'</article>').join('')+'</div>'+(data.nodes_truncated||data.tasks_truncated?'<p class="muted">仅显示服务端返回的部分节点 / 任务。</p>':'')+'</section>';
 }
 function cockpitExecutionMode(action){
   const mode=action?.automation?.mode||'blocked';
@@ -279,13 +278,12 @@ function cockpitActionCard(a,located=false){
 }
 function renderControllerTodos(data,target){
   const recovery=(data.todos||[]).filter(t=>t.kind==='recovery'&&controllerRecoveryMatches(t,target));
-  const rawActs=data.actions||[];
-  const allActs=data.read_state==='confirmed'?rawActs.filter(a=>controllerActionMatches(a,target)):[];
-  const actions=allActs.filter(a=>a.group!=='pipeline'&&controllerActionMatches(a,target));
+  const rawActs=data.actions||[],allActs=data.read_state==='confirmed'?rawActs.filter(a=>controllerActionMatches(a,target)):[],actions=allActs.filter(a=>a.group!=='pipeline'&&controllerActionMatches(a,target));
   const rejected=state.controllerReceipt;
   if(rejected?.status==='rejected'&&rejected.workflow_id===data.workflow?.workflow_id&&rejected.stale_action&&controllerActionMatches(rejected.stale_action,target)&&!actions.some(a=>cockpitActionKey(a)===cockpitActionKey(rejected.stale_action)))actions.push(rejected.stale_action);
-  const located=['nodeId','taskId','runId','paneId','operationId'].some(key=>target[key]!=null&&target[key]!=='');
-  const body=recovery.map(o=>'<div class="controller-cockpit-recovery'+(located?' is-target':'')+'" tabindex="-1">'+recoveryCard(o,data.workflow?.workflow_id)+'</div>').join('')+actions.map(a=>cockpitActionCard(a,located)).join('');
+  const located=['nodeId','taskId','runId','paneId','operationId'].some(k=>target[k]!=null&&target[k]!=='');
+  const guideCard=recovery.length?'<div class="ctl-guide-card" style="background:var(--bg-surface);border:1px solid var(--primary);border-left:4px solid var(--primary);border-radius:var(--radius-md);padding:16px;margin-bottom:16px;"><div style="font-size:14px;font-weight:600;color:var(--primary);margin-bottom:8px;">💡 怎么解决当前卡点？</div><div style="font-size:13px;line-height:1.6;color:var(--text-primary)">系统检测到流程已因门禁阻断或身份未确认而暂停。推荐操作：<ul style="margin:8px 0 0;padding-left:20px"><li style="margin-bottom:8px"><b>返工修复</b>：点击下方「↺ 回溯至执行者重新修复」，系统将自动作废未通过任务并重新派发修复。</li><li><b>查看卡点原因</b>：点击左侧任务查看右侧审查报告或执行现场日志。</li></ul></div></div>':'';
+  const body=guideCard+recovery.map(o=>'<div class="controller-cockpit-recovery'+(located?' is-target':'')+'" tabindex="-1">'+recoveryCard(o,data.workflow?.workflow_id)+'</div>').join('')+actions.map(a=>cockpitActionCard(a,located)).join('');
   const decisionSection=state.decisionData?.workflow_id===data.workflow?.workflow_id?renderDecisionPanel():'<p class="muted">人工裁决状态尚未确认，请查看工作流详情。</p>';
   const unblockSection='<section class="controller-cockpit-section"><h3>调度待办 · 继续推进</h3>'+(data.read_state!=='confirmed'?'<div role="alert">读取未确认，尚不能确认是否存在待办。</div>':body||'<p class="muted">暂无待办</p>')+(data.actions_truncated||data.recovery_truncated?'<p class="muted">待办已截断，请查看对应节点的详情。</p>':'')+'</section>';
   const pipelineSection=renderPipelineActions(allActs);
@@ -300,12 +298,9 @@ function renderControllerTimeline(data){
   return '<section class="controller-cockpit-section"><h3>执行记录</h3>'+(data.receipts||[]).map(renderControllerReceipt).join('')+'<ol class="controller-cockpit-timeline">'+(data.timeline||[]).map(e=>'<li><time>'+esc(e.timestamp||'时间未确认')+'</time><span>'+esc(e.event_type||e.type||'事件')+'</span><span class="muted">'+esc(e.task_id||e.node_id||'')+'</span></li>').join('')+'</ol>'+(data.timeline_truncated?'<p class="muted">仅显示最近记录。</p>':'')+'</section>';
 }
 function paintControllerCockpit(){
-  const data=state.controllerCockpit;
-  const box=document.getElementById('controllerTabView');
+  const data=state.controllerCockpit,box=document.getElementById('controllerTabView');
   if(!box)return;
-  if(!data||data.workflow?.workflow_id!==cockpitWorkflowId()){
-    box.innerHTML='<div class="controller-cockpit-wrap" role="status">正在读取调度状态…</div>';return;
-  }
+  if(!data||data.workflow?.workflow_id!==cockpitWorkflowId()){box.innerHTML='<div class="controller-cockpit-wrap" role="status">正在读取调度状态…</div>';return;}
   const receipt=state.controllerReceipt?.workflow_id===data.workflow.workflow_id?state.controllerReceipt:null;
   box.innerHTML='<div class="controller-cockpit-wrap">'+renderControllerHeader(data)+(data.read_state!=='confirmed'?'<div class="controller-cockpit-error" role="alert">读取未确认：'+esc(Object.values(data.errors||{}).join('；')||'部分权威来源不可用')+'。请刷新核验。</div>':'')+renderControllerJudgment(data)+renderControllerTarget(data,state.controllerTarget||{})+renderControllerReceipt(receipt)+'<div class="controller-cockpit-columns">'+renderControllerNodes(data,state.controllerTarget||{})+renderControllerTodos(data,state.controllerTarget||{})+'</div>'+renderControllerTimeline(data)+'</div>';
   box.hidden=false;
@@ -348,8 +343,7 @@ function openControllerCockpitModal(){return openControllerCockpit();}
 async function returnFromControllerCockpit(){
   const context=state.controllerReturnContext;
   if(!context)return;
-  closeModal();
-  state.controllerReturnContext=null;state.controllerFocusPending=false;
+  closeModal();state.controllerReturnContext=null;state.controllerFocusPending=false;
   state.workflowId=context.workflowId;state.shellView='workbench';state.workflowView=context.workflowView;
   if(state.workflow?.workflow?.workflow_id!==context.workflowId){
     try{await loadWorkflow(context.workflowId)}catch(e){toast('返回工作流失败：'+e.message,true);return;}
@@ -367,21 +361,15 @@ async function returnFromControllerCockpit(){
   });
 }
 async function executeCockpitAction(actionId){
-  const data=state.controllerCockpit;
-  const action=(data?.actions||[]).find(a=>a.action_id===actionId);
-  const wid=data?.workflow?.workflow_id;
+  const data=state.controllerCockpit,action=(data?.actions||[]).find(a=>a.action_id===actionId),wid=data?.workflow?.workflow_id;
   if(!action||!controllerActionMatches(action,state.controllerTarget||{})||data.read_state!=='confirmed'||!['manual','confirmation_required'].includes(cockpitExecutionMode(action))||!action.expected_identity||isRejectedCockpitAction(action)){toast('操作条件未确认，请刷新',true);return;}
-  const snapshot=JSON.parse(JSON.stringify(action));
-  const actionKey=cockpitActionKey(snapshot);
-  const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk);
-  const isSteer=action.api_payload?.type==='steer';
-  const isDispatchConfirm=action.api_payload?.type==='confirm_dispatch',needsReason=highRisk||isDispatchConfirm;
+  const snapshot=JSON.parse(JSON.stringify(action)),actionKey=cockpitActionKey(snapshot);
+  const highRisk=action.is_destructive||action.category==='bypass'||['destructive','evidence_bypass'].includes(action.risk),isSteer=action.api_payload?.type==='steer',isDispatchConfirm=action.api_payload?.type==='confirm_dispatch',needsReason=highRisk||isDispatchConfirm;
   openModal(action.title||'确认操作','<div class="form"><p>'+esc(action.effect||action.description||'')+'</p>'+(highRisk?'<p role="alert">高风险操作：请先人工核验产物和目标身份。</p>':'')+(isSteer?'<label for="cockpitInstruction">指导内容</label><textarea id="cockpitInstruction" rows="3"></textarea>':'')+'<label for="cockpitReason">处理依据'+(needsReason?'（必填）':'')+'</label><textarea id="cockpitReason" rows="3"></textarea><p id="cockpitActionError" role="alert"></p><button class="btn primary" id="cockpitActionConfirm">确认执行</button><button class="btn" onclick="closeModal()">取消</button></div>');
   const button=document.getElementById('cockpitActionConfirm');
   button.onclick=async()=>{
     if(!controllerActionMatches(action,state.controllerTarget||{})||state.workflowId!=='__ctl__'||state.controllerCockpit?.read_state!=='confirmed'||!['manual','confirmation_required'].includes(cockpitExecutionMode((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId)))||cockpitWorkflowId()!==wid||cockpitActionKey((state.controllerCockpit?.actions||[]).find(a=>a.action_id===actionId))!==actionKey){document.getElementById('cockpitActionError').textContent='目标已变化，请刷新';return;}
-    const reason=(document.getElementById('cockpitReason')?.value||'').trim();
-    const instruction=isSteer?(document.getElementById('cockpitInstruction')?.value||'').trim():null;
+    const reason=(document.getElementById('cockpitReason')?.value||'').trim(),instruction=isSteer?(document.getElementById('cockpitInstruction')?.value||'').trim():null;
     if(isSteer&&!instruction){document.getElementById('cockpitActionError').textContent='请输入指导内容';return;}
     if(needsReason&&!reason){document.getElementById('cockpitActionError').textContent=isDispatchConfirm?'派发确认必须填写人工核查依据':'必须填写人工核验依据';return;}
     button.disabled=true;
@@ -389,8 +377,7 @@ async function executeCockpitAction(actionId){
       const result=await api('/api/controller/execute-action',{method:'POST',body:JSON.stringify({workflow_id:wid,action_id:actionId,expected_identity:action.expected_identity,reason,...(isSteer?{instruction}:{}),confirmed:true,operator:'human_console'})});
       if(state.workflowId!=='__ctl__'||cockpitWorkflowId()!==wid)return;
       state.controllerReceipt=result.receipt?{...result.receipt,...(result.receipt.status==='rejected'?{stale_action:snapshot}:{})}:{workflow_id:wid,action_id:actionId,status:'accepted_waiting',message:'回执缺失，结果未确认'};
-      closeModal();paintControllerCockpit();
-      await loadControllerCockpit(wid);
+      closeModal();paintControllerCockpit();await loadControllerCockpit(wid);
     }catch(error){if(cockpitWorkflowId()===wid){document.getElementById('cockpitActionError').textContent=error.message;button.disabled=false;}}
   };
 }
@@ -423,13 +410,30 @@ function dispatchConfirmations(nodeId){
 function dispatchConfirmationHtml(nodeId){return dispatchConfirmations(nodeId).map(o=>'<div class="flow-attn" role="status"><span class="flow-attn-tag">派发已确认</span><span class="flow-attn-text">'+esc(o.confirmation.task_ids.join('、'))+' · 查看任务列表可跟踪实际执行</span></div>').join('');}
 function recoveryUnavailable(){return Boolean(state.workflow&&!state.controllerActionsData);}
 function recoveryCard(o,wid){
-  const r=o.recovery;
-  const labels={pending:'等待派发',running:'正在处理',waiting:'已暂缓',waiting_human:'等待人工确认',awaiting_result:'等待总指挥建立任务'};
-  const reasons={dispatch_task_missing:'未确认目标任务登记，请核对已有派发并补足需求',dispatch_delivery_unknown:'派发结果未知，先核验已有任务',dispatch_awaiting_task:'通知已返回，正在核验实际任务登记',legacy_dispatch_unknown:'历史通知无登记证据，正在核验',coordinator_missing:'总指挥工位不可用，等待前置问题处理',dispatch_generation_changed:'工作流代次或配置已变化，旧派发需核对',coordinator_busy:'总指挥忙碌，等待下一次检查',source_wip_requires_decision:'源仓库存在未处理改动，请先确认归属和处理方式',delivery_unknown:'交付结果未知，请核对现有后继',successor_delivery_unconfirmed:'后继交付尚未确认',candidate_unknown:'候选身份尚未确认',candidate_mismatch:'验收候选与当前候选不一致',recovery_successor_failed:'修复任务仍未通过，需要人工处理',finalize_escalated:'交付需要人工排除前置障碍',workflow_execution_unknown:'工作流执行身份尚未确认'};
+  const r=o.recovery,labels={pending:'等待派发',running:'正在处理',waiting:'已暂缓',waiting_human:'等待人工确认',awaiting_result:'等待总指挥建立任务'};
+  const reasons={dispatch_task_missing:'未确认目标任务登记，请核对已有派发并补足需求',dispatch_delivery_unknown:'派发结果未知，先核验已有任务',dispatch_awaiting_task:'通知已返回，正在核验实际任务登记',legacy_dispatch_unknown:'历史通知无登记证据，正在核验',coordinator_missing:'总指挥工位不可用，等待前置问题处理',dispatch_generation_changed:'工作流代次或配置已变化，旧派发需核对',coordinator_busy:'总指挥忙碌，等待下一次检查',source_wip_requires_decision:'源仓库存在未处理改动，请先确认归属和处理方式',delivery_unknown:'交付结果未知，请核对现有后继',successor_delivery_unconfirmed:'后继交付尚未确认',candidate_unknown:'候选身份尚未确认',candidate_mismatch:'验收候选与当前候选不一致',recovery_successor_failed:'修复任务仍未通过，需要人工处理',finalize_escalated:'交付需要人工排除前置障碍',workflow_execution_unknown:'工作流执行身份尚未确认',identity_unknown:'任务运行身份未确认，已锁定直接重跑；建议回溯至执行者重新修复'};
   const code=o.detail?.reason||o.payload?.reason;
-  const reason=r?.summary||o.detail?.decision_needed||reasons[code]||humanReason(code)||'等待恢复处理';
-  const controls=r?(r.actions||[]).map(a=>`<button class="mini" data-recovery-action="${esc(a.action)}" onclick="openRecoveryDecision(${o.id},'${esc(a.action)}')">${esc(a.label)}</button>`).join(''):(o.status==='waiting_human'?`<button class="mini" onclick="decideRecovery(${o.id},${o.version},'${o.started?'verify':'retry'}','${esc(wid)}')">${o.started?'核对现有任务':'前置问题已处理，重试'}</button><button class="mini" onclick="decideRecovery(${o.id},${o.version},'hold','${esc(wid)}')">暂缓一小时</button>`:'');
-  return `<div class="ctl-blocker"><strong>${esc(cleanStageLabel(r?.node_label||o.payload?.node_id||'恢复待办'))} · ${esc(labels[o.status]||o.status)}</strong><div>${esc(reason)}</div>${r?`<p class="muted">${esc(r.explanation)}</p><p>${esc(r.next_step)}</p><div>${(r.resource_checks||[]).map(c=>`<p>${esc(c.task_id||'旧启动')}：${esc(c.message)}</p>`).join('')}</div><div class="muted">验收版本：${esc((r.candidate_sha||'未确认').slice(0,12))}</div>`:''}<div class="muted">负责人：总指挥 · 恢复：Controller · ${o.status!=='waiting_human'&&o.next_due_at?'下次检查：'+new Date(o.next_due_at*1000).toLocaleString():'等待人工决定'}${o.detail?.deadline_at?' · 截止：'+new Date(o.detail.deadline_at*1000).toLocaleString():''}</div><div>${controls}</div></div>`;
+  let reason=r?.summary;
+  if(!reason){
+    const rawDecision=(o.detail?.decision_needed||'').trim();
+    if(rawDecision&&!rawDecision.startsWith('Resolve '))reason=rawDecision;
+    else if(rawDecision.includes('identity_unknown')||code==='identity_unknown')reason='任务运行凭据缺失（身份未确认）。为防止误覆盖，系统已锁定直接重试；推荐使用下方「一键回溯至执行者」重新派发修复，或在执行工位中核对。';
+    else if(code&&reasons[code])reason=reasons[code];
+    else reason=humanReason(code)||'等待恢复处理';
+  }
+  const rawNode=r?.node_label||o.payload?.node_id||(o.payload?.gate_nodes&&o.payload.gate_nodes[0])||o.payload?.retry_node||'';
+  const nodeLabel=cleanStageLabel(rawNode)||(o.payload?.kind==='fix_loop'?'返工修复':'流程卡点');
+  const isFixLoop=o.payload?.kind==='fix_loop'||code==='identity_unknown'||Boolean(o.payload?.retry_node);
+  const retryNode=o.payload?.retry_node||'executor',retryLabel=cleanStageLabel(retryNode)||'执行者';
+  let controls='';
+  if(r&&r.actions&&r.actions.length){
+    controls=r.actions.map(a=>`<button class="mini" data-recovery-action="${esc(a.action)}" onclick="openRecoveryDecision(${o.id},'${esc(a.action)}')">${esc(a.label)}</button>`).join('');
+  }else if(isFixLoop&&o.status==='waiting_human'){
+    controls=`<button class="mini primary" onclick="executeCockpitAction('${esc(`${wid}:rollback:${retryNode}`)}')">↺ 回溯至 ${esc(retryLabel)} 重新修复</button><button class="mini" onclick="decideRecovery(${o.id},${o.version},'hold','${esc(wid)}')">暂缓一小时</button>`;
+  }else if(o.status==='waiting_human'){
+    controls=`<button class="mini" onclick="decideRecovery(${o.id},${o.version},'${o.started?'verify':'retry'}','${esc(wid)}')">${o.started?'核对现有任务':'前置问题已处理，重试'}</button><button class="mini" onclick="decideRecovery(${o.id},${o.version},'hold','${esc(wid)}')">暂缓一小时</button>`;
+  }
+  return `<div class="ctl-blocker"><strong>${esc(nodeLabel)} · ${esc(labels[o.status]||o.status)}</strong><div>${esc(reason)}</div>${r?`<p class="muted">${esc(r.explanation)}</p><p>${esc(r.next_step)}</p><div>${(r.resource_checks||[]).map(c=>`<p>${esc(c.task_id||'旧启动')}：${esc(c.message)}</p>`).join('')}</div><div class="muted">验收版本：${esc((r.candidate_sha||'未确认').slice(0,12))}</div>`:''}<div class="muted">负责人：总指挥 · 恢复：Controller · ${o.status!=='waiting_human'&&o.next_due_at?'下次检查：'+new Date(o.next_due_at*1000).toLocaleString():'等待人工决定'}${o.detail?.deadline_at?' · 截止：'+new Date(o.detail.deadline_at*1000).toLocaleString():''}</div><div>${controls}</div></div>`;
 }
 function renderRecoveryPanel(wid){
   if(state.controllerActionsData?.pending)return '<section role="status">正在读取恢复状态…</section>';
@@ -438,13 +442,10 @@ function renderRecoveryPanel(wid){
   return (operations.length?'<section><div class="ctl-section-title">恢复待办</div>'+operations.map(o=>recoveryCard(o,wid)).join('')+'</section>':'')+dispatchConfirmationHtml();
 }
 function openRecoveryDecision(id,action){
-  const o=currentRecovery().find(o=>o.id===id);
-  const choice=o?.recovery?.actions?.find(a=>a.action===action);
+  const o=currentRecovery().find(o=>o.id===id),choice=o?.recovery?.actions?.find(a=>a.action===action);
   if(!choice){toast('恢复条件已变化，请刷新页面',true);return;}
-  const wid=o.workflow_id;
-  const resend=['restore_scope','confirm_absent'].includes(action);
-  const bindLineage=action==='restore_scope'&&o.recovery.lineage?.some(t=>t.requires_binding);
-  const partial=action==='abandon_partial_launch';
+  const wid=o.workflow_id,resend=['restore_scope','confirm_absent'].includes(action);
+  const bindLineage=action==='restore_scope'&&o.recovery.lineage?.some(t=>t.requires_binding),partial=action==='abandon_partial_launch';
   openModal(choice.label,`<form id="recoveryForm" class="form"><p>${esc(o.recovery.summary)}</p><p>${esc(o.recovery.next_step)}</p><p class="muted">节点：${esc(cleanStageLabel(o.recovery.node_label||o.payload.node_id))} · 验收版本：${esc(o.recovery.candidate_sha||'未确认')}</p><label for="recoveryOperator">处理人</label><input id="recoveryOperator" required maxlength="128"><label for="recoveryReason">核查结果与处理依据</label><textarea id="recoveryReason" required maxlength="1000" rows="3"></textarea>${resend?'<label><input id="recoveryConfirmed" type="checkbox" required style="width:auto">我已查看任务列表及旧工位，确认没有旧任务执行，授权对当前版本重新派发。</label><p class="muted">这是人工核查回执，不代表业务验收通过。系统仍会复查启动记录、候选和依赖。</p>':''}${partial?`<p>旧工位：${esc(choice.pane_id)} · Terminal：${esc(choice.terminal_id)}</p><p>先在终端检查 <code>herdr pane read ${esc(choice.pane_id)}</code>，只允许归档明确停留在启动提示的现场；确认 transcript 未包含任务指令或工作产出后，将其 SHA-256 填入。</p><label for="recoveryTranscriptSha256">已复核 transcript SHA-256</label><input id="recoveryTranscriptSha256" required maxlength=64 pattern="[a-fA-F0-9]{64}"><label><input id="recoveryPartialConfirmed" type="checkbox" required style="width:auto">我已检查上方工位 transcript，确认仅有启动提示且没有开始执行任务。</label>`:''}${bindLineage?`<p>旧任务：${esc(o.recovery.lineage.map(t=>t.task_id+' / '+(t.run_id||'身份未确认')).join('；'))}</p><label><input id="recoveryLineage" type="checkbox" required style="width:auto">确认以上任务 / Run属于本次工作流执行，授权补齐其执行归属。</label>`:''}<p id="recoveryError" role="alert"></p><button id="recoverySubmit" type="submit" class="btn primary">${esc(choice.label)}</button><button type="button" class="btn" onclick="closeModal()">取消</button></form>`);
   const form=document.getElementById('recoveryForm');
   const ownsForm=()=>form.isConnected&&document.getElementById('recoveryForm')===form&&document.getElementById('modal')?.classList.contains('open')&&(state.workflowId===wid||(state.workflowId==='__ctl__'&&cockpitWorkflowId()===wid));
