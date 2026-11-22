@@ -373,6 +373,9 @@ class CanaryRoutingTestBase(unittest.TestCase):
     def setUp(self):
         self.store, self.tmp_path, self.db_path = _make_env(self)
         _enable_workflow(self.store)
+        p = patch.object(agent_router, "DEFAULT_ALLOWED", ("claude", "codex", "opencode", "qodercli", "grok", "kimi"))
+        p.start()
+        self.addCleanup(p.stop)
 
     def _enable_canary(self, percentage=100, agent="codex", node=NODE,
                        task_type=TASK_TYPE):

@@ -235,6 +235,75 @@ class TestTriadDevV1Engine(unittest.TestCase):
             self.assertEqual(receipt["number"], 99)
             self.assertEqual(receipt["candidate_sha"], sha)
 
+    def test_tool_gate_uses_isolated_candidate_worktree_and_assigns_run_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, stdout=subprocess.PIPE)
+            subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, stdout=subprocess.PIPE)
+
+            subprocess.run(["git", "checkout", "-b", "feat"], cwd=repo, check=True, stdout=subprocess.PIPE)
+            (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "candidate"], cwd=repo, check=True, stdout=subprocess.PIPE)
+            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+            # Mutate the working tree after candidate commit; tool gate must verify candidate_sha, not dirty work_dir.
+            (repo / "app.py").write_text("x = 999\n", encoding="utf-8")
+
+            store = SQLiteStateStore(root / "state.db")
+            store.save_workflow({"workflow_id": "wf-tool-iso", "project_id": "p1", "status": "running", "candidate_sha": sha})
+
+            res = tool_gate.run_tool_gate(
+                store,
+                "wf-tool-iso",
+                {"id": "gate"},
+                project_root=str(repo),
+                candidate_sha=sha,
+                base_branch="main",
+                verify_commands=["python3 -c 'import app; assert app.x == 2'"],
+            )
+            self.assertEqual(res["verdict"], "pass")
+            saved = store.get_task(res["task_id"])
+            self.assertTrue(str(saved.get("run_id") or "").startswith("run_"))
+            self.assertEqual(saved.get("execution_id"), "wf-tool-iso")
+            self.assertEqual((repo / "app.py").read_text(encoding="utf-8"), "x = 999\n")
+
+    def test_clear_fix_loop_blockers_uses_episode_store_transaction(self):
+        from console import control_api
+        from herdr import kernel as herdr_kernel
+        from herdr.liveness import EpisodeStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ctrl_dir = Path(tmp)
+            att_file = ctrl_dir / "attention.json"
+            stage_file = ctrl_dir / "stage_state.json"
+            stage_file.write_text(json.dumps({
+                "wf-clear|fixloop|executor|pending_redo": True,
+                "wf-other|fixloop|executor|pending_redo": True,
+            }), encoding="utf-8")
+
+            ep_store = EpisodeStore(att_file)
+            with ep_store.transaction() as episodes:
+                episodes["wf-clear:fix_loop_exhausted:executor"] = {"status": "open"}
+                episodes["wf-other:pane_stuck:p1"] = {"status": "open"}
+
+            with patch.object(herdr_kernel, "CONTROLLER_DIR", ctrl_dir), \
+                 patch.object(herdr_kernel, "get_stage_state_file", return_value=stage_file):
+                control_api._clear_fix_loop_blockers("wf-clear", "rework")
+
+            with EpisodeStore(att_file).transaction() as episodes:
+                self.assertNotIn("wf-clear:fix_loop_exhausted:executor", episodes)
+                self.assertIn("wf-other:pane_stuck:p1", episodes)
+            st_data = json.loads(stage_file.read_text(encoding="utf-8"))
+            self.assertNotIn("wf-clear|fixloop|executor|pending_redo", st_data)
+            self.assertIn("wf-other|fixloop|executor|pending_redo", st_data)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -148,8 +148,8 @@ def maybe_close_completed_workflow(ports, workflow_id):
         try:
             try:
                 if hasattr(ports, "workflow_config_for") and hasattr(ports, "_get_store"):
-                    wf_cfg = ports.workflow_config_for(workflow_id) or {}
-                    if wf_cfg.get("direct_pr_delivery") and entry.get("delivery_ceiling") != "workspace":
+                    wf_cfg = ports.workflow_config_for(workflow_id)
+                    if isinstance(wf_cfg, dict) and wf_cfg.get("direct_pr_delivery") is True and entry.get("delivery_ceiling") != "workspace":
                         from herdr.pr_delivery import publish_direct_workflow_pr
                         publish_direct_workflow_pr(ports._get_store(), workflow_id)
                 task_count = 0

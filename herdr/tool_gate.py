@@ -10,8 +10,11 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -144,24 +147,40 @@ def run_tool_gate(
 
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    if repo.is_dir() and candidate_sha:
-        for cmd in verify_commands or []:
-            try:
-                res = subprocess.run(
-                    cmd,
+    if repo.is_dir() and candidate_sha and verify_commands:
+        checkout_dir = Path(tempfile.mkdtemp(prefix="herdr-tool-gate-"))
+        worktree_added = False
+        try:
+            _run_git(repo, "worktree", "add", "--detach", str(checkout_dir), candidate_sha)
+            worktree_added = True
+            for cmd in verify_commands:
+                try:
+                    res = subprocess.run(
+                        cmd,
+                        cwd=str(checkout_dir),
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        timeout=300,
+                    )
+                    tail = (res.stdout + "\n" + res.stderr).strip()[-1000:]
+                    cmd_outputs.append(f"$ {cmd} -> exit={res.returncode}\n{tail}")
+                    if res.returncode != 0:
+                        errors.append(f"验证命令失败 (exit={res.returncode}): {cmd}")
+                except (subprocess.TimeoutExpired, OSError) as exc:
+                    errors.append(f"验证命令执行异常 ({type(exc).__name__}): {cmd}")
+        except Exception as exc:
+            errors.append(f"隔离检出 candidate_sha 失败: {exc}")
+        finally:
+            if worktree_added:
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(checkout_dir)],
                     cwd=str(repo),
-                    shell=True,
                     capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=300,
+                    timeout=30,
                 )
-                tail = (res.stdout + "\n" + res.stderr).strip()[-1000:]
-                cmd_outputs.append(f"$ {cmd} -> exit={res.returncode}\n{tail}")
-                if res.returncode != 0:
-                    errors.append(f"验证命令失败 (exit={res.returncode}): {cmd}")
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                errors.append(f"验证命令执行异常 ({type(exc).__name__}): {cmd}")
+            shutil.rmtree(checkout_dir, ignore_errors=True)
 
     verdict = "pass" if not errors else "blocked"
     note_lines = [
@@ -186,6 +205,7 @@ def run_tool_gate(
     now = time.time()
     task_record = {
         "task_id": task_id,
+        "run_id": f"run_{uuid.uuid4().hex}",
         "workflow_id": workflow_id,
         "node": node_id,
         "stage": node_id,
@@ -195,7 +215,7 @@ def run_tool_gate(
         "status": "completed",
         "candidate_sha": candidate_sha,
         "verified_candidate_sha": candidate_sha,
-        "execution_id": workflow.get("execution_id"),
+        "execution_id": workflow.get("execution_id") or workflow_id,
         "candidate_episode_id": workflow.get("candidate_episode_id"),
         "stage_verdict": verdict,
         "stage_verdict_note": verdict_note[:4000],
