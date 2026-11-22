@@ -50,6 +50,37 @@ _LAST_LINEAR_SYNC_TIME = 0.0
 _LINEAR_SYNC_LOCK = threading.Lock()
 
 
+def start_linear_poller() -> None:
+    """Start background daemon thread to periodically pull Linear issues."""
+    def _loop():
+        time.sleep(2)
+        while True:
+            try:
+                sync_linear_issues(force=True)
+            except Exception:
+                pass
+            time.sleep(30)
+    t = threading.Thread(target=_loop, name="linear_issue_poller", daemon=True)
+    t.start()
+
+
+def _has_task_link(db_path: Path, tenant_id: str, external_id: str) -> bool:
+    """Check if an intake task link already exists for the given external issue."""
+    try:
+        from herdr.intake.schema import open_db
+        from contextlib import closing
+        with closing(open_db(db_path)) as db:
+            row = db.execute(
+                """SELECT 1 FROM intake_objects o
+                   JOIN intake_task_links l ON l.tenant_id = o.tenant_id AND l.object_id = o.object_id
+                   WHERE o.tenant_id = ? AND o.external_id = ? LIMIT 1""",
+                (tenant_id, external_id),
+            ).fetchone()
+            return bool(row)
+    except Exception:
+        return False
+
+
 def sync_linear_issues(force: bool = False, limit: int = 20) -> int:
     """Pull recent Linear issues directly via GraphQL API and ingest them into HAFlow."""
     global _LAST_LINEAR_SYNC_TIME
@@ -60,6 +91,8 @@ def sync_linear_issues(force: bool = False, limit: int = 20) -> int:
         return 0
     try:
         from herdr.intake.connectors.linear.client import LinearClient
+        from herdr.intake.materializer import local_config
+        from herdr.state_db import get_default_db_path
         org_id = os.environ.get("LINEAR_ORGANIZATION_ID")
         api_token = os.environ.get("LINEAR_API_TOKEN")
         secret = os.environ.get("LINEAR_WEBHOOK_SECRET")
@@ -90,10 +123,21 @@ def sync_linear_issues(force: bool = False, limit: int = 20) -> int:
 
         now_ms = int(time.time() * 1000)
         synced_count = 0
+        db_path = Path(get_inbox_store().db_path or get_default_db_path())
+        cfg = local_config()
+        effective_tenant = (cfg.get("tenant_id") if cfg else None) or "tenant"
+
         for issue in nodes:
             try:
+                issue_id = str(issue.get("id") or "").strip()
+                state = issue.get("state") if isinstance(issue.get("state"), dict) else {}
+                state_type = str(state.get("type") or "").lower()
+                is_open = state_type not in ("completed", "canceled")
+                has_link = _has_task_link(db_path, effective_tenant, issue_id) if issue_id else False
+
+                action = "create" if (is_open and not has_link) else "update"
                 payload = {
-                    "action": "create",
+                    "action": action,
                     "type": "Issue",
                     "createdAt": issue.get("createdAt"),
                     "updatedAt": issue.get("updatedAt"),
@@ -156,6 +200,7 @@ def _drain_intake_events(tenant: Optional[str] = None, connection: Optional[str]
                 "allowed_connections": tuple(conns),
             }
             store = EventStore(path, scope)
+            store.recover_expired()
             for _ in range(50):
                 if not run_once(store, materialization=policy):
                     break
