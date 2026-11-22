@@ -63,7 +63,16 @@ function renderTaskOverview(task,proj){
   else{h+=`<div class="td-sec"><div class="td-lbl">结果</div><div class="empty" style="padding:8px 0">当前任务尚未产生结果</div></div>`}
   h+=`<div class="td-sec"><div class="td-lbl">状态</div><div>${badge(task.status||'unknown')}</div></div>`;
   if(blocker)h+=`<div class="td-sec"><div class="td-lbl">阻塞原因</div><div class="td-txt">${esc(blocker)}</div></div>`;
-  if(verdict)h+=`<div class="td-sec"><div class="td-lbl">阶段结论</div><div class="td-txt">${esc(verdict)}${note?' · '+esc(note):''}</div></div>`;h+=renderPromptLedger(proj);
+  if(verdict){
+    let fNote=note?' · '+esc(note):'';
+    if(note&&(note.includes('[P0]')||note.includes('\n'))){
+      const p0s=note.split('\n').filter(l=>l.includes('[P0]')).map(p=>`<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:var(--radius-sm);padding:8px 12px;font-size:12px;line-height:1.5;color:var(--text-primary)"><span class="badge warning" style="margin-right:8px">P0 阻断</span><span>${esc(p.replace(/\[P0\]\s*/,''))}</span></div>`).join('');
+      const gen=note.split('\n').filter(l=>!l.includes('[P0]')&&l.trim()).join('\n');
+      fNote=`<div style="margin-top:8px;white-space:pre-wrap;line-height:1.6">${esc(gen)}</div>`+(p0s?`<div style="margin-top:8px;display:flex;flex-direction:column;gap:8px">${p0s}</div>`:'');
+    }
+    h+=`<div class="td-sec"><div class="td-lbl">阶段结论</div><div class="td-txt"><span class="badge ${verdict==='pass'?'cleaned':'warning'}">${esc(verdict)}</span>${fNote}</div></div>`;
+  }
+  h+=renderPromptLedger(proj);
   return h;
 }
 function renderTaskActivity(task,proj){
@@ -385,16 +394,7 @@ function renderTaskDrawer(){
   const rtShort=[task.workspace_id||rt.workspace_id||'',task.pane_id||rt.pane_id||''].filter(Boolean).join(' / ');
   const ds=taskDisplayStart(task);
   const attrRows=[];
-  if(task.agent)attrRows.push(['执行者',task.agent]);
-  if(stage)attrRows.push(['阶段',stage]);
-  if(task.status)attrRows.push(['状态',taskStatusLabel(task)]);
-  if(rtShort)attrRows.push(['运行现场',rtShort]);
-  if(ds)attrRows.push([ds.label,fmtClock(ds.ts)]);
-  if(dur!==null)attrRows.push(['耗时',formatElapsed(dur)]);
-  const pipelineLine=deliveryPipelineLine(task);
-  if(pipelineLine)attrRows.push(['交付管道',pipelineLine]);
-  const waitReason=deliveryReason(task);
-  if(waitReason)attrRows.push(['当前等待',waitReason]);
+  [['执行者',task.agent],['阶段',stage],['状态',taskStatusLabel(task)],['运行现场',rtShort],[ds?.label,ds?fmtClock(ds.ts):null],dur!==null?['耗时',formatElapsed(dur)]:null,['交付管道',deliveryPipelineLine(task)],['当前等待',deliveryReason(task)]].forEach(r=>{if(r&&r[0]&&r[1])attrRows.push(r);});
   const tab=state.taskDrawerTab==='activity'?'trace':state.taskDrawerTab;
   const tabs=['overview','trace','artifacts','runtime'];
   const labels={overview:'tdTabOverview',trace:'tdTabActivity',artifacts:'tdTabArtifacts',runtime:'tdTabRuntime'};

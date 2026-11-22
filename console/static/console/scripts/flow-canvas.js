@@ -194,7 +194,20 @@ function renderFlowWorkbench(){
       attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ 恢复状态读取失败，卡点未确认</span></div><button class="mini" onclick="loadWorkflow(state.workflow.workflow.workflow_id)">刷新恢复状态</button>`;
     }else if(state.workflowView==='flow'&&recoveries.length){
       attnBar.style.display='flex';
-      attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ ${recoveries.length} 项恢复待办：${esc(recoveries.map(o=>cleanStageLabel(o.recovery?.node_label||o.payload?.node_id||'')+' · '+(o.recovery?.summary||'需处理')).join('；'))}</span></div><button class="mini" onclick="openControllerCockpit(${esc(JSON.stringify({workflowId:state.workflowId,operationId:recoveries[0]?.id}))})">在 Controller 中处理</button>`;
+      const items=recoveries.map(o=>{
+        const rawNode=o.recovery?.node_label||o.payload?.node_id||(o.payload?.gate_nodes&&o.payload.gate_nodes[0])||o.payload?.retry_node||'';
+        const nodeName=cleanStageLabel(rawNode)||(o.payload?.kind==='fix_loop'?'返工修复':'流程节点');
+        let summary=o.recovery?.summary;
+        if(!summary){
+          const code=o.detail?.reason||o.payload?.reason;
+          if(o.payload?.kind==='fix_loop'||code==='identity_unknown')summary='审查未通过，需回溯执行者修复';
+          else if(code==='dispatch_task_missing')summary='任务派发待确认';
+          else if(code==='dispatch_generation_changed')summary='配置更新待核对';
+          else summary='需处理';
+        }
+        return nodeName+' · '+summary;
+      });
+      attnBar.innerHTML=`<div class="flow-attn-text" role="status"><span>⚠ ${recoveries.length} 项流程待办：${esc(items.join('；'))}</span></div><button class="mini" onclick="openControllerCockpit(${esc(JSON.stringify({workflowId:state.workflowId,operationId:recoveries[0]?.id}))})">查看卡点并处理 ➔</button>`;
     }else{
       attnBar.style.display='none';
       attnBar.innerHTML='';

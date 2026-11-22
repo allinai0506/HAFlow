@@ -10128,3 +10128,48 @@ git diff --check
 - `herdr/inbox/store.py#InboxStore`
 - `console/static/console/scripts/intake.js`
 - `tests/test_linear_connector.py`
+
+
+## 239. 恢复待办 Fail-Closed 闭环与控制台向导式解阻治理（Recovery Safe Loop & Guidance UX）（2026-11-22）
+
+### 问题背景
+
+在工作流执行过程中，若对抗审核（Review）发现 P0 级严重并发/事务缺陷，流程会进入返工分支（`fix_loop`）并将恢复操作置为 `waiting_human` 且标记原因 `identity_unknown`。
+在此场景下，系统面临三层严重的操作阻塞与用户体验挫败：
+1. **Fail-Closed 契约与前端死循环按钮冲突**：后端 `herdr/recovery_store.py` 严格遵循不可变交付与安全屏障契约，对 `identity_unknown` 的恢复操作禁止直接 `action: "retry"`（抛出 `ValueError('retry prerequisites unknown; delivery must be verified')`）。但前端原本向所有 `waiting_human` 统一渲染 `[ 前置问题已处理，重试 ]` 按钮，用户点击必定报错失败，陷入无法在页面解阻的死循环；
+2. **术语与动态节点名称脱节**：动态生成的返工节点（如 `fix_loop`）在顶部提示栏中未能匹配静态标签，渲染为空白 `· 需处理`；恢复原因直接打印底层异常英文调用 `Resolve identity_unknown...`，普通工程师完全无法理解该如何处理；
+3. **现场干扰与缺陷文本可读性差**：非工位任务（确定性门禁与自动审查）在任务列表中显示为引起焦虑的 `工位 未确认`；而审查报告中排查出的 4 项事务并发缺陷被合并为密密麻麻的一整段长文本，缺乏层次感。
+
+### 经验教训
+
+| 问题现象 | 根因分析 | 治理原则与规范 |
+| :--- | :--- | :--- |
+| **点击重试报错且无法解阻** | 前端按钮与后端 Fail-Closed 状态机断言脱节，未提供正规回溯入口 | **状态驱动的操作匹配（Recovery Action Parity）**：对 `fix_loop` / `identity_unknown`，前端直接替换为后端支持的合法解阻动作：`[ ↺ 回溯至执行者重新修复 ]`（调用 Controller 声明式 `rollback:executor` 动作），一键安全作废未通过分支并允许重新派发 |
+| **顶部黄条显示空白节点名与生硬报错** | 阶段标签未做动态适配，异常直接透传 raw string | **人性化中文降级与向导式卡片**：动态返工节点统一解析为「返工修复」；卡片顶部增设「💡 怎么解决当前卡点？」向导卡片（Next Best Action），讲清为什么卡住、如何解阻 |
+| **免工位任务显示「工位 未确认」** | UI 未区分「尚未确认工位」与「确定性任务本身不需要工位」 | **语义精准降级**：无工位依赖的任务明确显示为「免工位」或「—」；存在活动工位的任务提供「💻 工位」直达按钮 |
+| **审查多项缺陷堆砌难读** | 多行格式未结构化反序列化 | **缺陷列表结构化提炼**：自动识别并抽离 `[P0]` 标识项，转化为独立的警示徽章与结构化卡片展示 |
+
+### 操作规范
+
+1. **安全重试与回溯解耦规范**：当后端 Recovery 因前置交付未确认而处于锁定状态时，前端严禁提供无意义的死循环重试按钮，必须提供清晰的回溯（Rollback）或工位排查入口。
+2. **静态资源评审行数预算**：所有 `console/static/console/` 下的源文件严格遵循单文件 `<= 500` 行评审预算；优化必须精炼合并，严禁超标。
+3. **栅格间距硬约束**：控制台 UI 样式严格遵循 4/8/12/16px 栅格间距规范，严禁出现 6px/10px 等非标间距值，行内样式每条规则必须以 `;` 闭合以防正则跨标签串联。
+
+### 验证命令 / 守护测试
+
+```bash
+pytest -q tests/test_console_plain_chinese_ui.py
+pytest -q tests/test_console_ui_modules.py
+pytest -q tests/test_console_standard_layout_tabs.py
+pytest -q tests/test_console_decision_ui.py
+pytest -q tests/test_console_module_boundaries.py
+python3 -m compileall -q herdr console tests
+git diff --check
+```
+
+### 相关文档 / 关联证据
+
+- `console/static/console/scripts/controller-cockpit.js`
+- `console/static/console/scripts/flow-canvas.js`
+- `console/static/console/scripts/task-detail.js`
+- `tests/test_console_ui_modules.py`
