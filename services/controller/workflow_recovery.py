@@ -149,7 +149,15 @@ def execute_workflow_recovery(ports, operation, owner):
     for task in ([] if verifying else targets):
         tid = task['task_id']
         details['source_runs'][tid] = task.get('run_id')
-        if task.get('status') == 'committed':
+        import re as _re
+        delivered_commit = task.get('commit') or task.get('integrated_commit')
+        has_delivered_commit = (
+            isinstance(delivered_commit, str)
+            and bool(_re.fullmatch(r'[0-9a-f]{40}', delivered_commit, _re.IGNORECASE))
+        )
+        if task.get('status') == 'committed' or (
+            task.get('status') == 'cleaned' and has_delivered_commit
+        ):
             if not workflow.get('execution_id'):
                 return 'waiting_human', {'reason': 'workflow_execution_unknown'}
             next_id = ports.next_recovery_task_id(tid, store.list_tasks(workflow_id=wid))
@@ -160,11 +168,14 @@ def execute_workflow_recovery(ports, operation, owner):
                 redact_text(str(f.get('stage_verdict_note') or f.get('blocker') or ''))[:2000]
                 for f in (payload.get('facts') or [])[:20]))
             try:
-                recovery_source = choose_recovery_source(task, source)
+                recovery_source = choose_recovery_source({**task, 'commit': delivered_commit}, source)
             except ValueError as exc:
                 return 'waiting_human', {'reason':str(exc), **details}
             details.setdefault('source_paths', {})[tid] = recovery_source
-            command = successor_launch_command(ports.TASK_MANAGER, workflow, task, next_id, recovery_source, prompt)
+            command = successor_launch_command(
+                ports.TASK_MANAGER, workflow, task, next_id, recovery_source, prompt,
+                root_sha=delivered_commit,
+            )
             step('successor_launch_started')
             result = ports.subprocess.run(command, text=True, capture_output=True, timeout=120)
             successor = store.get_task(next_id)
