@@ -73,9 +73,12 @@ def _scheduler_resolve_candidate_and_plan(ports, workflow_id, workflow_cfg):
             ports._reverification_plan_for_rotation(
                 workflow_id, workflow_cfg, project_root, rotated_from,
                 frozen_sha, episode_id)
-    from herdr.wrapup_delivery import reconcile_verifiers
-    wrapup_closure = any(node.get('id') == 'wrapup' and node.get('review_closure_required')
-                         for node in workflow_cfg.get('nodes', []))
+    from herdr.wrapup_delivery import reconcile_verifiers, template_supports_wrapup_delivery
+    wrapup_closure = (
+        any(node.get('id') == 'wrapup' and node.get('review_closure_required')
+            for node in workflow_cfg.get('nodes', []))
+        or template_supports_wrapup_delivery(workflow_cfg)
+    )
     if wrapup_closure and reconcile_verifiers(ports._get_store(), workflow_id):
         ports.reconcile_node_dispatches(workflow_id)
     return frozen_sha, False

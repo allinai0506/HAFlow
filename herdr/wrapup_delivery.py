@@ -12,21 +12,27 @@ import tempfile
 from . import recovery_store, state_db
 
 ACTIVE = {"working", "agent_done", "rework"}
-TEMPLATES = {"software-development-v1", "spec-development-v1"}
+TEMPLATES = {"software-development-v1", "spec-development-v1", "code-craft-v1"}
+
+
+def template_supports_wrapup_delivery(config):
+    node = next((n for n in (config or {}).get("nodes", []) if n.get("id") == "wrapup"), {})
+    template_name = (
+        (config or {}).get("workflow_template")
+        or (config or {}).get("template")
+        or (config or {}).get("template_name")
+        or (config or {}).get("name")
+        or ""
+    )
+    return bool(
+        template_name in TEMPLATES
+        and (node.get("review_closure_required") is True or template_name == "code-craft-v1")
+    )
 
 
 def enabled(task, config):
-    node = next((n for n in config.get("nodes", []) if n.get("id") == "wrapup"), {})
-    template_name = (
-        config.get("workflow_template")
-        or config.get("template")
-        or config.get("template_name")
-        or config.get("name")
-        or ""
-    )
     return (
-        template_name in TEMPLATES
-        and node.get("review_closure_required") is True
+        template_supports_wrapup_delivery(config)
         and (task.get("node") or task.get("stage")) == "wrapup"
         and task.get("integration_mode") == "none"
         and task.get("execution_mode") != "context"
@@ -418,10 +424,12 @@ def reconcile_verifiers(store, workflow_id):
         freeze = json.loads(row["payload_json"]) if row else {}
         if freeze.get("source_node") != "wrapup" or workflow.get("status") != "running":
             return False
+        from .node_roles import verifier_node_ids
+
+        verifier_nodes = set(verifier_node_ids(config)) | {"test", "review", "acceptance"}
         for task in tasks:
             if (
-                (task.get("node") or task.get("stage"))
-                not in {"test", "review", "acceptance"}
+                (task.get("node") or task.get("stage")) not in verifier_nodes
                 or task.get("execution_id") != workflow.get("execution_id")
                 or task.get("status") == "superseded"
                 or task.get("superseded_by")

@@ -428,6 +428,24 @@ def record_router_failure_task(args, node_id, error, *, get_store, new_run_id,
             execution_id=launch_intent["execution_id"],
         )
     store.save_task(task)
+    if launch_refused and task.get("supersedes"):
+        try:
+            pred = store.get_task(task["supersedes"])
+            if (
+                pred
+                and pred.get("workflow_id") == workflow_id
+                and (pred.get("node") or pred.get("stage")) == node_id
+                and (not task.get("execution_id") or pred.get("execution_id") == task.get("execution_id"))
+                and pred.get("status") == "superseded"
+                and not pred.get("superseded_by")
+            ):
+                store.update_task_metadata(
+                    pred["task_id"],
+                    {"superseded_by": task_id, "replacement_pending": False},
+                    expected_version=pred.get("version"),
+                )
+        except (OSError, ValueError, RuntimeError, AttributeError, sqlite3.Error):
+            pass
     if launch_intent:
         from herdr.task_resources import abort_launch_intent, finish_launch_intent
         if launch_refused:

@@ -175,6 +175,39 @@ def _valid_required(required):
         and len(required) <= 64 and all(isinstance(task_id, str) and task_id.strip() for task_id in required))
 
 
+def _node_already_completed(operation, workflow, config, tasks):
+    """True when active non-superseded tasks in this execution already satisfy the node."""
+    from . import scheduler
+    node_id = operation['payload'].get('node_id')
+    node = next((n for n in (config or {}).get('nodes') or [] if n.get('id') == node_id), None)
+    if not node:
+        return False
+    inventory = [
+        t for t in tasks
+        if t.get('workflow_id') == operation['workflow_id']
+        and (t.get('node') or t.get('stage')) == node_id
+        and (not workflow.get('execution_id') or t.get('execution_id') == workflow.get('execution_id'))
+    ]
+    active_tasks = scheduler.node_tasks(inventory, operation['workflow_id'], node_id)
+    if (
+        not active_tasks
+        or scheduler.node_verdict(active_tasks) == 'blocked'
+        or any(str(t.get('blocker') or '').strip() for t in active_tasks)
+    ):
+        return False
+    if not scheduler.node_is_complete(inventory, node.get('required_task_ids'), node=node):
+        return False
+    expected_sha = operation['payload'].get('candidate_sha')
+    if expected_sha and not all(t.get('candidate_sha') == expected_sha for t in active_tasks):
+        return False
+    expected_episode = operation['payload'].get('candidate_episode_id')
+    if expected_episode and not all(
+        t.get('candidate_episode_id') == expected_episode for t in active_tasks
+    ):
+        return False
+    return True
+
+
 def result(operation, workflow, config, tasks, now):
     if not active(workflow) and (
         workflow.get('status') in {'completed', 'failed', 'halted', 'abandoned'}
@@ -184,16 +217,7 @@ def result(operation, workflow, config, tasks, now):
         return 'superseded', {'reason': 'workflow_completed',
                               'responsibility_transferred_to': 'workflow_terminal'}
     if not current(operation, workflow, config):
-        node_id = operation['payload'].get('node_id')
-        node_completed = any(
-            t.get('workflow_id') == operation['workflow_id']
-            and (t.get('node') or t.get('stage')) == node_id
-            and (not workflow.get('execution_id') or t.get('execution_id') == workflow.get('execution_id'))
-            and t.get('status') in {'completed', 'cleaned', 'cleanup_ready'}
-            and t.get('stage_verdict') == 'pass'
-            for t in tasks
-        )
-        if node_completed:
+        if _node_already_completed(operation, workflow, config, tasks):
             return 'superseded', {'reason': 'dispatch_existing_tasks',
                                   'responsibility_transferred_to': 'registered_tasks'}
         return ('waiting_human' if operation['started'] else 'superseded', {'reason': 'dispatch_generation_changed'})
@@ -202,6 +226,9 @@ def result(operation, workflow, config, tasks, now):
     if not predecessors_current(operation, workflow, tasks):
         replan_count = int((operation.get('detail') or {}).get('replan_count', 0))
         if replan_count >= 2:
+            if _node_already_completed(operation, workflow, config, tasks):
+                return 'superseded', {'reason': 'dispatch_existing_tasks',
+                                      'responsibility_transferred_to': 'registered_tasks'}
             return ('waiting_human',
                     {'reason': 'dispatch_replan_exhausted',
                      'replan_count': replan_count,
