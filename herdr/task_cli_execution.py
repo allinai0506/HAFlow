@@ -317,13 +317,21 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
                     text=True, capture_output=True, timeout=3,
                 )
                 if probe.returncode != 0 or not (probe.stdout or "").strip():
-                    return None, None
+                    return None, None, None
                 agent_info = (json.loads(probe.stdout).get("result") or {}).get("agent") or {}
                 rev = agent_info.get("revision")
                 valid_rev = rev if (isinstance(rev, int) and not isinstance(rev, bool)) else None
-                return agent_info.get("agent_status"), valid_rev
+                sess = agent_info.get("agent_session")
+                sess_val = sess.get("value") if isinstance(sess, dict) else sess
+                identity = (
+                    agent_info.get("agent"),
+                    agent_info.get("name"),
+                    agent_info.get("terminal_id"),
+                    sess_val,
+                )
+                return agent_info.get("agent_status"), valid_rev, identity
             except Exception:
-                return None, None
+                return None, None, None
 
         def send(pane, text):
             from herdr.supervisor_delivery import current_delivery_task
@@ -334,7 +342,10 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
                 verify_delay = float(os.environ.get("HERDR_CODEX_PROMPT_VERIFY_DELAY", "2.5"))
             except (ValueError, TypeError):
                 verify_delay = 2.5
-            pre_rev = _probe_codex_runtime(pane)[1] if (is_codex and verify_delay > 0) else None
+            if is_codex and verify_delay > 0:
+                _, pre_rev, pre_identity = _probe_codex_runtime(pane)
+            else:
+                pre_rev, pre_identity = None, None
             try:
                 result = subprocess.run(
                     ["herdr", "agent", "prompt", str(pane), text], text=True,
@@ -350,15 +361,26 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
             parsed = raise_for_transport(result)
             if is_codex and verify_delay > 0 and pre_rev is not None:
                 time.sleep(verify_delay)
-                post_status, post_rev = _probe_codex_runtime(pane)
-                if post_status in {"idle", "done"} and post_rev is not None and post_rev <= pre_rev:
+                post_status, post_rev, post_identity = _probe_codex_runtime(pane)
+                if (
+                    post_status in {"idle", "done"}
+                    and post_rev is not None
+                    and post_rev == pre_rev
+                    and post_identity == pre_identity
+                ):
+                    try:
+                        verified_pane = current_delivery_task(task, store, native=True)["pane_id"]
+                    except Exception:
+                        return parsed
+                    if str(verified_pane) != str(pane):
+                        return parsed
                     print(
-                        f"[CODEX PROMPT RETRY] task={task_id} pane={pane} "
-                        f"status={post_status} rev={post_rev}<=pre_rev={pre_rev}"
+                        f"[CODEX PROMPT RETRY] task={task_id} pane={verified_pane} "
+                        f"status={post_status} rev={post_rev}"
                     )
                     try:
                         retry_res = subprocess.run(
-                            ["herdr", "agent", "prompt", str(pane), text], text=True,
+                            ["herdr", "agent", "prompt", str(verified_pane), text], text=True,
                             capture_output=True, timeout=timeout,
                         )
                         parsed = raise_for_transport(retry_res)
