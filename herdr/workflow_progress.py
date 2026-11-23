@@ -254,6 +254,7 @@ def _identity_reason(workflow, facts, candidate):
                 and fact.get('execution_id') != workflow['execution_id']):
             return 'identity_unknown'
         cand_values = {
+            fact.get('verified_candidate_sha'),
             fact.get('candidate_sha'),
             fact.get('commit'),
             fact.get('integrated_commit'),
@@ -288,7 +289,17 @@ def assess_workflow(workflow, config, tasks, *, expected_task_ids_by_node=None):
         node_id = task.get('node') or task.get('stage')
         kind = ('delivery' if task.get('finalize_escalate_reason') == 'delivery_incomplete'
                 and task.get('delivery_failure') else 'finalize' if task.get('finalize_escalated') else 'fix_loop')
-        candidate = (task.get('commit') or task.get('candidate_sha'))
+        if kind == 'fix_loop' and (
+            task.get('integration_mode') == 'none'
+            or (task.get('stage_verdict') == 'blocked' and task.get('integration_mode') != 'git')
+        ):
+            candidate = (
+                task.get('verified_candidate_sha')
+                or task.get('candidate_sha')
+                or task.get('commit')
+            )
+        else:
+            candidate = (task.get('commit') or task.get('candidate_sha'))
         if kind in {'finalize', 'delivery'}:
             retry = node_id
         else:

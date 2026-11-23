@@ -594,3 +594,56 @@ def test_close_accepts_human_adjudicated_blocked_verdicts(scene, controller, age
         else (e.get("payload") or {}).get("to_status") == "completed"
         for e in events
     ), "close receipt (workflow_transition → completed) must be persisted"
+
+
+def test_blocked_gate_closure_report_commit_does_not_cause_candidate_mismatch():
+    """Blocked integration_mode=none gate with a closure report commit still matches workflow candidate_sha."""
+    candidate = "a" * 40
+    report_commit = "b" * 40
+    workflow = {
+        "workflow_id": "wf-fixloop",
+        "execution_id": "exec-fixloop",
+        "status": "running",
+        "candidate_sha": candidate,
+    }
+    config = {
+        "nodes": [
+            {"id": "craft", "depends_on": []},
+            {"id": "cleanroom_review", "depends_on": ["craft"], "gate": {"retry_node": "craft"}},
+        ]
+    }
+    tasks = [
+        {
+            "task_id": "wf-fixloop-craft-r1",
+            "workflow_id": "wf-fixloop",
+            "execution_id": "exec-fixloop",
+            "run_id": "run-craft-1",
+            "node": "craft",
+            "stage": "craft",
+            "status": "cleaned",
+            "integration_mode": "git",
+            "commit": candidate,
+            "integrated_commit": candidate,
+        },
+        {
+            "task_id": "wf-fixloop-review-r1",
+            "workflow_id": "wf-fixloop",
+            "execution_id": "exec-fixloop",
+            "run_id": "run-review-1",
+            "node": "cleanroom_review",
+            "stage": "cleanroom_review",
+            "status": "cleaned",
+            "integration_mode": "none",
+            "stage_verdict": "blocked",
+            "candidate_sha": candidate,
+            "verified_candidate_sha": candidate,
+            "commit": report_commit,
+        },
+    ]
+
+    assessment = assess_workflow(workflow, config, tasks)
+    obligation = next(o for o in assessment["obligations"] if o.get("kind") == "fix_loop")
+    assert obligation["candidate_sha"] == candidate
+    assert obligation["retry_node"] == "craft"
+    assert obligation["reason"] != "candidate_mismatch"
+    assert obligation["status"] == "pending"

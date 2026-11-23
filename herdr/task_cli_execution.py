@@ -310,10 +310,31 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
             if not result.get("accepted"):
                 raise ValueError("Task changed before prepared delivery")
 
+        def _probe_codex_runtime(pane_id):
+            try:
+                probe = subprocess.run(
+                    ["herdr", "agent", "get", str(pane_id)],
+                    text=True, capture_output=True, timeout=3,
+                )
+                if probe.returncode != 0 or not (probe.stdout or "").strip():
+                    return None, None
+                agent_info = (json.loads(probe.stdout).get("result") or {}).get("agent") or {}
+                rev = agent_info.get("revision")
+                valid_rev = rev if (isinstance(rev, int) and not isinstance(rev, bool)) else None
+                return agent_info.get("agent_status"), valid_rev
+            except Exception:
+                return None, None
+
         def send(pane, text):
             from herdr.supervisor_delivery import current_delivery_task
             from herdr.prompt_ledger import PromptTransportError, classify_transport_result, raise_for_transport
             pane = current_delivery_task(task, store, native=True)["pane_id"]
+            is_codex = str(task.get("agent") or "").strip().lower() == "codex"
+            try:
+                verify_delay = float(os.environ.get("HERDR_CODEX_PROMPT_VERIFY_DELAY", "2.5"))
+            except (ValueError, TypeError):
+                verify_delay = 2.5
+            pre_rev = _probe_codex_runtime(pane)[1] if (is_codex and verify_delay > 0) else None
             try:
                 result = subprocess.run(
                     ["herdr", "agent", "prompt", str(pane), text], text=True,
@@ -326,7 +347,29 @@ def handle_dispatch_task(task_id, prompt, prefetched_experience_suffix=None,
                     stderr=getattr(exc, "stderr", "") or "",
                     timed_out=True,
                 )) from exc
-            return raise_for_transport(result)
+            parsed = raise_for_transport(result)
+            if is_codex and verify_delay > 0 and pre_rev is not None:
+                time.sleep(verify_delay)
+                post_status, post_rev = _probe_codex_runtime(pane)
+                if post_status in {"idle", "done"} and post_rev is not None and post_rev <= pre_rev:
+                    print(
+                        f"[CODEX PROMPT RETRY] task={task_id} pane={pane} "
+                        f"status={post_status} rev={post_rev}<=pre_rev={pre_rev}"
+                    )
+                    try:
+                        retry_res = subprocess.run(
+                            ["herdr", "agent", "prompt", str(pane), text], text=True,
+                            capture_output=True, timeout=timeout,
+                        )
+                        parsed = raise_for_transport(retry_res)
+                    except subprocess.TimeoutExpired as exc:
+                        raise PromptTransportError(classify_transport_result(
+                            returncode=124,
+                            stdout=getattr(exc, "stdout", "") or "",
+                            stderr=getattr(exc, "stderr", "") or "",
+                            timed_out=True,
+                        )) from exc
+            return parsed
 
         return deliver(
             task, store, "INITIAL", {"intervention_id": "initial:" + task["run_id"], "action": "INITIAL"},

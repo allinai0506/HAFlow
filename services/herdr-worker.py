@@ -564,6 +564,13 @@ def measure_complexity_baseline(clone):
         except Exception:
             pass
 
+    if not _clone_nm.exists() and (_herdr_repo / "package.json").is_file():
+        print(
+            f"[COMPLEXITY BASELINE SKIPPED] node_modules missing in {clone}; degrading to disabled",
+            file=sys.stderr,
+        )
+        return "disabled"
+
     timeout_sec = int(os.environ.get("HERDR_COMPLEXITY_BASELINE_TIMEOUT", "90") or "90")
     try:
         result = subprocess.run(
@@ -579,9 +586,9 @@ def measure_complexity_baseline(clone):
             capture_output=True,
             timeout=timeout_sec,
         )
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError) as exc:
         print(
-            f"[COMPLEXITY BASELINE TIMEOUT] exceeded {timeout_sec}s in {clone}; degrading to disabled",
+            f"[COMPLEXITY BASELINE DEGRADED] {type(exc).__name__} in {clone}; degrading to disabled",
             file=sys.stderr,
         )
         return "disabled"
@@ -594,10 +601,12 @@ def measure_complexity_baseline(clone):
     )
 
     if not match:
-        raise RuntimeError(
-            "无法取得 complexity baseline:\n"
-            + output[-2000:]
+        print(
+            "[COMPLEXITY BASELINE FAILED] unable to parse baseline; degrading to disabled: "
+            + output[-400:].strip(),
+            file=sys.stderr,
         )
+        return "disabled"
 
     baseline = int(match.group(1))
     if cache_key:
@@ -1070,6 +1079,62 @@ def unique_agent_name(task_id, pane_id, attempt=0):
     return f"{base[:max_base]}-{suffix}"
 
 
+def ensure_codex_project_trusted(clone_path, config_path=None):
+    """Idempotently pre-trust a clone directory in ~/.codex/config.toml so Codex CLI
+    does not stall on the interactive 'Trust this folder?' modal during worker launch."""
+    import fcntl
+    try:
+        import tomllib
+    except ImportError:
+        tomllib = None
+
+    tmp = None
+    try:
+        resolved = str(Path(clone_path).expanduser().resolve())
+        escaped_dq = resolved.replace("\\", "\\\\").replace('"', '\\"')
+        header_dq = f'[projects."{escaped_dq}"]'
+        header_sq = f"[projects.'{resolved}']"
+        raw_cfg = config_path or os.environ.get("HERDR_CODEX_CONFIG_PATH")
+        cfg = Path(raw_cfg).expanduser() if raw_cfg else (Path.home() / ".codex" / "config.toml")
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = cfg.with_name(f".{cfg.name}.lock")
+        with open(lock_path, "a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                existing = cfg.read_text(encoding="utf-8") if cfg.is_file() else ""
+                already_present = False
+                if tomllib is not None and existing.strip():
+                    try:
+                        parsed = tomllib.loads(existing)
+                        projects = parsed.get("projects") if isinstance(parsed, dict) else None
+                        if isinstance(projects, dict) and resolved in projects:
+                            already_present = True
+                    except Exception:
+                        pass
+                if not already_present:
+                    lines = {line.strip() for line in existing.splitlines()}
+                    already_present = header_dq in lines or header_sq in lines
+                if already_present:
+                    return False
+                prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+                entry = f'{prefix}\n{header_dq}\ntrust_level = "trusted"\n'
+                tmp = cfg.with_name(f".{cfg.name}.{os.getpid()}.{time.time_ns()}.tmp")
+                tmp.write_text(existing + entry, encoding="utf-8")
+                os.replace(tmp, cfg)
+                tmp = None
+                return True
+            finally:
+                if tmp is not None:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except (OSError, UnicodeError) as exc:
+        print(f"[CODEX TRUST WARN] unable to pre-trust {clone_path}: {exc}", file=sys.stderr)
+        return False
+
+
 def start_agent(task_id, agent_kind, pane_id, retries=15, delay=0.5):
     if agent_kind == "opencode" and (Path.home() / ".herdr-controller" / "opencode-disabled").exists():
         raise RuntimeError("opencode disabled locally; reroute before worker launch")
@@ -1523,6 +1588,9 @@ def main():
                 record_worker_start_checkpoint(
                     launch_store, args.launch_intent_key, launch_identity, clone, requested=True,
                 )
+
+        if args.agent == "codex" and clone:
+            ensure_codex_project_trusted(clone)
 
         agent_start_attempted = True
         agent = start_agent(
