@@ -146,7 +146,7 @@ def _has_origin_branch(repo, branch):
     try:
         _git(repo, 'show-ref', '--verify', '--quiet', f'refs/remotes/origin/{branch}')
         return True
-    except ValueError:
+    except (ValueError, subprocess.CalledProcessError, OSError):
         return False
 
 
@@ -179,7 +179,7 @@ def _resolve_pr_base(repo, *, pr_base=None, note_base=None, task_base=None, work
                 remote_default = origin_head.split('/', 1)[1].strip()
                 if remote_default:
                     return remote_default
-        except ValueError:
+        except (ValueError, subprocess.CalledProcessError, OSError):
             pass
 
     return candidate or note_val or 'main'

@@ -201,7 +201,7 @@ def _node_already_completed(operation, workflow, config, tasks):
     if expected_sha and not all(t.get('candidate_sha') == expected_sha for t in active_tasks):
         return False
     expected_episode = operation['payload'].get('candidate_episode_id')
-    if expected_episode is not None and not all(
+    if expected_episode and not all(
         t.get('candidate_episode_id') == expected_episode for t in active_tasks
     ):
         return False
