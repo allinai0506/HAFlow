@@ -36,6 +36,11 @@ def process_gate_verdict_reconciliations(ports):
     processed = 0
     for task in ports.load_tasks():
         status = task.get("status")
+        if not (
+            status in {"working", "dispatched", "rework"}
+            or (status == "failed" and task.get("failure_reason") == "hard_timeout_watchdog")
+        ):
+            continue
         workflow_id = task.get("workflow_id")
         node_id = task.get("node") or task.get("stage")
         if task.get("gate") is False:

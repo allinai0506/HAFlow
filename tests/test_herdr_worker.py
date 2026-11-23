@@ -325,6 +325,44 @@ class TestCleanSandbox(unittest.TestCase):
             self.assertEqual((clone / "node_modules").resolve(), (self.source_repo / "node_modules").resolve())
             self.assertFalse((clone / ".codegraph").exists())
 
+    def test_measure_complexity_baseline_caches_by_head_and_degrades_on_timeout(self):
+        import os
+        worker = load_worker()
+        repo = Path(self.temp_dir) / "complexity-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+        (repo / "scripts").mkdir()
+        (repo / "scripts" / "complexity-gate.cjs").write_text("console.log('当前实测: 42 条');\n")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+        cache_file = Path(self.temp_dir) / "complexity-cache.json"
+        with patch.dict(os.environ, {"HERDR_COMPLEXITY_BASELINE_CACHE": str(cache_file)}):
+            first = worker.measure_complexity_baseline(repo)
+            self.assertEqual(first, 42)
+            self.assertTrue(cache_file.is_file())
+            # Second call hits cache without spawning node
+            real_run = subprocess.run
+            calls = []
+            def guarded_run(cmd, *args, **kwargs):
+                if cmd and cmd[0] == "node":
+                    calls.append(cmd)
+                return real_run(cmd, *args, **kwargs)
+            with patch.object(worker.subprocess, "run", side_effect=guarded_run):
+                self.assertEqual(worker.measure_complexity_baseline(repo), 42)
+                self.assertEqual(calls, [])
+
+            # Timeout degrades cleanly to "disabled" instead of killing worker launch
+            cache_file.unlink()
+            def timeout_node(cmd, *args, **kwargs):
+                if cmd and cmd[0] == "node":
+                    raise subprocess.TimeoutExpired(cmd, timeout=1)
+                return real_run(cmd, *args, **kwargs)
+            with patch.object(worker.subprocess, "run", side_effect=timeout_node):
+                self.assertEqual(worker.measure_complexity_baseline(repo), "disabled")
+
     def test_create_task_branch_with_dirty_source(self):
         worker = load_worker()
         clone_root = Path(self.temp_dir) / "clones"
