@@ -171,3 +171,43 @@ def test_failed_prompt_delivery_does_not_persist_dedup_and_allows_retry(tmp_path
         task_listener.handle_event(ports, task["task_id"], "idle")
         assert mock_run.call_count == 2
         assert len(store.list_events(task_id=task["task_id"], event_type="receipt_v1_nudge_sent")) == 1
+
+
+def test_production_controller_binding_delivers_missing_receipt_nudge(tmp_path):
+    """Real herdr-controller.py binding (via bindings.install_modules) must expose subprocess/lock to handle_event."""
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+
+    controller_path = Path(__file__).resolve().parent.parent / "services" / "herdr-controller.py"
+    spec = importlib.util.spec_from_loader(
+        "ctrl_receipt_nudge_binding_test",
+        importlib.machinery.SourceFileLoader("ctrl_receipt_nudge_binding_test", str(controller_path)),
+    )
+    ctrl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ctrl)
+
+    db_path = tmp_path / "prod_binding.db"
+    store = SQLiteStateStore(db_path=db_path)
+    open_receipt_conn(store).close()
+    task = _make_task(task_id="wf-prod-craft-auto", completion_epoch="epoch-prod-1")
+
+    with patch.object(ctrl, "get_task", return_value=task), \
+         patch.object(ctrl, "_get_store", return_value=store), \
+         patch.object(ctrl, "_completion_marker_snapshot", return_value=(True, "HERDR_TASK_DONE")), \
+         patch.object(
+             ctrl.subprocess,
+             "run",
+             return_value=subprocess.CompletedProcess(["herdr", "agent", "prompt"], 0, "ok", ""),
+         ) as mock_run, \
+         patch("herdr.task_resources.owned_live_pane", return_value=(True, "identity_match")):
+        ctrl.handle_event(task["task_id"], "done")
+        ctrl.handle_event(task["task_id"], "idle")
+
+    assert mock_run.call_count == 1
+    cmd = mock_run.call_args[0][0]
+    assert cmd[:4] == ["herdr", "agent", "prompt", "w1R:p5"]
+    assert "herdr-task report-completion wf-prod-craft-auto --identity-file /tmp/receipt-id.json" in cmd[4]
+    events = store.list_events(task_id=task["task_id"], event_type="receipt_v1_nudge_sent")
+    assert len(events) == 1
+    assert events[0]["payload"]["completion_epoch"] == "epoch-prod-1"
