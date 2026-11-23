@@ -140,6 +140,51 @@ def _is_joint_candidate_covering(store, task, sha, note_sha):
     return False
 
 
+def _has_origin_branch(repo, branch):
+    if not branch or not repo or not Path(repo).is_dir():
+        return False
+    try:
+        _git(repo, 'show-ref', '--verify', '--quiet', f'refs/remotes/origin/{branch}')
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_pr_base(repo, *, pr_base=None, note_base=None, task_base=None, workflow_base=None):
+    """Resolve remote PR target branch without conflating a local worktree anchor.
+
+    Trust precedence:
+    1. Operator-configured `pr_base_branch` (workflow/task).
+    2. Operator-configured `base_branch` (task/workflow) when it exists on `origin`.
+    3. Only when `base_branch` is absent or local-only (e.g. a worktree anchor):
+       `note_base` (if verified on `origin`), then `origin/HEAD`, then `note_base`/`candidate`/`main`.
+    """
+    explicit_pr_base = str(pr_base or '').strip()
+    if explicit_pr_base:
+        return explicit_pr_base
+
+    candidate = str(task_base or workflow_base or '').strip()
+    note_val = str(note_base or '').strip()
+    has_repo = bool(repo and Path(repo).is_dir())
+
+    if candidate and has_repo and _has_origin_branch(repo, candidate):
+        return candidate
+
+    if has_repo:
+        if note_val and _has_origin_branch(repo, note_val):
+            return note_val
+        try:
+            origin_head = _git(repo, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD')
+            if origin_head.startswith('origin/'):
+                remote_default = origin_head.split('/', 1)[1].strip()
+                if remote_default:
+                    return remote_default
+        except ValueError:
+            pass
+
+    return candidate or note_val or 'main'
+
+
 def _publication(task, notes, store):
     from .wrapup_delivery import integrated, publication_branch
     workflow = store.get_workflow(task['workflow_id']) or {}
@@ -209,7 +254,15 @@ def _publication(task, notes, store):
     if business_gates_blockers(store, store.get_workflow(task['workflow_id']) or {}, gates,
                                {g.get('node') or g.get('stage') for g in gates}):
         raise ValueError('delivery gate business acceptance unavailable')
-    return effective_sha, effective_branch, task.get('base_branch') or _body_value(note,'base') or 'main'
+    repo = Path(task.get('source_repo') or '').expanduser()
+    base = _resolve_pr_base(
+        repo if str(repo) else None,
+        pr_base=workflow.get('pr_base_branch') or task.get('pr_base_branch'),
+        note_base=_body_value(note, 'base'),
+        task_base=task.get('base_branch'),
+        workflow_base=workflow.get('base_branch'),
+    )
+    return effective_sha, effective_branch, base
 
 
 def _matching_pr(rows, branch, base, sha):
@@ -330,7 +383,13 @@ def publish_direct_workflow_pr(store, workflow_id, *, title=None, body='', draft
             raise ValueError('no integrated candidate task found for direct PR delivery')
         sha = str(candidate_task.get('integrated_commit') or '').strip()
         branch = str(candidate_task.get('integration_branch') or '').strip()
-        base = str(candidate_task.get('base_branch') or workflow.get('base_branch') or 'main').strip()
+        repo = Path(candidate_task.get('source_repo') or '').expanduser()
+        base = _resolve_pr_base(
+            repo if str(repo) else None,
+            pr_base=workflow.get('pr_base_branch') or candidate_task.get('pr_base_branch'),
+            task_base=candidate_task.get('base_branch'),
+            workflow_base=workflow.get('base_branch'),
+        )
         if not re.fullmatch(r'[0-9a-f]{40}', sha) or not branch:
             raise ValueError('candidate task missing valid integrated commit or branch')
         gate_task = next(
