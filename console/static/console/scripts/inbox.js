@@ -57,7 +57,8 @@ async function loadInboxData(isAppend, isReset){
     const currentCount = isReset ? (inboxState.pageSize || 50) : Math.max(inboxState.pageSize || 50, inboxState.tasks.length);
     const limit = isAppend ? (inboxState.pageSize || 50) : currentCount;
     const qParts = [`limit=${limit}`, `offset=${offset}`];
-    if(inboxState.filterStatus && !['ALL','MINE','PENDING_ASSIGNMENT'].includes(inboxState.filterStatus)) qParts.push('status=' + encodeURIComponent(inboxState.filterStatus));
+    const statusParam = inboxState.filterStatus === 'RUNNING' ? 'RUNNING,CLAIMED' : inboxState.filterStatus;
+    if(statusParam && !['ALL','MINE','PENDING_ASSIGNMENT'].includes(statusParam)) qParts.push('status=' + encodeURIComponent(statusParam));
     if(inboxState.filterProject && inboxState.filterProject !== 'ALL') qParts.push('project_id=' + encodeURIComponent(inboxState.filterProject));
     if(inboxState.filterPriority && inboxState.filterPriority !== 'ALL') qParts.push('priority=' + encodeURIComponent(inboxState.filterPriority));
 

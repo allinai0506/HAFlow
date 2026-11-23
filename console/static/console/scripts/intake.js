@@ -246,9 +246,14 @@ function showIntakeDetail(linkId, onReload){
   const form = document.getElementById('intakeDetail');
   const project = document.getElementById('intakeProject');
   const workspace = document.getElementById('intakeWorkspace');
-  const initial = editable ? JSON.stringify([...new FormData(form)]) : '';
+  const snapshot = () => JSON.stringify([...new FormData(form), ['workspace_id', workspace ? workspace.value : '']]);
+  const initial = editable ? snapshot() : '';
+  if(project && workspace){
+    const currentWs = project.selectedOptions[0]?.dataset.workspace || '';
+    if(project.value && currentWs) workspace.value = currentWs;
+  }
   const apply = async (action, changes) => {
-    if(action === 'confirm' && initial !== JSON.stringify([...new FormData(form)])){
+    if(action === 'confirm' && initial !== snapshot()){
       form.querySelector('[role=status]').textContent = '请先保存修改，再确认当前任务。';
       form.querySelector('button[type=submit]').focus();
       return;
