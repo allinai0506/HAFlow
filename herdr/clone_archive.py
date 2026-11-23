@@ -12,7 +12,9 @@ import io
 import json
 import os
 import re
+import select
 import stat
+import subprocess
 import tarfile
 import tempfile
 import time
@@ -23,6 +25,7 @@ from herdr.workflow_docs import workflow_docs_dir
 MAX_BYTES = 1024 * 1024 * 1024
 MAX_ENTRIES = 100000
 MAX_SECONDS = 120
+MAX_GIT_IGNORE_BYTES = 4 * 1024 * 1024
 
 # Explicit bypass directories and files produced by external indexers, IDEs,
 # and live IPC daemons (e.g. CodeGraph MCP daemon, Unix sockets).
@@ -82,6 +85,139 @@ def is_bypass_rel_path(rel: str | Path) -> bool:
         name = parts[-1]
         if name in BYPASS_IGNORED_DIRS or name in BYPASS_IGNORED_FILE_NAMES:
             return True
+    return False
+
+
+def _git_ignored_rel_paths(root: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """Return untracked gitignored (dirs, files) relative to root using the repo's own .gitignore.
+
+    Bounded and fail-safe: returns empty sets if root is not a real Git directory, git fails,
+    times out, or output exceeds MAX_GIT_IGNORE_BYTES / MAX_ENTRIES. Isolates git config so
+    agent-writable .git/config cannot redirect work-tree or core.excludesFile outside root.
+    """
+    git_entry = root / ".git"
+    if not git_entry.is_dir() or git_entry.is_symlink():
+        return frozenset(), frozenset()
+    env = dict(os.environ)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    cmd = [
+        "git",
+        f"--git-dir={git_entry}",
+        f"--work-tree={root}",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "core.excludesFile=",
+        "-C",
+        str(root),
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "-z",
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return frozenset(), frozenset()
+
+    chunks: list[bytes] = []
+    total_bytes = 0
+    deadline = time.monotonic() + 15.0
+    exceeded = False
+    try:
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                exceeded = True
+                break
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                exceeded = True
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > MAX_GIT_IGNORE_BYTES:
+                exceeded = True
+                break
+            chunks.append(chunk)
+        if exceeded:
+            proc.kill()
+            proc.wait(timeout=5)
+            return frozenset(), frozenset()
+        remaining = max(0.1, deadline - time.monotonic())
+        returncode = proc.wait(timeout=remaining)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        return frozenset(), frozenset()
+    finally:
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+
+    if returncode != 0 or not chunks:
+        return frozenset(), frozenset()
+    raw_items = b"".join(chunks).split(b"\x00")
+    if len(raw_items) > MAX_ENTRIES:
+        return frozenset(), frozenset()
+    ignored_dirs: set[str] = set()
+    ignored_files: set[str] = set()
+    for raw in raw_items:
+        if not raw:
+            continue
+        try:
+            text = raw.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        except Exception:
+            continue
+        is_dir = text.endswith("/")
+        norm = text.rstrip("/")
+        if not norm or norm == ".git" or norm.startswith(".git/"):
+            continue
+        if is_dir:
+            ignored_dirs.add(norm)
+        else:
+            ignored_files.add(norm)
+    return frozenset(ignored_dirs), frozenset(ignored_files)
+
+
+def _is_git_ignored_rel_path(
+    rel: str,
+    ignored_dirs: frozenset[str],
+    ignored_files: frozenset[str],
+) -> bool:
+    """True when rel matches an untracked gitignored file or lies inside a gitignored dir."""
+    if not ignored_dirs and not ignored_files:
+        return False
+    norm = rel.rstrip("/")
+    if not norm or norm == ".git" or norm.startswith(".git/"):
+        return False
+    if norm in ignored_files or norm in ignored_dirs:
+        return True
+    if ignored_dirs:
+        idx = norm.find("/")
+        while idx != -1:
+            if norm[:idx] in ignored_dirs:
+                return True
+            idx = norm.find("/", idx + 1)
     return False
 
 
@@ -243,6 +379,7 @@ def _inventory(root, task=None):
     total = 0
     deadline = time.monotonic() + MAX_SECONDS
     declared = _declared_deliverable_rel_paths(task, root)
+    ignored_dirs, ignored_files = _git_ignored_rel_paths(root)
 
     def failed(error):
         raise error
@@ -250,12 +387,19 @@ def _inventory(root, task=None):
     for current, dirs, files in os.walk(root, followlinks=False, onerror=failed):
         rel_current = Path(current).relative_to(root).as_posix()
         in_git = rel_current == ".git" or rel_current.startswith(".git/")
-        dirs[:] = [
-            d for d in dirs
-            if in_git
-            or d not in BYPASS_IGNORED_DIRS
-            or _is_declared_or_ancestor(d if rel_current == "." else f"{rel_current}/{d}", declared)
-        ]
+        kept_dirs = []
+        for d in dirs:
+            rel_d = d if rel_current == "." else f"{rel_current}/{d}"
+            if (
+                in_git
+                or _is_declared_or_ancestor(rel_d, declared)
+                or (
+                    d not in BYPASS_IGNORED_DIRS
+                    and not _is_git_ignored_rel_path(rel_d, ignored_dirs, ignored_files)
+                )
+            ):
+                kept_dirs.append(d)
+        dirs[:] = kept_dirs
         for name in sorted(dirs + files):
             path = Path(current) / name
             info = path.lstat()
@@ -268,7 +412,10 @@ def _inventory(root, task=None):
                 or name in BYPASS_IGNORED_DIRS
             ):
                 continue  # External indexer or transient metadata.
-            if not is_declared and is_bypass_rel_path(rel):
+            if not is_declared and (
+                is_bypass_rel_path(rel)
+                or (not in_git and _is_git_ignored_rel_path(rel, ignored_dirs, ignored_files))
+            ):
                 continue
             if len(entries) >= MAX_ENTRIES or time.monotonic() > deadline:
                 raise ValueError("archive inventory budget exceeded")
@@ -431,8 +578,15 @@ def verify_source(task, clone_root, archive):
     manifest = archive_manifest(dict(task, clone_archive=archive))
     current = _inventory(root, task=task)
     declared = _declared_deliverable_rel_paths(task, root)
+    ignored_dirs, ignored_files = _git_ignored_rel_paths(root)
     manifest_entries = {
-        k: v for k, v in manifest["entries"].items() if _is_declared_or_ancestor(k, declared) or not is_bypass_rel_path(k)
+        k: v
+        for k, v in manifest["entries"].items()
+        if _is_declared_or_ancestor(k, declared)
+        or (
+            not is_bypass_rel_path(k)
+            and not _is_git_ignored_rel_path(k, ignored_dirs, ignored_files)
+        )
     }
     deleting = task.get("clone_reclaim_started") == archive["manifest_sha256"]
     if current != manifest_entries and not (
@@ -475,7 +629,7 @@ def plan_clone(task, clone_root):
     if task.get("clone_archive"):
         verify_source(task, clone_root, task["clone_archive"])
     else:
-        _inventory(root)
+        _inventory(root, task=task)
     return {
         "archive_required": True,
         "archive_would_create": not bool(task.get("clone_archive")),
