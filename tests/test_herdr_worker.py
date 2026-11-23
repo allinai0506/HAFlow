@@ -363,6 +363,72 @@ class TestCleanSandbox(unittest.TestCase):
             with patch.object(worker.subprocess, "run", side_effect=timeout_node):
                 self.assertEqual(worker.measure_complexity_baseline(repo), "disabled")
 
+            # Missing node_modules when package.json exists degrades cleanly without spawning node
+            (repo / "package.json").write_text('{"name": "demo"}\n')
+            calls.clear()
+            with patch.object(worker.subprocess, "run", side_effect=guarded_run):
+                self.assertEqual(worker.measure_complexity_baseline(repo), "disabled")
+                self.assertEqual(calls, [])
+
+            # Unparseable ESLint failure output also degrades cleanly to "disabled"
+            (repo / "node_modules").mkdir()
+            (repo / "scripts" / "complexity-gate.cjs").write_text("console.error('ESLint 未产出 JSON'); process.exit(1);\n")
+            self.assertEqual(worker.measure_complexity_baseline(repo), "disabled")
+
+    def test_ensure_codex_project_trusted_idempotent(self):
+        worker = load_worker()
+        cfg = Path(self.temp_dir) / "codex-config.toml"
+        cfg.write_text('model = "gpt-5"\n', encoding="utf-8")
+        clone_dir = Path(self.temp_dir) / "clones" / "wf-task-r1"
+        clone_dir.mkdir(parents=True)
+
+        added_first = worker.ensure_codex_project_trusted(clone_dir, config_path=str(cfg))
+        added_second = worker.ensure_codex_project_trusted(clone_dir, config_path=str(cfg))
+
+        self.assertTrue(added_first)
+        self.assertFalse(added_second)
+        text = cfg.read_text(encoding="utf-8")
+        expected_header = f'[projects."{clone_dir.resolve()}"]'
+        self.assertEqual(text.count(expected_header), 1)
+        self.assertIn('trust_level = "trusted"', text)
+
+        # Single-quoted TOML project table is also recognized without duplicating
+        sq_clone = Path(self.temp_dir) / "clones" / "wf-task-sq"
+        sq_clone.mkdir(parents=True)
+        cfg.write_text(
+            cfg.read_text(encoding="utf-8") + f"\n[projects.'{sq_clone.resolve()}']\ntrust_level = \"trusted\"\n",
+            encoding="utf-8",
+        )
+        self.assertFalse(worker.ensure_codex_project_trusted(sq_clone, config_path=str(cfg)))
+
+    def test_ensure_codex_project_trusted_concurrent_processes_no_lost_update(self):
+        import sys
+        cfg = Path(self.temp_dir) / "concurrent-codex.toml"
+        cfg.write_text('model = "gpt-5"\n', encoding="utf-8")
+        clones = []
+        for i in range(6):
+            d = Path(self.temp_dir) / "clones" / f"wf-concurrent-{i}"
+            d.mkdir(parents=True)
+            clones.append(d)
+
+        script = (
+            "import importlib.util, sys; "
+            "spec = importlib.util.spec_from_file_location('w', 'services/herdr-worker.py'); "
+            "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w); "
+            "w.ensure_codex_project_trusted(sys.argv[1], config_path=sys.argv[2])"
+        )
+        repo_root = Path(__file__).resolve().parents[1]
+        procs = [
+            subprocess.Popen([sys.executable, "-c", script, str(d), str(cfg)], cwd=str(repo_root))
+            for d in clones
+        ]
+        for p in procs:
+            self.assertEqual(p.wait(timeout=15), 0)
+
+        text = cfg.read_text(encoding="utf-8")
+        for d in clones:
+            self.assertIn(f'[projects."{d.resolve()}"]', text)
+
     def test_create_task_branch_with_dirty_source(self):
         worker = load_worker()
         clone_root = Path(self.temp_dir) / "clones"
