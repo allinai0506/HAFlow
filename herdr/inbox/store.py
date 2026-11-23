@@ -235,8 +235,14 @@ class InboxStore:
                 where_clauses.append("user_id = ?")
                 params.append(user_id)
             if status:
-                where_clauses.append("status = ?")
-                params.append(status.upper())
+                statuses = [s.strip().upper() for s in str(status).split(",") if s.strip()]
+                if len(statuses) == 1:
+                    where_clauses.append("status = ?")
+                    params.append(statuses[0])
+                elif statuses:
+                    marks = ",".join("?" for _ in statuses)
+                    where_clauses.append(f"status IN ({marks})")
+                    params.extend(statuses)
             if project_id:
                 where_clauses.append("project_id = ?")
                 params.append(project_id)
