@@ -123,3 +123,63 @@ def test_clone_archive_blocks_gitdir_file_external_excludesfile_and_bounds_stdou
     # 3. Byte cap fail-safe returns empty sets instead of buffering unbounded stdout
     monkeypatch.setattr(clone_archive, "MAX_GIT_IGNORE_BYTES", 4)
     assert clone_archive._git_ignored_rel_paths(repo) == (frozenset(), frozenset())
+
+
+def test_clone_archive_preserves_descendants_of_declared_directory(tmp_path, monkeypatch):
+    """Codex P1: declaring a directory (e.g. artifacts=['reports']) must protect its descendants too."""
+    clones_dir = tmp_path / "clones"
+    repo = clones_dir / "task-p2-dir-decl"
+    _init_repo(repo)
+    (repo / "reports" / "nested").mkdir(parents=True)
+    (repo / "reports" / "result.txt").write_text("deliverable\n", encoding="utf-8")
+    (repo / "reports" / "nested" / "detail.json").write_text("{}\n", encoding="utf-8")
+    (repo / "perf").mkdir()
+    (repo / "perf" / "ignored.bin").write_bytes(b"p" * 128)
+
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "docs"))
+    task = {
+        "task_id": "task-p2-dir-decl",
+        "workflow_id": "wf-p2-dir-decl",
+        "run_id": "run-p2-dir-decl",
+        "clone_path": str(repo),
+        "workspace": str(repo),
+        "artifacts": ["reports"],
+    }
+
+    archive = clone_archive.preserve_clone(task, clones_dir)
+    manifest = clone_archive.archive_manifest(dict(task, clone_archive=archive))
+    entries = set(manifest["entries"].keys())
+    assert "reports" in entries
+    assert "reports/result.txt" in entries
+    assert "reports/nested/detail.json" in entries
+    assert "perf/ignored.bin" not in entries
+    clone_archive.verify_source(task, clones_dir, archive)
+
+
+def test_clone_archive_verify_source_survives_interrupted_deletion_after_git_removed(tmp_path, monkeypatch):
+    """Codex P2: interrupted deletion after .git/.gitignore removal must still honor persisted exclusions."""
+    import shutil
+
+    clones_dir = tmp_path / "clones"
+    repo = clones_dir / "task-p2-interrupt"
+    _init_repo(repo)
+    (repo / "reports").mkdir()
+    (repo / "reports" / "big.bin").write_bytes(b"x" * 200_000)
+
+    monkeypatch.setenv("HERDR_WORKFLOW_DOCS_DIR", str(tmp_path / "docs"))
+    monkeypatch.setattr(clone_archive, "MAX_BYTES", 150_000)
+    task = {
+        "task_id": "task-p2-interrupt",
+        "workflow_id": "wf-p2-interrupt",
+        "run_id": "run-p2-interrupt",
+        "clone_path": str(repo),
+        "workspace": str(repo),
+    }
+
+    archive = clone_archive.preserve_clone(task, clones_dir)
+    # Simulate interrupted reclaim: .git and .gitignore deleted, reports/ still on disk
+    shutil.rmtree(repo / ".git")
+    (repo / ".gitignore").unlink()
+    reclaim_task = dict(task, clone_reclaim_started=archive["manifest_sha256"])
+    # Must NOT raise 'archive byte budget exceeded' or 'clone output changed after archive'
+    clone_archive.verify_source(reclaim_task, clones_dir, archive)

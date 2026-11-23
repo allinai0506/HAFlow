@@ -367,19 +367,26 @@ def _declared_deliverable_rel_paths(task: dict | None, root: Path | str | None =
 
 
 def _is_declared_or_ancestor(rel: str, declared: set[str]) -> bool:
-    """Check if rel is an explicitly declared path or an ancestor directory of one."""
+    """Check if rel is a declared path, an ancestor of one, or a descendant of a declared dir."""
     if not declared:
         return False
-    norm = rel.rstrip("/") + "/"
-    return rel in declared or any(p.startswith(norm) for p in declared)
+    norm = rel.rstrip("/")
+    norm_prefix = norm + "/"
+    return norm in declared or any(
+        p.startswith(norm_prefix) or norm.startswith(p.rstrip("/") + "/")
+        for p in declared
+    )
 
 
-def _inventory(root, task=None):
+def _inventory(root, task=None, *, ignored_override=None):
     entries = {}
     total = 0
     deadline = time.monotonic() + MAX_SECONDS
     declared = _declared_deliverable_rel_paths(task, root)
-    ignored_dirs, ignored_files = _git_ignored_rel_paths(root)
+    if ignored_override is not None:
+        ignored_dirs, ignored_files = ignored_override
+    else:
+        ignored_dirs, ignored_files = _git_ignored_rel_paths(root)
 
     def failed(error):
         raise error
@@ -458,13 +465,18 @@ def preserve_clone(task, clone_root):
         verify_source(task, clone_root, task["clone_archive"])
         return task["clone_archive"]
     info = root.stat()
-    entries = _inventory(root, task=task)
+    ignored_dirs, ignored_files = _git_ignored_rel_paths(root)
+    entries = _inventory(root, task=task, ignored_override=(ignored_dirs, ignored_files))
     manifest = {
         "task_id": task["task_id"],
         "workflow_id": task["workflow_id"],
         "run_id": task.get("run_id"),
         "entries": entries,
     }
+    if ignored_dirs:
+        manifest["git_ignored_dirs"] = sorted(ignored_dirs)
+    if ignored_files:
+        manifest["git_ignored_files"] = sorted(ignored_files)
     encoded = json.dumps(manifest, sort_keys=True).encode()
     manifest_sha = hashlib.sha256(encoded).hexdigest()
     destination = archive_directory(task)
@@ -576,9 +588,17 @@ def verify_source(task, clone_root, archive):
                                        declared=_declared_deliverable_rel_paths(task, root)):
             raise ValueError("clone instance changed")
     manifest = archive_manifest(dict(task, clone_archive=archive))
-    current = _inventory(root, task=task)
     declared = _declared_deliverable_rel_paths(task, root)
-    ignored_dirs, ignored_files = _git_ignored_rel_paths(root)
+    deleting = task.get("clone_reclaim_started") == archive["manifest_sha256"]
+    live_dirs, live_files = _git_ignored_rel_paths(root)
+    if deleting:
+        persisted_dirs = frozenset(manifest.get("git_ignored_dirs") or ())
+        persisted_files = frozenset(manifest.get("git_ignored_files") or ())
+        ignored_dirs = live_dirs | persisted_dirs
+        ignored_files = live_files | persisted_files
+    else:
+        ignored_dirs, ignored_files = live_dirs, live_files
+    current = _inventory(root, task=task, ignored_override=(ignored_dirs, ignored_files))
     manifest_entries = {
         k: v
         for k, v in manifest["entries"].items()
@@ -588,7 +608,6 @@ def verify_source(task, clone_root, archive):
             and not _is_git_ignored_rel_path(k, ignored_dirs, ignored_files)
         )
     }
-    deleting = task.get("clone_reclaim_started") == archive["manifest_sha256"]
     if current != manifest_entries and not (
         is_residual_clone_shell(root, declared=declared)
         or (
