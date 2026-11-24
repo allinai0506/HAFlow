@@ -10,7 +10,10 @@ from herdr.task_cli_launch_worker import WorkerStartupHealthFailure, run_launch_
 from herdr.task_resources import begin_launch_intent
 
 
-def test_worker_token_exhausted_startup_allows_auto_handover(tmp_path):
+import pytest
+
+@pytest.mark.parametrize("disposition", ["rolled_back", "borrowed_pane_restored"])
+def test_worker_token_exhausted_startup_allows_auto_handover(tmp_path, disposition):
     """When worker exits with TOKEN_EXHAUSTED and safe rollback disposition under agent=auto,
     run_launch_worker marks agent unhealthy and raises WorkerStartupHealthFailure for handover."""
     store = SQLiteStateStore(db_path=tmp_path / "state.db")
@@ -47,7 +50,7 @@ def test_worker_token_exhausted_startup_allows_auto_handover(tmp_path):
     failure_payload = {
         "task_id": "wf-tok-cleanroom_test-auto",
         "run_id": "run-tok-1",
-        "disposition": "rolled_back",
+        "disposition": disposition,
         "recovery_required": False,
         "failure_type": "RuntimeError",
     }
