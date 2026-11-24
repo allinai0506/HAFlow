@@ -285,27 +285,72 @@ def try_auto_rebase_candidate(source_repo, candidate_sha, *, base_branch="dev", 
 
 
 def auto_rebase_stale_workflow(store, workflow_id, project_root, candidate_sha, base_branch, node_id):
-    """Attempt conflict-free rebase for a stale workflow candidate and re-freeze on success."""
+    """Attempt conflict-free rebase for a stale workflow candidate and atomically re-freeze only if candidate generation/watermark did not advance."""
+    from herdr import recovery_store, state_db
+
     try:
-        stale_sha = candidate_sha or (store.get_workflow(workflow_id) or {}).get("candidate_sha") or ""
+        wf_before = store.get_workflow(workflow_id) or {}
+        if wf_before.get("status") != "running":
+            return None
+        stale_sha = candidate_sha or wf_before.get("candidate_sha") or ""
+        pre_exec_id = wf_before.get("execution_id")
+        pre_episode_id = wf_before.get("candidate_episode_id")
+
+        ro = state_db.get_readonly_db_connection(store.db_path)
+        try:
+            row = ro.execute(
+                "SELECT COALESCE(MAX(id), 0) AS max_id FROM events "
+                "WHERE workflow_id=? AND event_type IN ('candidate_frozen', 'candidate_published', 'candidate_integrated')",
+                (workflow_id,),
+            ).fetchone()
+            pre_watermark = int(row["max_id"]) if row else 0
+        finally:
+            ro.close()
+
         rb = try_auto_rebase_candidate(project_root, stale_sha, base_branch=base_branch or "dev")
-        if rb.get("ok") and rb.get("new_sha"):
-            store.record_event(
-                "candidate_frozen",
-                {"candidate_sha": rb["new_sha"], "source_node": "auto_rebase", "previous_candidate_sha": stale_sha},
-                workflow_id=workflow_id,
-                source="critical-path-scheduler",
+        if not (rb.get("ok") and rb.get("new_sha")):
+            return None
+
+        with recovery_store._transaction(store.db_path) as conn:
+            fresh_wf, _, _ = recovery_store._snapshot(conn, workflow_id)
+            if (
+                fresh_wf.get("status") != "running"
+                or fresh_wf.get("execution_id") != pre_exec_id
+                or fresh_wf.get("candidate_episode_id") != pre_episode_id
+                or (fresh_wf.get("candidate_sha") or "") != stale_sha
+            ):
+                print(f"[BASELINE AUTO-REBASE STALE] workflow={workflow_id} candidate changed concurrently; aborting freeze")
+                return None
+            newer = conn.execute(
+                "SELECT id FROM events WHERE workflow_id=? AND id > ? "
+                "AND event_type IN ('candidate_frozen', 'candidate_published', 'candidate_integrated') LIMIT 1",
+                (workflow_id, pre_watermark),
+            ).fetchone()
+            if newer is not None:
+                print(f"[BASELINE AUTO-REBASE STALE] workflow={workflow_id} newer publication event={newer['id']}; aborting freeze")
+                return None
+            state_db.record_event(
+                {
+                    "event_type": "candidate_frozen",
+                    "workflow_id": workflow_id,
+                    "source": "critical-path-scheduler",
+                    "payload": {"candidate_sha": rb["new_sha"], "source_node": "auto_rebase", "previous_candidate_sha": stale_sha},
+                },
+                conn=conn,
             )
-            store.record_event(
-                "candidate_auto_rebased",
-                {"old_sha": stale_sha, "new_sha": rb["new_sha"], "base_tip": rb.get("base_tip")},
-                workflow_id=workflow_id,
-                node_id=node_id,
-                source="herdr-controller",
+            state_db.record_event(
+                {
+                    "event_type": "candidate_auto_rebased",
+                    "workflow_id": workflow_id,
+                    "node_id": node_id,
+                    "source": "herdr-controller",
+                    "payload": {"old_sha": stale_sha, "new_sha": rb["new_sha"], "base_tip": rb.get("base_tip")},
+                },
+                conn=conn,
             )
-            store.update_workflow_metadata(workflow_id, {"candidate_sha": rb["new_sha"]})
-            print(f"[BASELINE AUTO-REBASED] workflow={workflow_id} {stale_sha[:8]} -> {rb['new_sha'][:8]}")
-            return rb["new_sha"]
+            state_db.update_workflow_metadata(workflow_id, {"candidate_sha": rb["new_sha"]}, conn=conn)
+        print(f"[BASELINE AUTO-REBASED] workflow={workflow_id} {stale_sha[:8]} -> {rb['new_sha'][:8]}")
+        return rb["new_sha"]
     except Exception as exc:
         print(f"[BASELINE AUTO-REBASE WARN] workflow={workflow_id}: {exc}")
     return None

@@ -88,3 +88,40 @@ def test_try_auto_rebase_candidate_succeeds_cleanly_and_aborts_on_conflict(tmp_p
     assert conflict_res["reason"] == "rebase_conflict"
     wt_list = subprocess.run(["git", "-C", str(repo), "worktree", "list"], check=True, capture_output=True, text=True).stdout
     assert len(wt_list.strip().splitlines()) == 1
+
+
+def test_auto_rebase_stale_workflow_rejects_concurrent_candidate_change(tmp_path, monkeypatch):
+    """If a newer candidate_frozen/publication occurs while rebase is running, auto_rebase_stale_workflow
+    must abort without overwriting the newer candidate."""
+    import herdr.launch_baseline as lb
+    from herdr.state_store import SQLiteStateStore
+
+    repo, _ = _init_repo_with_bare_remote(tmp_path)
+    sha_old = "1" * 40
+    sha_concurrent = "2" * 40
+    sha_rebased = "3" * 40
+
+    store = SQLiteStateStore(db_path=tmp_path / "state.db")
+    store.save_workflow(
+        {
+            "workflow_id": "wf-rb-cas",
+            "project_root": str(repo),
+            "base_branch": "dev",
+            "status": "running",
+            "execution_id": "exec-rb",
+            "candidate_sha": sha_old,
+            "candidate_episode_id": 1,
+        }
+    )
+    store.record_event("candidate_frozen", {"candidate_sha": sha_old}, workflow_id="wf-rb-cas", source="critical-path-scheduler")
+
+    def fake_rebase(*_a, **_k):
+        # Simulate concurrent integration freezing a newer candidate during rebase
+        store.record_event("candidate_frozen", {"candidate_sha": sha_concurrent}, workflow_id="wf-rb-cas", source="critical-path-scheduler")
+        store.update_workflow_metadata("wf-rb-cas", {"candidate_sha": sha_concurrent, "candidate_episode_id": 2})
+        return {"ok": True, "old_sha": sha_old, "new_sha": sha_rebased, "base_tip": "4" * 40}
+
+    monkeypatch.setattr(lb, "try_auto_rebase_candidate", fake_rebase)
+    res = lb.auto_rebase_stale_workflow(store, "wf-rb-cas", str(repo), sha_old, "dev", "cleanroom_test")
+    assert res is None
+    assert store.get_workflow("wf-rb-cas")["candidate_sha"] == sha_concurrent
