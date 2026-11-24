@@ -237,3 +237,48 @@ def refresh_remote_base(source_repo, base, timeout=10):
     if not base:
         return False
     return _git(source_repo, "fetch", "origin", base, timeout=timeout) is not None
+
+
+def try_auto_rebase_candidate(source_repo, candidate_sha, *, base_branch="dev", timeout=60):
+    """Attempt a clean, conflict-free rebase of candidate_sha onto origin/<base_branch> inside a temporary worktree."""
+    import tempfile
+    from pathlib import Path
+
+    if not source_repo or not candidate_sha:
+        return {"ok": False, "reason": "invalid_arguments", "detail": "missing source_repo or candidate_sha"}
+    refresh_remote_base(source_repo, base_branch, timeout=min(timeout, 30))
+    base_ref = f"origin/{base_branch}"
+    base_tip = _rev_parse_commit(source_repo, base_ref) or _rev_parse_commit(source_repo, base_branch)
+    if not base_tip:
+        return {"ok": False, "reason": "base_tip_unknown", "detail": f"cannot resolve {base_ref}"}
+    target_ref = base_ref if _rev_parse_commit(source_repo, base_ref) else base_branch
+    with tempfile.TemporaryDirectory(prefix="herdr-auto-rebase-") as tmpdir:
+        wt_path = str(Path(tmpdir) / "wt")
+        add_res = subprocess.run(
+            ["git", "-C", str(source_repo), "worktree", "add", "--detach", wt_path, candidate_sha],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if add_res.returncode != 0:
+            return {"ok": False, "reason": "worktree_add_failed", "detail": (add_res.stderr or add_res.stdout or "")[:300]}
+        try:
+            rb_res = subprocess.run(
+                ["git", "-C", wt_path, "rebase", target_ref],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if rb_res.returncode != 0:
+                subprocess.run(["git", "-C", wt_path, "rebase", "--abort"], capture_output=True, text=True, timeout=15)
+                return {
+                    "ok": False,
+                    "reason": "rebase_conflict",
+                    "base_tip": base_tip,
+                    "detail": (rb_res.stderr or rb_res.stdout or "rebase conflict")[:300],
+                }
+            new_sha = _rev_parse_commit(wt_path, "HEAD")
+            if not new_sha:
+                return {"ok": False, "reason": "head_unresolvable", "base_tip": base_tip, "detail": "HEAD unreadable after rebase"}
+            return {"ok": True, "old_sha": candidate_sha, "new_sha": new_sha, "base_tip": base_tip}
+        finally:
+            subprocess.run(
+                ["git", "-C", str(source_repo), "worktree", "remove", "--force", wt_path],
+                capture_output=True, text=True, timeout=30,
+            )

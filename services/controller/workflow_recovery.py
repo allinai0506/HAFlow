@@ -54,7 +54,10 @@ def execute_workflow_recovery(ports, operation, owner):
     else:
         resolved_gate_nodes = sorted({
             n['id'] for n in config.get('nodes') or []
-            if n['id'] != 'wrapup' and (ports.resolve_gate_config(n, n['id']) or {}).get('retry_node') == payload.get('retry_node')
+            if n['id'] != 'wrapup' and (
+                (ports.resolve_gate_config(n, n['id']) or {}).get('retry_node') == payload.get('retry_node')
+                or n['id'] == payload.get('retry_node') and n['id'] in (payload.get('gate_nodes') or [])
+            )
         })
     details = {'execution_id': workflow.get('execution_id'), 'successor_ids': [], 'rework_ids': [], 'target_runs': {}, 'source_runs': {}, 'repair_map': {}, 'rework_requests': {},
                'gate_nodes': resolved_gate_nodes}
@@ -180,6 +183,10 @@ def execute_workflow_recovery(ports, operation, owner):
             result = ports.subprocess.run(command, text=True, capture_output=True, timeout=120)
             successor = store.get_task(next_id)
             if result.returncode or not successor or not has_confirmed_delivery(store, successor):
+                details['launch_returncode'] = result.returncode
+                launch_err = (getattr(result, 'stderr', '') or getattr(result, 'stdout', '') or '').strip()
+                if launch_err:
+                    details['launch_error'] = launch_err[:500]
                 return 'waiting_human', {'reason': 'successor_delivery_unconfirmed', **details}
             if (store.get_task(tid) or {}).get('superseded_by') != next_id:
                 return 'waiting_human', {'reason': 'successor_lineage_unconfirmed', **details}
@@ -209,7 +216,8 @@ def execute_workflow_recovery(ports, operation, owner):
             # 人工:以当前冻结候选为根构造继任者,与人工 relaunch
             # --candidate-sha 同构(wf-haflow-1022-01 r7 的 identity_unknown 死路)。
             frozen = payload.get('candidate_sha')
-            if should_launch_frozen_candidate_successor(task, workflow, frozen):
+            self_retry = (payload.get('retry_node') == (task.get('node') or task.get('stage')))
+            if should_launch_frozen_candidate_successor(task, workflow, frozen, self_retry=self_retry):
                 next_id = ports.next_recovery_task_id(tid, store.list_tasks(workflow_id=wid))
                 details['successor_ids'].append(next_id)
                 from herdr.supervisor.state import redact_text
@@ -228,6 +236,10 @@ def execute_workflow_recovery(ports, operation, owner):
                 result = ports.subprocess.run(command, text=True, capture_output=True, timeout=120)
                 successor = store.get_task(next_id)
                 if result.returncode or not successor or not has_confirmed_delivery(store, successor):
+                    details['launch_returncode'] = result.returncode
+                    launch_err = (getattr(result, 'stderr', '') or getattr(result, 'stdout', '') or '').strip()
+                    if launch_err:
+                        details['launch_error'] = launch_err[:500]
                     return 'waiting_human', {'reason': 'successor_delivery_unconfirmed', **details}
                 if (store.get_task(tid) or {}).get('superseded_by') != next_id:
                     return 'waiting_human', {'reason': 'successor_lineage_unconfirmed', **details}

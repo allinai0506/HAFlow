@@ -289,6 +289,16 @@ def assess_workflow(workflow, config, tasks, *, expected_task_ids_by_node=None):
         node_id = task.get('node') or task.get('stage')
         kind = ('delivery' if task.get('finalize_escalate_reason') == 'delivery_incomplete'
                 and task.get('delivery_failure') else 'finalize' if task.get('finalize_escalated') else 'fix_loop')
+        explicit_affected = set(task.get('affected_task_ids') or []) | set(task.get('stage_verdict_affected_task_ids') or [])
+        if (
+            kind == 'fix_loop'
+            and node_id == 'wrapup'
+            and task.get('stage_verdict') == 'blocked'
+            and task.get('status') in {'completed', 'cleaned', 'cleanup_ready', 'agent_done'}
+            and not (explicit_affected - {task.get('task_id')})
+        ):
+            # wrapup blocked awaiting external PR authorization/publication without blaming implementation.
+            continue
         if kind == 'fix_loop' and (
             task.get('integration_mode') == 'none'
             or (task.get('stage_verdict') == 'blocked' and task.get('integration_mode') != 'git')
@@ -301,6 +311,8 @@ def assess_workflow(workflow, config, tasks, *, expected_task_ids_by_node=None):
         else:
             candidate = (task.get('commit') or task.get('candidate_sha'))
         if kind in {'finalize', 'delivery'}:
+            retry = node_id
+        elif explicit_affected == {task.get('task_id')} or task.get('remediation_target') == 'self':
             retry = node_id
         else:
             gate_target = _gate(nodes, node_id)

@@ -221,6 +221,10 @@ def close_workflow_owned(
 
     base_branch = (entry or {}).get("base_branch") or "main"
 
+    store_obj = get_store() if callable(get_store) else None
+    has_pr_created = bool(
+        store_obj and store_obj.list_events(workflow_id=workflow_id, event_type="pull_request_created", limit=1)
+    )
     blocked_verdicts = [
         t["task_id"]
         for t in tasks
@@ -230,6 +234,8 @@ def close_workflow_owned(
         # 更严的二次裁决(wf-haflow-1022-01 requirements-challenger-r2 曾
         # 因此在全部节点通过后仍无法收口)。
         and not (t.get("accepted_with_limits") and not t.get("finalize_escalated"))
+        # wrapup awaiting external PR authorization is satisfied once PR delivery is recorded.
+        and not (has_pr_created and (t.get("node") or t.get("stage")) == "wrapup")
     ]
     if blocked_verdicts and not abandon:
         print(

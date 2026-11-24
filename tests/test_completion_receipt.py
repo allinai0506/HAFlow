@@ -228,3 +228,43 @@ def test_receipt_cannot_supersede_pending_verification(execution):
     execution.record_event('verification_completed',{'verification':{'passed':False,'intervention_id':intervention['intervention_id']}},
         workflow_id='wf-receipt',task_id='work-a',run_id='run-a',source='trajectory')
     assert m.consume_completion_receipt('work-a',execution,now=time.time()+61)['accepted'] is True
+
+
+def test_verifier_report_completion_requires_business_acceptance_first(execution):
+    sha = 'a' * 40
+    execution.save_workflow({
+        'workflow_id': 'wf-ver',
+        'status': 'running',
+        'execution_id': 'exec-ver',
+        'candidate_sha': sha,
+        'config': {'nodes': [{'id': 'cleanroom_test', 'default_task_type': 'test'}]},
+    })
+    execution.save_task({
+        'task_id': 'ver-1',
+        'workflow_id': 'wf-ver',
+        'run_id': 'run-ver-1',
+        'execution_id': 'exec-ver',
+        'node': 'cleanroom_test',
+        'stage': 'cleanroom_test',
+        'task_type': 'test',
+        'completion_protocol': 'receipt-v1',
+        'candidate_sha': sha,
+        'acceptance_criteria': ['Run E2E'],
+        'status': 'working',
+        'started_at': time.time(),
+        'created_at': time.time(),
+    })
+    m = api()
+    issued = m.issue_completion_contract('ver-1', execution)
+    identity = json.loads(Path(issued['path']).read_text())
+    with pytest.raises(ValueError, match='acceptance-record'):
+        m.report_completion('ver-1', identity, [], execution)
+
+
+def test_launch_inherits_acceptance_criteria_from_node_required_outputs():
+    from herdr.task_cli_launch_orchestrator import resolve_inherited_acceptance
+    node = {'id': 'cleanroom_review', 'required_outputs': ['Review diff', 'Write verdict']}
+    assert resolve_inherited_acceptance(None, node, None) == ['Review diff', 'Write verdict']
+    assert resolve_inherited_acceptance([], node, None) == ['Review diff', 'Write verdict']
+    assert resolve_inherited_acceptance(['Explicit'], node, None) == ['Explicit']
+    assert resolve_inherited_acceptance(None, {}, {'acceptance_criteria': ['From pred']}) == ['From pred']

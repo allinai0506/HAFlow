@@ -182,7 +182,8 @@ def report_completion(task_id, identity, artifacts, store):
         expiry_error = _expiry_error(task, time.time())
         if expiry_error:
             raise ValueError('Completion expiry rejected: ' + expiry_error)
-        from .task_checkpoint import validate_checkpoint_artifact
+        from .task_checkpoint import validate_checkpoint_artifact, has_business_acceptance
+        from .node_roles import is_verifier_task
         for reference in artifacts:
             validate_checkpoint_artifact(task, reference, store=store, observations=observations)
         row = conn.execute('SELECT payload FROM completion_receipts WHERE task_id=? AND run_id=? AND epoch=?',
@@ -193,6 +194,15 @@ def report_completion(task_id, identity, artifacts, store):
             if original['artifacts'] != artifacts:
                 raise ValueError('Completion receipt conflict')
             return original
+        if (task.get('completion_protocol') == 'receipt-v1'
+                and task.get('execution_mode') != 'context'
+                and is_verifier_task(task)
+                and task.get('candidate_sha')
+                and not has_business_acceptance(store, task, task.get('candidate_sha'), observations=observations)):
+            raise ValueError(
+                f'Business acceptance checkpoint receipt required before report-completion for verifier task {task_id}; '
+                f'run `herdr-task acceptance-record {task_id} ...` first'
+            )
         if task['status'] not in ('pending', 'dispatched', 'working', 'rework'):
             raise ValueError('Task is not executing')
         receipt = {'receipt_id': secrets.token_hex(16), 'task_id': task_id, 'run_id': task['run_id'],

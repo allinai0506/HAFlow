@@ -544,16 +544,9 @@ def _compute_used_agents(
 
                     if is_verifier:
                         # Verifiers must never review their own work or code from their contributing lineage.
-                        # In round-scoped mode:
-                        # - Tasks in the current round are excluded.
-                        # - Non-superseded tasks from earlier rounds (e.g., unchanged tasks in a multi-task
-                        #   subset redispatch) still contribute to the reviewed candidate, so their authors
-                        #   must also be excluded.
-                        # - Earlier tasks that were superseded by subsequent repairs no longer contribute
-                        #   to the candidate, so they do not spend the reviewer isolation budget.
-                        is_current_round = (t_round_int is not None and t_round_int == effective_round)
-                        is_active_contributor = (str(t.get("status") or "") != "superseded")
-                        if not (is_current_round or is_active_contributor):
+                        # Earlier tasks that were superseded by subsequent repairs no longer contribute
+                        # to the candidate, so they do not spend the reviewer isolation budget.
+                        if str(t.get("status") or "") == "superseded" or t.get("superseded_by"):
                             continue
                     else:
                         # For workers/implementers, only exclude agents from the same round,
@@ -871,7 +864,34 @@ def _choose_agent_locked(
         if non_penalized:
             candidates = non_penalized + [a for a in candidates if a in penalized_set]
 
-    if stage_used_agents:
+    # A stale status never authorizes execution. Bound refresh to compatible candidates
+    # BEFORE stage isolation / soft_degrade so unhealthy agents cannot mask pool exhaustion.
+    if not snapshot_fresh and candidates:
+        from herdr.deep_preflight import refresh_workflow_preflight
+        pending = [agent for agent in candidates if not preflight_snapshot_fresh({
+            "preflight_checked_at": (record.get("preflight_agent_checked_at") or {}).get(agent, 0),
+            "preflight_identity": (record.get("preflight_identities") or {}).get(agent, {}),
+        })]
+        if pending and _refresh_budget:
+            # Provider transport cannot hold the global reservation lock.
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            refresh_workflow_preflight(workflow_id, pending, store=_get_store())
+            # Rebuild every policy, workflow fact and role exclusion under a new short lock.
+            return _choose_agent_impl(workflow_id, stage, task_type, requested=requested,
+                                      reservation_key=reservation_key, run_id=run_id,
+                                      decided_at=decided_at, dispatch_role=dispatch_role,
+                                      penalize_agents=penalize_agents,
+                                      _refresh_budget=_refresh_budget - 1,
+                                      dispatch_round=dispatch_round,
+                                      candidate_author=candidate_author,
+                                      candidate_episode_id=candidate_episode_id)
+        verified = set(record.get("healthy_agents", []))
+        candidates = [agent for agent in candidates
+                      if agent in verified and _agent_request_fresh(record, agent)]
+        if not candidates:
+            raise RouterHealthRejection("Workflow Deep Preflight: no request-verified compatible Agent")
+
+    if stage_used_agents and candidates:
         _opt_out, _opt_reason = _isolation_opt_out(node_policy)
         if _opt_out:
             if not _opt_reason:
@@ -907,32 +927,6 @@ def _choose_agent_locked(
                     )
             else:
                 candidates = filtered
-
-    # A stale status never authorizes execution. Bound refresh to compatible candidates.
-    if not snapshot_fresh and candidates:
-        from herdr.deep_preflight import refresh_workflow_preflight
-        pending = [agent for agent in candidates if not preflight_snapshot_fresh({
-            "preflight_checked_at": (record.get("preflight_agent_checked_at") or {}).get(agent, 0),
-            "preflight_identity": (record.get("preflight_identities") or {}).get(agent, {}),
-        })]
-        if pending and _refresh_budget:
-            # Provider transport cannot hold the global reservation lock.
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            refresh_workflow_preflight(workflow_id, pending, store=_get_store())
-            # Rebuild every policy, workflow fact and role exclusion under a new short lock.
-            return _choose_agent_impl(workflow_id, stage, task_type, requested=requested,
-                                      reservation_key=reservation_key, run_id=run_id,
-                                      decided_at=decided_at, dispatch_role=dispatch_role,
-                                      penalize_agents=penalize_agents,
-                                      _refresh_budget=_refresh_budget - 1,
-                                      dispatch_round=dispatch_round,
-                                      candidate_author=candidate_author,
-                                      candidate_episode_id=candidate_episode_id)
-        verified = set(record.get("healthy_agents", []))
-        candidates = [agent for agent in candidates
-                      if agent in verified and _agent_request_fresh(record, agent)]
-        if not candidates:
-            raise RouterHealthRejection("Workflow Deep Preflight: no request-verified compatible Agent")
 
     if not candidates:
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)

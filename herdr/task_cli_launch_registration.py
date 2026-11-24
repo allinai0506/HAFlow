@@ -155,7 +155,7 @@ def register_launched_task(context, store, *, apply_execution_identity,
         task.update(
             recovery_predecessor=predecessor["task_id"],
             expected_predecessor_version=predecessor["version"],
-            expected_predecessor_sha=predecessor["commit"],
+            expected_predecessor_sha=predecessor.get("commit") or predecessor.get("integrated_commit"),
         )
     elif context.predecessor:
         predecessor = context.predecessor

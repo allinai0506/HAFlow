@@ -368,6 +368,30 @@ def try_direct_stage_advance(ports, item):
             output = (result.stderr.strip() or result.stdout.strip()) if result is not None else ""
             if output:
                 print(f"[DIRECT DISPATCH ERROR] task={spec['task_id']}: {output}")
+            if "[BASELINE STALE]" in output and not launched and dispatch_operation_id is not None:
+                try:
+                    from herdr.launch_baseline import try_auto_rebase_candidate
+                    stale_sha = spec.get("candidate_sha") or (ports._get_store().get_workflow(workflow_id) or {}).get("candidate_sha") or ""
+                    rb = try_auto_rebase_candidate(project_root, stale_sha, base_branch=project_ctx.get("base_branch") or "dev")
+                    if rb.get("ok") and rb.get("new_sha"):
+                        store = ports._get_store()
+                        store.record_event(
+                            "candidate_frozen",
+                            {"candidate_sha": rb["new_sha"], "source_node": "auto_rebase", "previous_candidate_sha": stale_sha},
+                            workflow_id=workflow_id,
+                            source="critical-path-scheduler",
+                        )
+                        store.record_event(
+                            "candidate_auto_rebased",
+                            {"old_sha": stale_sha, "new_sha": rb["new_sha"], "base_tip": rb.get("base_tip")},
+                            workflow_id=workflow_id,
+                            node_id=ready_id,
+                            source="herdr-controller",
+                        )
+                        store.update_workflow_metadata(workflow_id, {"candidate_sha": rb["new_sha"]})
+                        print(f"[BASELINE AUTO-REBASED] workflow={workflow_id} {stale_sha[:8]} -> {rb['new_sha'][:8]}")
+                except Exception as rb_exc:
+                    print(f"[BASELINE AUTO-REBASE WARN] workflow={workflow_id}: {rb_exc}")
             if dispatch_operation_id is not None:
                 from herdr.node_dispatch_store import direct_finished
                 receipt = direct_finished(ports._get_store().db_path, dispatch_operation_id,

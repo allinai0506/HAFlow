@@ -311,7 +311,8 @@ def begin_launch_intent(store, *, workflow_id, node_id, role='worker', candidate
                 or (old.get('dispatch_role') or 'worker') != role):
             raise ValueError('supersedes must bind previous round of same workflow/node/role')
         cur_cand = candidate_sha or ''
-        old_cand = old.get('candidate_sha') or old.get('commit') or old.get('integrated_commit') or ''
+        old_produced = old.get('commit') or old.get('integrated_commit') or ''
+        old_cand = old_produced or old.get('candidate_sha') or ''
         is_diff_cand = bool(cur_cand and old_cand and cur_cand != old_cand)
         if is_diff_cand:
             node_tasks = store.list_tasks(workflow_id=workflow_id)

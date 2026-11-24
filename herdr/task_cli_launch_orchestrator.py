@@ -6,6 +6,22 @@ import sys
 from pathlib import Path
 
 
+def resolve_inherited_acceptance(explicit_acceptance, node, predecessor=None):
+    """Inherit acceptance_criteria from node required_outputs or predecessor when omitted."""
+    cleaned = [str(x).strip() for x in (explicit_acceptance or []) if str(x or "").strip()]
+    if cleaned:
+        return cleaned
+    for source in (
+        (node or {}).get("required_outputs"),
+        (predecessor or {}).get("acceptance_criteria"),
+    ):
+        if isinstance(source, list) and source:
+            inherited = [str(x).strip() for x in source if str(x or "").strip()]
+            if inherited:
+                return inherited
+    return list(explicit_acceptance) if explicit_acceptance else []
+
+
 def launch_task_orchestrated(args, *, deps):
     BranchOwnershipError = deps["BranchOwnershipError"]
     HERDR_ROOT = deps["HERDR_ROOT"]
@@ -102,6 +118,9 @@ def launch_task_orchestrated(args, *, deps):
             if getattr(args, "supersedes", None)
             else None
         )
+        args.acceptance = resolve_inherited_acceptance(
+            getattr(args, "acceptance", None), node, predecessor
+        )
         roles = (node.get("agent_policy") or {}).get("roles") or []
         requested_role = getattr(args, "dispatch_role", None)
         if len(roles) > 1 and (not requested_role) and (not predecessor):
@@ -171,11 +190,20 @@ def launch_task_orchestrated(args, *, deps):
         )
         candidate = str(getattr(args, "candidate_sha", None) or "").strip()
         onto = getattr(args, "onto", None)
+        pred_delivered_commit = (
+            (predecessor.get("commit") or predecessor.get("integrated_commit"))
+            if predecessor
+            else None
+        )
         committed_recovery = bool(
-            predecessor and predecessor.get("status") == "committed"
+            predecessor
+            and (
+                predecessor.get("status") == "committed"
+                or (predecessor.get("status") == "cleaned" and pred_delivered_commit)
+            )
         )
         if committed_recovery:
-            if candidate != predecessor.get("commit"):
+            if candidate != pred_delivered_commit:
                 raise ValueError(
                     "Committed recovery requires exact predecessor --candidate-sha"
                 )

@@ -181,3 +181,158 @@ class TestAgentRouterSoftDegrade(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 choose_agent(self.workflow_id, "review", "test")
             self.assertIn("not durably recorded", str(ctx.exception))
+
+    def test_superseded_impl_tasks_do_not_exhaust_verifier_isolation_budget(self):
+        """wf_ibx_f3eb258d: superseded r1 impl (agy) + active r2 impl (codex) must only exclude codex,
+        letting verifier select agy even when dispatch_round=1 matches r1's round."""
+        self.store.save_task(
+            {
+                "task_id": "wf-craft-r1",
+                "workflow_id": self.workflow_id,
+                "node": "craft",
+                "stage": "craft",
+                "status": "superseded",
+                "superseded_by": "wf-craft-r2",
+                "agent": "agy",
+                "commit": "1" * 40,
+                "dispatch_round": 1,
+            }
+        )
+        self.store.save_task(
+            {
+                "task_id": "wf-craft-r2",
+                "workflow_id": self.workflow_id,
+                "node": "craft",
+                "stage": "craft",
+                "status": "cleaned",
+                "agent": "codex",
+                "commit": "2" * 40,
+                "dispatch_round": 2,
+            }
+        )
+        workflow_config = {
+            "nodes": [
+                {"id": "craft"},
+                {
+                    "id": "cleanroom_review",
+                    "default_task_type": "review",
+                    "gate": {"retry_node": "craft"},
+                    "agent_policy": {
+                        "preferred": ["grok", "codex", "agy"],
+                        "exclude_stage_agents": ["craft"],
+                        "allow_soft_degrade": True,
+                    },
+                },
+            ]
+        }
+        # Stale preflight snapshot with unhealthy 'grok' still in pool before refresh
+        self.store.save_workflow(
+            {
+                "workflow_id": self.workflow_id,
+                "project_id": "default",
+                "preflight_checked_at": 0,
+                "healthy_agents": ["agy", "codex"],
+                "unhealthy_agents": {},
+            }
+        )
+        def fake_refresh(wid, pending, store=None):
+            store.update_workflow_metadata(
+                wid,
+                {
+                    "healthy_agents": ["agy", "codex"],
+                    "unhealthy_agents": {"grok": "TOKEN_EXHAUSTED"},
+                    "preflight_checked_at": 9999999999.0,
+                    "preflight_agent_checked_at": {a: 9999999999.0 for a in pending},
+                    "preflight_identities": {a: {"status": "READY"} for a in ("agy", "codex")},
+                },
+            )
+        pool_data = {
+            "allowed_agents": ["grok", "codex", "agy"],
+            "disabled_agents": [],
+            "stage_preferences": {},
+            "task_type_preferences": {},
+        }
+        import json
+        self.pools_file.write_text(json.dumps({"projects": {"default": pool_data}}))
+        import herdr.deep_preflight as dp
+        with patch.object(agent_router, "_get_store", return_value=self.store), \
+             patch.object(agent_router, "workflow_config_for", return_value=workflow_config), \
+             patch.object(agent_router, "POOLS_FILE", self.pools_file), \
+             patch.object(agent_router, "RESERVATIONS_FILE", self.reservations_file), \
+             patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file), \
+             patch.object(dp, "refresh_workflow_preflight", side_effect=fake_refresh), \
+             patch.object(agent_router, "_agent_request_fresh", return_value=True):
+            selected = choose_agent(self.workflow_id, "cleanroom_review", "review", dispatch_round=1)
+            self.assertEqual(selected, "agy")
+
+    def test_preflight_runs_before_soft_degrade_so_unhealthy_agents_do_not_bypass_degrade(self):
+        """When only healthy agent is excluded (codex) and unhealthy 'grok' is still in pool before
+        preflight refresh, preflight must run first so allow_soft_degrade=True triggers on ['codex']."""
+        self.store.save_task(
+            {
+                "task_id": "wf-craft-only",
+                "workflow_id": self.workflow_id,
+                "node": "craft",
+                "stage": "craft",
+                "status": "cleaned",
+                "agent": "codex",
+                "commit": "2" * 40,
+                "dispatch_round": 1,
+            }
+        )
+        workflow_config = {
+            "nodes": [
+                {"id": "craft"},
+                {
+                    "id": "cleanroom_review",
+                    "default_task_type": "review",
+                    "gate": {"retry_node": "craft"},
+                    "agent_policy": {
+                        "preferred": ["grok", "codex"],
+                        "exclude_stage_agents": ["craft"],
+                        "allow_soft_degrade": True,
+                    },
+                },
+            ]
+        }
+        self.store.save_workflow(
+            {
+                "workflow_id": self.workflow_id,
+                "project_id": "default",
+                "preflight_checked_at": 0,
+                "healthy_agents": ["codex"],
+                "unhealthy_agents": {},
+            }
+        )
+        def fake_refresh(wid, pending, store=None):
+            store.update_workflow_metadata(
+                wid,
+                {
+                    "healthy_agents": ["codex"],
+                    "unhealthy_agents": {"grok": "TOKEN_EXHAUSTED"},
+                    "preflight_checked_at": 9999999999.0,
+                    "preflight_agent_checked_at": {a: 9999999999.0 for a in pending},
+                    "preflight_identities": {"codex": {"status": "READY"}},
+                },
+            )
+        pool_data = {
+            "allowed_agents": ["grok", "codex"],
+            "disabled_agents": [],
+            "stage_preferences": {},
+            "task_type_preferences": {},
+        }
+        import json
+        self.pools_file.write_text(json.dumps({"projects": {"default": pool_data}}))
+        import herdr.deep_preflight as dp
+        with patch.object(agent_router, "_get_store", return_value=self.store), \
+             patch.object(agent_router, "workflow_config_for", return_value=workflow_config), \
+             patch.object(agent_router, "POOLS_FILE", self.pools_file), \
+             patch.object(agent_router, "RESERVATIONS_FILE", self.reservations_file), \
+             patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file), \
+             patch.object(dp, "refresh_workflow_preflight", side_effect=fake_refresh), \
+             patch.object(agent_router, "_agent_request_fresh", return_value=True):
+            selected, ctx = agent_router._choose_agent_impl(
+                self.workflow_id, "cleanroom_review", "review", dispatch_round=1
+            )
+            self.assertEqual(selected, "codex")
+            self.assertTrue(ctx.get("isolation_degraded"))

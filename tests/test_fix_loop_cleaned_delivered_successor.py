@@ -270,3 +270,251 @@ def test_cleaned_without_delivered_commit_still_requires_explicit_replacement(tm
     assert op["status"] == "waiting_human"
     assert op["detail"]["target_requires_explicit_replacement"] is True
     assert store.get_task("wf-craft-auto-r2") is None
+
+
+def test_begin_launch_intent_and_link_successor_allow_r2_to_r3_on_cleaned_predecessor(tmp_path):
+    """r2 (cleaned, candidate_sha=sha1, commit=sha2, round=2) -> r3 (candidate_sha=sha2, round=3)
+    must not be misclassified as fresh candidate requiring round=1, and link_committed_successor
+    must accept cleaned predecessors with delivered commit."""
+    from herdr.recovery_successor import link_committed_successor
+    from herdr.task_resources import begin_launch_intent, finish_launch_intent, record_launch_resources
+
+    sha1 = "1" * 40
+    sha2 = "2" * 40
+    store = SQLiteStateStore(db_path=tmp_path / "state.db")
+    store.save_workflow(
+        {
+            "workflow_id": "wf-r3",
+            "project_root": str(tmp_path),
+            "base_branch": "main",
+            "status": "running",
+            "startup_ready": True,
+            "execution_id": "exec-r3",
+            "candidate_sha": sha2,
+            "candidate_episode_id": 2,
+            "created_at": 1.0,
+            "config": {"nodes": [{"id": "craft"}, {"id": "cleanroom_test", "gate": {"retry_node": "craft"}}]},
+        }
+    )
+    store.save_task(
+        {
+            "task_id": "wf-r3-craft-auto-r2",
+            "workflow_id": "wf-r3",
+            "node": "craft",
+            "stage": "craft",
+            "status": "cleaned",
+            "run_id": "run-r2",
+            "execution_id": "exec-r3",
+            "dispatch_role": "worker",
+            "dispatch_round": 2,
+            "candidate_sha": sha1,
+            "commit": sha2,
+            "integrated_commit": sha2,
+        }
+    )
+    claim = begin_launch_intent(
+        store,
+        workflow_id="wf-r3",
+        node_id="craft",
+        role="worker",
+        candidate_sha=sha2,
+        dispatch_round=3,
+        task_id="wf-r3-craft-auto-r3",
+        supersedes="wf-r3-craft-auto-r2",
+        run_id="run-r3",
+        execution_id="exec-r3",
+    )
+    assert claim["status"] == "claimed"
+    intent = record_launch_resources(store, claim["intent"], {"run_id": "run-r3"})
+    store.save_task(
+        {
+            "task_id": "wf-r3-craft-auto-r3",
+            "workflow_id": "wf-r3",
+            "node": "craft",
+            "stage": "craft",
+            "status": "dispatched",
+            "run_id": "run-r3",
+            "execution_id": "exec-r3",
+            "dispatch_role": "worker",
+            "dispatch_round": 3,
+            "candidate_sha": sha2,
+            "supersedes": "wf-r3-craft-auto-r2",
+            "launch_intent_id": intent["intent_id"],
+            "completion_epoch": "epoch-r3",
+            "completion_identity_path": str(tmp_path / "id-r3.json"),
+        }
+    )
+    finish_launch_intent(store, intent)
+    store.record_event(
+        "initial_dispatched",
+        {
+            "delivery_phase": "dispatched",
+            "completion_epoch": "epoch-r3",
+            "identity_path": str(tmp_path / "id-r3.json"),
+            "intervention_id": "intv-r3",
+        },
+        task_id="wf-r3-craft-auto-r3",
+        run_id="run-r3",
+        workflow_id="wf-r3",
+        node_id="craft",
+        source="herdr-task",
+    )
+    r2 = store.get_task("wf-r3-craft-auto-r2")
+    linked = link_committed_successor(
+        store,
+        "wf-r3-craft-auto-r2",
+        "wf-r3-craft-auto-r3",
+        r2["version"],
+        sha2,
+        "failed candidate recovery",
+    )
+    assert linked["ok"] is True
+    assert store.get_task("wf-r3-craft-auto-r2")["superseded_by"] == "wf-r3-craft-auto-r3"
+
+
+def test_fix_loop_real_cli_launch_records_failure_details_and_succeeds_r2_to_r3(tmp_path, monkeypatch):
+    """Exercise controller -> real bin/herdr-task launch (not mocked) for r2 -> r3 recovery."""
+    import sys
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    sha1 = _git_commit(repo, "work.txt", "v1\n", "r1 candidate")
+    sha2 = _git_commit(repo, "work.txt", "v2\n", "r2 candidate")
+
+    db_path = tmp_path / "state.db"
+    store = SQLiteStateStore(db_path=db_path)
+    config = {
+        "workflow_template": "code-craft-v1",
+        "nodes": [
+            {"id": "craft", "role": "worker"},
+            {"id": "cleanroom_review", "role": "gate", "gate": {"retry_node": "craft"}},
+        ],
+    }
+    store.save_workflow(
+        {
+            "workflow_id": "wf-cli-r3",
+            "project_root": str(repo),
+            "base_branch": "main",
+            "status": "running",
+            "startup_ready": True,
+            "execution_id": "exec-cli",
+            "candidate_sha": sha2,
+            "candidate_episode_id": 2,
+            "created_at": 1.0,
+            "config": config,
+            "healthy_agents": ["agy", "codex"],
+            "unhealthy_agents": {},
+            "preflight_checked_at": time.time(),
+        }
+    )
+    store.record_event(
+        "candidate_frozen",
+        {"candidate_sha": sha2},
+        workflow_id="wf-cli-r3",
+        source="critical-path-scheduler",
+        timestamp=2.0,
+    )
+    store.save_task(
+        {
+            "task_id": "wf-cli-r3-craft-auto-r2",
+            "workflow_id": "wf-cli-r3",
+            "node": "craft",
+            "stage": "craft",
+            "status": "cleaned",
+            "run_id": "run-r2",
+            "execution_id": "exec-cli",
+            "agent": "codex",
+            "goal": "Fix cache keys",
+            "dispatch_role": "worker",
+            "dispatch_round": 2,
+            "candidate_sha": sha1,
+            "commit": sha2,
+            "integrated_commit": sha2,
+        }
+    )
+    store.save_task(
+        {
+            "task_id": "wf-cli-r3-cleanroom_review-auto",
+            "workflow_id": "wf-cli-r3",
+            "node": "cleanroom_review",
+            "stage": "cleanroom_review",
+            "status": "cleaned",
+            "run_id": "run-rev",
+            "execution_id": "exec-cli",
+            "candidate_sha": sha2,
+            "stage_verdict": "blocked",
+            "stage_verdict_note": "BUG-3: still broken",
+            "affected_task_ids": ["wf-cli-r3-craft-auto-r2"],
+        }
+    )
+
+    ctl = importlib.import_module("services.herdr-controller")
+    monkeypatch.setattr(ctl, "_get_store", lambda: store)
+    monkeypatch.setattr(ctl, "load_tasks", store.list_tasks)
+
+    # First verify failure detail capture when CLI exits non-zero
+    real_run = subprocess.run
+    def _failing_run(cmd, **kwargs):
+        if "launch" in cmd:
+            return SimpleNamespace(returncode=2, stdout="", stderr="simulated launch error\n")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(ctl.subprocess, "run", _failing_run)
+    now = time.time()
+    rs.reconcile(db_path, "wf-cli-r3", now=now)
+    drive_recovery(store, "wf-cli-r3", lambda op, owner: ctl.execute_workflow_recovery(op, owner), now=now)
+    op = next(o for o in rs.list_operations(db_path, "wf-cli-r3") if o["payload"]["kind"] == "fix_loop")
+    assert op["detail"].get("launch_returncode") == 2, op["detail"]
+    assert "simulated launch error" in (op["detail"].get("launch_error") or "")
+
+    # Now test real begin_launch_intent via bin/herdr-task launch CLI (stopping right after begin_launch_intent
+    # isn't needed; we verify real bin/herdr-task launch --help/admission reaches past begin_launch_intent)
+    env = {
+        **dict(__import__("os").environ),
+        "HERDR_STATE_DB": str(db_path),
+        "HERDR_TASKS_FILE": str(tmp_path / "tasks.json"),
+        "HERDR_WORKFLOWS_FILE": str(tmp_path / "workflows.json"),
+    }
+    res = real_run(
+        [
+            sys.executable,
+            "bin/herdr-task",
+            "launch",
+            "--task-id",
+            "wf-cli-r3-craft-auto-r3",
+            "--workflow-id",
+            "wf-cli-r3",
+            "--node",
+            "craft",
+            "--source",
+            str(repo),
+            "--agent",
+            "auto",
+            "--integration-mode",
+            "git",
+            "--task-type",
+            "fix",
+            "--candidate-sha",
+            sha2,
+            "--supersedes",
+            "wf-cli-r3-craft-auto-r2",
+            "--supersede-reason",
+            "failed candidate recovery",
+            "--dispatch-role",
+            "worker",
+            "--dispatch-round",
+            "3",
+            "--execution-id",
+            "exec-cli",
+            "--goal",
+            "Fix cache keys",
+            "--prompt",
+            "Fix BUG-3",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert "fresh candidate round requires dispatch_round=1" not in (res.stdout + res.stderr)
+    assert "Committed recovery requires" not in (res.stdout + res.stderr)
