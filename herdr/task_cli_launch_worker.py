@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 
-SAFE_CLEANUP_DISPOSITIONS = ("rolled_back", "pane_reclaimed", "not_started")
+SAFE_CLEANUP_DISPOSITIONS = ("rolled_back", "pane_reclaimed", "not_started", "borrowed_pane_restored")
 
 
 class WorkerStartupHealthFailure(RuntimeError):

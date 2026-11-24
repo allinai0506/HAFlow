@@ -287,17 +287,14 @@ def try_direct_stage_advance(ports, item):
     launched = []
 
     for spec in specs:
-        # Backfill enterprise attribution from the superseded record when the
-        # planner did not carry it, so redispatch never drops mandatory policy.
+        # Backfill enterprise attribution from superseded record so redispatch never drops mandatory policy.
         try:
             _sup_id = str(spec.get("supersedes") or spec.get("redispatch_of") or "").strip()
-            if _sup_id and (not spec.get("customer") or not spec.get("business_task_type")
-                            or not spec.get("mandatory_experience_rules")):
+            if _sup_id:
                 _old_task = ports._get_store().get_task(_sup_id) or {}
-                if not spec.get("customer") and str(_old_task.get("customer") or "").strip():
-                    spec["customer"] = str(_old_task.get("customer")).strip()
-                if not spec.get("business_task_type") and str(_old_task.get("business_task_type") or "").strip():
-                    spec["business_task_type"] = str(_old_task.get("business_task_type")).strip()
+                for _k in ("customer", "business_task_type"):
+                    if not spec.get(_k) and str(_old_task.get(_k) or "").strip():
+                        spec[_k] = str(_old_task.get(_k)).strip()
                 if not spec.get("mandatory_experience_rules") and _old_task.get("mandatory_experience_rules"):
                     spec["mandatory_experience_rules"] = True
         except Exception:
@@ -368,6 +365,9 @@ def try_direct_stage_advance(ports, item):
             output = (result.stderr.strip() or result.stdout.strip()) if result is not None else ""
             if output:
                 print(f"[DIRECT DISPATCH ERROR] task={spec['task_id']}: {output}")
+            if result is not None and "[BASELINE STALE]" in (result.stdout + result.stderr) and not launched and dispatch_operation_id is not None:
+                from herdr.launch_baseline import auto_rebase_stale_workflow
+                auto_rebase_stale_workflow(ports._get_store(), workflow_id, project_root, spec.get("candidate_sha"), project_ctx.get("base_branch"), ready_id)
             if dispatch_operation_id is not None:
                 from herdr.node_dispatch_store import direct_finished
                 receipt = direct_finished(ports._get_store().db_path, dispatch_operation_id,

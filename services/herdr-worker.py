@@ -1704,6 +1704,22 @@ def main():
         elif agent_start_attempted and not agent_started and pane_id and pane_source == 'dynamic' and rollback_unready_startup(clone, pane_id, pane_source, launch_identity, agent):
             pane_rolled_back = True
             pane_id = None
+        elif (
+            agent_start_attempted
+            and not agent_started
+            and pane_id
+            and pane_source == 'prebuilt'
+            and launch_identity
+            and (readiness or {}).get("status") in {"TOKEN_EXHAUSTED", "AUTH_REQUIRED", "TRUST_REQUIRED"}
+            and restore_borrowed_pane(
+                pane_id,
+                launch_identity.get("previous_label") or "",
+                launch_identity.get("previous_cwd") or "",
+            )
+        ):
+            borrowed_restored = True
+            pane_rolled_back = True
+            pane_id = None
 
         can_cleanup_clone = (
             clone and os.path.lexists(clone) and pane_id is None

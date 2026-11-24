@@ -24,10 +24,17 @@ def is_unfinished_infrastructure_predecessor(task):
     )
 
 
-def should_launch_frozen_candidate_successor(task, workflow, frozen):
+def should_launch_frozen_candidate_successor(task, workflow, frozen, *, self_retry=False):
+    task_status = (task or {}).get('status')
+    self_verifier_retry = bool(
+        self_retry
+        and task_status in ('cleaned', 'completed')
+        and (task or {}).get('stage_verdict') == 'blocked'
+    )
     return bool(
-        (task or {}).get('status') == 'failed'
+        task_status == 'failed'
         or is_unfinished_infrastructure_predecessor(task)
+        or self_verifier_retry
     ) and bool(
         re.fullmatch(r'[0-9a-f]{40}', frozen or '', re.IGNORECASE)
         and (workflow or {}).get('execution_id')
@@ -47,9 +54,11 @@ def successor_launch_command(cli, workflow, predecessor, successor_id, source, p
     sha = root_sha or predecessor.get('commit')
     if not re.fullmatch(r'[0-9a-f]{40}', sha or '') or not workflow.get('execution_id'):
         raise ValueError('committed successor requires exact SHA and workflow execution identity')
+    imode = predecessor.get('integration_mode') or 'git'
+    ttype = predecessor.get('task_type') or ('fix' if imode == 'git' else 'test')
     argv = [cli, 'launch', '--task-id', successor_id, '--workflow-id', workflow['workflow_id'],
             '--node', predecessor.get('node') or predecessor['stage'], '--source', source,
-            '--agent', 'auto', '--integration-mode', 'git', '--task-type', 'fix',
+            '--agent', 'auto', '--integration-mode', imode, '--task-type', ttype,
             '--candidate-sha', sha, '--supersedes', predecessor['task_id'],
             '--supersede-reason', 'failed candidate recovery',
             '--dispatch-role', predecessor.get('dispatch_role') or 'worker',
@@ -198,7 +207,12 @@ def result_status(operation, workflow, tasks, acceptance=None):
            for t in targets):
         return 'waiting_human', {'reason': 'recovery_successor_failed'}
     candidate = workflow.get('candidate_sha')
+    self_verifier_retry = bool(
+        payload.get('retry_node')
+        and payload.get('retry_node') in (payload.get('gate_nodes') or [])
+    )
     if any(t.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}
+           and not (self_verifier_retry and t.get('integration_mode') == 'none' and t.get('status') == 'completed')
            and not (t.get('node') == 'wrapup' and (t.get('integrated_commit') or t.get('commit')) == candidate)
            for t in targets):
         return None
@@ -207,7 +221,7 @@ def result_status(operation, workflow, tasks, acceptance=None):
             return 'resolved', {'reason': 'delivery_finalized'}
         return None
     candidate = workflow.get('candidate_sha')
-    if not candidate or candidate == payload.get('candidate_sha'):
+    if not candidate or (not self_verifier_retry and candidate == payload.get('candidate_sha')):
         return None
     if any(t.get('execution_id') != workflow.get('execution_id') for t in targets):
         return 'waiting_human', {'reason': 'recovery_successor_identity_unknown'}

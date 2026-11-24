@@ -110,7 +110,8 @@ def link_committed_successor(store, predecessor_id, successor_id, expected_versi
         if (not execution_id or new.get('execution_id') != execution_id
                 or (old.get('execution_id') and old['execution_id'] != execution_id)):
             raise ValueError('recovery requires authoritative workflow execution identity')
-        if old.get('status') != 'committed' or old.get('commit') != candidate_sha:
+        pred_sha = old.get('commit') or old.get('integrated_commit')
+        if old.get('status') not in ('committed', 'cleaned') or pred_sha != candidate_sha:
             raise ValueError('predecessor must retain exact committed candidate')
         if old.get('superseded_by') and old['superseded_by'] != successor_id:
             raise ValueError('predecessor already has another successor')

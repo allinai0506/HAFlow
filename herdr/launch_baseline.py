@@ -237,3 +237,120 @@ def refresh_remote_base(source_repo, base, timeout=10):
     if not base:
         return False
     return _git(source_repo, "fetch", "origin", base, timeout=timeout) is not None
+
+
+def try_auto_rebase_candidate(source_repo, candidate_sha, *, base_branch="dev", timeout=60):
+    """Attempt a clean, conflict-free rebase of candidate_sha onto origin/<base_branch> inside a temporary worktree."""
+    import tempfile
+    from pathlib import Path
+
+    if not source_repo or not candidate_sha:
+        return {"ok": False, "reason": "invalid_arguments", "detail": "missing source_repo or candidate_sha"}
+    refresh_remote_base(source_repo, base_branch, timeout=min(timeout, 30))
+    base_ref = f"origin/{base_branch}"
+    base_tip = _rev_parse_commit(source_repo, base_ref) or _rev_parse_commit(source_repo, base_branch)
+    if not base_tip:
+        return {"ok": False, "reason": "base_tip_unknown", "detail": f"cannot resolve {base_ref}"}
+    target_ref = base_ref if _rev_parse_commit(source_repo, base_ref) else base_branch
+    with tempfile.TemporaryDirectory(prefix="herdr-auto-rebase-") as tmpdir:
+        wt_path = str(Path(tmpdir) / "wt")
+        add_res = subprocess.run(
+            ["git", "-C", str(source_repo), "worktree", "add", "--detach", wt_path, candidate_sha],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if add_res.returncode != 0:
+            return {"ok": False, "reason": "worktree_add_failed", "detail": (add_res.stderr or add_res.stdout or "")[:300]}
+        try:
+            rb_res = subprocess.run(
+                ["git", "-C", wt_path, "rebase", target_ref],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if rb_res.returncode != 0:
+                subprocess.run(["git", "-C", wt_path, "rebase", "--abort"], capture_output=True, text=True, timeout=15)
+                return {
+                    "ok": False,
+                    "reason": "rebase_conflict",
+                    "base_tip": base_tip,
+                    "detail": (rb_res.stderr or rb_res.stdout or "rebase conflict")[:300],
+                }
+            new_sha = _rev_parse_commit(wt_path, "HEAD")
+            if not new_sha:
+                return {"ok": False, "reason": "head_unresolvable", "base_tip": base_tip, "detail": "HEAD unreadable after rebase"}
+            return {"ok": True, "old_sha": candidate_sha, "new_sha": new_sha, "base_tip": base_tip}
+        finally:
+            subprocess.run(
+                ["git", "-C", str(source_repo), "worktree", "remove", "--force", wt_path],
+                capture_output=True, text=True, timeout=30,
+            )
+
+
+def auto_rebase_stale_workflow(store, workflow_id, project_root, candidate_sha, base_branch, node_id):
+    """Attempt conflict-free rebase for a stale workflow candidate and atomically re-freeze only if candidate generation/watermark did not advance."""
+    from herdr import recovery_store, state_db
+
+    try:
+        wf_before = store.get_workflow(workflow_id) or {}
+        if wf_before.get("status") != "running":
+            return None
+        stale_sha = candidate_sha or wf_before.get("candidate_sha") or ""
+        pre_exec_id = wf_before.get("execution_id")
+        pre_episode_id = wf_before.get("candidate_episode_id")
+
+        ro = state_db.get_readonly_db_connection(store.db_path)
+        try:
+            row = ro.execute(
+                "SELECT COALESCE(MAX(id), 0) AS max_id FROM events "
+                "WHERE workflow_id=? AND event_type IN ('candidate_frozen', 'candidate_published', 'candidate_integrated')",
+                (workflow_id,),
+            ).fetchone()
+            pre_watermark = int(row["max_id"]) if row else 0
+        finally:
+            ro.close()
+
+        rb = try_auto_rebase_candidate(project_root, stale_sha, base_branch=base_branch or "dev")
+        if not (rb.get("ok") and rb.get("new_sha")):
+            return None
+
+        with recovery_store._transaction(store.db_path) as conn:
+            fresh_wf, _, _ = recovery_store._snapshot(conn, workflow_id)
+            if (
+                fresh_wf.get("status") != "running"
+                or fresh_wf.get("execution_id") != pre_exec_id
+                or fresh_wf.get("candidate_episode_id") != pre_episode_id
+                or (fresh_wf.get("candidate_sha") or "") != stale_sha
+            ):
+                print(f"[BASELINE AUTO-REBASE STALE] workflow={workflow_id} candidate changed concurrently; aborting freeze")
+                return None
+            newer = conn.execute(
+                "SELECT id FROM events WHERE workflow_id=? AND id > ? "
+                "AND event_type IN ('candidate_frozen', 'candidate_published', 'candidate_integrated') LIMIT 1",
+                (workflow_id, pre_watermark),
+            ).fetchone()
+            if newer is not None:
+                print(f"[BASELINE AUTO-REBASE STALE] workflow={workflow_id} newer publication event={newer['id']}; aborting freeze")
+                return None
+            state_db.record_event(
+                {
+                    "event_type": "candidate_frozen",
+                    "workflow_id": workflow_id,
+                    "source": "critical-path-scheduler",
+                    "payload": {"candidate_sha": rb["new_sha"], "source_node": "auto_rebase", "previous_candidate_sha": stale_sha},
+                },
+                conn=conn,
+            )
+            state_db.record_event(
+                {
+                    "event_type": "candidate_auto_rebased",
+                    "workflow_id": workflow_id,
+                    "node_id": node_id,
+                    "source": "herdr-controller",
+                    "payload": {"old_sha": stale_sha, "new_sha": rb["new_sha"], "base_tip": rb.get("base_tip")},
+                },
+                conn=conn,
+            )
+            state_db.update_workflow_metadata(workflow_id, {"candidate_sha": rb["new_sha"]}, conn=conn)
+        print(f"[BASELINE AUTO-REBASED] workflow={workflow_id} {stale_sha[:8]} -> {rb['new_sha'][:8]}")
+        return rb["new_sha"]
+    except Exception as exc:
+        print(f"[BASELINE AUTO-REBASE WARN] workflow={workflow_id}: {exc}")
+    return None

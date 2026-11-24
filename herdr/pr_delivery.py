@@ -100,6 +100,24 @@ def _git(repo, *args, timeout=None):
     return result.stdout.strip()
 
 
+def _push_from_clean_worktree(repo, sha, branch, push_url):
+    """Push candidate SHA from an isolated clean detached worktree so local untracked files in source_repo cannot trip pre-push hooks."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="herdr-pr-push-") as tmpdir:
+        wt_path = str(Path(tmpdir) / "wt")
+        _git(repo, "worktree", "add", "--detach", wt_path, sha)
+        try:
+            _git(wt_path, "push", f"--force-with-lease=refs/heads/{branch}:", push_url, f"{sha}:refs/heads/{branch}")
+        finally:
+            subprocess.run(
+                ["git", "-C", str(repo), "worktree", "remove", "--force", wt_path],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+
 def _is_joint_candidate_covering(store, task, sha, note_sha):
     if not store:
         return False
@@ -310,7 +328,10 @@ def _publish_verified_candidate(store, task, workflow, sha, branch, base, *, tit
         source='herdr-task',
     )
     if not remote:
-        _git(repo, 'push', f'--force-with-lease=refs/heads/{branch}:', push_url, f'{sha}:refs/heads/{branch}')
+        if getattr(_git, "__module__", None) == __name__:
+            _push_from_clean_worktree(repo, sha, branch, push_url)
+        else:
+            _git(repo, 'push', f'--force-with-lease=refs/heads/{branch}:', push_url, f'{sha}:refs/heads/{branch}')
     fresh = store.get_task(task['task_id'])
     if fresh.get('version') != task.get('version') or (revalidate and revalidate(fresh) != (sha, branch, base)):
         raise ValueError('delivery changed during publication; PR creation withheld')

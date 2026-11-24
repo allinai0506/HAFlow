@@ -871,11 +871,20 @@ def test_uncertified_or_forge_blocked_candidate_cannot_complete(
     tasks = dispatch_verifiers(scene, controller, agents)
     for tid in tasks:
         node = scene.store.get_task(tid)["node"]
+        if failure == "business" and node == "test":
+            with pytest.raises(AssertionError):
+                certify(
+                    scene,
+                    tid,
+                    verdict="pass",
+                    acceptance=False,
+                )
+            return
         certify(
             scene,
             tid,
             verdict="blocked" if failure == node else "pass",
-            acceptance=not (failure == "business" and node == "test"),
+            acceptance=True,
         )
     delivery(scene, tasks)
     if failure in {"test", "review", "business"}:

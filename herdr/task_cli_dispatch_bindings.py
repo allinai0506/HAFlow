@@ -13,9 +13,10 @@ def build_dispatch_bindings(namespace):
                 "[DISPATCH RECOVERY_REQUIRED] registered successor delivery unconfirmed; reconcile retained intent"
             )
             namespace["sys"].exit(2)
+        pred_sha = predecessor.get("commit") or predecessor.get("integrated_commit")
         if (
             task.get("recovery_predecessor") != predecessor["task_id"]
-            or task.get("expected_predecessor_sha") != predecessor.get("commit")
+            or task.get("expected_predecessor_sha") != pred_sha
             or type(task.get("expected_predecessor_version")) is not int
         ):
             raise ValueError("Recovery successor lacks captured predecessor identity")
