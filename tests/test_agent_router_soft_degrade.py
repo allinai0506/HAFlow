@@ -182,9 +182,10 @@ class TestAgentRouterSoftDegrade(unittest.TestCase):
                 choose_agent(self.workflow_id, "review", "test")
             self.assertIn("not durably recorded", str(ctx.exception))
 
-    def test_superseded_impl_tasks_do_not_exhaust_verifier_isolation_budget(self):
-        """wf_ibx_f3eb258d: superseded r1 impl (agy) + active r2 impl (codex) must only exclude codex,
-        letting verifier select agy even when dispatch_round=1 matches r1's round."""
+    def test_contributing_predecessor_preserves_isolation_and_preflight_enables_soft_degrade(self):
+        """Contributing superseded predecessor (agy) + active r2 impl (codex) must both remain in
+        verifier exclusion set; preflight refresh runs first to evict unhealthy grok so allow_soft_degrade=True
+        triggers cleanly instead of raising RouterHealthRejection."""
         self.store.save_task(
             {
                 "task_id": "wf-craft-r1",
@@ -262,8 +263,15 @@ class TestAgentRouterSoftDegrade(unittest.TestCase):
              patch.object(agent_router, "ROUTER_LOCK_FILE", self.lock_file), \
              patch.object(dp, "refresh_workflow_preflight", side_effect=fake_refresh), \
              patch.object(agent_router, "_agent_request_fresh", return_value=True):
-            selected = choose_agent(self.workflow_id, "cleanroom_review", "review", dispatch_round=1)
-            self.assertEqual(selected, "agy")
+            used = agent_router._compute_used_agents(
+                self.workflow_id, ["craft"], store=self.store, dispatch_round=1, is_verifier=True
+            )
+            self.assertEqual(used, {"agy", "codex"})
+            selected, ctx = agent_router._choose_agent_impl(
+                self.workflow_id, "cleanroom_review", "review", dispatch_round=1
+            )
+            self.assertIn(selected, ("codex", "agy"))
+            self.assertTrue(ctx.get("isolation_degraded"))
 
     def test_preflight_runs_before_soft_degrade_so_unhealthy_agents_do_not_bypass_degrade(self):
         """When only healthy agent is excluded (codex) and unhealthy 'grok' is still in pool before

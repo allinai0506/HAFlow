@@ -207,7 +207,12 @@ def result_status(operation, workflow, tasks, acceptance=None):
            for t in targets):
         return 'waiting_human', {'reason': 'recovery_successor_failed'}
     candidate = workflow.get('candidate_sha')
+    self_verifier_retry = bool(
+        payload.get('retry_node')
+        and payload.get('retry_node') in (payload.get('gate_nodes') or [])
+    )
     if any(t.get('status') not in {'integrated', 'cleanup_ready', 'cleaned'}
+           and not (self_verifier_retry and t.get('integration_mode') == 'none' and t.get('status') == 'completed')
            and not (t.get('node') == 'wrapup' and (t.get('integrated_commit') or t.get('commit')) == candidate)
            for t in targets):
         return None
@@ -216,7 +221,7 @@ def result_status(operation, workflow, tasks, acceptance=None):
             return 'resolved', {'reason': 'delivery_finalized'}
         return None
     candidate = workflow.get('candidate_sha')
-    if not candidate or candidate == payload.get('candidate_sha'):
+    if not candidate or (not self_verifier_retry and candidate == payload.get('candidate_sha')):
         return None
     if any(t.get('execution_id') != workflow.get('execution_id') for t in targets):
         return 'waiting_human', {'reason': 'recovery_successor_identity_unknown'}

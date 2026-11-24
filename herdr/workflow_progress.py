@@ -295,7 +295,7 @@ def assess_workflow(workflow, config, tasks, *, expected_task_ids_by_node=None):
             task.get('awaiting_publication')
             or any(
                 marker in verdict_note.lower()
-                for marker in ('pr', 'pull request', 'push', '只读', 'awaiting_publication', '交付仍阻塞', 'business acceptance recorded: blocked')
+                for marker in ('awaiting pr', 'cannot push pr', 'pr 交付仍阻塞', 'awaiting_publication', '只读工位')
             )
         )
         if (

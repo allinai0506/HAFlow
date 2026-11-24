@@ -544,9 +544,16 @@ def _compute_used_agents(
 
                     if is_verifier:
                         # Verifiers must never review their own work or code from their contributing lineage.
-                        # Earlier tasks that were superseded by subsequent repairs no longer contribute
-                        # to the candidate, so they do not spend the reviewer isolation budget.
-                        if str(t.get("status") or "") == "superseded" or t.get("superseded_by"):
+                        # In round-scoped mode:
+                        # - Tasks in the current round are excluded.
+                        # - Non-superseded tasks from earlier rounds still contribute to the reviewed
+                        #   candidate, so their authors must also be excluded.
+                        # - Earlier tasks that were superseded by subsequent repairs no longer contribute
+                        #   only when they had no accepted commit (handled by _consumes_isolation_budget);
+                        #   contributing predecessors remain excluded.
+                        is_current_round = (t_round_int is not None and t_round_int == effective_round)
+                        is_active_contributor = (str(t.get("status") or "") != "superseded")
+                        if not (is_current_round or is_active_contributor):
                             continue
                     else:
                         # For workers/implementers, only exclude agents from the same round,

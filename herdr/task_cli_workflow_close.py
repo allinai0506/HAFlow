@@ -222,9 +222,30 @@ def close_workflow_owned(
     base_branch = (entry or {}).get("base_branch") or "main"
 
     store_obj = get_store() if callable(get_store) else None
-    has_pr_created = bool(
-        store_obj and store_obj.list_events(workflow_id=workflow_id, event_type="pull_request_created", limit=1)
-    )
+    pr_events = (
+        store_obj.list_events(workflow_id=workflow_id, event_type="pull_request_created", limit=50)
+        if store_obj else []
+    ) or []
+    wf_exec_id = (entry or {}).get("execution_id")
+    def _wrapup_satisfied_by_pr(task_obj):
+        if (task_obj.get("node") or task_obj.get("stage")) != "wrapup":
+            return False
+        note_text = str(task_obj.get("stage_verdict_note") or "")
+        is_pub_blocker = bool(
+            task_obj.get("awaiting_publication")
+            or any(m in note_text.lower() for m in ("awaiting pr", "cannot push pr", "pr 交付仍阻塞", "awaiting_publication", "只读工位"))
+        )
+        if not is_pub_blocker:
+            return False
+        task_sha = task_obj.get("verified_candidate_sha") or task_obj.get("candidate_sha")
+        if not task_sha:
+            return False
+        for ev in pr_events:
+            p = ev.get("payload") or {}
+            if p.get("candidate_sha") == task_sha and (not wf_exec_id or not p.get("execution_id") or p.get("execution_id") == wf_exec_id):
+                return True
+        return False
+
     blocked_verdicts = [
         t["task_id"]
         for t in tasks
@@ -234,8 +255,8 @@ def close_workflow_owned(
         # 更严的二次裁决(wf-haflow-1022-01 requirements-challenger-r2 曾
         # 因此在全部节点通过后仍无法收口)。
         and not (t.get("accepted_with_limits") and not t.get("finalize_escalated"))
-        # wrapup awaiting external PR authorization is satisfied once PR delivery is recorded.
-        and not (has_pr_created and (t.get("node") or t.get("stage")) == "wrapup")
+        # wrapup awaiting external PR authorization is satisfied once PR delivery for that exact candidate is recorded.
+        and not _wrapup_satisfied_by_pr(t)
     ]
     if blocked_verdicts and not abandon:
         print(

@@ -62,6 +62,11 @@ def test_wrapup_blocked_for_pr_authorization_never_spawns_craft_fix_loop(tmp_pat
     assert res["can_advance"] is False
     assert [op for op in res["obligations"] if op["kind"] == "fix_loop"] == []
 
+    # Generic default note without publication-specific marker must still emit fix_loop
+    tasks[1]["stage_verdict_note"] = "business acceptance recorded: blocked"
+    res_generic = assess_workflow(workflow, config, tasks)
+    assert len([op for op in res_generic["obligations"] if op["kind"] == "fix_loop"]) == 1
+
 
 def test_verifier_self_blocked_reruns_same_verifier_node_on_frozen_sha(tmp_path, monkeypatch):
     """When a verifier gate is blocked with affected_task_ids pointing to itself (missing E2E/regression),
@@ -195,7 +200,17 @@ def test_verifier_self_blocked_reruns_same_verifier_node_on_frozen_sha(tmp_path,
     ops = rs.list_operations(db_path, "wf-self")
     assert len(launched) == 1, [(o["status"], o["payload"].get("reason"), o["detail"]) for o in ops]
     assert "--node" in launched[0] and launched[0][launched[0].index("--node") + 1] == "cleanroom_test"
-    assert store.get_task("wf-self-cleanroom_test-auto-r2") is not None
+    r2 = store.get_task("wf-self-cleanroom_test-auto-r2")
+    assert r2 is not None
+
+    # Now r2 passes on the same frozen candidate SHA -> result_status must settle to 'resolved'
+    from herdr.workflow_recovery import result_status
+    store.save_task({**r2, "status": "cleaned", "stage_verdict": "pass", "verified_candidate_sha": sha})
+    wf_now = store.get_workflow("wf-self")
+    ops_now = rs.list_operations(db_path, "wf-self")
+    fix_op = next(o for o in ops_now if o["payload"]["kind"] == "fix_loop")
+    settled = result_status(fix_op, wf_now, store.list_tasks(workflow_id="wf-self"), acceptance={r2["task_id"]: True})
+    assert settled is not None and settled[0] == "resolved"
 
 
 def test_close_workflow_allows_blocked_wrapup_when_pr_created(tmp_path):
@@ -251,23 +266,42 @@ def test_close_workflow_allows_blocked_wrapup_when_pr_created(tmp_path):
             "candidate_sha": sha,
             "verified_candidate_sha": sha,
             "stage_verdict": "blocked",
-            "stage_verdict_note": "AC-4 blocked awaiting PR",
+            "stage_verdict_note": "AC-4 blocked: cannot push PR",
+            "awaiting_publication": True,
         }
     )
+    # Mismatched PR candidate SHA must NOT waive blocked wrapup
     store.record_event(
         "pull_request_created",
-        {"candidate_sha": sha, "number": 1927, "url": "https://gitee.com/org/repo/pulls/1927"},
+        {"candidate_sha": "0" * 40, "execution_id": "exec-cp", "number": 1926, "url": "https://gitee.com/org/repo/pulls/1926"},
         workflow_id="wf-close-pr",
         task_id="wf-close-pr-craft",
         source="herdr-task",
     )
-
     env = {
         **dict(__import__("os").environ),
         "HERDR_STATE_DB": str(db_path),
         "HERDR_TASKS_FILE": str(tmp_path / "tasks.json"),
         "HERDR_WORKFLOWS_FILE": str(tmp_path / "workflows.json"),
     }
+    res_mismatch = subprocess.run(
+        [sys.executable, "bin/herdr-task", "close-workflow", "wf-close-pr"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert res_mismatch.returncode == 2
+    assert "[CLOSE ABORT] workflow has blocked gate verdicts" in (res_mismatch.stdout + res_mismatch.stderr)
+
+    # Matching candidate SHA & execution_id waives the publication-only wrapup block
+    store.record_event(
+        "pull_request_created",
+        {"candidate_sha": sha, "execution_id": "exec-cp", "number": 1927, "url": "https://gitee.com/org/repo/pulls/1927"},
+        workflow_id="wf-close-pr",
+        task_id="wf-close-pr-craft",
+        source="herdr-task",
+    )
     res = subprocess.run(
         [sys.executable, "bin/herdr-task", "close-workflow", "wf-close-pr"],
         capture_output=True,
