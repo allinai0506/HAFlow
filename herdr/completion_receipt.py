@@ -198,7 +198,7 @@ def report_completion(task_id, identity, artifacts, store):
                 and task.get('execution_mode') != 'context'
                 and is_verifier_task(task)
                 and task.get('candidate_sha')
-                and not has_business_acceptance(store, task, task.get('candidate_sha'), observations=observations)):
+                and not has_business_acceptance(store, task, task.get('candidate_sha'), observations=observations, allow_blocked=True)):
             raise ValueError(
                 f'Business acceptance checkpoint receipt required before report-completion for verifier task {task_id}; '
                 f'run `herdr-task acceptance-record {task_id} ...` first'

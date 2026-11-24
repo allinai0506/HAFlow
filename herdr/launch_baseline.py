@@ -282,3 +282,30 @@ def try_auto_rebase_candidate(source_repo, candidate_sha, *, base_branch="dev", 
                 ["git", "-C", str(source_repo), "worktree", "remove", "--force", wt_path],
                 capture_output=True, text=True, timeout=30,
             )
+
+
+def auto_rebase_stale_workflow(store, workflow_id, project_root, candidate_sha, base_branch, node_id):
+    """Attempt conflict-free rebase for a stale workflow candidate and re-freeze on success."""
+    try:
+        stale_sha = candidate_sha or (store.get_workflow(workflow_id) or {}).get("candidate_sha") or ""
+        rb = try_auto_rebase_candidate(project_root, stale_sha, base_branch=base_branch or "dev")
+        if rb.get("ok") and rb.get("new_sha"):
+            store.record_event(
+                "candidate_frozen",
+                {"candidate_sha": rb["new_sha"], "source_node": "auto_rebase", "previous_candidate_sha": stale_sha},
+                workflow_id=workflow_id,
+                source="critical-path-scheduler",
+            )
+            store.record_event(
+                "candidate_auto_rebased",
+                {"old_sha": stale_sha, "new_sha": rb["new_sha"], "base_tip": rb.get("base_tip")},
+                workflow_id=workflow_id,
+                node_id=node_id,
+                source="herdr-controller",
+            )
+            store.update_workflow_metadata(workflow_id, {"candidate_sha": rb["new_sha"]})
+            print(f"[BASELINE AUTO-REBASED] workflow={workflow_id} {stale_sha[:8]} -> {rb['new_sha'][:8]}")
+            return rb["new_sha"]
+    except Exception as exc:
+        print(f"[BASELINE AUTO-REBASE WARN] workflow={workflow_id}: {exc}")
+    return None

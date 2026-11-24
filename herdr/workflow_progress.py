@@ -290,11 +290,20 @@ def assess_workflow(workflow, config, tasks, *, expected_task_ids_by_node=None):
         kind = ('delivery' if task.get('finalize_escalate_reason') == 'delivery_incomplete'
                 and task.get('delivery_failure') else 'finalize' if task.get('finalize_escalated') else 'fix_loop')
         explicit_affected = set(task.get('affected_task_ids') or []) | set(task.get('stage_verdict_affected_task_ids') or [])
+        verdict_note = str(task.get('stage_verdict_note') or '')
+        wrapup_awaiting_pub = bool(
+            task.get('awaiting_publication')
+            or any(
+                marker in verdict_note.lower()
+                for marker in ('pr', 'pull request', 'push', '只读', 'awaiting_publication', '交付仍阻塞', 'business acceptance recorded: blocked')
+            )
+        )
         if (
             kind == 'fix_loop'
             and node_id == 'wrapup'
             and task.get('stage_verdict') == 'blocked'
             and task.get('status') in {'completed', 'cleaned', 'cleanup_ready', 'agent_done'}
+            and wrapup_awaiting_pub
             and not (explicit_affected - {task.get('task_id')})
         ):
             # wrapup blocked awaiting external PR authorization/publication without blaming implementation.

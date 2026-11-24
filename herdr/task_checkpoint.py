@@ -386,7 +386,7 @@ def business_acceptance_receipt(conn, task, candidate_sha):
     return {'id': row['id'], 'payload': json.loads(row['payload_json'])} if row else None
 
 
-def has_business_acceptance(store, task, candidate_sha, conn=None, observations=None):
+def has_business_acceptance(store, task, candidate_sha, conn=None, observations=None, *, allow_blocked=False):
     from .workflow_progress import _hash
     observations = observations or ObservationStore(store.db_path)
     owned = conn is None
@@ -396,12 +396,14 @@ def has_business_acceptance(store, task, candidate_sha, conn=None, observations=
         if not receipt:
             return False
         payload = receipt['payload']
-        if (payload.get('verdict') != 'pass' or not payload.get('execution_id')
+        allowed_verdicts = ('pass', 'blocked') if allow_blocked else ('pass',)
+        verdict = payload.get('verdict')
+        if (verdict not in allowed_verdicts or not payload.get('execution_id')
                 or payload['execution_id'] != task.get('execution_id')
                 or payload.get('required_criteria_sha256') != _hash(task.get('acceptance_criteria'))
                 or not payload.get('artifacts')):
             return False
-        _criteria_results(task, payload.get('criteria'), 'pass')
+        _criteria_results(task, payload.get('criteria'), verdict)
         for reference in payload['artifacts']:
             validate_checkpoint_artifact(task, reference, store=store, observations=observations)
         return True
