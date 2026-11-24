@@ -365,7 +365,7 @@ def try_direct_stage_advance(ports, item):
             output = (result.stderr.strip() or result.stdout.strip()) if result is not None else ""
             if output:
                 print(f"[DIRECT DISPATCH ERROR] task={spec['task_id']}: {output}")
-            if "[BASELINE STALE]" in output and not launched and dispatch_operation_id is not None:
+            if result is not None and "[BASELINE STALE]" in (result.stdout + result.stderr) and not launched and dispatch_operation_id is not None:
                 from herdr.launch_baseline import auto_rebase_stale_workflow
                 auto_rebase_stale_workflow(ports._get_store(), workflow_id, project_root, spec.get("candidate_sha"), project_ctx.get("base_branch"), ready_id)
             if dispatch_operation_id is not None:
